@@ -194,3 +194,5 @@ fn incremental_runtime_ingress_preserves_history_with_linear_append_cost() {
     assert!(bytes[1] < 3 * bytes[0]);
     assert!(bytes[2] < 3 * bytes[1]);
 }
+
+include!("storage_runtime_successor_regression.rs");

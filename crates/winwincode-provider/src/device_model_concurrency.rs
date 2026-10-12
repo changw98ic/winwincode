@@ -34,27 +34,27 @@ impl Drop for DeviceModelExchangeOwner {
     }
 }
 
-/// An acquired Device-wide Provider slot, or a request that cannot invoke a new model.
+/// An acquired Device-wide Provider slot for exactly one physical attempt.
 /// Moving this value into the model thread keeps the slot until that thread completes.
 #[derive(Debug)]
 pub struct DeviceModelPermit {
-    slot: Option<File>,
+    slot: File,
 }
 
 impl Drop for DeviceModelPermit {
     fn drop(&mut self) {
-        if let Some(slot) = &self.slot {
-            // An unrelated child can retain this open file description until exec.
-            // The invocation owner returns its slot before those aliases close.
-            let _ = slot.unlock();
-        }
+        // The invocation owner returns its slot before inherited aliases close.
+        let _ = self.slot.unlock();
     }
 }
 
 /// A full Provider queue leaves the original request unstarted and retryable.
 #[derive(Debug)]
 pub enum DeviceModelAdmission {
-    Ready(DeviceModelPermit),
+    InvokeAttempt(DeviceModelPermit),
+    ReplayStoredResult,
+    RecoverExchange,
+    RejectRequest,
     Deferred,
 }
 
@@ -63,10 +63,14 @@ impl DeviceProviderStore {
         &self,
         exchange_id: &str,
     ) -> Result<Option<DeviceModelExchangeOwner>, DeviceProviderError> {
-        let database = Path::new(self.connection.path().ok_or(DeviceProviderError)?);
+        let database = Path::new(
+            self.connection
+                .path()
+                .ok_or(DeviceProviderError::StateInvalid)?,
+        );
         let root = database
             .parent()
-            .ok_or(DeviceProviderError)?
+            .ok_or(DeviceProviderError::StateInvalid)?
             .join("model-exchange-owners");
         private_directory(&root)?;
         let file =
@@ -74,11 +78,11 @@ impl DeviceProviderStore {
         match file.try_lock() {
             Ok(()) => Ok(Some(DeviceModelExchangeOwner { file })),
             Err(TryLockError::WouldBlock) => Ok(None),
-            Err(TryLockError::Error(_)) => Err(DeviceProviderError),
+            Err(TryLockError::Error(_)) => Err(DeviceProviderError::FilesystemUnavailable),
         }
     }
     /// Non-blocking admission before creating a first-start exchange record.
-    /// Existing exchanges use their original replay/failure path without another slot.
+    /// Stored replay and recovery carry no physical invocation authority.
     /// Malformed requests retain their existing bounded failure path.
     ///
     /// # Errors
@@ -90,13 +94,17 @@ impl DeviceProviderStore {
         let existing = self
             .connection
             .query_row(
-                "SELECT 1 FROM exchanges WHERE exchange_id=?1",
+                "SELECT chunks IS NOT NULL FROM exchanges WHERE exchange_id=?1",
                 [&open.model_exchange_id.0],
-                |_| Ok(()),
+                |row| row.get::<_, bool>(0),
             )
             .optional()?;
-        if existing.is_some() {
-            return Ok(without_invocation());
+        if let Some(completed) = existing {
+            return Ok(if completed {
+                DeviceModelAdmission::ReplayStoredResult
+            } else {
+                DeviceModelAdmission::RecoverExchange
+            });
         }
         self.try_model_attempt_permit(open)
     }
@@ -111,27 +119,27 @@ impl DeviceProviderStore {
         open: &ModelOpenMessage,
     ) -> Result<DeviceModelAdmission, DeviceProviderError> {
         let Ok(payload) = validated_model_payload(open) else {
-            return Ok(without_invocation());
+            return Ok(DeviceModelAdmission::RejectRequest);
         };
         let Ok(request) = serde_json::from_slice::<serde_json::Value>(&payload) else {
-            return Ok(without_invocation());
+            return Ok(DeviceModelAdmission::RejectRequest);
         };
         let Some(provider) = request.get("provider").and_then(serde_json::Value::as_str) else {
-            return Ok(without_invocation());
+            return Ok(DeviceModelAdmission::RejectRequest);
         };
         if request
             .pointer("/request/model")
             .and_then(serde_json::Value::as_str)
             .is_none()
         {
-            return Ok(without_invocation());
+            return Ok(DeviceModelAdmission::RejectRequest);
         }
         if provider.trim().is_empty()
             || provider.trim() != provider
             || provider.len() > 128
             || provider.chars().any(char::is_control)
         {
-            return Ok(without_invocation());
+            return Ok(DeviceModelAdmission::RejectRequest);
         }
         self.try_provider_model_permit(provider)
     }
@@ -140,8 +148,12 @@ impl DeviceProviderStore {
         &self,
         provider: &str,
     ) -> Result<DeviceModelAdmission, DeviceProviderError> {
-        let database = Path::new(self.connection.path().ok_or(DeviceProviderError)?);
-        let root = database.parent().ok_or(DeviceProviderError)?;
+        let database = Path::new(
+            self.connection
+                .path()
+                .ok_or(DeviceProviderError::StateInvalid)?,
+        );
+        let root = database.parent().ok_or(DeviceProviderError::StateInvalid)?;
         let slots = root.join("model-provider-slots");
         private_directory(&slots)?;
         let provider_slots = slots.join(format!("{:x}", Sha256::digest(provider.as_bytes())));
@@ -150,20 +162,18 @@ impl DeviceProviderStore {
             let file = private_slot_file(&provider_slots.join(format!("slot-{slot}")))?;
             match file.try_lock() {
                 Ok(()) => {
-                    return Ok(DeviceModelAdmission::Ready(DeviceModelPermit {
-                        slot: Some(file),
+                    return Ok(DeviceModelAdmission::InvokeAttempt(DeviceModelPermit {
+                        slot: file,
                     }));
                 }
                 Err(TryLockError::WouldBlock) => {}
-                Err(TryLockError::Error(_)) => return Err(DeviceProviderError),
+                Err(TryLockError::Error(_)) => {
+                    return Err(DeviceProviderError::FilesystemUnavailable);
+                }
             }
         }
         Ok(DeviceModelAdmission::Deferred)
     }
-}
-
-fn without_invocation() -> DeviceModelAdmission {
-    DeviceModelAdmission::Ready(DeviceModelPermit { slot: None })
 }
 
 pub(crate) fn private_directory(path: &Path) -> Result<(), DeviceProviderError> {
@@ -174,7 +184,7 @@ pub(crate) fn private_directory(path: &Path) -> Result<(), DeviceProviderError> 
     }
     let meta = fs::symlink_metadata(path)?;
     if !meta.is_dir() || meta.permissions().mode() & 0o077 != 0 {
-        return Err(DeviceProviderError);
+        return Err(DeviceProviderError::StateInvalid);
     }
     Ok(())
 }
@@ -183,7 +193,7 @@ pub(crate) fn private_slot_file(path: &Path) -> Result<File, DeviceProviderError
     if let Ok(meta) = fs::symlink_metadata(path)
         && (!meta.is_file() || meta.permissions().mode() & 0o077 != 0)
     {
-        return Err(DeviceProviderError);
+        return Err(DeviceProviderError::StateInvalid);
     }
     let file = OpenOptions::new()
         .read(true)
@@ -194,7 +204,7 @@ pub(crate) fn private_slot_file(path: &Path) -> Result<File, DeviceProviderError
         .open(path)?;
     let meta = file.metadata()?;
     if !meta.is_file() || meta.permissions().mode() & 0o077 != 0 {
-        return Err(DeviceProviderError);
+        return Err(DeviceProviderError::StateInvalid);
     }
     // Keep the inode permanently: unlinking a live lock would create a second slot.
     Ok(file)

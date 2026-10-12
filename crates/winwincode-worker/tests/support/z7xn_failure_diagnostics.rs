@@ -285,7 +285,7 @@ async fn assert_shutdown_then_recover(submission: bool) {
 }
 
 #[test]
-fn z7xn_typed_core_provider_error_is_failed_and_secret_safe_after_restart() {
+fn z7xn_typed_core_provider_error_is_infrastructure_and_secret_safe_after_restart() {
     run_on_large_stack(assert_retained_failure(
         "core-provider",
         ProductionEventPollFault::CoreError(
@@ -293,10 +293,10 @@ fn z7xn_typed_core_provider_error_is_failed_and_secret_safe_after_restart() {
                 http_status_code: Some(503),
             },
         ),
-        ExecutionOutcomeStatus::Failed,
-        ExecutionPortErrorCode::ExecutionFailed,
-        false,
-        "embedded Codex execution failed [stage=core_event; cause=CORE_RESPONSE_STREAM_DISCONNECTED]",
+        ExecutionOutcomeStatus::InfrastructureError,
+        ExecutionPortErrorCode::InfrastructureError,
+        true,
+        "embedded Codex infrastructure failed [stage=core_event; cause=CORE_RESPONSE_STREAM_DISCONNECTED]",
         2,
     ));
 }
@@ -359,11 +359,14 @@ fn z7xn_explicit_cancel_does_not_become_a_pending_event_failure() {
             })
             .unwrap();
         assert_eq!(outcome.outcome.status, ExecutionOutcomeStatus::Cancelled);
-        assert_eq!(outcome.outcome.summary, "embedded Codex turn cancelled");
+        assert_eq!(
+            outcome.outcome.summary,
+            "Codex turn stopped after cancellation"
+        );
         let error = outcome.outcome.error.as_ref().unwrap();
         assert_eq!(error.code, ExecutionPortErrorCode::Cancelled);
         assert!(!error.retryable);
-        assert_eq!(error.message, "embedded Codex turn cancelled");
+        assert_eq!(error.message, "Codex turn stopped after cancellation");
         assert!(outcome.outcome.finished_at.0 < dispatch.lease.expires_at.0);
         assert_eq!(outcome.outcome.last_event_sequence.0, 2);
         assert_eq!(facts.len(), 3);
@@ -434,7 +437,9 @@ async fn assert_retained_failure(
         )
         .await
         .expect("accept real production failure dispatch");
+    let poll_started = std::time::Instant::now();
     run_until_outcome_without_gateway(&mut worker, &port).await;
+    let poll_elapsed = poll_started.elapsed();
     let messages = port.messages();
     assert_no_model_request(&messages);
     let facts = unique_terminal_facts(&messages);
@@ -458,7 +463,22 @@ async fn assert_retained_failure(
     // It must not become a lease-expiry or cancellation diagnosis.
     assert_eq!(outcome.lease, dispatch.lease);
     assert!(outcome.outcome.finished_at.0 < dispatch.lease.expires_at.0);
-    assert_eq!(outcome.outcome.finished_at, at("2030-01-01T00:00:02.000Z"));
+    let supplied_at = time::OffsetDateTime::parse(
+        "2030-01-01T00:00:02.000Z",
+        &time::format_description::well_known::Rfc3339,
+    )
+    .unwrap();
+    let finished_at = time::OffsetDateTime::parse(
+        &outcome.outcome.finished_at.0,
+        &time::format_description::well_known::Rfc3339,
+    )
+    .unwrap();
+    // The driver advances the supplied clock by real monotonic elapsed time.
+    // One millisecond covers only the timestamp's three-digit serialization.
+    let observed_end = supplied_at
+        + time::Duration::try_from(poll_elapsed).unwrap()
+        + time::Duration::milliseconds(1);
+    assert!(finished_at >= supplied_at && finished_at <= observed_end);
     assert_eq!(
         outcome.outcome.last_event_sequence.0,
         expected_last_sequence

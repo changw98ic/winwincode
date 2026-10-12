@@ -175,7 +175,7 @@ async fn unknown_effect_or_interrupted_output_hook_never_reexecutes() {
 async fn rejection_and_changed_input_have_distinct_recovery_outcomes() {
     let invocation = invocation().await;
     let record = begin_new(&invocation).await.unwrap();
-    record.deny().await.unwrap();
+    record.deny("test denial").await.unwrap();
     let replay = begin_new(&invocation).await.err().unwrap();
     assert_eq!(recovery_state(replay)["state"], "request_denied");
     let mut changed = invocation;
@@ -404,4 +404,75 @@ async fn restarted_wait_reports_historical_cell_owner_without_creating_a_wait_ed
             .iter()
             .all(|event| !matches!(event.fact, codex_state::ToolRuntimeFact::Wait(_)))
     );
+}
+
+#[test]
+fn required_fact_storage_error_is_fatal_and_has_a_safe_non_retryable_category() {
+    let private_error = "private database path and credential must remain private";
+    let FunctionCallError::Fatal(message) = storage_error(private_error) else {
+        panic!("required Core fact storage cannot be model feedback");
+    };
+    assert_eq!(
+        message,
+        "tool_fact_store_unavailable: execution and recovery require durable Core facts"
+    );
+    let error = codex_protocol::error::CodexErr::Fatal(message);
+    assert!(!error.is_retryable());
+    let event = error.to_error_event(None);
+    assert_eq!(
+        event.codex_error_info,
+        Some(codex_protocol::protocol::CodexErrorInfo::InternalServerError)
+    );
+    assert!(!event.message.contains(private_error));
+}
+
+#[tokio::test]
+async fn required_attempt_claim_storage_failure_stops_before_the_tool_handler() {
+    let invocation = invocation().await;
+    let store = StateRuntime::init(
+        invocation.turn.config.sqlite_config().clone(),
+        invocation.turn.config.model_provider_id.clone(),
+    )
+    .await
+    .unwrap();
+    let pool = store
+        .sqlite()
+        .open_read_write_pool(&store.sqlite().state_db_path())
+        .await
+        .unwrap();
+    sqlx::query(
+        "CREATE TRIGGER fail_required_attempt_claim BEFORE INSERT ON tool_attempts
+        BEGIN SELECT RAISE(ABORT,'private required-store failure'); END",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    assert!(
+        ExecutionFacts::for_session(&invocation.session)
+            .store
+            .set(store.clone())
+            .is_ok()
+    );
+    let effects = Arc::new(AtomicUsize::new(0));
+    let registry = ToolRegistry::from_tools([
+        Arc::new(EffectTool(effects.clone())) as Arc<dyn CoreToolRuntime>
+    ]);
+    let error = registry
+        .dispatch_any_with_terminal_outcome(invocation.clone(), None)
+        .await
+        .err()
+        .unwrap();
+    assert!(matches!(error, FunctionCallError::Fatal(_)));
+    assert_eq!(effects.load(Ordering::SeqCst), 0);
+    let events = store
+        .list_tool_fact_events(&invocation.session.thread_id.to_string(), 0, 200)
+        .await
+        .unwrap();
+    assert_eq!(events.len(), 1);
+    assert_eq!(
+        events[0].fact.request.thread_id,
+        invocation.session.thread_id.to_string()
+    );
+    assert!(events[0].fact.attempt.is_none());
+    pool.close().await;
 }

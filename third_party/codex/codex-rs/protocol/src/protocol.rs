@@ -1775,6 +1775,10 @@ pub enum NonSteerableTurnKind {
 pub enum CodexErrorInfo {
     ContextWindowExceeded,
     SessionBudgetExceeded,
+    /// The embedding host rejected the original expired execution lease.
+    ExecutionLeaseExpired,
+    /// The host refused a model call under an expired execution authority.
+    ModelAuthorityExpired,
     UsageLimitExceeded,
     ServerOverloaded,
     CyberPolicy,
@@ -1814,6 +1818,8 @@ impl CodexErrorInfo {
             Self::ThreadRollbackFailed | Self::ActiveTurnNotSteerable { .. } => false,
             Self::ContextWindowExceeded
             | Self::SessionBudgetExceeded
+            | Self::ExecutionLeaseExpired
+            | Self::ModelAuthorityExpired
             | Self::UsageLimitExceeded
             | Self::ServerOverloaded
             | Self::CyberPolicy

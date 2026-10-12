@@ -125,13 +125,19 @@ fn seed_real_rework_writer(seed: u64) -> (RealReworkFixture, ControlPlane) {
     initial_terminal.sent_at = initial_terminal.outcome.finished_at.clone();
     initial_terminal.outcome.last_event_sequence = ExecutionAckSequence(1);
     seed_delivery_and_job(&root, &delivery, &initial_job);
-    seed_authenticated_worker_execution(&root, &scope, &initial_job, &initial_terminal, seed);
-    let mut control_plane = ControlPlane::start_local_with_delivery_adapters(
+    let mut control_plane = ControlPlane::start_local(
         ControlPlaneConfig::local(&root),
         Box::new(RecordingPublisher),
-        LocalDeliveryAdapterConfig::new(&repository, scope.clone()),
     )
-    .expect("initial writer Control Plane");
+    .expect("initial writer manual terminal Control Plane");
+    control_plane
+        .install_git_source_resolver(Box::new(
+            winwincode_storage::LocalGitSourceResolver::open_artifact_cache(
+                root.join("delivery-sources"),
+            )
+            .expect("initial writer artifact-backed Git source"),
+        ))
+        .expect("initial writer candidate source and retention root");
     upload_initial_candidate(
         &mut control_plane,
         &repository,
@@ -826,4 +832,136 @@ fn upload_initial_candidate(
             .expect("exact final acknowledgement pin replay")
             .is_some()
     );
+}
+
+#[test]
+#[allow(clippy::too_many_lines)]
+fn cancelling_unchanged_rework_keeps_raw_failure_without_restoring_candidate_or_controller() {
+    use winwincode_control_plane::{RepositoryExecutionScheduler, WorkRunCancellationRequest};
+    use winwincode_delivery::application::workrun_execution::{
+        TerminalOutcomeStatus, WorkerTerminalOutcomeReport, seal_dispatch_terminal_outcome,
+    };
+    use winwincode_storage::RepositorySchedulerScope;
+
+    let seed = 181;
+    let (fixture, control_plane) = seed_real_rework_writer(seed);
+    let mut control_plane = settle_independent_rework_roles(&fixture, control_plane);
+    let (job, _authorization) = authorize_precise_rework(&fixture, &mut control_plane);
+    control_plane.shutdown().unwrap();
+    let running = claim_running_rework(ReworkAttemptConfig {
+        root: &fixture.root,
+        scope: &fixture.scope,
+        delivery_id: fixture.delivery.id(),
+        job: &job,
+        scope_seed: fixture.seed,
+        identity_seed: fixture.seed + 100_000,
+        clock: 5,
+    });
+    let (mut terminal, _) =
+        successful_profile_terminal(&running, Vec::new(), fixture.seed + 100_000);
+    terminal.outcome.status = ExecutionOutcomeStatus::Failed;
+    terminal.outcome.error = Some(ExecutionPortError {
+        code: ExecutionPortErrorCode::CandidateUnchanged,
+        message: "remediator preserved the original candidate".into(),
+        retryable: false,
+    });
+    let raw = serde_json::to_value(&terminal).unwrap();
+    let finished = terminal
+        .outcome
+        .finished_at
+        .0
+        .parse::<jiff::Timestamp>()
+        .unwrap();
+    let requested_at = Instant(format!("2027-01-15T08:{:02}:29.000Z", running.clock - 1));
+    let mut storage = SqliteStorage::open(&fixture.root).unwrap();
+    let state = storage
+        .load_state(&format!("delivery:{}", fixture.delivery.id().0))
+        .unwrap()
+        .unwrap();
+    let cancel = RepositoryExecutionScheduler::new(&mut storage)
+        .request_cancellation_for_work_run(&WorkRunCancellationRequest {
+            scope: RepositorySchedulerScope {
+                organization_id: fixture.scope.organization_id.clone(),
+                workspace_id: fixture.scope.workspace_id.clone(),
+                project_id: fixture.scope.project_id.clone(),
+                repository_id: fixture.scope.repository_id.clone(),
+            },
+            delivery_id: fixture.delivery.id().clone(),
+            work_run_id: terminal.session_identity.work_run_id.clone().unwrap(),
+            request_id: RequestId(canonical_id("req", fixture.seed + 150_000)),
+            expected_delivery_revision: state.revision,
+            requested_at,
+            public_command_digest: Sha256Digest(format!("sha256:{}", "d".repeat(64))),
+        })
+        .unwrap()
+        .unwrap();
+    assert_eq!(cancel.lease, terminal.lease);
+    let dispatch = storage
+        .load_execution_dispatch_authority(&job.job_id)
+        .unwrap()
+        .unwrap();
+    let facts = seal_dispatch_terminal_outcome(
+        &winwincode_storage::delivery_dispatch_authority(&dispatch),
+        WorkerTerminalOutcomeReport {
+            work_run_id: terminal.session_identity.work_run_id.clone().unwrap(),
+            status: TerminalOutcomeStatus::Failed,
+            codex_thread_id: terminal.outcome.codex_thread_id.clone(),
+            finished_at_millis: u64::try_from(finished.as_millisecond()).unwrap(),
+            last_event_sequence: terminal.outcome.last_event_sequence.clone(),
+            artifacts: Vec::new(),
+        },
+    );
+    Box::new(storage).close().unwrap();
+    let before_dispatch = execution_job_counts(&fixture.root);
+    let mut control_plane = ControlPlane::start_local_with_delivery_adapters(
+        ControlPlaneConfig::local(&fixture.root),
+        Box::new(RecordingPublisher),
+        LocalDeliveryAdapterConfig::new(&fixture.repository, fixture.scope.clone()),
+    )
+    .unwrap();
+    let receipt = control_plane
+        .commit_delivery_terminal_outcome(&fixture.scope, &terminal, &facts, &terminal.sent_at)
+        .unwrap();
+    let settled = load_delivery(&control_plane, fixture.delivery.id());
+    let run = settled
+        .snapshot()
+        .work_run_aggregate
+        .runs
+        .iter()
+        .find(|run| run.execution_job_id == job.job_id)
+        .unwrap();
+    assert_eq!(run.state, winwincode_domain::WorkRunState::Cancelled);
+    assert!(settled.snapshot().same_candidate_reverification.is_none());
+    assert_eq!(
+        execution_job_counts(&fixture.root),
+        before_dispatch,
+        "effective cancelled unchanged rework starts no Controller job"
+    );
+    let original = control_plane
+        .load_state(&format!("execution-outcome:{}:1", job.job_id.0))
+        .unwrap()
+        .unwrap();
+    let accepted: serde_json::Value = serde_json::from_slice(&original.payload).unwrap();
+    assert_eq!(original.revision, 2);
+    assert_eq!(accepted["message"], raw);
+    assert_eq!(accepted["decision"]["status"], "cancelled");
+    assert_eq!(accepted["followUp"]["controllerRequired"], true);
+    let replay = control_plane
+        .commit_delivery_terminal_outcome(&fixture.scope, &terminal, &facts, &terminal.sent_at)
+        .unwrap();
+    assert!(replay.receipt().idempotent_replay);
+    assert_eq!(
+        replay.receipt().receipt_identity,
+        receipt.receipt().receipt_identity
+    );
+    assert_eq!(
+        control_plane
+            .load_state(&format!("execution-outcome:{}:1", job.job_id.0))
+            .unwrap()
+            .unwrap(),
+        original
+    );
+    assert_eq!(execution_job_counts(&fixture.root), before_dispatch);
+    control_plane.shutdown().unwrap();
+    fs::remove_dir_all(fixture.root).unwrap();
 }

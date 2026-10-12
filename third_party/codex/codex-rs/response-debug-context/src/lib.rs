@@ -55,6 +55,7 @@ pub fn extract_response_debug_context(transport: &TransportError) -> ResponseDeb
 
 pub fn extract_response_debug_context_from_api_error(error: &ApiError) -> ResponseDebugContext {
     match error {
+        ApiError::HostTerminal { source } => extract_response_debug_context_from_api_error(source),
         ApiError::Transport(transport) => extract_response_debug_context(transport),
         _ => ResponseDebugContext::default(),
     }
@@ -73,6 +74,9 @@ pub fn telemetry_transport_error_message(error: &TransportError) -> String {
 
 pub fn telemetry_api_error_message(error: &ApiError) -> String {
     match error {
+        ApiError::HostTerminal { source } => telemetry_api_error_message(source),
+        ApiError::ExecutionLeaseExpired => "execution lease expired".to_string(),
+        ApiError::ModelAuthorityExpired => "model call authority expired".to_string(),
         ApiError::Transport(transport) => telemetry_transport_error_message(transport),
         ApiError::Api { status, .. } => format!("api error {}", status.as_u16()),
         ApiError::Stream(err) => err.to_string(),
@@ -85,6 +89,81 @@ pub fn telemetry_api_error_message(error: &ApiError) -> String {
         ApiError::CyberPolicy { .. } => "cyber policy".to_string(),
         ApiError::MisalignmentPolicyViolation { .. } => "misalignment policy violation".to_string(),
         ApiError::ServerOverloaded => "server overloaded".to_string(),
+    }
+}
+
+#[cfg(test)]
+mod host_terminal_retry_tests {
+    use super::*;
+    use http::HeaderMap;
+    use http::HeaderValue;
+    use http::StatusCode;
+
+    #[test]
+    fn host_terminal_telemetry_retains_safe_semantic_categories() {
+        for (error, expected) in [
+            (
+                ApiError::RateLimit("private-rate-limit-payload".to_owned()),
+                "rate limit",
+            ),
+            (
+                ApiError::InvalidRequest {
+                    message: "private-request-payload".to_owned(),
+                },
+                "invalid request",
+            ),
+            (
+                ApiError::Api {
+                    status: StatusCode::SERVICE_UNAVAILABLE,
+                    message: "private-api-payload".to_owned(),
+                },
+                "api error 503",
+            ),
+        ] {
+            assert_eq!(telemetry_api_error_message(&error), expected);
+            assert_eq!(
+                telemetry_api_error_message(&error.without_retry()),
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn host_terminal_telemetry_omits_http_body_url_and_private_headers() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "authorization",
+            HeaderValue::from_static("Bearer private-header"),
+        );
+        let error = ApiError::Transport(TransportError::Http {
+            status: StatusCode::UNAUTHORIZED,
+            url: Some("https://private-url.invalid/private-path".to_owned()),
+            headers: Some(headers),
+            body: Some("private-http-body".to_owned()),
+        });
+        assert_eq!(telemetry_api_error_message(&error), "http 401");
+        assert_eq!(
+            telemetry_api_error_message(&error.without_retry()),
+            "http 401"
+        );
+    }
+
+    #[test]
+    fn host_terminal_preserves_original_response_request_id() {
+        let mut headers = HeaderMap::new();
+        headers.insert("x-request-id", HeaderValue::from_static("upstream-42"));
+        let error = ApiError::Transport(TransportError::Http {
+            status: StatusCode::TOO_MANY_REQUESTS,
+            url: None,
+            headers: Some(headers),
+            body: None,
+        });
+        let original = extract_response_debug_context_from_api_error(&error);
+        assert_eq!(original.request_id.as_deref(), Some("upstream-42"));
+        assert_eq!(
+            extract_response_debug_context_from_api_error(&error.without_retry()),
+            original
+        );
     }
 }
 

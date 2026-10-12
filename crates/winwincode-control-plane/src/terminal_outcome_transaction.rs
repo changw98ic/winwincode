@@ -13,8 +13,9 @@ use winwincode_audit::{
 use winwincode_delivery::{
     application::workrun_execution::{
         DeliveryTerminalOutcomeFacts, DurableTerminalOutcomeInput, TerminalArtifactReference,
-        TerminalOutcomeStatus, reconcile_durable_settled_terminal_outcome,
-        reconcile_durable_terminal_outcome,
+        TerminalOutcomeStatus, WorkerTerminalOutcomeReport,
+        reconcile_durable_settled_terminal_outcome, reconcile_durable_terminal_outcome,
+        seal_dispatch_terminal_outcome,
     },
     domain::Delivery,
     store::{ApplyDeliveryTerminalOutcome, DeliveryCommand, DeliveryCommandPort, DeliveryStore},
@@ -32,6 +33,12 @@ use winwincode_execution_port::generated::{
 use winwincode_storage::{
     CommitReceipt, DurableOutboxEvent, NewOutboxEvent, PendingAuditEvent, ProductStateStorage,
     PublicEventSource, ReceiptIdentity, ReceiptScopeKey, StateCommit, StateMutation, StorageError,
+    public_actor_from_receipt_key,
+};
+
+use crate::execution_outcome_commit::{
+    AcceptedOutcomeFollowUp, ExecutionOutcomeCommit, OutcomeReplay, commit_accepted_outcome,
+    outcome_replay, terminal_decision,
 };
 
 use crate::delivery_transaction::{
@@ -44,9 +51,8 @@ use crate::session_binding_transaction::{
     work_run_runtime_invalidated_event,
 };
 use crate::{
-    DeliveryChangeKind, OutboxError, WorkerExecutionLifecycleError,
-    delivery_changed_event_for_scope, execution_audit_event, repository_scope_key,
-    validate_delivery_changed_receipt,
+    DeliveryChangeKind, DurableExecutionPortError, delivery_changed_event_for_scope,
+    execution_audit_event, repository_scope_key, validate_delivery_changed_receipt,
 };
 
 const TERMINAL_PHASE: &str = "terminal-outcome";
@@ -74,16 +80,12 @@ impl DeliveryTerminalOutcomeCommitReceipt {
 }
 
 /// Failure of a terminal-outcome transaction.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Debug)]
 pub enum DeliveryTerminalOutcomeCommitError {
     Storage(StorageError),
-    WorkerResourcesPending {
+    CompletionPending {
         commit: Box<DeliveryTerminalOutcomeCommitReceipt>,
-        source: WorkerExecutionLifecycleError,
-    },
-    PublicationPending {
-        commit: Box<DeliveryTerminalOutcomeCommitReceipt>,
-        source: OutboxError,
+        source: Box<DurableExecutionPortError>,
     },
 }
 
@@ -91,8 +93,7 @@ impl DeliveryTerminalOutcomeCommitError {
     #[must_use]
     pub fn committed_receipt(&self) -> Option<&DeliveryTerminalOutcomeCommitReceipt> {
         match self {
-            Self::WorkerResourcesPending { commit, .. }
-            | Self::PublicationPending { commit, .. } => Some(commit),
+            Self::CompletionPending { commit, .. } => Some(commit),
             Self::Storage(_) => None,
         }
     }
@@ -104,19 +105,22 @@ impl fmt::Display for DeliveryTerminalOutcomeCommitError {
             Self::Storage(error) => {
                 write!(formatter, "terminal outcome transaction failed: {error}")
             }
-            Self::WorkerResourcesPending { source, .. } => write!(
+            Self::CompletionPending { source, .. } => write!(
                 formatter,
-                "terminal outcome committed, but Worker resources remain pending: {source}"
-            ),
-            Self::PublicationPending { source, .. } => write!(
-                formatter,
-                "terminal outcome committed, but its events remain pending: {source}"
+                "terminal outcome committed, but completion remains pending: {source}"
             ),
         }
     }
 }
 
-impl std::error::Error for DeliveryTerminalOutcomeCommitError {}
+impl std::error::Error for DeliveryTerminalOutcomeCommitError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Storage(source) => Some(source),
+            Self::CompletionPending { source, .. } => Some(source.as_ref()),
+        }
+    }
+}
 
 impl From<StorageError> for DeliveryTerminalOutcomeCommitError {
     fn from(error: StorageError) -> Self {
@@ -124,6 +128,10 @@ impl From<StorageError> for DeliveryTerminalOutcomeCommitError {
     }
 }
 
+#[allow(
+    clippy::too_many_lines,
+    reason = "Receipt replay and new Delivery acceptance share one guarded terminal transaction"
+)]
 pub(crate) fn execute_at(
     storage: &mut dyn ProductStateStorage,
     scope: &RepositoryScope,
@@ -131,11 +139,11 @@ pub(crate) fn execute_at(
     facts: &DeliveryTerminalOutcomeFacts,
     server_time: &Instant,
     accepted_period: &Instant,
+    controller_required: bool,
 ) -> Result<DeliveryTerminalOutcomeCommitReceipt, DeliveryTerminalOutcomeCommitError> {
     let phase = TerminalPhase::new(scope, message)?;
     if let Some(receipt) = storage.load_receipt(&phase.receipt_identity, &phase.command_digest)? {
-        validate_receipt(&receipt, &phase, message, true)?;
-        validate_terminal_pending_audit_event(storage, &receipt, &phase)?;
+        let receipt = validate_accepted_receipt(storage, receipt, &phase, message)?;
         return Ok(DeliveryTerminalOutcomeCommitReceipt { receipt });
     }
     validate_message_shape(message)?;
@@ -205,17 +213,124 @@ pub(crate) fn execute_at(
             })?,
         );
     }
+    let dispatch = storage
+        .load_execution_dispatch_authority(&message.lease.job_id)?
+        .ok_or_else(|| StorageError::invalid_input("terminal outcome dispatch is missing"))?;
+    let resources = storage
+        .load_execution_terminal_resources(&message.lease.job_id)?
+        .ok_or_else(|| StorageError::invalid_input("terminal outcome resources are missing"))?;
+    if resources.scope.delivery_id.as_ref() != Some(&context.delivery_id)
+        || resources.scope.product_session_id != context.product_session_id
+        || resources.scope.organization_id != context.repository_scope.organization_id
+        || resources.scope.workspace_id != context.repository_scope.workspace_id
+        || resources.scope.project_id != context.repository_scope.project_id
+        || resources.scope.repository_id != context.repository_scope.repository_id
+    {
+        return Err(StorageError::invalid_input("terminal outcome resource scope differs").into());
+    }
+    let decision = terminal_decision(storage, message, server_time)?;
+    let effective = decision.apply(message);
+    if effective.outcome.status == ExecutionOutcomeStatus::Cancelled {
+        context.unchanged_recovery = None;
+    }
+    let effective_facts = seal_dispatch_terminal_outcome(
+        &winwincode_storage::delivery_dispatch_authority(&dispatch),
+        WorkerTerminalOutcomeReport {
+            work_run_id: context.work_run_id.clone(),
+            status: terminal_status(&effective.outcome.status),
+            codex_thread_id: effective.outcome.codex_thread_id.clone(),
+            finished_at_millis: instant_millis(&effective.outcome.finished_at)?,
+            last_event_sequence: effective.outcome.last_event_sequence.clone(),
+            artifacts: effective
+                .outcome
+                .artifacts
+                .iter()
+                .map(|artifact| TerminalArtifactReference {
+                    artifact_id: artifact.artifact_id.clone(),
+                    digest: artifact.digest.clone(),
+                })
+                .collect(),
+        },
+    );
+    let follow_up = AcceptedOutcomeFollowUp {
+        controller_required,
+        completed_profile: job.execution_profile.clone(),
+        initiating_actor: public_actor_from_receipt_key(durable.receipt_identity().actor_key())?,
+    };
+    let acceptance = ExecutionOutcomeCommit {
+        message,
+        decision: &decision,
+        dispatch: &dispatch,
+        scope: &resources.scope,
+        worker_pool_id: &resources.worker_pool_id,
+        authority: &resources.authority,
+        follow_up: Some(&follow_up),
+    };
     let receipt = commit_terminal(
         storage,
-        message,
-        facts,
+        &acceptance,
+        &effective_facts,
         &phase,
         &context,
         &current,
         &session_identity,
     )
-    .or_else(|source| recover_raced_receipt(storage, &phase, message, source))?;
+    .or_else(|source| match source {
+        DeliveryTerminalOutcomeCommitError::Storage(source) => {
+            recover_raced_receipt(storage, &phase, message, source)
+        }
+        pending @ DeliveryTerminalOutcomeCommitError::CompletionPending { .. } => Err(pending),
+    })?;
     Ok(DeliveryTerminalOutcomeCommitReceipt { receipt })
+}
+
+/// Restores only the original accepted receipt for pending completion. Current
+/// Delivery state and execution descriptors grant no new authority to this read.
+pub(crate) fn replay_accepted_receipt(
+    storage: &dyn ProductStateStorage,
+    scope: &RepositoryScope,
+    message: &JobOutcomeMessage,
+) -> Result<DeliveryTerminalOutcomeCommitReceipt, DeliveryTerminalOutcomeCommitError> {
+    let phase = TerminalPhase::new(scope, message)?;
+    let receipt = storage
+        .load_receipt(&phase.receipt_identity, &phase.command_digest)?
+        .ok_or_else(|| {
+            StorageError::adapter("accepted Delivery outcome has no original receipt")
+        })?;
+    let receipt = validate_accepted_receipt(storage, receipt, &phase, message)?;
+    Ok(DeliveryTerminalOutcomeCommitReceipt { receipt })
+}
+
+fn validate_retained_receipt(
+    storage: &dyn ProductStateStorage,
+    receipt: CommitReceipt,
+    phase: &TerminalPhase,
+    message: &JobOutcomeMessage,
+) -> Result<CommitReceipt, StorageError> {
+    let effective = retained_effective_outcome(storage, message)?;
+    validate_receipt(&receipt, phase, message, &effective, true)?;
+    validate_terminal_pending_audit_event(storage, &receipt, phase)?;
+    Ok(receipt)
+}
+
+fn completion_pending(
+    receipt: CommitReceipt,
+    source: StorageError,
+) -> DeliveryTerminalOutcomeCommitError {
+    DeliveryTerminalOutcomeCommitError::CompletionPending {
+        commit: Box::new(DeliveryTerminalOutcomeCommitReceipt { receipt }),
+        source: Box::new(DurableExecutionPortError::Storage(source)),
+    }
+}
+
+fn validate_accepted_receipt(
+    storage: &dyn ProductStateStorage,
+    receipt: CommitReceipt,
+    phase: &TerminalPhase,
+    message: &JobOutcomeMessage,
+) -> Result<CommitReceipt, DeliveryTerminalOutcomeCommitError> {
+    validate_retained_receipt(storage, receipt.clone(), phase, message)
+        .map_err(|source| completion_pending(receipt, source))
 }
 
 fn validate_trusted_lease_time(
@@ -733,13 +848,14 @@ const fn terminal_result_code(status: TerminalOutcomeStatus) -> &'static str {
 
 fn commit_terminal(
     storage: &mut dyn ProductStateStorage,
-    message: &JobOutcomeMessage,
+    acceptance: &ExecutionOutcomeCommit<'_>,
     facts: &DeliveryTerminalOutcomeFacts,
     phase: &TerminalPhase,
     context: &TerminalContext,
     current: &Delivery,
     session_identity: &SessionIdentity,
-) -> Result<CommitReceipt, StorageError> {
+) -> Result<CommitReceipt, DeliveryTerminalOutcomeCommitError> {
+    let message = acceptance.decision.apply(acceptance.message);
     let journal_key = delivery_journal_key(&context.delivery_id)?;
     let loaded = storage.load_journal(&journal_key)?;
     let journal = StagedDeliveryJournal::new(context.delivery_id.clone(), loaded);
@@ -758,7 +874,8 @@ fn commit_terminal(
     if mutation.replayed {
         return Err(StorageError::invalid_input(
             "terminal outcome journal replay has no matching scoped receipt",
-        ));
+        )
+        .into());
     }
     let publication = journal
         .into_publication()
@@ -767,7 +884,7 @@ fn commit_terminal(
             StorageError::invalid_input("workrun.terminal did not stage a journal publication")
         })?;
     let revision = mutation.snapshot.revision();
-    let accepted = terminal_accepted_event(message, phase, context, revision)?;
+    let accepted = terminal_accepted_event(&message, phase, context, revision)?;
     let public_scope = crate::public_repository_scope(&context.repository_scope);
     let public_source = PublicEventSource::SessionExecutionWorker {
         worker_id: message.lease.worker_id.clone(),
@@ -805,7 +922,7 @@ fn commit_terminal(
         &mutation.snapshot,
     )?;
     let terminal_authority = persisted_terminal_authority(
-        message,
+        &message,
         context,
         PersistedTerminalDisposition::Settled {
             delivery_revision: revision,
@@ -830,9 +947,26 @@ fn commit_terminal(
             StorageError::adapter(format!("failed to encode terminal authority: {error}"))
         })?,
     )?);
-    let receipt = storage.commit(&commit)?;
-    validate_receipt(&receipt, phase, message, receipt.idempotent_replay)?;
-    validate_terminal_pending_audit_event(storage, &receipt, phase)?;
+    let receipt = commit_accepted_outcome(storage, commit, acceptance)?;
+    confirm_terminal_receipt(storage, receipt, phase, acceptance.message, &message)
+}
+
+fn confirm_terminal_receipt(
+    storage: &dyn ProductStateStorage,
+    receipt: CommitReceipt,
+    phase: &TerminalPhase,
+    original: &JobOutcomeMessage,
+    effective: &JobOutcomeMessage,
+) -> Result<CommitReceipt, DeliveryTerminalOutcomeCommitError> {
+    validate_receipt(
+        &receipt,
+        phase,
+        original,
+        effective,
+        receipt.idempotent_replay,
+    )
+    .and_then(|()| validate_terminal_pending_audit_event(storage, &receipt, phase))
+    .map_err(|source| completion_pending(receipt.clone(), source))?;
     Ok(receipt)
 }
 
@@ -1019,14 +1153,30 @@ fn recover_raced_receipt(
     phase: &TerminalPhase,
     message: &JobOutcomeMessage,
     source: StorageError,
-) -> Result<CommitReceipt, StorageError> {
+) -> Result<CommitReceipt, DeliveryTerminalOutcomeCommitError> {
     let Some(receipt) = storage.load_receipt(&phase.receipt_identity, &phase.command_digest)?
     else {
-        return Err(source);
+        return Err(source.into());
     };
-    validate_receipt(&receipt, phase, message, true)?;
-    validate_terminal_pending_audit_event(storage, &receipt, phase)?;
-    Ok(receipt)
+    validate_accepted_receipt(storage, receipt, phase, message)
+}
+
+fn retained_effective_outcome(
+    storage: &dyn ProductStateStorage,
+    message: &JobOutcomeMessage,
+) -> Result<JobOutcomeMessage, StorageError> {
+    match outcome_replay(storage, message)? {
+        OutcomeReplay::Exact(retained) => Ok(retained.decision.apply(&retained.message)),
+        OutcomeReplay::Missing => Err(StorageError::adapter(
+            "terminal receipt has no accepted original execution outcome",
+        )),
+        OutcomeReplay::AuthorityConflict => Err(StorageError::invalid_input(
+            "terminal receipt differs from accepted execution authority",
+        )),
+        OutcomeReplay::FrameConflict => Err(StorageError::invalid_input(
+            "terminal receipt differs from accepted execution frame",
+        )),
+    }
 }
 
 fn terminal_accepted_event(
@@ -1068,6 +1218,7 @@ fn validate_receipt(
     receipt: &CommitReceipt,
     phase: &TerminalPhase,
     message: &JobOutcomeMessage,
+    effective: &JobOutcomeMessage,
     expected_replay: bool,
 ) -> Result<(), StorageError> {
     if receipt.receipt_identity != phase.receipt_identity
@@ -1094,7 +1245,7 @@ fn validate_receipt(
     let canonical = serde_json::to_vec(&payload).map_err(|error| {
         StorageError::adapter(format!("failed to encode terminal outcome event: {error}"))
     })?;
-    let expected_finished_at = instant_millis(&message.outcome.finished_at)?;
+    let expected_finished_at = instant_millis(&effective.outcome.finished_at)?;
     let pending_handoff = receipt.stream_id == terminal_authority_stream_id(&payload.job_id);
     let receipt_shape_is_valid = if pending_handoff {
         receipt.revision == 1 && receipt.events.len() == 2
@@ -1112,7 +1263,7 @@ fn validate_receipt(
         || payload.outcome.codex_thread_id != message.outcome.codex_thread_id
         || payload.outcome.finished_at_millis != expected_finished_at
         || payload.outcome.last_event_sequence != message.outcome.last_event_sequence
-        || payload.outcome.status != message.outcome.status
+        || payload.outcome.status != effective.outcome.status
         || payload.execution_job.event_id != format!("execution-job:{}", payload.job_id.0)
         || payload.execution_job.stream_id != delivery_stream_id(&payload.delivery_id)
         || validate_durable_job_ref(&payload.execution_job).is_err()

@@ -193,7 +193,8 @@ impl crate::tools::registry::CoreToolRuntime for DiagnosticHandoffTool {
 
 fn latched_handoff(handoffs: &TerminalHandoffs, cell: &CellId) -> ChangeBatchHandoff {
     let cells = handoffs.cells.lock().unwrap();
-    let Some(ToolContinuation::YieldToHost(handoff)) = cells.get(cell).unwrap().borrow().clone()
+    let Some(super::HostBoundary::Handoff(ToolContinuation::YieldToHost(handoff))) =
+        cells.get(cell).unwrap().borrow().clone()
     else {
         panic!("original typed handoff must remain latched");
     };
@@ -416,4 +417,105 @@ async fn diagnostic_offer_rollback_preserves_typed_handoff_without_republishing_
     .unwrap();
     assert_eq!((required_count, diagnostic_count), (1, 1));
     pool.close().await;
+}
+
+#[test]
+fn a_fatal_is_latched_only_for_its_original_live_cell_and_outranks_handoff() {
+    let handoffs = TerminalHandoffs::default();
+    let original = CellId::new("fatal-original-cell".into());
+    let other = CellId::new("independent-cell".into());
+    handoffs.register(&original);
+    handoffs.register(&other);
+    handoffs
+        .publish(
+            original.clone(),
+            ToolContinuation::YieldToHost(ChangeBatchHandoff {
+                call_id: "original-proposal".into(),
+                proposal: "original proposal".into(),
+            }),
+        )
+        .unwrap();
+    handoffs.publish_fatal(&original, "original safe fatal".into());
+    handoffs.publish_fatal(&original, "later safe fatal".into());
+    let cells = handoffs.cells.lock().unwrap();
+    assert!(matches!(
+        cells.get(&original).unwrap().borrow().as_ref(),
+        Some(super::HostBoundary::Fatal(message)) if message == "original safe fatal"
+    ));
+    drop(cells);
+    assert!(handoffs.is_pending(&original));
+    assert!(!handoffs.is_pending(&other));
+    handoffs.close_cell(&original);
+    assert!(handoffs.is_pending(&original));
+    handoffs.close_cell(&other);
+    handoffs.publish_fatal(&other, "closed cell fatal".into());
+    assert!(!handoffs.is_pending(&other));
+}
+
+#[tokio::test]
+async fn a_caught_native_exception_cannot_clear_fatal_at_execute_or_later_wait_boundary() {
+    use crate::function_tool::FunctionCallError;
+    use codex_code_mode::RuntimeResponse;
+    use codex_code_mode::WaitOutcome;
+    use std::sync::Arc;
+
+    for yielded_first in [false, true] {
+        let service = super::CodeModeService::new(
+            Arc::new(codex_code_mode::DisabledCodeModeSessionProvider),
+            &crate::config::CodeModeConfig::default(),
+        );
+        let cell = CellId::new(format!("caught-fatal-cell-{yielded_first}"));
+        let other = CellId::new(format!("unaffected-cell-{yielded_first}"));
+        service.terminal_handoffs.register(&cell);
+        service.terminal_handoffs.register(&other);
+        if yielded_first {
+            let (response, continuation) = service
+                .await_boundary(&cell, async {
+                    Ok(WaitOutcome::LiveCell(RuntimeResponse::Yielded {
+                        cell_id: cell.clone(),
+                        content_items: vec![],
+                    }))
+                })
+                .await
+                .unwrap();
+            assert!(matches!(
+                response,
+                WaitOutcome::LiveCell(RuntimeResponse::Yielded { .. })
+            ));
+            assert!(continuation.is_none());
+        }
+        service.terminal_handoffs.publish_fatal(
+            &cell,
+            "tool_fact_store_unavailable: execution and recovery require durable Core facts".into(),
+        );
+        let response = service
+            .await_boundary(&cell, async {
+                // A script may catch its nested tool exception and return
+                // normally. The host-owned fatal still owns this boundary.
+                Ok(WaitOutcome::LiveCell(RuntimeResponse::Result {
+                    cell_id: cell.clone(),
+                    content_items: vec![],
+                    error_text: None,
+                }))
+            })
+            .await;
+        assert!(matches!(
+            response,
+            Err(FunctionCallError::Fatal(message))
+                if message == "tool_fact_store_unavailable: execution and recovery require durable Core facts"
+        ));
+        assert!(service.terminal_handoffs.is_pending(&cell));
+        let independent = service
+            .await_boundary(&other, async {
+                Ok(WaitOutcome::LiveCell(RuntimeResponse::Result {
+                    cell_id: other.clone(),
+                    content_items: vec![],
+                    error_text: None,
+                }))
+            })
+            .await;
+        assert!(independent.is_ok());
+        service.terminal_handoffs.discard_all();
+        assert!(!service.terminal_handoffs.is_pending(&cell));
+    }
 }

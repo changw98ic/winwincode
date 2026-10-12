@@ -4,7 +4,7 @@
 
 use crate::{DeviceProviderError, DeviceProviderStore};
 use base64::{Engine as _, engine::general_purpose::STANDARD};
-use rusqlite::params;
+use rusqlite::{OptionalExtension as _, params};
 use sha2::{Digest, Sha256};
 use winwincode_domain::Sha256Digest;
 use winwincode_execution_port::{
@@ -13,7 +13,112 @@ use winwincode_execution_port::{
     generated::{ExecutionLeaseStamp, ModelChunkMessage, ModelOpenMessage},
 };
 
+/// Measured lower bounds across every physical invocation of one model exchange.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DevicePrimaryModelUsage {
+    pub input_tokens: u64,
+    pub cached_input_tokens: Option<u64>,
+    pub output_tokens: u64,
+    pub usage_known: bool,
+    pub cost_microunits: Option<u64>,
+}
+
 impl DeviceProviderStore {
+    /// Reads all physical charge facts without changing their immutable frames.
+    /// # Errors
+    /// Rejects another original request, corrupt receipts, or unavailable storage.
+    pub fn model_primary_usage(
+        &self,
+        open: &ModelOpenMessage,
+    ) -> Result<DevicePrimaryModelUsage, DeviceProviderError> {
+        let (digest, request, fallback): (String, String, Option<String>) = self.connection
+            .query_row("SELECT digest,request_open,COALESCE(accounting_chunks,chunks) FROM exchanges WHERE exchange_id=?1", [&open.model_exchange_id.0],
+                |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?)))
+            .optional()?.ok_or(DeviceProviderError::StateInvalid)?;
+        if digest != format!("{:x}", Sha256::digest(request.as_bytes()))
+            || serde_json::from_str::<ModelOpenMessage>(&request)? != *open
+        {
+            return Err(DeviceProviderError::StateInvalid);
+        }
+        let attempts = self.connection.prepare("SELECT state,accounting_chunks FROM model_invocation_attempts WHERE exchange_id=?1 ORDER BY attempt_number")?
+            .query_map([&open.model_exchange_id.0], |row| Ok((row.get::<_,String>(0)?,row.get::<_,Option<String>>(1)?)))?
+            .collect::<Result<Vec<_>,_>>()?;
+        let frames = if attempts.is_empty() {
+            vec![("completed".to_owned(), fallback)]
+        } else {
+            attempts
+                .into_iter()
+                .filter(|(state, _)| state != "not_sent")
+                .collect()
+        };
+        let mut usage = DevicePrimaryModelUsage {
+            input_tokens: 0,
+            cached_input_tokens: Some(0),
+            output_tokens: 0,
+            usage_known: true,
+            cost_microunits: Some(0),
+        };
+        for (state, frames) in frames {
+            if !matches!(
+                state.as_str(),
+                "completed" | "failed" | "prepared" | "invoking" | "interrupted_unknown"
+            ) {
+                return Err(DeviceProviderError::StateInvalid);
+            }
+            let final_attempt = matches!(state.as_str(), "completed" | "failed");
+            usage.usage_known &= final_attempt;
+            let chunks: Vec<ModelChunkMessage> = frames
+                .as_deref()
+                .map(serde_json::from_str)
+                .transpose()?
+                .unwrap_or_default();
+            let payload = chunks
+                .last()
+                .map(|chunk| primary_accounting_payload(open, chunk))
+                .transpose()?
+                .flatten();
+            let tokens = payload
+                .as_ref()
+                .and_then(|value| value.get("tokenUsage").or_else(|| value.get("token_usage")))
+                .and_then(|tokens| {
+                    metric(tokens, "inputTokens", "input_tokens").zip(metric(
+                        tokens,
+                        "outputTokens",
+                        "output_tokens",
+                    ))
+                });
+            if let Some((input, output)) = tokens {
+                usage.input_tokens = usage
+                    .input_tokens
+                    .checked_add(input)
+                    .ok_or(DeviceProviderError::StateInvalid)?;
+                usage.output_tokens = usage
+                    .output_tokens
+                    .checked_add(output)
+                    .ok_or(DeviceProviderError::StateInvalid)?;
+            } else {
+                usage.usage_known = false;
+            }
+            let cached = payload
+                .as_ref()
+                .and_then(|value| value.get("tokenUsage").or_else(|| value.get("token_usage")))
+                .and_then(|tokens| metric(tokens, "cachedInputTokens", "cached_input_tokens"));
+            if cached
+                .zip(tokens)
+                .is_some_and(|(cached, (input, _))| cached > input)
+            {
+                return Err(DeviceProviderError::StateInvalid);
+            }
+            usage.cached_input_tokens = checked_optional_sum(usage.cached_input_tokens, cached)?;
+            let cost = payload
+                .as_ref()
+                .filter(|_| final_attempt)
+                .and_then(|value| metric(value, "actualCostMicros", "actual_cost_micros"));
+            usage.cost_microunits = checked_optional_sum(usage.cost_microunits, cost)?;
+        }
+        Ok(usage)
+    }
+
     /// Freezes a Server-confirmed finished/fenced attempt and exports only durable
     /// Provider receipts. Missing response or price facts remain unknown.
     /// # Errors
@@ -54,7 +159,7 @@ impl DeviceProviderStore {
             };
             for (digest, request, chunks) in rows {
                 if digest != format!("{:x}", Sha256::digest(request.as_bytes())) {
-                    return Err(DeviceProviderError);
+                    return Err(DeviceProviderError::StateInvalid);
                 }
                 let open: ModelOpenMessage = serde_json::from_str(&request)?;
                 if open.lease.job_id != lease.job_id
@@ -65,14 +170,14 @@ impl DeviceProviderStore {
                     || open.lease.fencing_token != lease.fencing_token
                     || open.lease.issued_at != lease.issued_at
                 {
-                    return Err(DeviceProviderError);
+                    return Err(DeviceProviderError::StateInvalid);
                 }
                 let payload: serde_json::Value =
                     serde_json::from_slice(&crate::device_model::validated_model_payload(&open)?)?;
                 let provider = payload
                     .get("provider")
                     .and_then(serde_json::Value::as_str)
-                    .ok_or(DeviceProviderError)?;
+                    .ok_or(DeviceProviderError::StateInvalid)?;
                 let mut invocations = self.connection.prepare("SELECT attempt_number,state,accounting_chunks,adapter_request_id FROM model_invocation_attempts WHERE exchange_id=?1 ORDER BY attempt_number")?.query_map([&open.model_exchange_id.0], |row| Ok((row.get::<_,i64>(0)?,row.get::<_,String>(1)?,row.get::<_,Option<String>>(2)?,row.get::<_,String>(3)?)))?.collect::<Result<Vec<_>,_>>()?;
                 if invocations
                     .iter()
@@ -99,7 +204,7 @@ impl DeviceProviderStore {
                         &open,
                         provider,
                         slot,
-                        chunks.as_deref().ok_or(DeviceProviderError)?,
+                        chunks.as_deref().ok_or(DeviceProviderError::StateInvalid)?,
                     )?;
                 } else {
                     if invocations
@@ -128,9 +233,14 @@ impl DeviceProviderStore {
                     let receipts = statement.receipts.split_off(before);
                     let totals = |metric: fn(&ProviderAccountingReceipt)->Option<u64>| -> Result<Option<u64>,DeviceProviderError> {
                         if receipts.len()!=actual.len() {return Ok(None);}
-                        receipts.iter().try_fold(Some(0_u64),|total,receipt| match (total,metric(receipt)) {(Some(total),Some(value))=>total.checked_add(value).map(Some).ok_or(DeviceProviderError),_=>Ok(None)})
+                        receipts.iter().try_fold(Some(0_u64),|total,receipt| match (total,metric(receipt)) {(Some(total),Some(value))=>total.checked_add(value).map(Some).ok_or(DeviceProviderError::StateInvalid),_=>Ok(None)})
                     };
                     let digest = format!("sha256:{:x}", Sha256::digest(source));
+                    let known_tokens = receipts.iter().try_fold(0_u64, |total, receipt| {
+                        total
+                            .checked_add(receipt.tokens.unwrap_or(receipt.known_tokens))
+                            .ok_or(DeviceProviderError::StateInvalid)
+                    })?;
                     statement.receipts.push(ProviderAccountingReceipt {
                         slot,
                         model_exchange_id: open.model_exchange_id.clone(),
@@ -138,6 +248,7 @@ impl DeviceProviderStore {
                         provider_receipt_id: format!("device-attempt-set:{digest}"),
                         source_digest: Sha256Digest(digest),
                         tokens: totals(|receipt| receipt.tokens)?,
+                        known_tokens,
                         cost_microunits: totals(|receipt| receipt.cost_microunits)?,
                     });
                 }
@@ -150,7 +261,9 @@ impl DeviceProviderStore {
             }
             statement.manifest.sort();
             statement.receipts.sort_by(|a, b| a.slot.cmp(&b.slot));
-            statement.sign(key).map_err(|_| DeviceProviderError)?;
+            statement
+                .sign(key)
+                .map_err(|_| DeviceProviderError::StateInvalid)?;
             // Freeze only the fully checked snapshot. Keep its write transaction
             // limited to this insert and commit; failed upgrades export nothing.
             self.connection.execute(
@@ -176,60 +289,95 @@ fn append_primary_receipt(
     chunks: &str,
 ) -> Result<(), DeviceProviderError> {
     let chunks: Vec<ModelChunkMessage> = serde_json::from_str(chunks)?;
-    if let Some(chunk) = chunks.last().filter(|chunk| chunk.is_final) {
-        if chunk.model_exchange_id != open.model_exchange_id
-            || chunk.lease.job_id != open.lease.job_id
-            || chunk.lease.lease_id != open.lease.lease_id
-            || chunk.lease.fencing_token != open.lease.fencing_token
-            || chunk.lease.worker_id != open.lease.worker_id
-            || chunk.lease.worker_instance_id != open.lease.worker_instance_id
-            || chunk.lease.attempt != open.lease.attempt
-            || chunk.lease.issued_at != open.lease.issued_at
-            || chunk.worker_session_id != open.worker_session_id
-            || chunk.session_identity != open.session_identity
-        {
-            return Err(DeviceProviderError);
-        }
-        if let Some(payload) = &chunk.payload {
-            let bytes = STANDARD
-                .decode(&payload.data_base64)
-                .map_err(|_| DeviceProviderError)?;
-            if payload.payload_digest.0 != format!("sha256:{:x}", Sha256::digest(&bytes)) {
-                return Err(DeviceProviderError);
-            }
-            let value: serde_json::Value = serde_json::from_slice(&bytes)?;
-            let usage = value.get("tokenUsage").or_else(|| value.get("token_usage"));
-            let tokens = usage
-                .filter(|usage| !usage.is_null())
-                .and_then(|usage| {
-                    metric(usage, "inputTokens", "input_tokens").zip(metric(
-                        usage,
-                        "outputTokens",
-                        "output_tokens",
-                    ))
-                })
-                .map(|(input, output)| input.checked_add(output).ok_or(DeviceProviderError))
-                .transpose()?;
-            let cost_microunits = metric(&value, "actualCostMicros", "actual_cost_micros");
-            if tokens.is_some() || cost_microunits.is_some() {
-                let response_id = value
-                    .get("responseId")
-                    .or_else(|| value.get("response_id"))
-                    .and_then(serde_json::Value::as_str)
-                    .unwrap_or(&open.model_exchange_id.0);
-                statement.receipts.push(ProviderAccountingReceipt {
-                    slot,
-                    model_exchange_id: open.model_exchange_id.clone(),
-                    provider_id: provider.to_owned(),
-                    provider_receipt_id: response_id.to_owned(),
-                    source_digest: Sha256Digest(format!("sha256:{:x}", Sha256::digest(&bytes))),
-                    tokens,
-                    cost_microunits,
-                });
-            }
+    if let Some(chunk) = chunks.last().filter(|chunk| chunk.is_final)
+        && let Some(value) = primary_accounting_payload(open, chunk)?
+    {
+        let usage = value.get("tokenUsage").or_else(|| value.get("token_usage"));
+        let tokens = usage
+            .filter(|usage| !usage.is_null())
+            .and_then(|usage| {
+                metric(usage, "inputTokens", "input_tokens").zip(metric(
+                    usage,
+                    "outputTokens",
+                    "output_tokens",
+                ))
+            })
+            .map(|(input, output)| {
+                input
+                    .checked_add(output)
+                    .ok_or(DeviceProviderError::StateInvalid)
+            })
+            .transpose()?;
+        let cost_microunits = metric(&value, "actualCostMicros", "actual_cost_micros");
+        if tokens.is_some() || cost_microunits.is_some() {
+            let response_id = value
+                .get("responseId")
+                .or_else(|| value.get("response_id"))
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or(&open.model_exchange_id.0);
+            statement.receipts.push(ProviderAccountingReceipt {
+                slot,
+                model_exchange_id: open.model_exchange_id.clone(),
+                provider_id: provider.to_owned(),
+                provider_receipt_id: response_id.to_owned(),
+                source_digest: chunk
+                    .payload
+                    .as_ref()
+                    .ok_or(DeviceProviderError::StateInvalid)?
+                    .payload_digest
+                    .clone(),
+                tokens,
+                known_tokens: tokens.unwrap_or(0),
+                cost_microunits,
+            });
         }
     }
     Ok(())
+}
+
+fn primary_accounting_payload(
+    open: &ModelOpenMessage,
+    chunk: &ModelChunkMessage,
+) -> Result<Option<serde_json::Value>, DeviceProviderError> {
+    if !chunk.is_final
+        || chunk.model_exchange_id != open.model_exchange_id
+        || chunk.lease.job_id != open.lease.job_id
+        || chunk.lease.lease_id != open.lease.lease_id
+        || chunk.lease.fencing_token != open.lease.fencing_token
+        || chunk.lease.worker_id != open.lease.worker_id
+        || chunk.lease.worker_instance_id != open.lease.worker_instance_id
+        || chunk.lease.attempt != open.lease.attempt
+        || chunk.lease.issued_at != open.lease.issued_at
+        || chunk.worker_session_id != open.worker_session_id
+        || chunk.session_identity != open.session_identity
+    {
+        return Err(DeviceProviderError::StateInvalid);
+    }
+    chunk
+        .payload
+        .as_ref()
+        .map(|payload| {
+            let bytes = STANDARD
+                .decode(&payload.data_base64)
+                .map_err(|_| DeviceProviderError::EncodingInvalid)?;
+            if payload.payload_digest.0 != format!("sha256:{:x}", Sha256::digest(&bytes)) {
+                return Err(DeviceProviderError::StateInvalid);
+            }
+            serde_json::from_slice(&bytes).map_err(DeviceProviderError::from)
+        })
+        .transpose()
+}
+
+fn checked_optional_sum(
+    left: Option<u64>,
+    right: Option<u64>,
+) -> Result<Option<u64>, DeviceProviderError> {
+    left.zip(right)
+        .map(|(left, right)| {
+            left.checked_add(right)
+                .ok_or(DeviceProviderError::StateInvalid)
+        })
+        .transpose()
 }
 
 fn metric(value: &serde_json::Value, camel: &str, snake: &str) -> Option<u64> {
@@ -262,6 +410,10 @@ fn append_jev<T: serde::Serialize>(
                 tokens: observation
                     .output_tokens
                     .and_then(|output| observation.input_tokens.checked_add(output)),
+                known_tokens: observation
+                    .output_tokens
+                    .and_then(|output| observation.input_tokens.checked_add(output))
+                    .unwrap_or(0),
                 cost_microunits: None,
             });
         }

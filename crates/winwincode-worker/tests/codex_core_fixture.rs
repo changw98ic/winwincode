@@ -306,12 +306,15 @@ impl CodexCoreAdapter for RealKernelAdapter {
         _now: &Instant,
     ) -> Result<CodexPoll, Self::Error> {
         if self.interrupted.remove(&thread_id.0) {
-            return Ok(CodexPoll::Completed(CodexTurnCompletion {
-                summary: secret_safe_runtime_summary("embedded Codex fixture interrupted")
-                    .map_err(|error| error.to_string())?,
-                artifacts: Vec::new(),
-                usage: Some(measured_fixture_usage()),
-            }));
+            return Ok(CodexPoll::terminal(
+                winwincode_codex::CodexExecutionOutcome::Completed(CodexTurnCompletion {
+                    summary: secret_safe_runtime_summary("embedded Codex fixture interrupted")
+                        .map_err(|error| error.to_string())?,
+                    artifacts: Vec::new(),
+                    usage: Some(measured_fixture_usage()),
+                }),
+                Vec::new(),
+            ));
         }
         let session_id = self.session_id(thread_id)?.to_owned();
         match self
@@ -320,17 +323,21 @@ impl CodexCoreAdapter for RealKernelAdapter {
             .await
             .map_err(|error| error.to_string())?
         {
-            EventPoll::Event(event) if event.kind == "turn_complete" => {
-                Ok(CodexPoll::Completed(CodexTurnCompletion {
+            EventPoll::Event(event) if event.kind == "turn_complete" => Ok(CodexPoll::terminal(
+                winwincode_codex::CodexExecutionOutcome::Completed(CodexTurnCompletion {
                     summary: secret_safe_runtime_summary("embedded Codex fixture completed")
                         .map_err(|error| error.to_string())?,
                     artifacts: Vec::new(),
                     usage: Some(measured_fixture_usage()),
-                }))
-            }
-            EventPoll::Event(event) if event.kind == "error" => Ok(CodexPoll::Failed(
-                secret_safe_runtime_summary("embedded Codex fixture failed")
-                    .map_err(|error| error.to_string())?,
+                }),
+                Vec::new(),
+            )),
+            EventPoll::Event(event) if event.kind == "error" => Ok(CodexPoll::terminal(
+                winwincode_codex::CodexExecutionOutcome::Failed(
+                    secret_safe_runtime_summary("embedded Codex fixture failed")
+                        .map_err(|error| error.to_string())?,
+                ),
+                Vec::new(),
             )),
             EventPoll::Event(_) | EventPoll::Timeout => Ok(CodexPoll::Pending),
             EventPoll::Closed => Err("embedded Codex fixture event stream closed".to_owned()),
@@ -842,9 +849,10 @@ async fn run_real_local_codex_fixture() {
         outcomes[1].outcome.status,
         ExecutionOutcomeStatus::Cancelled
     );
-    assert!(
-        outcomes[1].outcome.usage.is_none(),
-        "a cancelled terminal fact does not invent usage"
+    assert_eq!(
+        outcomes[1].outcome.usage,
+        Some(measured_fixture_usage()),
+        "cancellation preserves the exact usage supplied by the fixture adapter"
     );
     assert_ne!(
         outcomes[0].worker_session_id, outcomes[1].worker_session_id,

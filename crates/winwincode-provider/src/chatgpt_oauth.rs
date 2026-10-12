@@ -66,15 +66,15 @@ impl Credentials {
             || self.subject.is_empty()
             || self.needs_refresh()?
         {
-            return Err(DeviceProviderError);
+            return Err(DeviceProviderError::StateInvalid);
         }
         ResolvedSecret::from_bytes(self.access_token.as_bytes().to_vec())
-            .map_err(|_| DeviceProviderError)
+            .map_err(|_| DeviceProviderError::StateInvalid)
     }
 
     pub(crate) fn refresh(&mut self) -> Result<(), DeviceProviderError> {
         if !valid_client(&self.client_id) || !valid_token(&self.refresh_token) {
-            return Err(DeviceProviderError);
+            return Err(DeviceProviderError::StateInvalid);
         }
         let agent = agent();
         self.refresh_with(
@@ -112,18 +112,22 @@ impl Credentials {
         if !response.token_type.eq_ignore_ascii_case("bearer")
             || !valid_token(&response.access_token)
         {
-            return Err(DeviceProviderError);
+            return Err(DeviceProviderError::StateInvalid);
         }
         let scope = response.scope.as_deref().unwrap_or(&self.scope);
         if !has_permission(scope) {
-            return Err(DeviceProviderError);
+            return Err(DeviceProviderError::StateInvalid);
         }
         // Refresh responses may omit the ID token. A supplied identity must remain bound.
         if let Some(id) = response.id_token.as_deref() {
-            let claims =
-                validate_identity(id, &self.client_id, None, keys.ok_or(DeviceProviderError)?)?;
+            let claims = validate_identity(
+                id,
+                &self.client_id,
+                None,
+                keys.ok_or(DeviceProviderError::StateInvalid)?,
+            )?;
             if claims.sub != self.subject {
-                return Err(DeviceProviderError);
+                return Err(DeviceProviderError::StateInvalid);
             }
         }
         let expires_at = expiry(response.expires_in)?;
@@ -132,7 +136,7 @@ impl Credentials {
             .as_ref()
             .is_some_and(|token| !valid_token(token))
         {
-            return Err(DeviceProviderError);
+            return Err(DeviceProviderError::StateInvalid);
         }
         clear(&mut self.access_token);
         self.access_token.clone_from(&response.access_token);
@@ -179,20 +183,22 @@ fn has_permission(scope: &str) -> bool {
 fn now() -> Result<u64, DeviceProviderError> {
     Ok(SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .map_err(|_| DeviceProviderError)?
+        .map_err(|_| DeviceProviderError::StateInvalid)?
         .as_secs())
 }
 
 fn expiry(expires_in: u64) -> Result<u64, DeviceProviderError> {
     if !(61..=604_800).contains(&expires_in) {
-        return Err(DeviceProviderError);
+        return Err(DeviceProviderError::StateInvalid);
     }
-    now()?.checked_add(expires_in).ok_or(DeviceProviderError)
+    now()?
+        .checked_add(expires_in)
+        .ok_or(DeviceProviderError::StateInvalid)
 }
 
 fn random() -> Result<String, DeviceProviderError> {
     let mut bytes = [0u8; 32];
-    getrandom::fill(&mut bytes).map_err(|_| DeviceProviderError)?;
+    getrandom::fill(&mut bytes).map_err(|_| DeviceProviderError::StateInvalid)?;
     let value = URL_SAFE_NO_PAD.encode(bytes);
     bytes.fill(0);
     Ok(value)
@@ -241,10 +247,10 @@ fn token_request(
         Duration::from_secs(30),
         || true,
     )
-    .map_err(|_| DeviceProviderError)?;
+    .map_err(|_| DeviceProviderError::StateInvalid)?;
     let response: TokenResponse = read_json(response)?;
     if !response.token_type.eq_ignore_ascii_case("bearer") || !valid_token(&response.access_token) {
-        return Err(DeviceProviderError);
+        return Err(DeviceProviderError::StateInvalid);
     }
     Ok(response)
 }
@@ -255,9 +261,9 @@ fn read_json<T: serde::de::DeserializeOwned>(
     let success = response.status().is_success();
     let mut bytes = response.into_body();
     let parsed = if success && bytes.len() <= 524_288 {
-        serde_json::from_slice(&bytes).map_err(|_| DeviceProviderError)
+        serde_json::from_slice(&bytes).map_err(DeviceProviderError::from)
     } else {
-        Err(DeviceProviderError)
+        Err(DeviceProviderError::StateInvalid)
     };
     bytes.fill(0);
     parsed
@@ -273,7 +279,7 @@ fn load_jwks(agent: &ureq::Agent) -> Result<JwkSet, DeviceProviderError> {
             Duration::from_secs(30),
             || true,
         )
-        .map_err(|_| DeviceProviderError)?,
+        .map_err(|_| DeviceProviderError::StateInvalid)?,
     )
 }
 
@@ -290,13 +296,13 @@ fn validate_identity(
     nonce: Option<&str>,
     keys: &JwkSet,
 ) -> Result<Identity, DeviceProviderError> {
-    let header = decode_header(token).map_err(|_| DeviceProviderError)?;
+    let header = decode_header(token).map_err(|_| DeviceProviderError::StateInvalid)?;
     if header.alg != Algorithm::RS256 {
-        return Err(DeviceProviderError);
+        return Err(DeviceProviderError::StateInvalid);
     }
-    let kid = header.kid.ok_or(DeviceProviderError)?;
-    let jwk = keys.find(&kid).ok_or(DeviceProviderError)?;
-    let key = DecodingKey::from_jwk(jwk).map_err(|_| DeviceProviderError)?;
+    let kid = header.kid.ok_or(DeviceProviderError::StateInvalid)?;
+    let jwk = keys.find(&kid).ok_or(DeviceProviderError::StateInvalid)?;
+    let key = DecodingKey::from_jwk(jwk).map_err(|_| DeviceProviderError::StateInvalid)?;
     let mut validation = Validation::new(Algorithm::RS256);
     validation.set_issuer(&[ISSUER]);
     validation.set_audience(&[client]);
@@ -304,7 +310,7 @@ fn validate_identity(
     validation.leeway = 5;
     validation.validate_nbf = true;
     let claims = decode::<Identity>(token, &key, &validation)
-        .map_err(|_| DeviceProviderError)?
+        .map_err(|_| DeviceProviderError::StateInvalid)?
         .claims;
     if claims.sub.is_empty()
         || claims.sub.len() > 200
@@ -312,7 +318,7 @@ fn validate_identity(
         || claims.iat > now()?.saturating_add(5)
         || nonce.is_some_and(|expected| claims.nonce.as_deref() != Some(expected))
     {
-        return Err(DeviceProviderError);
+        return Err(DeviceProviderError::StateInvalid);
     }
     Ok(claims)
 }
@@ -361,7 +367,7 @@ impl Pending {
         host_id: &str,
         previous: Option<&Credentials>,
     ) -> Result<Url, DeviceProviderError> {
-        let mut url = Url::parse(AUTHORIZE).map_err(|_| DeviceProviderError)?;
+        let mut url = Url::parse(AUTHORIZE).map_err(|_| DeviceProviderError::StateInvalid)?;
         let mut query = url.query_pairs_mut();
         query.extend_pairs([
             (
@@ -445,7 +451,7 @@ impl Pending {
                         Callback::Code { code, client_id } => return Ok((code, client_id, stream)),
                         Callback::Denied => {
                             respond(&mut stream, false);
-                            return Err(DeviceProviderError);
+                            return Err(DeviceProviderError::StateInvalid);
                         }
                         Callback::Ignore => respond(&mut stream, false),
                     }
@@ -456,7 +462,7 @@ impl Pending {
                 Err(error) => return Err(error.into()),
             }
         }
-        Err(DeviceProviderError)
+        Err(DeviceProviderError::StateInvalid)
     }
 
     fn read_callback(&self, stream: &mut TcpStream) -> Result<Callback, DeviceProviderError> {
@@ -468,11 +474,11 @@ impl Pending {
         let mut buffer = [0u8; 1024];
         while bytes.len() <= 16_384 {
             if Instant::now() >= deadline {
-                return Err(DeviceProviderError);
+                return Err(DeviceProviderError::StateInvalid);
             }
             let count = stream.read(&mut buffer)?;
             if count == 0 {
-                return Err(DeviceProviderError);
+                return Err(DeviceProviderError::StateInvalid);
             }
             bytes.extend_from_slice(&buffer[..count]);
             if bytes.windows(4).any(|window| window == b"\r\n\r\n") {
@@ -480,20 +486,21 @@ impl Pending {
             }
         }
         if bytes.len() > 16_384 {
-            return Err(DeviceProviderError);
+            return Err(DeviceProviderError::StateInvalid);
         }
-        let request = std::str::from_utf8(&bytes).map_err(|_| DeviceProviderError)?;
+        let request =
+            std::str::from_utf8(&bytes).map_err(|_| DeviceProviderError::EncodingInvalid)?;
         let mut lines = request.split("\r\n");
         let mut first = lines
             .next()
-            .ok_or(DeviceProviderError)?
+            .ok_or(DeviceProviderError::StateInvalid)?
             .split_ascii_whitespace();
         if first.next() != Some("GET") {
-            return Err(DeviceProviderError);
+            return Err(DeviceProviderError::StateInvalid);
         }
-        let target = first.next().ok_or(DeviceProviderError)?;
+        let target = first.next().ok_or(DeviceProviderError::StateInvalid)?;
         if first.next() != Some("HTTP/1.1") || first.next().is_some() {
-            return Err(DeviceProviderError);
+            return Err(DeviceProviderError::StateInvalid);
         }
         let expected_host = format!("127.0.0.1:{}", self.listener.local_addr()?.port());
         let hosts: Vec<_> = lines
@@ -501,7 +508,7 @@ impl Pending {
             .filter(|(key, _)| key.eq_ignore_ascii_case("host"))
             .collect();
         if hosts.len() != 1 || hosts[0].1.trim() != expected_host {
-            return Err(DeviceProviderError);
+            return Err(DeviceProviderError::StateInvalid);
         }
         let result = self.callback(target);
         bytes.fill(0);
@@ -528,7 +535,7 @@ pub(crate) fn authorize(
 ) -> Result<Credentials, DeviceProviderError> {
     let pending = Pending::new(previous)?;
     let url = pending.url(host_id, previous)?;
-    webbrowser::open(url.as_str()).map_err(|_| DeviceProviderError)?;
+    webbrowser::open(url.as_str()).map_err(DeviceProviderError::from)?;
     let (mut code, client_id, mut stream) = pending.wait()?;
     let agent = agent();
     let result = (|| {
@@ -567,23 +574,26 @@ fn credentials(
         || !response.token_type.eq_ignore_ascii_case("bearer")
         || !valid_token(&response.access_token)
     {
-        return Err(DeviceProviderError);
+        return Err(DeviceProviderError::StateInvalid);
     }
-    let id_token = response.id_token.as_ref().ok_or(DeviceProviderError)?;
+    let id_token = response
+        .id_token
+        .as_ref()
+        .ok_or(DeviceProviderError::StateInvalid)?;
     let claims = validate_identity(id_token, client, Some(nonce), keys)?;
     if previous.is_some_and(|record| record.subject != claims.sub || record.client_id != client) {
-        return Err(DeviceProviderError);
+        return Err(DeviceProviderError::StateInvalid);
     }
     let scope = response
         .scope
         .as_ref()
         .filter(|scope| has_permission(scope))
-        .ok_or(DeviceProviderError)?;
+        .ok_or(DeviceProviderError::StateInvalid)?;
     let refresh = response
         .refresh_token
         .as_ref()
         .filter(|token| valid_token(token))
-        .ok_or(DeviceProviderError)?;
+        .ok_or(DeviceProviderError::StateInvalid)?;
     Ok(Credentials {
         client_id: client.to_owned(),
         subject: claims.sub,
@@ -620,7 +630,7 @@ pub(crate) fn models(record: &Credentials) -> Result<Vec<String>, DeviceProvider
             Duration::from_secs(30),
             || true,
         )
-        .map_err(|_| DeviceProviderError)?,
+        .map_err(|_| DeviceProviderError::StateInvalid)?,
     )?;
     let models: Vec<_> = catalog
         .models
@@ -636,7 +646,7 @@ pub(crate) fn models(record: &Credentials) -> Result<Vec<String>, DeviceProvider
         .take(100)
         .collect();
     if models.is_empty() {
-        return Err(DeviceProviderError);
+        return Err(DeviceProviderError::StateInvalid);
     }
     Ok(models)
 }
@@ -838,7 +848,7 @@ z3AxPR+IWK+k7GyAWgO6vtXmUm6is+DCthbCX8goI8kqDB8VUO0=
         assert!(
             record
                 .refresh_with(
-                    || Err(DeviceProviderError),
+                    || Err(DeviceProviderError::StateInvalid),
                     |_, _| {
                         consumed.set(true);
                         Ok(signed_response(&claims()))

@@ -372,6 +372,32 @@ pub(crate) struct DiagnosticArtifactOutbox {
 }
 
 impl DiagnosticArtifactOutbox {
+    pub(crate) fn has_required_pending(
+        &self,
+        authority: &DiagnosticArtifactAuthority,
+    ) -> Result<bool, AdapterStoreError> {
+        if verification_artifact_role(&authority.job.execution_profile) {
+            self.has_pending(authority)
+        } else {
+            Ok(false)
+        }
+    }
+
+    pub(crate) fn completion_references(
+        &self,
+        authority: &DiagnosticArtifactAuthority,
+    ) -> Result<Vec<ArtifactReference>, AdapterStoreError> {
+        let references = self.accepted_references(authority);
+        if verification_artifact_role(&authority.job.execution_profile) {
+            references
+        } else {
+            Ok(references.unwrap_or_else(|_| {
+                eprintln!("Codex diagnostic_loss stage=terminal_artifact_projection");
+                Vec::new()
+            }))
+        }
+    }
+
     pub(crate) fn open(store: AdapterStore) -> Result<Self, AdapterStoreError> {
         prepare_diagnostic_job_route(&store)?;
         Ok(Self { store })
@@ -551,6 +577,9 @@ impl DiagnosticArtifactOutbox {
 }
 
 const DIAGNOSTIC_JOB_ROUTE_MIGRATION: &str = "diagnostic-artifact-job-route-v1";
+fn verification_artifact_role(profile: &str) -> bool {
+    matches!(profile, "reviewer" | "verifier" | "adversarial-verifier")
+}
 const DIAGNOSTIC_UPLOAD_SCHEMA: &str = r"CREATE TABLE diagnostic_artifact_upload (
   artifact_id TEXT PRIMARY KEY NOT NULL,
   authority_key TEXT NOT NULL,
@@ -1218,6 +1247,46 @@ mod tests {
             "winwincode-diagnostic-outbox-{name}-{}-{unique}",
             std::process::id()
         ))
+    }
+
+    #[test]
+    fn completion_gate_ignores_auxiliary_corruption_but_requires_verification_evidence() {
+        for profile in ["codex-chat", "verifier"] {
+            let root = test_root(profile);
+            let store = AdapterStore::open(&root).unwrap();
+            let outbox = DiagnosticArtifactOutbox::open(store.clone()).unwrap();
+            let mut upload = fixture_upload(b"command output".to_vec());
+            upload.job.execution_profile = profile.to_owned();
+            if profile == "verifier" {
+                // A verification upload must carry its frozen Snapshot. This
+                // gate test begins after the runtime has installed that identity.
+                assert_eq!(outbox.retain(&upload), Err(AdapterStoreError::Conflict));
+                upload.snapshot_id = Some(winwincode_domain::SnapshotId(
+                    "snap_01J00000000000000000000001".to_owned(),
+                ));
+            }
+            let retained = outbox.retain(&upload).unwrap();
+            assert_eq!(
+                outbox.has_required_pending(&retained.authority).unwrap(),
+                profile == "verifier"
+            );
+            store.lock().unwrap().execute("UPDATE diagnostic_artifact_upload SET record_json='broken' WHERE artifact_id=?1", [&retained.artifact.artifact_id.0]).unwrap();
+            if profile == "verifier" {
+                assert!(outbox.has_required_pending(&retained.authority).is_err());
+                assert!(outbox.completion_references(&retained.authority).is_err());
+            } else {
+                assert!(!outbox.has_required_pending(&retained.authority).unwrap());
+                assert!(
+                    outbox
+                        .completion_references(&retained.authority)
+                        .unwrap()
+                        .is_empty()
+                );
+            }
+            drop(outbox);
+            drop(store);
+            std::fs::remove_dir_all(root).unwrap();
+        }
     }
 
     fn fixture_upload(bytes: Vec<u8>) -> DiagnosticArtifactUpload {

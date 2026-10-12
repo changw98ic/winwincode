@@ -133,6 +133,19 @@ impl ActionEnforcementIssuer {
 pub struct ActionEnforcementVerifier(ActionEnforcementSigningKey);
 
 impl ActionEnforcementVerifier {
+    /// Verifies the complete original receipt without granting live authority.
+    /// Historical cleanup still requires an independently durable use proof.
+    ///
+    /// # Errors
+    ///
+    /// Rejects altered receipt bytes or an invalid original signature.
+    pub fn verify_signature(
+        &self,
+        receipt: &ActionEnforcementReceiptMessage,
+    ) -> Result<(), ActionEnforcementError> {
+        ActionEnforcementIssuer::new(self.0.clone()).verify_signature(receipt)
+    }
+
     /// Verifies the signature and every action, invocation, lease, session, and
     /// Policy fact bound into a permit receipt.
     ///
@@ -379,6 +392,39 @@ impl FileActionReceiptUseStore {
         restrict_directory(&directory)?;
         sync_directory(&directory)?;
         Ok(Self { directory })
+    }
+
+    /// Reads whether this exact signed invocation was already durably claimed.
+    /// This method cannot create a claim or change file permissions.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Conflict` for changed or non-canonical proof and `Storage` for
+    /// unavailable durable state. The caller must verify the full signature.
+    pub fn has_consumed(
+        &self,
+        receipt: &ActionEnforcementReceiptMessage,
+    ) -> Result<bool, ActionReceiptUseError> {
+        if !canonical_id(&receipt.request_id.0, "req_") || !digest(&receipt.receipt_signature.0) {
+            return Err(ActionReceiptUseError::Conflict);
+        }
+        let key = format!("{:x}.json", Sha256::digest(receipt.request_id.0.as_bytes()));
+        let bytes = match fs::read(self.directory.join(key)) {
+            Ok(bytes) => bytes,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+            Err(_) => return Err(ActionReceiptUseError::Storage),
+        };
+        let decoded: StoredReceiptUse =
+            serde_json::from_slice(&bytes).map_err(|_| ActionReceiptUseError::Storage)?;
+        let canonical = serde_json::to_vec(&decoded).map_err(|_| ActionReceiptUseError::Storage)?;
+        if canonical != bytes
+            || decoded.schema_version != RECEIPT_USE_SCHEMA_VERSION
+            || decoded.request_id != receipt.request_id
+            || decoded.receipt_signature != receipt.receipt_signature
+        {
+            return Err(ActionReceiptUseError::Conflict);
+        }
+        Ok(true)
     }
 }
 

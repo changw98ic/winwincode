@@ -380,6 +380,325 @@ fn late_predecessor_receipts_are_additive_idempotent_and_do_not_revive_cancelled
     }
 }
 
+#[test]
+#[allow(
+    clippy::too_many_lines,
+    reason = "signed financial lower bounds survive missing statistics, immutable terminal replay, restart and attempted rollback"
+)]
+fn signed_physical_lower_bounds_survive_missing_terminal_statistics_and_reopen() {
+    for (legacy_known, complete) in [(false, false), (true, false), (true, true)] {
+        reconcile_signed_physical_usage(legacy_known, complete);
+    }
+}
+
+#[allow(
+    clippy::too_many_lines,
+    reason = "signed physical totals repair legacy logical accounting while preserving original source and terminal facts across restart"
+)]
+fn reconcile_signed_physical_usage(legacy_known: bool, complete: bool) {
+    use winwincode_domain::{
+        FencingToken, LeaseId, ModelExchangeId, Sha256Digest, WorkerId, WorkerInstanceId,
+    };
+    use winwincode_execution_port::{
+        accounting::{AttemptAccountingStatement, ProviderAccountingReceipt},
+        action_enforcement::ActionEnforcementSigningKey,
+        generated::{
+            ExecutionLeaseStamp, ExecutionOutcomeUsage, ExecutionOutcomeUsageAccountingStatus,
+        },
+    };
+    let root = temporary_directory("physical-unknown-lower-bound");
+    let scope = scope(195);
+    let pool = pool(195);
+    let request = reservation(&scope, &pool, 195, 195, ExecutionRepositoryAccess::ReadOnly);
+    let mut storage = SqliteStorage::open(&root).unwrap();
+    let mut admission = storage.execution_admission().unwrap();
+    configure(&mut admission, &scope, &pool, generous_limits());
+    admission.reserve(&request).unwrap();
+    admission.start(&start(&request, 196)).unwrap();
+    let terminal = ExecutionReservationRelease {
+        scope: scope.clone(),
+        worker_pool_id: pool.clone(),
+        job_id: request.job_id.clone(),
+        request_id: RequestId(id("req", 197)),
+        expected_revision: 2,
+        reason: ExecutionReservationReleaseReason::Failed,
+        released_at: at(3),
+    };
+    let raw = if legacy_known {
+        ExecutionOutcomeUsage {
+            runtime_millis: 1000,
+            tokens: Some(5),
+            known_tokens: 5,
+            cost_microunits: complete.then_some(7),
+            accounting_status: ExecutionOutcomeUsageAccountingStatus::Known,
+        }
+    } else {
+        ExecutionOutcomeUsage::unknown(1000, 0)
+    };
+    if legacy_known {
+        admission
+            .settle(&ExecutionReservationSettlement {
+                scope: scope.clone(),
+                worker_pool_id: pool.clone(),
+                job_id: request.job_id.clone(),
+                request_id: terminal.request_id.clone(),
+                expected_revision: 2,
+                actual_tokens: 5,
+                actual_cost_microunits: raw
+                    .cost_microunits
+                    .map(|value| u64::try_from(value).unwrap()),
+                actual_runtime_millis: 1000,
+                completed_at: at(3),
+            })
+            .unwrap();
+    } else {
+        admission
+            .release_with_unknown_usage(&terminal, &raw)
+            .unwrap();
+    }
+    let lease = ExecutionLeaseStamp {
+        job_id: request.job_id.clone(),
+        lease_id: LeaseId(id("lse", 195)),
+        worker_id: WorkerId(id("wrk", 195)),
+        worker_instance_id: WorkerInstanceId(id("wki", 195)),
+        attempt: 1,
+        fencing_token: FencingToken("1".into()),
+        issued_at: at(1),
+        expires_at: at(2),
+    };
+    storage.execution_registry().unwrap();
+    let connection = rusqlite::Connection::open(storage.database_path()).unwrap();
+    connection
+        .execute(
+            "INSERT INTO execution_leases VALUES(?1,?2,?3,?4,?5,1,?6,?7,?8)",
+            rusqlite::params![
+                lease.job_id.0,
+                lease.lease_id.0,
+                format!("sha256:{}", "e".repeat(64)),
+                lease.worker_id.0,
+                lease.worker_instance_id.0,
+                lease.fencing_token.0,
+                lease.issued_at.0,
+                lease.expires_at.0
+            ],
+        )
+        .unwrap();
+    drop(connection);
+    assert_eq!(
+        storage
+            .combine_execution_attempt_usage(&lease, &raw)
+            .unwrap(),
+        raw
+    );
+    let source_before = storage
+        .execution_admission()
+        .unwrap()
+        .load_settlement_source(&lease.job_id)
+        .unwrap();
+    let earlier_known = ExecutionOutcomeUsage {
+        runtime_millis: 1000,
+        tokens: Some(5),
+        known_tokens: 5,
+        cost_microunits: None,
+        accounting_status: ExecutionOutcomeUsageAccountingStatus::Known,
+    };
+    let earlier_receipt = RequestId(id("req", 201));
+    if !legacy_known {
+        assert!(
+            storage
+                .execution_admission()
+                .unwrap()
+                .settle_reconciliation(
+                    &lease.job_id,
+                    &terminal.request_id,
+                    &earlier_receipt,
+                    &earlier_known,
+                    &at(4)
+                )
+                .unwrap()
+        );
+    }
+    let key = ActionEnforcementSigningKey::from_bytes([7; 32]).unwrap();
+    let mut statement = AttemptAccountingStatement {
+        lease: lease.clone(),
+        manifest: vec!["primary:physical-attempts".into()],
+        receipts: vec![ProviderAccountingReceipt {
+            slot: "primary:physical-attempts".into(),
+            model_exchange_id: ModelExchangeId(id("mdl", 195)),
+            provider_id: "provider".into(),
+            provider_receipt_id: "original-physical-attempt-set".into(),
+            source_digest: Sha256Digest(format!("sha256:{}", "b".repeat(64))),
+            tokens: complete.then_some(16),
+            known_tokens: if complete { 16 } else { 5 },
+            cost_microunits: complete.then_some(9),
+        }],
+        signature: Sha256Digest(String::new()),
+    };
+    statement.sign(&key).unwrap();
+    storage
+        .reconcile_provider_attempt(&statement.verified(&key).unwrap(), &at(4))
+        .unwrap();
+    let combined = storage
+        .combine_execution_attempt_usage(&lease, &raw)
+        .unwrap();
+    assert_eq!(combined.tokens, complete.then_some(16));
+    assert_eq!(combined.cost_microunits, complete.then_some(9));
+    assert_eq!(combined.known_tokens, if complete { 16 } else { 5 });
+    if !legacy_known {
+        assert!(
+            !storage
+                .execution_admission()
+                .unwrap()
+                .settle_reconciliation(
+                    &lease.job_id,
+                    &terminal.request_id,
+                    &earlier_receipt,
+                    &earlier_known,
+                    &at(4)
+                )
+                .unwrap(),
+            "an exact earlier receipt stays replayable after signed CURRENT uncertainty"
+        );
+        let connection = rusqlite::Connection::open(storage.database_path()).unwrap();
+        let facts: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM execution_admission_reconciliation_facts WHERE job_id=?1",
+                [&lease.job_id.0],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(facts, 2, "exact replay appends no financial fact");
+        assert_eq!(
+            storage
+                .combine_execution_attempt_usage(&lease, &raw)
+                .unwrap(),
+            combined,
+            "exact replay preserves the current signed financial projection"
+        );
+    }
+    if !complete {
+        let falsely_known = ExecutionOutcomeUsage {
+            runtime_millis: 1000,
+            tokens: Some(5),
+            known_tokens: 5,
+            cost_microunits: None,
+            accounting_status: ExecutionOutcomeUsageAccountingStatus::Known,
+        };
+        assert!(
+            storage
+                .execution_admission()
+                .unwrap()
+                .settle_reconciliation(
+                    &lease.job_id,
+                    &terminal.request_id,
+                    &RequestId(id("req", 198)),
+                    &falsely_known,
+                    &at(5)
+                )
+                .is_err(),
+            "raw final success cannot fill signed CURRENT physical uncertainty"
+        );
+        let falsely_priced = ExecutionOutcomeUsage {
+            runtime_millis: 1000,
+            tokens: None,
+            known_tokens: 5,
+            cost_microunits: Some(9),
+            accounting_status: ExecutionOutcomeUsageAccountingStatus::Unknown,
+        };
+        assert!(
+            storage
+                .execution_admission()
+                .unwrap()
+                .settle_reconciliation(
+                    &lease.job_id,
+                    &terminal.request_id,
+                    &RequestId(id("req", 199)),
+                    &falsely_priced,
+                    &at(5)
+                )
+                .is_err()
+        );
+    }
+    assert_eq!(
+        storage
+            .execution_admission()
+            .unwrap()
+            .load_settlement_source(&lease.job_id)
+            .unwrap(),
+        source_before
+    );
+    drop(storage);
+    let mut storage = SqliteStorage::open(&root).unwrap();
+    storage
+        .reconcile_provider_attempt(&statement.verified(&key).unwrap(), &at(5))
+        .unwrap();
+    assert_eq!(
+        storage
+            .combine_execution_attempt_usage(&lease, &raw)
+            .unwrap(),
+        combined
+    );
+    assert_eq!(
+        storage
+            .execution_admission()
+            .unwrap()
+            .load_settlement_source(&lease.job_id)
+            .unwrap(),
+        source_before
+    );
+    for boundary in boundaries(&scope, &pool) {
+        let accounting = storage
+            .execution_admission()
+            .unwrap()
+            .usage(&boundary)
+            .unwrap();
+        assert_eq!(accounting.committed_tokens, if complete { 16 } else { 5 });
+        assert_eq!(accounting.committed_cost_microunits, complete.then_some(9));
+        assert_eq!(accounting.accounting_pending, u64::from(!complete));
+    }
+    let connection = rusqlite::Connection::open(storage.database_path()).unwrap();
+    let original: String = connection
+        .query_row(
+            "SELECT usage_json FROM execution_attempt_terminal_usage WHERE job_id=?1",
+            [&lease.job_id.0],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        serde_json::from_str::<ExecutionOutcomeUsage>(&original).unwrap(),
+        raw
+    );
+    let reconciliation:(String,String)=connection.query_row("SELECT accounting_status,(SELECT usage_json FROM execution_admission_reconciliation_facts f WHERE f.job_id=r.job_id ORDER BY sequence DESC LIMIT 1) FROM execution_admission_reconciliation r WHERE job_id=?1",[&lease.job_id.0],|row|Ok((row.get(0)?,row.get(1)?))).unwrap();
+    assert_eq!(
+        reconciliation.0,
+        if complete { "settled" } else { "pending" }
+    );
+    assert_eq!(
+        serde_json::from_str::<ExecutionOutcomeUsage>(&reconciliation.1).unwrap(),
+        combined
+    );
+    assert_eq!(
+        connection
+            .query_row::<i64, _, _>(
+                "SELECT COUNT(*) FROM execution_attempt_accounting_facts WHERE job_id=?1",
+                [&lease.job_id.0],
+                |row| row.get(0)
+            )
+            .unwrap(),
+        1
+    );
+    statement.receipts[0].known_tokens = 4;
+    statement.sign(&key).unwrap();
+    assert!(
+        storage
+            .reconcile_provider_attempt(&statement.verified(&key).unwrap(), &at(6))
+            .is_err()
+    );
+    drop(connection);
+    drop(storage);
+    fs::remove_dir_all(root).unwrap();
+}
+
 #[allow(
     clippy::too_many_lines,
     reason = "the fixture checks both arrival orders across a restart and conflicting replays"
@@ -494,6 +813,7 @@ fn reconcile_late_predecessor(tokens_first: bool) {
             provider_receipt_id: "provider-response-190".into(),
             source_digest: Sha256Digest(format!("sha256:{}", "b".repeat(64))),
             tokens: tokens_first.then_some(11),
+            known_tokens: 0,
             cost_microunits: (!tokens_first).then_some(7),
         }],
         signature: Sha256Digest(String::new()),
@@ -848,6 +1168,446 @@ fn cancellation_and_failure_release_all_reserved_resources_across_restart() {
 
     drop(restarted);
     fs::remove_dir_all(root).expect("directory release");
+}
+
+#[test]
+#[allow(
+    clippy::too_many_lines,
+    reason = "known and unknown late terminal facts follow the same cancellation, restart, immutable replay and accounting reconciliation lifecycle"
+)]
+fn cancelled_release_retains_late_terminal_usage_and_reconciles_without_changing_release() {
+    use winwincode_execution_port::generated::{
+        ExecutionOutcomeUsage, ExecutionOutcomeUsageAccountingStatus,
+    };
+
+    for known in [false, true] {
+        let root = temporary_directory(&format!("late-cancelled-accounting-{known}"));
+        let request_scope = scope(150);
+        let worker_pool = pool(150);
+        let mut storage = SqliteStorage::open(&root).unwrap();
+        let mut admission = storage.execution_admission().unwrap();
+        configure(
+            &mut admission,
+            &request_scope,
+            &worker_pool,
+            generous_limits(),
+        );
+        let request = reservation(
+            &request_scope,
+            &worker_pool,
+            150,
+            150,
+            ExecutionRepositoryAccess::ReadOnly,
+        );
+        admission.reserve(&request).unwrap();
+        admission.start(&start(&request, 151)).unwrap();
+        let cancellation = ExecutionReservationRelease {
+            scope: request_scope.clone(),
+            worker_pool_id: worker_pool.clone(),
+            job_id: request.job_id.clone(),
+            request_id: RequestId(id("req", 152)),
+            expected_revision: 2,
+            reason: ExecutionReservationReleaseReason::Cancelled,
+            released_at: at(3),
+        };
+        let released = admission.release(&cancellation).unwrap();
+        let terminal = ExecutionReservationRelease {
+            request_id: RequestId(id("req", 153)),
+            expected_revision: released.reservation.revision,
+            released_at: at(4),
+            ..cancellation.clone()
+        };
+        let usage = if known {
+            ExecutionOutcomeUsage {
+                tokens: Some(23),
+                cost_microunits: Some(29),
+                runtime_millis: 12_000,
+                known_tokens: 23,
+                accounting_status: ExecutionOutcomeUsageAccountingStatus::Known,
+            }
+        } else {
+            ExecutionOutcomeUsage::unknown(12_000, 17)
+        };
+        assert_eq!(
+            admission
+                .load_retained_terminal_usage(&request.job_id, &terminal.request_id)
+                .unwrap(),
+            None
+        );
+        let retained = admission
+            .retain_released_terminal_usage(&terminal, &usage)
+            .unwrap();
+        assert!(!retained.replayed);
+        assert_eq!(retained.reservation, released.reservation);
+        assert_eq!(
+            admission
+                .load_retained_terminal_usage(&request.job_id, &terminal.request_id)
+                .unwrap(),
+            Some(usage.clone())
+        );
+        for boundary in boundaries(&request_scope, &worker_pool) {
+            let accounting = admission.usage(&boundary).unwrap();
+            assert_eq!(accounting.running, 0);
+            assert_eq!(accounting.reserved_tokens, 0);
+            assert_eq!(
+                accounting.committed_tokens,
+                u64::try_from(usage.known_tokens).unwrap()
+            );
+            assert_eq!(
+                accounting.committed_cost_microunits,
+                usage
+                    .cost_microunits
+                    .map(|value| u64::try_from(value).unwrap())
+            );
+            assert_eq!(accounting.accounting_pending, u64::from(!known));
+        }
+        drop(storage);
+
+        let mut storage = SqliteStorage::open(&root).unwrap();
+        let mut admission = storage.execution_admission().unwrap();
+        let original = admission.release(&cancellation).unwrap();
+        assert!(original.replayed);
+        assert_eq!(original.reservation, released.reservation);
+        assert_eq!(
+            admission
+                .load_retained_terminal_usage(&request.job_id, &terminal.request_id)
+                .unwrap(),
+            Some(usage.clone())
+        );
+        assert!(
+            admission
+                .retain_released_terminal_usage(&terminal, &usage)
+                .unwrap()
+                .replayed
+        );
+        let mut changed = usage.clone();
+        changed.known_tokens += 1;
+        if let Some(tokens) = &mut changed.tokens {
+            *tokens += 1;
+        }
+        assert!(
+            admission
+                .retain_released_terminal_usage(&terminal, &changed)
+                .is_err()
+        );
+        let conflicting = ExecutionReservationRelease {
+            request_id: RequestId(id("req", 154)),
+            ..terminal.clone()
+        };
+        assert!(
+            admission
+                .retain_released_terminal_usage(&conflicting, &usage)
+                .is_err()
+        );
+
+        let complete = ExecutionOutcomeUsage {
+            tokens: Some(23),
+            cost_microunits: Some(29),
+            runtime_millis: 12_000,
+            known_tokens: 23,
+            accounting_status: ExecutionOutcomeUsageAccountingStatus::Known,
+        };
+        let settlement_id = RequestId(id("req", 155));
+        assert!(
+            admission
+                .settle_reconciliation(
+                    &request.job_id,
+                    &cancellation.request_id,
+                    &settlement_id,
+                    &complete,
+                    &at(5)
+                )
+                .is_err(),
+            "the cancellation receipt cannot replace the terminal identity"
+        );
+        assert_eq!(
+            admission
+                .settle_reconciliation(
+                    &request.job_id,
+                    &terminal.request_id,
+                    &settlement_id,
+                    &complete,
+                    &at(5)
+                )
+                .unwrap(),
+            !known
+        );
+        assert!(
+            !admission
+                .settle_reconciliation(
+                    &request.job_id,
+                    &terminal.request_id,
+                    &settlement_id,
+                    &complete,
+                    &at(5)
+                )
+                .unwrap()
+        );
+        let lower = ExecutionOutcomeUsage {
+            tokens: Some(16),
+            known_tokens: 16,
+            ..complete.clone()
+        };
+        assert!(
+            admission
+                .settle_reconciliation(
+                    &request.job_id,
+                    &terminal.request_id,
+                    &RequestId(id("req", 156)),
+                    &lower,
+                    &at(6)
+                )
+                .is_err()
+        );
+        assert!(
+            admission
+                .settle_reconciliation(
+                    &request.job_id,
+                    &terminal.request_id,
+                    &settlement_id,
+                    &complete,
+                    &at(6)
+                )
+                .is_err(),
+            "a settlement replay cannot change its observed time"
+        );
+        assert_eq!(
+            admission
+                .load_retained_terminal_usage(&request.job_id, &terminal.request_id)
+                .unwrap(),
+            Some(usage.clone()),
+            "later reconciliation must not replace the original terminal fact"
+        );
+        assert!(
+            admission
+                .retain_released_terminal_usage(&terminal, &usage)
+                .unwrap()
+                .replayed
+        );
+        assert_eq!(
+            admission
+                .load_reservation_by_job(&request.job_id)
+                .unwrap()
+                .unwrap(),
+            released.reservation
+        );
+        for boundary in boundaries(&request_scope, &worker_pool) {
+            let accounting = admission.usage(&boundary).unwrap();
+            assert_eq!(accounting.committed_tokens, 23);
+            assert_eq!(accounting.committed_cost_microunits, Some(29));
+            assert_eq!(accounting.accounting_pending, 0);
+        }
+        drop(storage);
+        let connection = rusqlite::Connection::open(root.join("control-plane.sqlite3")).unwrap();
+        let record: (String, String, String) = connection.query_row("SELECT terminal_request_id,terminal_usage_json,accounting_status FROM execution_admission_reconciliation WHERE job_id=?1", [&request.job_id.0], |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?))).unwrap();
+        assert_eq!(record.0, terminal.request_id.0);
+        assert_eq!(
+            serde_json::from_str::<ExecutionOutcomeUsage>(&record.1).unwrap(),
+            usage
+        );
+        assert_eq!(record.2, "settled");
+        drop(connection);
+        fs::remove_dir_all(root).unwrap();
+    }
+}
+
+#[test]
+#[allow(
+    clippy::too_many_lines,
+    reason = "one real reservation distinguishes running, failed release, foreign/stale cancellation authority and transactional receipt failure"
+)]
+fn late_terminal_accounting_requires_cancelled_release_and_rolls_back_with_its_receipt() {
+    use winwincode_execution_port::generated::ExecutionOutcomeUsage;
+
+    let root = temporary_directory("late-terminal-accounting-authority");
+    let request_scope = scope(160);
+    let worker_pool = pool(160);
+    let mut storage = SqliteStorage::open(&root).unwrap();
+    let mut admission = storage.execution_admission().unwrap();
+    configure(
+        &mut admission,
+        &request_scope,
+        &worker_pool,
+        generous_limits(),
+    );
+    let request = reservation(
+        &request_scope,
+        &worker_pool,
+        160,
+        160,
+        ExecutionRepositoryAccess::ReadOnly,
+    );
+    admission.reserve(&request).unwrap();
+    admission.start(&start(&request, 161)).unwrap();
+    let mut terminal = ExecutionReservationRelease {
+        scope: request_scope.clone(),
+        worker_pool_id: worker_pool.clone(),
+        job_id: request.job_id.clone(),
+        request_id: RequestId(id("req", 164)),
+        expected_revision: 2,
+        reason: ExecutionReservationReleaseReason::Cancelled,
+        released_at: at(4),
+    };
+    let usage = ExecutionOutcomeUsage::unknown(12_000, 17);
+    assert!(
+        admission
+            .retain_released_terminal_usage(&terminal, &usage)
+            .is_err(),
+        "a running reservation must use its terminal transition"
+    );
+    let cancellation = ExecutionReservationRelease {
+        request_id: RequestId(id("req", 162)),
+        released_at: at(3),
+        ..terminal.clone()
+    };
+    let released = admission.release(&cancellation).unwrap();
+    terminal.expected_revision = released.reservation.revision;
+    let mut foreign = terminal.clone();
+    foreign.worker_pool_id = pool(161);
+    assert!(
+        admission
+            .retain_released_terminal_usage(&foreign, &usage)
+            .is_err()
+    );
+    foreign = terminal.clone();
+    foreign.scope.product_session_id = ProductSessionId(id("psn", 161));
+    assert!(
+        admission
+            .retain_released_terminal_usage(&foreign, &usage)
+            .is_err()
+    );
+    let mut stale = terminal.clone();
+    stale.expected_revision -= 1;
+    assert!(
+        admission
+            .retain_released_terminal_usage(&stale, &usage)
+            .is_err()
+    );
+    stale = terminal.clone();
+    stale.released_at = at(2);
+    assert!(
+        admission
+            .retain_released_terminal_usage(&stale, &usage)
+            .is_err()
+    );
+    let failed = reservation(
+        &request_scope,
+        &worker_pool,
+        161,
+        165,
+        ExecutionRepositoryAccess::ReadOnly,
+    );
+    admission.reserve(&failed).unwrap();
+    let released_failure = admission
+        .release(&ExecutionReservationRelease {
+            job_id: failed.job_id.clone(),
+            request_id: RequestId(id("req", 166)),
+            expected_revision: 1,
+            reason: ExecutionReservationReleaseReason::Failed,
+            released_at: at(3),
+            ..terminal.clone()
+        })
+        .unwrap();
+    let failed_terminal = ExecutionReservationRelease {
+        job_id: failed.job_id.clone(),
+        request_id: RequestId(id("req", 167)),
+        expected_revision: released_failure.reservation.revision,
+        ..terminal.clone()
+    };
+    assert!(
+        admission
+            .retain_released_terminal_usage(&failed_terminal, &usage)
+            .is_err(),
+        "ordinary release has no cancellation authority"
+    );
+    let connection = rusqlite::Connection::open(storage.database_path()).unwrap();
+    connection.execute_batch("CREATE TRIGGER fail_late_terminal_receipt BEFORE INSERT ON execution_admission_receipts BEGIN SELECT RAISE(ABORT, 'injected late terminal receipt failure'); END;").unwrap();
+    assert!(
+        storage
+            .execution_admission()
+            .unwrap()
+            .retain_released_terminal_usage(&terminal, &usage)
+            .is_err()
+    );
+    let count: i64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM execution_admission_reconciliation",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        count, 0,
+        "receipt failure must roll back the retained usage"
+    );
+    assert_eq!(
+        storage
+            .execution_admission()
+            .unwrap()
+            .load_reservation_by_job(&request.job_id)
+            .unwrap()
+            .unwrap(),
+        released.reservation
+    );
+    connection
+        .execute_batch("DROP TRIGGER fail_late_terminal_receipt")
+        .unwrap();
+    storage
+        .execution_admission()
+        .unwrap()
+        .retain_released_terminal_usage(&terminal, &usage)
+        .unwrap();
+    let admission = storage.execution_admission().unwrap();
+    assert_eq!(
+        admission
+            .load_retained_terminal_usage(&ExecutionJobId(id("job", 999)), &terminal.request_id)
+            .unwrap(),
+        None
+    );
+    assert!(
+        admission
+            .load_retained_terminal_usage(&request.job_id, &cancellation.request_id)
+            .is_err(),
+        "the read must validate the frozen terminal identity"
+    );
+    assert!(
+        admission
+            .load_retained_terminal_usage(&ExecutionJobId("invalid".into()), &terminal.request_id)
+            .is_err()
+    );
+    assert!(
+        admission
+            .load_retained_terminal_usage(&request.job_id, &RequestId("invalid".into()))
+            .is_err()
+    );
+    for corrupted in [
+        "{",
+        "{}",
+        "{\"tokens\":3,\"costMicrounits\":null,\"runtimeMillis\":12000,\"knownTokens\":17,\"accountingStatus\":\"known\"}",
+    ] {
+        connection.execute("UPDATE execution_admission_reconciliation SET terminal_usage_json=?1 WHERE job_id=?2", rusqlite::params![corrupted, request.job_id.0]).unwrap();
+        assert!(
+            admission
+                .load_retained_terminal_usage(&request.job_id, &terminal.request_id)
+                .is_err(),
+            "corrupt or inconsistent retained usage must not become replay authority"
+        );
+    }
+    connection
+        .execute(
+            "UPDATE execution_admission_reconciliation SET terminal_usage_json=?1 WHERE job_id=?2",
+            rusqlite::params![serde_json::to_string(&usage).unwrap(), request.job_id.0],
+        )
+        .unwrap();
+    assert_eq!(
+        admission
+            .load_retained_terminal_usage(&request.job_id, &terminal.request_id)
+            .unwrap(),
+        Some(usage)
+    );
+    drop(connection);
+    drop(storage);
+    fs::remove_dir_all(root).unwrap();
 }
 
 #[test]

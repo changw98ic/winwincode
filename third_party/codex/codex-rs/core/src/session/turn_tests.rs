@@ -59,6 +59,28 @@ fn post_sampling_token_estimate_is_disabled_by_always_on_sinks() {
 }
 
 #[tokio::test]
+async fn drain_preserves_required_tool_fact_failure() {
+    let (session, turn_context) = crate::session::tests::make_session_and_context().await;
+    let mut in_flight: FuturesOrdered<BoxFuture<'static, CodexResult<ToolCallCompletion>>> =
+        FuturesOrdered::new();
+    in_flight.push_back(Box::pin(async {
+        Err(CodexErr::Fatal(
+            "tool_fact_store_unavailable: execution and recovery require durable Core facts"
+                .to_string(),
+        ))
+    }));
+    let error = drain_in_flight(&mut in_flight, Arc::new(session), Arc::new(turn_context))
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        error.details(),
+        CodexErrorDetails::Fatal(message)
+            if message == "tool_fact_store_unavailable: execution and recovery require durable Core facts"
+    ));
+    assert!(!error.is_retryable());
+}
+
+#[tokio::test]
 async fn delegated_handoff_records_the_outer_response_before_continuation() {
     for (outer_name, outer_call_id) in [
         ("submit_change_batch", "batch-original"),

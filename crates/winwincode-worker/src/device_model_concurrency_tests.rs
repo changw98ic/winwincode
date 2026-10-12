@@ -6,6 +6,9 @@
 #[path = "device_model_recovery_tests.rs"]
 mod recovery_tests;
 
+#[path = "device_model_physical_attempt_tests.rs"]
+mod physical_attempt_tests;
+
 use super::{DeviceModelSendOutcome, DeviceModels};
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use rcgen::{CertifiedKey, generate_simple_self_signed};
@@ -318,6 +321,9 @@ fn run_device_members(directory: &Path, endpoint: &str, per_provider: usize) {
             );
         }
         if provider_index == 0 && per_provider == 3 {
+            // send only queues a task. The three physical invocations must hold
+            // their actual slots before the fourth admission probe is meaningful.
+            wait_for_invoking_members(directory, &template, provider, per_provider);
             // The parent still awaits the other nine HTTP requests, so no GLM slot can finish.
             let fourth = member_open(&template, provider, expected);
             assert_eq!(
@@ -367,6 +373,41 @@ fn run_device_members(directory: &Path, endpoint: &str, per_provider: usize) {
         }
     }
     assert_eq!(completed.len(), expected);
+}
+
+fn wait_for_invoking_members(
+    directory: &Path,
+    template: &ModelOpenMessage,
+    provider: &str,
+    expected: usize,
+) {
+    let database = rusqlite::Connection::open(directory.join("providers.sqlite3")).unwrap();
+    let exchanges = (0..expected)
+        .map(|index| member_open(template, provider, index).model_exchange_id.0)
+        .collect::<Vec<_>>();
+    let started = Instant::now();
+    loop {
+        let invoking = exchanges
+            .iter()
+            .filter(|exchange| {
+                database
+                    .query_row(
+                        "SELECT EXISTS(SELECT 1 FROM model_invocation_attempts WHERE exchange_id=?1 AND state='invoking')",
+                        [exchange.as_str()],
+                        |row| row.get::<_, bool>(0),
+                    )
+                    .unwrap()
+            })
+            .count();
+        if invoking == expected {
+            return;
+        }
+        assert!(
+            started.elapsed() < WAIT,
+            "only {invoking}/{expected} {provider} physical invocations hold their slots"
+        );
+        thread::sleep(Duration::from_millis(1));
+    }
 }
 
 fn member_open(template: &ModelOpenMessage, provider: &str, index: usize) -> ModelOpenMessage {

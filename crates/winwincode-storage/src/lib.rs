@@ -31,6 +31,7 @@ mod execution_attempt_accounting;
 mod execution_queue;
 mod execution_registry;
 mod execution_scope_replacement;
+mod execution_terminal_resources;
 mod git_candidate_retention;
 mod git_source;
 mod local_candidate;
@@ -132,6 +133,7 @@ pub use execution_registry::{
     WorkerRegistrationStatus,
 };
 pub use execution_scope_replacement::ExecutionScopeReplacementAuthority;
+pub use execution_terminal_resources::ExecutionTerminalResources;
 pub use git_candidate_retention::{
     CandidateGitPinReceipt, CandidateGitReleaseAuthority, CandidateGitReleaseReceipt,
     CandidateGitRetention, CandidateGitRetentionError, CandidateGitRetentionErrorKind,
@@ -264,8 +266,6 @@ const SQLITE_OPEN_TIMEOUT: Duration = Duration::from_secs(5);
 const SQLITE_OPEN_RETRY_INTERVAL: Duration = Duration::from_millis(1);
 const ACTOR_KEY_PREFIX: &[u8] = b"winwincode.command-receipt.actor.v1";
 const SCOPE_KEY_PREFIX: &[u8] = b"winwincode.command-receipt.scope.v1";
-const LEGACY_V1_ACTOR_KEY: &[u8] = b"winwincode.command-receipt.actor.legacy-v1";
-const LEGACY_V1_SCOPE_KEY: &[u8] = b"winwincode.command-receipt.scope.legacy-v1";
 
 /// One event to append atomically with a canonical state change.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -2297,6 +2297,46 @@ pub trait ProductStateStorage: Send {
         ))
     }
 
+    /// Accepts a product terminal and its queue/Registry terminal in one transaction.
+    /// Exact receipt replay performs no new settlement and may outlive the owner.
+    /// # Errors
+    /// Rejects changed authority and adapters that cannot provide atomic acceptance.
+    fn commit_with_execution_terminal(
+        &mut self,
+        commit: &StateCommit,
+        guard: &ExecutionAuthorityCommitGuard,
+        terminal: &RepositorySchedulerTerminalRequest,
+    ) -> Result<CommitReceipt, StorageError> {
+        commit.validate()?;
+        validate_execution_terminal_commit(commit, guard, terminal)?;
+        Err(StorageError::adapter(
+            "atomic execution terminal commit is unavailable",
+        ))
+    }
+
+    /// Reads the accepted dispatch used for a write-time terminal CAS.
+    /// # Errors
+    /// Returns storage errors rather than inferring authority from a Worker frame.
+    fn load_execution_dispatch_authority(
+        &self,
+        _job_id: &ExecutionJobId,
+    ) -> Result<Option<ExecutionDispatchAuthority>, StorageError> {
+        Ok(None)
+    }
+
+    /// Reads the original reservation and exact accepted-dispatch Worker slot.
+    /// Missing or foreign resources cannot be replaced by inferred defaults.
+    /// # Errors
+    /// Rejects unavailable adapters, corrupt facts and changed resource authority.
+    fn load_execution_terminal_resources(
+        &self,
+        _job_id: &ExecutionJobId,
+    ) -> Result<Option<ExecutionTerminalResources>, StorageError> {
+        Err(StorageError::adapter(
+            "execution terminal resources are unavailable",
+        ))
+    }
+
     /// Loads the canonical scheduler row for one globally unique execution Job.
     ///
     /// Local production storage overrides this seam so every Control Plane
@@ -2771,12 +2811,12 @@ impl SqliteStorage {
         result
     }
 
-    /// Opens the local database and applies all schema migrations before return.
+    /// Opens the local database and initializes or validates the current schema.
     ///
     /// # Errors
     ///
     /// Returns an adapter-neutral error when the directory, connection,
-    /// durability settings, or schema migration cannot be prepared.
+    /// durability settings, or current schema cannot be prepared.
     pub fn open(data_directory: impl AsRef<Path>) -> Result<Self, StorageError> {
         let open_deadline = StdInstant::now() + SQLITE_OPEN_TIMEOUT;
         let data_directory = data_directory.as_ref();
@@ -2810,7 +2850,7 @@ impl SqliteStorage {
             .pragma_update(None, "synchronous", "FULL")
             .map_err(sql_error)?;
         set_open_busy_deadline(&connection, open_deadline)?;
-        apply_migrations(&mut connection)?;
+        initialize_schema(&mut connection)?;
 
         let read_connection =
             Connection::open_with_flags(&database_path, flags).map_err(sql_error)?;
@@ -3147,6 +3187,48 @@ impl ProductStateStorage for SqliteStorage {
             commit_with_execution_authority_guard_in_transaction(&transaction, commit, guard)?;
         transaction.commit().map_err(sql_error)?;
         Ok(receipt)
+    }
+
+    fn commit_with_execution_terminal(
+        &mut self,
+        commit: &StateCommit,
+        guard: &ExecutionAuthorityCommitGuard,
+        terminal: &RepositorySchedulerTerminalRequest,
+    ) -> Result<CommitReceipt, StorageError> {
+        commit.validate()?;
+        validate_execution_terminal_commit(commit, guard, terminal)?;
+        let transaction = self
+            .connection_mut()?
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(sql_error)?;
+        let receipt =
+            commit_with_execution_authority_guard_in_transaction(&transaction, commit, guard)?;
+        if !receipt.idempotent_replay {
+            if guard.expected_job.state == ExecutionJobState::Cancelling
+                && terminal.terminal.outcome != ExecutionLeaseTerminalOutcome::Cancelled
+            {
+                return Err(StorageError::invalid_input(
+                    "cancellation owns this execution terminal",
+                ));
+            }
+            repository_scheduler::settle_terminal_in_transaction(&transaction, terminal)?;
+        }
+        transaction.commit().map_err(sql_error)?;
+        Ok(receipt)
+    }
+
+    fn load_execution_dispatch_authority(
+        &self,
+        job_id: &ExecutionJobId,
+    ) -> Result<Option<ExecutionDispatchAuthority>, StorageError> {
+        execution_registry::load_dispatch_authority_in_transaction(self.connection()?, job_id)
+    }
+
+    fn load_execution_terminal_resources(
+        &self,
+        job_id: &ExecutionJobId,
+    ) -> Result<Option<ExecutionTerminalResources>, StorageError> {
+        execution_terminal_resources::load(self.connection()?, job_id)
     }
 
     fn load_execution_job_record(
@@ -3670,6 +3752,33 @@ fn validate_execution_authority_commit_scope(
     {
         return Err(StorageError::invalid_input(
             "execution authority guard and state receipt repository scopes differ",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_execution_terminal_commit(
+    commit: &StateCommit,
+    guard: &ExecutionAuthorityCommitGuard,
+    request: &RepositorySchedulerTerminalRequest,
+) -> Result<(), StorageError> {
+    validate_execution_authority_commit_scope(commit, guard)?;
+    let scope = &guard.expected_job.scope;
+    let lease = guard.expected_dispatch.lease();
+    let terminal = &request.terminal;
+    if request.scope.organization_id != scope.organization_id
+        || request.scope.workspace_id != scope.workspace_id
+        || request.scope.project_id != scope.project_id
+        || request.scope.repository_id != scope.repository_id
+        || terminal.job_id != lease.job_id
+        || terminal.lease_id != lease.lease_id
+        || terminal.worker_id != lease.worker_id
+        || terminal.worker_instance_id != lease.worker_instance_id
+        || terminal.attempt != lease.attempt
+        || terminal.fencing_token != lease.fencing_token
+    {
+        return Err(StorageError::invalid_input(
+            "terminal commit differs from its execution guard",
         ));
     }
     Ok(())
@@ -4650,69 +4759,38 @@ fn append_receipt(
     Ok(())
 }
 
-fn apply_migrations(connection: &mut Connection) -> Result<(), StorageError> {
-    let version = connection
-        .pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))
-        .map_err(sql_error)?;
-    if !matches!(version, 0 | 1 | 2 | 3 | 4 | 5 | SCHEMA_VERSION) {
-        return Err(StorageError::adapter(format!(
-            "unsupported schema version {version}"
-        )));
-    }
-
+fn initialize_schema(connection: &mut Connection) -> Result<(), StorageError> {
     let transaction = connection
         .transaction_with_behavior(TransactionBehavior::Immediate)
         .map_err(sql_error)?;
+    let version = transaction
+        .pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))
+        .map_err(sql_error)?;
     match version {
-        0 | SCHEMA_VERSION => create_schema_v6(&transaction)?,
-        1 => {
-            migrate_v1_to_v2(&transaction)?;
+        0 => {
+            create_current_schema(&transaction)?;
             create_aggregate_journal_schema(&transaction)?;
             create_projection_event_schema(&transaction)?;
-            create_public_event_context_schema(&transaction)?;
+            create_pending_audit_event_schema(&transaction)?;
+            git_candidate_retention::create_schema(&transaction)?;
+            managed_app::create_schema(&transaction)?;
+            transaction
+                .pragma_update(None, "user_version", SCHEMA_VERSION)
+                .map_err(sql_error)?;
         }
-        2 => {
-            create_aggregate_journal_schema(&transaction)?;
-            create_projection_event_schema(&transaction)?;
-            create_public_event_context_schema(&transaction)?;
-        }
-        3 => {
-            create_projection_event_schema(&transaction)?;
-            create_public_event_context_schema(&transaction)?;
-        }
-        4 => {
-            create_public_event_context_schema(&transaction)?;
-            migrate_projection_event_stream_heads_to_v6(&transaction)?;
-        }
-        5 => migrate_projection_event_stream_heads_to_v6(&transaction)?,
-        unsupported => {
+        SCHEMA_VERSION => {}
+        _ => {
             return Err(StorageError::adapter(format!(
-                "unsupported schema version {unsupported}"
+                "unsupported schema version {version}"
             )));
         }
     }
-    create_pending_audit_event_schema(&transaction)?;
-    git_candidate_retention::create_schema(&transaction)?;
     validate_journal_schema(&transaction)?;
     validate_projection_event_schema(&transaction)?;
     validate_public_event_context_schema(&transaction)?;
     validate_pending_audit_event_schema(&transaction)?;
     git_candidate_retention::validate_schema(&transaction)?;
-    managed_app::create_schema(&transaction)?;
-    transaction
-        .pragma_update(None, "user_version", SCHEMA_VERSION)
-        .map_err(sql_error)?;
-    transaction.commit().map_err(sql_error)?;
-
-    let migrated_version = connection
-        .pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))
-        .map_err(sql_error)?;
-    if migrated_version != SCHEMA_VERSION {
-        return Err(StorageError::adapter(format!(
-            "unsupported schema version {migrated_version}"
-        )));
-    }
-    Ok(())
+    transaction.commit().map_err(sql_error)
 }
 
 fn validate_journal_schema(transaction: &rusqlite::Transaction<'_>) -> Result<(), StorageError> {
@@ -4755,54 +4833,6 @@ fn validate_journal_schema(transaction: &rusqlite::Transaction<'_>) -> Result<()
     Ok(())
 }
 
-fn create_schema_v3(transaction: &rusqlite::Transaction<'_>) -> Result<(), StorageError> {
-    create_schema_v2(transaction)?;
-    create_aggregate_journal_schema(transaction)
-}
-
-fn create_schema_v4(transaction: &rusqlite::Transaction<'_>) -> Result<(), StorageError> {
-    create_schema_v3(transaction)?;
-    create_projection_event_schema(transaction)
-}
-
-fn create_schema_v5(transaction: &rusqlite::Transaction<'_>) -> Result<(), StorageError> {
-    create_schema_v4(transaction)?;
-    create_public_event_context_schema(transaction)
-}
-
-fn create_schema_v6(transaction: &rusqlite::Transaction<'_>) -> Result<(), StorageError> {
-    create_schema_v5(transaction)
-}
-
-fn create_public_event_context_schema(
-    transaction: &rusqlite::Transaction<'_>,
-) -> Result<(), StorageError> {
-    let columns = table_columns(transaction, "outbox")?;
-    if !columns.contains(&"public_scope_json".to_owned()) {
-        let unbound_public_events = transaction
-            .query_row(
-                "SELECT COUNT(*) FROM outbox WHERE projection_stream_kind IS NOT NULL",
-                [],
-                |row| row.get::<_, i64>(0),
-            )
-            .map_err(sql_error)?;
-        if unbound_public_events != 0 {
-            return Err(StorageError::adapter(
-                "legacy public outbox rows have no durable envelope context",
-            ));
-        }
-        transaction
-            .execute_batch(
-                "ALTER TABLE outbox ADD COLUMN public_scope_json BLOB;
-                 ALTER TABLE outbox ADD COLUMN public_stream_json BLOB;
-                 ALTER TABLE outbox ADD COLUMN public_occurred_at_json BLOB;
-                 ALTER TABLE outbox ADD COLUMN public_source_json BLOB;",
-            )
-            .map_err(sql_error)?;
-    }
-    Ok(())
-}
-
 fn validate_public_event_context_schema(
     transaction: &rusqlite::Transaction<'_>,
 ) -> Result<(), StorageError> {
@@ -4825,16 +4855,6 @@ fn validate_public_event_context_schema(
 fn create_projection_event_schema(
     transaction: &rusqlite::Transaction<'_>,
 ) -> Result<(), StorageError> {
-    let columns = table_columns(transaction, "outbox")?;
-    if !columns.contains(&"projection_stream_kind".to_owned()) {
-        transaction
-            .execute_batch(
-                "ALTER TABLE outbox ADD COLUMN projection_stream_kind TEXT;
-                 ALTER TABLE outbox ADD COLUMN projection_resource_id TEXT;
-                 ALTER TABLE outbox ADD COLUMN projection_stream_sequence INTEGER;",
-            )
-            .map_err(sql_error)?;
-    }
     transaction
         .execute_batch(
             "CREATE TABLE IF NOT EXISTS projection_event_stream_heads (
@@ -4853,34 +4873,6 @@ fn create_projection_event_schema(
                  ON outbox (receipt_scope_key, projection_stream_kind,
                             projection_resource_id, projection_stream_sequence)
                  WHERE projection_stream_kind IS NOT NULL;",
-        )
-        .map_err(sql_error)
-}
-
-fn migrate_projection_event_stream_heads_to_v6(
-    transaction: &rusqlite::Transaction<'_>,
-) -> Result<(), StorageError> {
-    transaction
-        .execute_batch(
-            "CREATE TABLE projection_event_stream_heads_v6 (
-                 scope_key BLOB NOT NULL,
-                 stream_kind TEXT NOT NULL CHECK (
-                     stream_kind IN ('scope', 'delivery', 'product-session', 'lease')
-                 ),
-                 resource_id TEXT NOT NULL,
-                 sequence INTEGER NOT NULL CHECK (sequence > 0),
-                 event_id TEXT NOT NULL,
-                 PRIMARY KEY (scope_key, stream_kind, resource_id),
-                 UNIQUE (scope_key, stream_kind, resource_id, sequence),
-                 FOREIGN KEY (event_id) REFERENCES outbox (event_id)
-             );
-             INSERT INTO projection_event_stream_heads_v6
-                 (scope_key, stream_kind, resource_id, sequence, event_id)
-                 SELECT scope_key, stream_kind, resource_id, sequence, event_id
-                 FROM projection_event_stream_heads;
-             DROP TABLE projection_event_stream_heads;
-             ALTER TABLE projection_event_stream_heads_v6
-                 RENAME TO projection_event_stream_heads;",
         )
         .map_err(sql_error)
 }
@@ -4995,7 +4987,7 @@ fn table_columns(
     rows.collect::<Result<Vec<_>, _>>().map_err(sql_error)
 }
 
-fn create_schema_v2(transaction: &rusqlite::Transaction<'_>) -> Result<(), StorageError> {
+fn create_current_schema(transaction: &rusqlite::Transaction<'_>) -> Result<(), StorageError> {
     transaction
         .execute_batch(
             "CREATE TABLE IF NOT EXISTS product_state (
@@ -5021,6 +5013,13 @@ fn create_schema_v2(transaction: &rusqlite::Transaction<'_>) -> Result<(), Stora
                  topic TEXT NOT NULL,
                  payload BLOB NOT NULL,
                  published INTEGER NOT NULL DEFAULT 0 CHECK (published IN (0, 1)),
+                 projection_stream_kind TEXT,
+                 projection_resource_id TEXT,
+                 projection_stream_sequence INTEGER,
+                 public_scope_json BLOB,
+                 public_stream_json BLOB,
+                 public_occurred_at_json BLOB,
+                 public_source_json BLOB,
                  FOREIGN KEY (receipt_actor_key, receipt_scope_key, request_id)
                      REFERENCES command_receipts (actor_key, scope_key, request_id)
                      DEFERRABLE INITIALLY DEFERRED
@@ -5057,74 +5056,6 @@ fn create_aggregate_journal_schema(
              );",
         )
         .map_err(sql_error)
-}
-
-fn migrate_v1_to_v2(transaction: &rusqlite::Transaction<'_>) -> Result<(), StorageError> {
-    transaction
-        .execute_batch(
-            "ALTER TABLE command_receipts RENAME TO command_receipts_v1;
-             ALTER TABLE outbox RENAME TO outbox_v1;",
-        )
-        .map_err(sql_error)?;
-    create_schema_v2(transaction)?;
-
-    let legacy_receipts = {
-        let mut statement = transaction
-            .prepare(
-                "SELECT request_id, command_signature, stream_id, revision \
-                 FROM command_receipts_v1 ORDER BY request_id",
-            )
-            .map_err(sql_error)?;
-        let rows = statement
-            .query_map([], |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, Vec<u8>>(1)?,
-                    row.get::<_, String>(2)?,
-                    row.get::<_, i64>(3)?,
-                ))
-            })
-            .map_err(sql_error)?;
-        rows.collect::<Result<Vec<_>, _>>().map_err(sql_error)?
-    };
-    for (request_id, signature, stream_id, revision) in legacy_receipts {
-        transaction
-            .execute(
-                "INSERT INTO command_receipts \
-                 (actor_key, scope_key, request_id, command_digest, stream_id, revision) \
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-                params![
-                    LEGACY_V1_ACTOR_KEY,
-                    LEGACY_V1_SCOPE_KEY,
-                    request_id,
-                    sha256_digest(&signature).0,
-                    stream_id,
-                    revision,
-                ],
-            )
-            .map_err(sql_error)?;
-    }
-
-    transaction
-        .execute(
-            "INSERT INTO outbox \
-             (sequence, event_id, receipt_actor_key, receipt_scope_key, request_id, topic, payload, published) \
-             SELECT sequence, event_id, ?1, ?2, request_id, topic, payload, published \
-             FROM outbox_v1 ORDER BY sequence",
-            params![LEGACY_V1_ACTOR_KEY, LEGACY_V1_SCOPE_KEY],
-        )
-        .map_err(sql_error)?;
-    transaction
-        .execute_batch(
-            "DROP TABLE outbox_v1;
-             DROP TABLE command_receipts_v1;
-             CREATE INDEX IF NOT EXISTS outbox_pending_sequence
-                 ON outbox (published, sequence);
-             CREATE INDEX IF NOT EXISTS outbox_receipt_sequence
-                 ON outbox(receipt_actor_key, receipt_scope_key, request_id, sequence);",
-        )
-        .map_err(sql_error)?;
-    Ok(())
 }
 
 fn receipt_events(
@@ -5368,11 +5299,6 @@ fn portable_event_key(value: &str) -> bool {
     value.bytes().all(|byte| {
         byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b':' | b'@' | b'-')
     })
-}
-
-fn sha256_digest(bytes: &[u8]) -> Sha256Digest {
-    let digest = Sha256::digest(bytes);
-    Sha256Digest(format!("sha256:{digest:x}"))
 }
 
 fn sql_error(error: rusqlite::Error) -> StorageError {

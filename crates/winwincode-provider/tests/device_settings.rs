@@ -110,34 +110,32 @@ fn opening_current_device_store_does_not_require_the_writer_lock() {
 }
 
 #[test]
-fn failed_device_key_validation_does_not_commit_a_schema_upgrade() {
+fn invalid_device_key_is_rejected_without_changing_the_database() {
     let directory = std::env::temp_dir().join(format!(
         "wwc-device-provider-bad-key-{}",
         std::process::id()
     ));
     let _ = fs::remove_dir_all(&directory);
     drop(DeviceProviderStore::open(&directory).expect("initialize schema"));
-    let database = rusqlite::Connection::open(directory.join("providers.sqlite3"))
-        .expect("legacy store fixture");
+    let database = rusqlite::Connection::open(directory.join("providers.sqlite3")).unwrap();
     database
-        .execute_batch(
-            "ALTER TABLE exchanges DROP COLUMN accounting_chunks;
-             DROP TABLE model_invocation_attempts; DROP TABLE model_attempt_diagnostics; DROP TABLE jev_attempt_diagnostics; DROP TABLE accounting_closed_attempts;
-             UPDATE identity SET private_key=zeroblob(32);
-             PRAGMA user_version=8;",
-        )
-        .expect("old schema with an invalid private key");
+        .execute_batch("UPDATE identity SET private_key=zeroblob(32);")
+        .unwrap();
     assert!(DeviceProviderStore::open(&directory).is_err());
-    let version: i64 = database
-        .pragma_query_value(None, "user_version", |row| row.get(0))
-        .expect("retained schema version");
-    assert_eq!(version, 8, "a failed open must roll back the migration");
-    database
-        .pragma_update(None, "user_version", 14)
-        .expect("future schema");
+    let key: Vec<u8> = database
+        .query_row("SELECT private_key FROM identity", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(key, vec![0; 32]);
+    database.pragma_update(None, "user_version", 99).unwrap();
     assert!(DeviceProviderStore::open(&directory).is_err());
+    assert_eq!(
+        database
+            .pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))
+            .unwrap(),
+        99
+    );
     drop(database);
-    fs::remove_dir_all(directory).expect("remove invalid key fixture");
+    fs::remove_dir_all(directory).unwrap();
 }
 
 #[test]
@@ -558,6 +556,11 @@ fn model_failure_replay_cancellation_and_public_projection_stay_local() {
         .cancel_model(&open.model_exchange_id.0)
         .expect("cancel");
     assert!(
+        store.execute_model(&open).is_err(),
+        "cancellation cannot admit conflicting request bytes"
+    );
+    open.request_id.0.pop();
+    assert!(
         store
             .execute_model(&open)
             .expect("cancel fences opens")
@@ -571,81 +574,6 @@ fn model_failure_replay_cancellation_and_public_projection_stay_local() {
     );
     drop(store);
     fs::remove_dir_all(directory).expect("cleanup");
-}
-
-#[test]
-fn old_database_upgrade_preserves_identity_and_provider_state() {
-    for version in [2, 3, 4, 5, 6] {
-        let directory = std::env::temp_dir().join(format!(
-            "wwc-provider-migrate-{}-{version}",
-            std::process::id()
-        ));
-        let _ = fs::remove_dir_all(&directory);
-        let store = DeviceProviderStore::open(&directory).expect("store");
-        let before = store.snapshot("device-1").expect("snapshot");
-        drop(store);
-        let db = rusqlite::Connection::open(directory.join("providers.sqlite3")).expect("db");
-        db.execute_batch("DROP TABLE model_invocation_attempts; DROP TABLE model_attempt_diagnostics; DROP TABLE jev_attempt_diagnostics; DROP TABLE accounting_closed_attempts; ALTER TABLE exchanges DROP COLUMN accounting_chunks; DROP TABLE jev_judge_exchanges;")
-            .expect("old schema");
-        db.execute_batch("ALTER TABLE jev_context_exchanges DROP COLUMN request_json;")
-            .expect("old schema");
-        if version < 6 {
-            db.execute_batch("ALTER TABLE exchanges DROP COLUMN prepared_payload; ALTER TABLE exchanges DROP COLUMN request_open;").expect("old schema");
-        }
-        if version < 5 {
-            db.execute_batch("DROP TABLE jev_settings;")
-                .expect("old schema");
-        }
-        if version < 4 {
-            db.execute_batch("DROP TABLE jev_context_exchanges;")
-                .expect("old schema");
-        }
-        if version == 2 {
-            db.execute_batch("DROP TABLE provider_headers;")
-                .expect("v2 schema");
-        }
-        if version >= 4 {
-            db.execute("INSERT INTO jev_context_exchanges VALUES ('retained-operation', 'retained-digest', 'retained-result')", []).unwrap();
-        }
-        db.execute("INSERT INTO exchanges (exchange_id, digest, chunks) VALUES ('old-exchange', 'old-digest', '[]')", []).unwrap();
-        db.pragma_update(None, "user_version", version)
-            .expect("old version");
-        drop(db);
-        let store = DeviceProviderStore::open(&directory).expect("upgrade");
-        assert_eq!(store.snapshot("device-1").expect("after"), before);
-        drop(store);
-        let store = DeviceProviderStore::open(&directory).expect("reopen");
-        assert_eq!(store.snapshot("device-1").expect("reopened"), before);
-        let db = rusqlite::Connection::open(directory.join("providers.sqlite3")).expect("db");
-        let upgraded: i64 = db
-            .pragma_query_value(None, "user_version", |row| row.get(0))
-            .unwrap();
-        assert_eq!(upgraded, 13);
-        let old: (String, String, Option<String>, Option<Vec<u8>>) = db.query_row(
-            "SELECT digest, chunks, request_open, prepared_payload FROM exchanges WHERE exchange_id='old-exchange'", [],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
-        ).unwrap();
-        assert_eq!(old, ("old-digest".into(), "[]".into(), None, None));
-        let entries: i64 = db
-            .query_row("SELECT count(*) FROM jev_context_exchanges", [], |row| {
-                row.get(0)
-            })
-            .unwrap();
-        assert_eq!(entries, i64::from(version >= 4));
-        if version >= 4 {
-            let retained: (String, String, Option<String>) = db.query_row(
-                "SELECT digest, result, request_json FROM jev_context_exchanges WHERE operation_id='retained-operation'", [],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-            ).unwrap();
-            assert_eq!(
-                retained,
-                ("retained-digest".into(), "retained-result".into(), None)
-            );
-        }
-        drop(db);
-        drop(store);
-        fs::remove_dir_all(directory).expect("cleanup");
-    }
 }
 
 fn assert_private_headers(store: &DeviceProviderStore, directory: &std::path::Path, node: &str) {

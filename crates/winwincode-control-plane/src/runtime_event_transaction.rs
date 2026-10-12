@@ -42,13 +42,15 @@ use winwincode_execution_port::generated::{
     RuntimeAckMessage, RuntimeAckMessageKind, RuntimeEventMessage, RuntimeEventMessageKind,
 };
 use winwincode_storage::{
-    CommitReceipt, DurableOutboxEvent, ImmutableStateImport, NewOutboxEvent, PendingAuditEvent,
-    ProductStateStorage, ProjectionEventStream, PublicEventSource, ReceiptIdentity,
-    ReceiptScopeKey, StateCommit, StateMutation, StateRevisionGuard, StorageError,
-    StorageErrorKind,
+    CommitReceipt, DurableOutboxEvent, ExecutionAuthorityCommitGuard, ImmutableStateImport,
+    NewOutboxEvent, PendingAuditEvent, ProductStateStorage, ProjectionEventStream,
+    PublicEventSource, ReceiptIdentity, ReceiptScopeKey, StateCommit, StateMutation,
+    StateRevisionGuard, StorageError, StorageErrorKind,
 };
 
-use crate::delivery_transaction::{EXECUTION_JOB_TOPIC, delivery_stream_id};
+use crate::delivery_transaction::{
+    delivery_stream_id, load_durable_execution_intent, load_durable_execution_job,
+};
 use crate::product_session_service::catalog_stream_id;
 use crate::session_binding_transaction::{
     execution_message_actor_key, execution_message_request_id, instant_millis, projection_event_id,
@@ -162,7 +164,7 @@ pub(crate) fn execute_at(
         return Ok(rejection_ack(message, 0, rejection));
     }
 
-    let (durable, job) = match load_runtime_execution_job(storage, &message.lease.job_id) {
+    let (durable, job) = match load_durable_execution_job(storage, &message.lease.job_id) {
         Ok(value) => value,
         Err(error) if error.kind() == StorageErrorKind::InvalidInput => {
             return Ok(rejection_ack(
@@ -241,8 +243,14 @@ pub(crate) fn execute_at(
         return Ok(rejection_ack(message, 0, rejection));
     }
 
+    let execution_guard = if context.scope_kind == RuntimeScopeKind::ProductSession {
+        runtime_execution_commit_guard(storage, &job, message)?
+    } else {
+        None
+    };
     let stream_id = phase.stream_id.clone();
-    let ledger = match load_ledger(storage, &stream_id)? {
+    let stored_ledger = load_ledger(storage, &stream_id)?;
+    let ledger = match stored_ledger.clone() {
         Some(previous)
             if context.scope_kind == RuntimeScopeKind::ProductSession
                 && previous.execution_job_id != context.execution_job_id =>
@@ -250,7 +258,7 @@ pub(crate) fn execute_at(
             // The Controller's immutable dispatch order permits advancing to a
             // later task, never returning the session head to an older task.
             let (prior_intent, prior_job) =
-                load_runtime_execution_job(storage, &previous.execution_job_id)?;
+                load_durable_execution_intent(storage, &previous.execution_job_id)?;
             if prior_intent.stream_id() != durable.stream_id()
                 || prior_intent.revision() >= durable.revision()
                 || prior_job.scope != job.scope
@@ -263,6 +271,25 @@ pub(crate) fn execute_at(
             }
             let mut next = RuntimeLedgerState::empty(&context, &message.lease, message);
             next.sequence_offset = previous.revision();
+            next
+        }
+        Some(previous)
+            if context.scope_kind == RuntimeScopeKind::ProductSession
+                && previous.execution_job_id == context.execution_job_id
+                && context.attempt > previous.attempt =>
+        {
+            if !trusted_runtime_successor(storage, &previous, message)? {
+                return Ok(rejection_ack(
+                    message,
+                    0,
+                    Rejection::Conflict(
+                        "runtime successor does not match sealed replacement authority",
+                    ),
+                ));
+            }
+            let mut next = RuntimeLedgerState::empty(&context, &message.lease, message);
+            next.sequence_offset = previous.revision();
+            next.indexed_sequence_offset = previous.indexed_sequence(previous.highest_sequence)?;
             next
         }
         Some(ledger) => ledger,
@@ -303,12 +330,14 @@ pub(crate) fn execute_at(
         )))
     })?;
     let acknowledged_sequence = ledger.highest_sequence;
-    let retained_events = ledger.events.clone();
-    let legacy_source_digest = if ledger.schema_version == 1 && !retained_events.is_empty() {
+    let legacy = stored_ledger
+        .as_ref()
+        .filter(|previous| previous.schema_version == 1 && !previous.events.is_empty());
+    let legacy_source_digest = if let Some(previous) = legacy {
         let source = storage
             .load_state(&stream_id)?
             .ok_or_else(|| StorageError::invalid_input("legacy runtime source is missing"))?;
-        if decode_runtime_ledger_state(&source, &stream_id)? != ledger {
+        if decode_runtime_ledger_state(&source, &stream_id)? != *previous {
             return Err(StorageError::invalid_input(
                 "legacy runtime source changed before migration",
             )
@@ -321,8 +350,10 @@ pub(crate) fn execute_at(
     } else {
         None
     };
-    let mut chain = if ledger.schema_version == 1 {
-        String::new()
+    let chain = if ledger.schema_version == 1 {
+        ledger.events.iter().fold(String::new(), |chain, entry| {
+            extend_event_chain(&chain, &entry.event_digest)
+        })
     } else {
         ledger.event_chain_digest.clone()
     };
@@ -378,11 +409,21 @@ pub(crate) fn execute_at(
     );
     // Immutable event rows, identity markers, header, receipt and publication
     // are committed together. Existing snapshot history moves once on append.
-    let mut legacy_rows = Vec::with_capacity(retained_events.len().saturating_mul(2));
-    for entry in &retained_events {
-        let indexed = IndexedRuntimeLedgerEvent::new(entry.clone(), std::mem::take(&mut chain));
-        chain.clone_from(&indexed.chain_digest);
-        legacy_rows.extend(runtime_event_mutations(&next.execution_job_id, &indexed)?);
+    let mut legacy_rows = Vec::new();
+    if let Some(previous) = legacy {
+        let mut legacy_chain = String::new();
+        for entry in &previous.events {
+            let indexed = IndexedRuntimeLedgerEvent::new(
+                entry.clone(),
+                std::mem::take(&mut legacy_chain),
+                previous.indexed_sequence_offset,
+            );
+            legacy_chain.clone_from(&indexed.chain_digest);
+            legacy_rows.extend(runtime_event_mutations(
+                &previous.execution_job_id,
+                &indexed,
+            )?);
+        }
     }
     if let Some(source_digest) = legacy_source_digest {
         commit = commit
@@ -394,6 +435,7 @@ pub(crate) fn execute_at(
             event_digest: event_digest.clone(),
         },
         chain,
+        next.indexed_sequence_offset,
     );
     for mutation in runtime_event_mutations(&next.execution_job_id, &indexed)? {
         commit = commit.with_state_mutation(mutation);
@@ -411,7 +453,12 @@ pub(crate) fn execute_at(
                 0,
             )?);
     }
-    let receipt = match storage.commit(&commit) {
+    let committed = if let Some(guard) = execution_guard.as_ref() {
+        storage.commit_with_execution_authority_guard(&commit, guard)
+    } else {
+        storage.commit(&commit)
+    };
+    let receipt = match committed {
         Ok(receipt) => receipt,
         Err(error) if error.is_state_guard_conflict() => {
             return Ok(rejection_ack(
@@ -480,11 +527,11 @@ fn resolve_raced_append(
     let Some(ledger) = load_ledger(storage, &phase.stream_id)? else {
         return Err(StorageError::revision_conflict(0, 1).into());
     };
-    if ledger.execution_job_id != message.lease.job_id {
+    if !ledger.owns_message(message) {
         return Ok(rejection_ack(
             message,
             0,
-            Rejection::Conflict("runtime task changed during append"),
+            Rejection::Conflict("runtime execution identity changed during append"),
         ));
     }
     match classify_indexed_event(storage, &ledger, &message.event, digest)? {
@@ -557,39 +604,74 @@ fn prior_receipt_sequence(
     Ok(u64::try_from(accepted_message.event.sequence.0).unwrap_or_default())
 }
 
-/// Loads the immutable dispatch intent without imposing the Delivery-only
-/// scope restriction used by the Delivery command transaction. `ProductSession`
-/// jobs use the same generated `ExecutionJob` DTO and outbox topic, but their
-/// trusted state stream is the `ProductSession` stream.
-fn load_runtime_execution_job(
+fn runtime_execution_commit_guard(
     storage: &dyn ProductStateStorage,
-    job_id: &ExecutionJobId,
-) -> Result<(DurableOutboxEvent, ExecutionJob), StorageError> {
-    let event_id = format!("execution-job:{}", job_id.0);
-    let durable = storage
-        .load_outbox_event(&event_id)?
-        .ok_or_else(|| StorageError::invalid_input("ExecutionJob event does not exist"))?;
-    let event = durable.event();
-    if event.event_id != event_id
-        || event.topic != EXECUTION_JOB_TOPIC
-        || event.projection_cursor.is_some()
+    job: &ExecutionJob,
+    message: &RuntimeEventMessage,
+) -> Result<Option<ExecutionAuthorityCommitGuard>, StorageError> {
+    // Non-scheduler storage adapters keep their existing runtime contract.
+    // Production Jobs bind the same queued and accepted facts at write time.
+    let Some(record) = storage.load_execution_job_record(&job.job_id)? else {
+        return Ok(None);
+    };
+    let dispatch = storage
+        .load_execution_dispatch_authority(&job.job_id)?
+        .ok_or_else(|| StorageError::invalid_input("runtime accepted dispatch is missing"))?;
+    let lease = dispatch.lease();
+    if u64::try_from(job.attempt).ok() != Some(record.attempt)
+        || serde_json::to_vec(job)
+            .map_err(|_| StorageError::adapter("runtime Job encoding failed"))?
+            != record.dispatch_payload
+        || lease.job_id != message.lease.job_id
+        || lease.lease_id != message.lease.lease_id
+        || Some(lease.attempt) != u64::try_from(message.lease.attempt).ok()
+        || lease.worker_id != message.lease.worker_id
+        || lease.worker_instance_id != message.lease.worker_instance_id
+        || lease.fencing_token != message.lease.fencing_token
+        || dispatch.worker_session_id() != &message.worker_session_id
     {
         return Err(StorageError::invalid_input(
-            "durable event is not the exact internal ExecutionJob intent",
+            "runtime write authority changed before commit",
         ));
     }
-    let job: ExecutionJob = serde_json::from_slice(&event.payload).map_err(|error| {
-        StorageError::invalid_input(format!("durable ExecutionJob payload is invalid: {error}"))
-    })?;
-    let canonical = serde_json::to_vec(&job).map_err(|error| {
-        StorageError::adapter(format!("failed to encode durable ExecutionJob: {error}"))
-    })?;
-    if canonical != event.payload || &job.job_id != job_id {
-        return Err(StorageError::invalid_input(
-            "durable ExecutionJob event identity or payload is not canonical",
-        ));
-    }
-    Ok((durable, job))
+    ExecutionAuthorityCommitGuard::terminal_round(record, dispatch).map(Some)
+}
+
+// Called only after current Job, accepted dispatch and lease-period checks.
+// The runtime head can lag when an intervening attempt produced no events.
+fn trusted_runtime_successor(
+    storage: &dyn ProductStateStorage,
+    previous: &RuntimeLedgerState,
+    message: &RuntimeEventMessage,
+) -> Result<bool, StorageError> {
+    let Some(seal) = storage.load_execution_scope_replacement_authority(&message.lease.job_id)?
+    else {
+        return Ok(false);
+    };
+    let successor = seal.replacement_lease();
+    let predecessor = seal.predecessor_lease();
+    let exact_predecessor = previous.attempt != predecessor.attempt
+        || (previous.lease_id == predecessor.lease_id
+            && previous.worker_id == predecessor.worker_id
+            && previous.worker_instance_id == predecessor.worker_instance_id
+            && previous.fencing_token == predecessor.fencing_token
+            && seal.previous_worker_session_id() == Some(&previous.worker_session_id));
+    Ok(seal.job_id() == &previous.execution_job_id
+        && seal.scope().product_session_id == previous.product_session_id
+        && seal.scope().delivery_id.is_none()
+        && seal.work_run_id().is_none()
+        && previous.attempt <= predecessor.attempt
+        && exact_predecessor
+        && u64::try_from(message.lease.attempt).ok() == Some(successor.attempt)
+        && successor.lease_id == message.lease.lease_id
+        && successor.worker_id == message.lease.worker_id
+        && successor.worker_instance_id == message.lease.worker_instance_id
+        && successor.fencing_token == message.lease.fencing_token
+        && successor.attempt > previous.attempt
+        && decimal_token(&successor.fencing_token) > decimal_token(&previous.fencing_token)
+        && successor.lease_id != previous.lease_id
+        && message.worker_session_id != previous.worker_session_id
+        && message.codex_thread_id != previous.codex_thread_id)
 }
 
 struct RuntimePhase {
@@ -649,6 +731,10 @@ pub(crate) struct RuntimeLedgerState {
     /// Existing first-task snapshots have an offset of zero.
     #[serde(default)]
     pub(crate) sequence_offset: u64,
+    /// Immutable row position occupied by earlier attempts of this Job.
+    /// Wire sequences and their chain remain local to the current attempt.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub(crate) indexed_sequence_offset: u64,
     pub(crate) highest_sequence: u64,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub(crate) events: Vec<RuntimeLedgerEvent>,
@@ -669,15 +755,28 @@ struct IndexedRuntimeLedgerEvent {
     entry: RuntimeLedgerEvent,
     previous_chain_digest: String,
     chain_digest: String,
+    #[serde(default, skip_serializing_if = "is_zero")]
+    indexed_sequence_offset: u64,
+}
+
+// Serde skip_serializing_if callbacks receive the field by reference.
+#[allow(clippy::trivially_copy_pass_by_ref)]
+fn is_zero(value: &u64) -> bool {
+    *value == 0
 }
 
 impl IndexedRuntimeLedgerEvent {
-    fn new(entry: RuntimeLedgerEvent, previous_chain_digest: String) -> Self {
+    fn new(
+        entry: RuntimeLedgerEvent,
+        previous_chain_digest: String,
+        indexed_sequence_offset: u64,
+    ) -> Self {
         let chain_digest = extend_event_chain(&previous_chain_digest, &entry.event_digest);
         Self {
             entry,
             previous_chain_digest,
             chain_digest,
+            indexed_sequence_offset,
         }
     }
 }
@@ -685,6 +784,26 @@ impl IndexedRuntimeLedgerEvent {
 impl RuntimeLedgerState {
     pub(crate) fn revision(&self) -> u64 {
         self.sequence_offset.saturating_add(self.highest_sequence)
+    }
+
+    fn indexed_sequence(&self, sequence: u64) -> Result<u64, StorageError> {
+        self.indexed_sequence_offset
+            .checked_add(sequence)
+            .filter(|value| *value <= MAX_SAFE_INTEGER)
+            .ok_or_else(|| StorageError::invalid_input("runtime index sequence overflow"))
+    }
+
+    fn owns_message(&self, message: &RuntimeEventMessage) -> bool {
+        self.execution_job_id == message.lease.job_id
+            && self.product_session_id == message.session_identity.product_session_id
+            && self.work_run_id == message.session_identity.work_run_id
+            && self.worker_session_id == message.worker_session_id
+            && self.codex_thread_id == message.codex_thread_id
+            && self.lease_id == message.lease.lease_id
+            && u64::try_from(message.lease.attempt).ok() == Some(self.attempt)
+            && self.fencing_token == message.lease.fencing_token
+            && self.worker_id == message.lease.worker_id
+            && self.worker_instance_id == message.lease.worker_instance_id
     }
 
     fn empty(
@@ -707,6 +826,7 @@ impl RuntimeLedgerState {
             worker_id: lease.worker_id.clone(),
             worker_instance_id: lease.worker_instance_id.clone(),
             sequence_offset: 0,
+            indexed_sequence_offset: 0,
             highest_sequence: 0,
             events: Vec::new(),
             event_chain_digest: String::new(),
@@ -1242,9 +1362,14 @@ pub(crate) fn load_ledger(
     crate::storage_mechanism_regression::ledger_read(state.payload.len());
     let ledger = decode_runtime_ledger_state(&state, stream_id)?;
     if ledger.schema_version == RUNTIME_STATE_VERSION {
-        let tail =
-            load_indexed_runtime_event(storage, &ledger.execution_job_id, ledger.highest_sequence)?;
-        if tail.chain_digest != ledger.event_chain_digest {
+        let tail = load_indexed_runtime_event(
+            storage,
+            &ledger.execution_job_id,
+            ledger.indexed_sequence(ledger.highest_sequence)?,
+        )?;
+        if tail.indexed_sequence_offset != ledger.indexed_sequence_offset
+            || tail.chain_digest != ledger.event_chain_digest
+        {
             return Err(StorageError::invalid_input(
                 "runtime header does not match its immutable tail",
             ));
@@ -1273,7 +1398,10 @@ pub(crate) fn decode_runtime_ledger_state(
                 || ledger.highest_sequence == 0
                 || !canonical_chain_digest(&ledger.event_chain_digest)))
         || ledger.revision() > MAX_SAFE_INTEGER
-        || (ledger.work_run_id.is_some() && ledger.sequence_offset != 0)
+        || ledger.indexed_sequence(ledger.highest_sequence).is_err()
+        || ledger.indexed_sequence_offset > ledger.sequence_offset
+        || (ledger.work_run_id.is_some()
+            && (ledger.sequence_offset != 0 || ledger.indexed_sequence_offset != 0))
         || state.revision != ledger.revision()
     {
         return Err(StorageError::invalid_input(
@@ -1337,7 +1465,10 @@ fn runtime_event_mutations(
 ) -> Result<Vec<StateMutation>, StorageError> {
     let entry = &indexed.entry;
     let sequence = u64::try_from(entry.event.sequence.0)
-        .map_err(|_| StorageError::invalid_input("runtime sequence is invalid"))?;
+        .ok()
+        .and_then(|sequence| indexed.indexed_sequence_offset.checked_add(sequence))
+        .filter(|sequence| *sequence <= MAX_SAFE_INTEGER)
+        .ok_or_else(|| StorageError::invalid_input("runtime sequence is invalid"))?;
     let bytes = serde_json::to_vec(indexed)
         .map_err(|_| StorageError::adapter("runtime event encoding failed"))?;
     let marker = serde_json::to_vec(&(sequence, &entry.event_digest))
@@ -1362,11 +1493,17 @@ fn decode_indexed_runtime_event(
     if sequence == 0
         || row.revision != 1
         || row.stream_id != runtime_event_key(job, sequence)
-        || u64::try_from(indexed.entry.event.sequence.0).ok() != Some(sequence)
+        || u64::try_from(indexed.entry.event.sequence.0)
+            .ok()
+            .and_then(|local| indexed.indexed_sequence_offset.checked_add(local))
+            != Some(sequence)
+        || indexed.entry.event.sequence.0 <= 0
+        || sequence > MAX_SAFE_INTEGER
         || event_digest(&indexed.entry.event)? != indexed.entry.event_digest
         || !canonical_chain_digest(&indexed.chain_digest)
-        || (sequence == 1 && !indexed.previous_chain_digest.is_empty())
-        || (sequence > 1 && !canonical_chain_digest(&indexed.previous_chain_digest))
+        || (indexed.entry.event.sequence.0 == 1 && !indexed.previous_chain_digest.is_empty())
+        || (indexed.entry.event.sequence.0 > 1
+            && !canonical_chain_digest(&indexed.previous_chain_digest))
         || extend_event_chain(&indexed.previous_chain_digest, &indexed.entry.event_digest)
             != indexed.chain_digest
     {
@@ -1418,7 +1555,10 @@ fn validate_indexed_runtime_marker(
             StorageError::invalid_input("runtime immutable event has no identity marker")
         })?;
     let (sequence, digest) = decode_runtime_identity_marker(&stored, job, event_id)?;
-    if u64::try_from(indexed.entry.event.sequence.0).ok() != Some(sequence)
+    if u64::try_from(indexed.entry.event.sequence.0)
+        .ok()
+        .and_then(|local| indexed.indexed_sequence_offset.checked_add(local))
+        != Some(sequence)
         || indexed.entry.event_digest != digest
     {
         return Err(StorageError::invalid_input(
@@ -1441,7 +1581,7 @@ fn classify_indexed_event(
     if let Some(stored) = storage.load_state(&key)? {
         let (sequence, accepted_digest) =
             decode_runtime_identity_marker(&stored, &ledger.execution_job_id, &event.event_id.0)?;
-        if sequence > ledger.highest_sequence {
+        if sequence > ledger.indexed_sequence(ledger.highest_sequence)? {
             return Err(StorageError::invalid_input(
                 "runtime identity marker is outside its header",
             ));
@@ -1454,9 +1594,13 @@ fn classify_indexed_event(
                 "runtime identity marker does not match immutable event",
             ));
         }
+        if accepted.indexed_sequence_offset != ledger.indexed_sequence_offset {
+            return Ok(LedgerDecision::Conflict(Rejection::Conflict(
+                "runtime event identity belongs to a preceding attempt",
+            )));
+        }
         return Ok(
-            if u64::try_from(event.sequence.0).ok() == Some(sequence) && accepted_digest == *digest
-            {
+            if event.sequence == accepted.entry.event.sequence && accepted_digest == *digest {
                 LedgerDecision::Duplicate
             } else {
                 LedgerDecision::Conflict(Rejection::Conflict(
@@ -1469,7 +1613,16 @@ fn classify_indexed_event(
         && sequence > 0
         && sequence <= ledger.highest_sequence
     {
-        let accepted = load_indexed_runtime_event(storage, &ledger.execution_job_id, sequence)?;
+        let accepted = load_indexed_runtime_event(
+            storage,
+            &ledger.execution_job_id,
+            ledger.indexed_sequence(sequence)?,
+        )?;
+        if accepted.indexed_sequence_offset != ledger.indexed_sequence_offset {
+            return Err(StorageError::invalid_input(
+                "runtime event row belongs to another attempt",
+            ));
+        }
         validate_indexed_runtime_marker(storage, &ledger.execution_job_id, &accepted)?;
         return Ok(LedgerDecision::Conflict(Rejection::Conflict(
             if accepted.entry.event_digest == *digest {
@@ -1492,10 +1645,17 @@ pub(crate) fn hydrate_runtime_ledger(
         return Ok(());
     }
     let prefix = runtime_event_prefix(&ledger.execution_job_id);
-    let upper = runtime_event_key(&ledger.execution_job_id, ledger.highest_sequence);
-    let mut after = prefix.clone();
+    let upper = runtime_event_key(
+        &ledger.execution_job_id,
+        ledger.indexed_sequence(ledger.highest_sequence)?,
+    );
+    let mut after = if ledger.indexed_sequence_offset == 0 {
+        prefix.clone()
+    } else {
+        runtime_event_key(&ledger.execution_job_id, ledger.indexed_sequence_offset)
+    };
     let mut chain = String::new();
-    let mut expected = 1_u64;
+    let mut expected = ledger.indexed_sequence(1)?;
     let mut events = Vec::new();
     let mut identities = HashSet::new();
     loop {
@@ -1506,7 +1666,8 @@ pub(crate) fn hydrate_runtime_ledger(
         for row in rows {
             let indexed = decode_indexed_runtime_event(&row, &ledger.execution_job_id, expected)?;
             validate_indexed_runtime_marker(storage, &ledger.execution_job_id, &indexed)?;
-            if indexed.previous_chain_digest != chain
+            if indexed.indexed_sequence_offset != ledger.indexed_sequence_offset
+                || indexed.previous_chain_digest != chain
                 || !identities.insert(indexed.entry.event.event_id.0.clone())
             {
                 return Err(StorageError::invalid_input(

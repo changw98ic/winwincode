@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Durable round trips for the local device-client store: schema migration,
+//! Durable round trips for the local device-client store: schema initialization,
 //! path-mapping CRUD, the client outbox, and the server-to-client inbox
 //! cursor. The temporary-directory infrastructure mirrors
 //! `crates/winwincode-storage/tests/sqlite.rs`.
@@ -59,7 +59,7 @@ fn envelope(message_id: &str, client_instance_id: &str, sequence: u64) -> Client
 }
 
 #[test]
-fn open_migrates_the_full_local_schema_and_round_trips_it() {
+fn open_initializes_the_full_current_schema_and_round_trips_it() {
     assert_eq!(winwincode_device_client::CLIENT_STORE_SCHEMA_VERSION, 9);
     let (root, mut store) = open_store("schema-round-trip");
     let database_path = store.database_path().to_path_buf();
@@ -84,13 +84,6 @@ fn open_migrates_the_full_local_schema_and_round_trips_it() {
         .expect("path mapping write before restart");
     store.close().expect("store should close");
 
-    // Reopen a version-7 database with real preexisting local state.
-    let legacy = Connection::open(&database_path).expect("legacy database");
-    legacy
-        .execute_batch("DROP TABLE server_command_results; PRAGMA user_version = 7;")
-        .expect("version-7 layout");
-    legacy.close().expect("close legacy inspection");
-
     let store = DeviceStore::open(&root).expect("restarted store should open");
     let mapping = store
         .path_mapping("binding-schema")
@@ -99,7 +92,7 @@ fn open_migrates_the_full_local_schema_and_round_trips_it() {
     assert_eq!(mapping.canonical_path, "/Users/dev/project-a");
     store.close().expect("restarted store should close");
 
-    let connection = Connection::open(&database_path).expect("migrated database should open");
+    let connection = Connection::open(&database_path).expect("current database should open");
     let version: i64 = connection
         .pragma_query_value(None, "user_version", |row| row.get(0))
         .expect("schema version should be readable");

@@ -153,9 +153,10 @@ WinWinCode 的可执行交付模型由 [ADR-0033](decisions/0033-community-engin
 
 Control Plane 下发的 `WorkRunInput.workPlan` 保存当前 WorkContract 下的完整 WorkItem 依赖图。
 当前 `workItem` 必须与图中的节点逐值一致；合同版本、节点唯一性和依赖关系沿用调度器校验。
-该计划随 ExecutionJob 摘要封存，Device 的 JEV 上下文评分要求它存在，并将其纳入任务依据。
+该计划随 ExecutionJob 摘要封存。Device 的 JEv 上下文评分在 WorkRun scope 中要求该计划存在，并将其纳入任务依据。
+普通 Chat 保留原 ProductSession scope 和没有 workInput 的任务输入；评分依据来自原 goal、instructions 和工具记录。
 这份调度计划与 Core 的执行步骤计划各自保持原有所有权。
-JEV 删除旧进度文字前，会按当前模型请求及评分记录取回已保存的原文，校验请求摘要及逐项内容。
+JEv 删除旧进度文字前，会按当前模型请求及评分记录取回已保存的原文，校验请求摘要及逐项内容。
 评分记录不能跨请求使用；来源不一致时保留原始记录并拒绝本次重建。
 旧进度文字的 `ARCHIVE` 决策会将其移出当前模型请求，原文仍由 Core 历史和 Device 请求记录保留，按原请求身份取回。后续请求重新评分；系统约束、工具记录和最新进度不会进入此归档路径。
 Device 在评分前保存输入、策略、执行选项及配置摘要，读取和重放时校验原始字节；旧记录缺失的输入保持为空。
@@ -282,6 +283,20 @@ Server 可部署在独立网络边界，Worker 按平台、容量、仓库和策
 Server 启动先恢复持久 state、receipt、outbox、SessionBinding 和事件游标，再接受请求；待发送 outbox 重新发送同一个事件。Worker 重新取得合法 Lease 后只恢复自己的 Job 和工作区。Control Plane 通过 `requestId`、revision、attempt、Lease 和 Fencing 校验重复或过期写入。
 
 取消是独立终态：Control Plane 先提交取消事实，Worker 仅对当前 attempt 执行取消，重复取消返回原始 receipt。重启不重放已经结算的工具或命令；新 retry 创建 attempt+1，并建立新的 WorkerSession、CodexThread 和 SessionBinding。旧 attempt 的 runtime、outcome 和 cancel 记录保持零写。
+
+Device 确认旧 Worker 进程退出后，Server 撤销该 WorkerSession 的通信凭据。旧实例发送的新消息和已接收消息的重发均返回 HTTP 401。故障恢复将旧未完成尝试记录为 `failed`，新 Worker 使用下一次 attempt 重试原请求。旧尝试失败、新尝试和恢复请求回执在同一个 SQLite 事务中提交；恢复请求摘要与处理结果成对保存，任一步写入失败均回滚。已接受的执行事实和未知账目保持原值。
+
+[`chat-execution-obsolete-owner-production.test.mjs`](../tests/chat-execution-obsolete-owner-production.test.mjs) 检查真实进程退出后的旧消息拒绝、原请求关联、旧尝试失败和新尝试完成。[`repository_scheduler.rs`](../crates/winwincode-storage/tests/repository_scheduler.rs) 在恢复事务的四个写入点注入故障，检查原请求保留、无单边结果和重启后的幂等恢复。
+
+Device 的每次模型调用、JEv 推理和 Core 工具调用，均先保存原请求正文和 `pending`。成功、失败或取消时，同一调用身份保存结果正文。Core 另存 hook 后的实际工具输入和物理执行结果。Device 确认 Worker 实例退出后，先关闭该实例的模型调用和其 Kernel 中的未完成工具调用，再报告退出。恢复保留已知用量；已发送但未取得回执的调用保持用量和副作用未知。新尝试使用新的执行身份，旧调用的终态正文不可覆盖。
+
+[`chat-call-pairs-production.test.mjs`](../tests/chat-call-pairs-production.test.mjs) 在真实模型和工具调用的 pending 切点终止 Worker，核对退出恢复、新尝试成功以及原请求、结果和物理账目的配对记录。
+
+JEv 在原模型请求内执行付费准备。Device 在调用模型前保存 prepared payload 和摘要；同一模型请求的 durable retry 优先读取该 payload，保留原 request/exchange、取消 authority 和已付费收据。未知用量和费用继续保持 unknown。
+
+[`chat-jev-recovery-production.test.mjs`](../tests/chat-jev-recovery-production.test.mjs) 的崩溃点位于付费准备完成、Worker 终态落盘之后，Control Plane 终态提交之前。该测试检查 Server 被 SIGKILL 后的原终态重交付、业务 ACK、prepared bytes、Core turn、收据和物理请求数量。终态重交付的结果对应上述崩溃点。
+
+[`device_jev_recovery_tests.rs`](../crates/winwincode-provider/src/device_jev_recovery_tests.rs) 用真实 HTTPS 和独立测试子进程检查两个 DeviceProviderStore 恢复切点。第一项在 Judge 收据落盘、Context 请求已发出时杀掉进程；重开原 exchange 后，已知用量下界和未知付费结果保持原值。第二项在 prepared payload 与 Provider deferred retry 决定落盘后杀掉进程；重开后使用原 prepared bytes，保留第一次物理失败记录，只新增下一次模型尝试。两项都检查原付费收据、完整请求身份、请求数量和签名账目。正式 Device daemon、Worker 与 Core 进程恢复按执行链切点单独验收。
 
 ## 安全与人工责任
 

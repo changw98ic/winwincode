@@ -33,7 +33,10 @@ pub(super) async fn observe(
     runtime: &StateRuntime,
     request: &ToolRequestIdentity,
 ) -> ToolExecutionFact {
-    let ToolRequestObservation::New(fact) = runtime.observe_tool_request(request).await.unwrap()
+    let ToolRequestObservation::New(fact) = runtime
+        .observe_tool_request(request, "test-owner", "{}")
+        .await
+        .unwrap()
     else {
         panic!("new observation")
     };
@@ -47,8 +50,8 @@ async fn competing_connections_claim_once_and_transport_replay_does_not_add_obse
         .await
         .unwrap();
     let (a, b) = tokio::join!(
-        runtime.observe_tool_request(&request),
-        other.observe_tool_request(&request)
+        runtime.observe_tool_request(&request, "test-owner", "{}"),
+        other.observe_tool_request(&request, "test-owner", "{}")
     );
     let (a, b) = (a.unwrap(), b.unwrap());
     let fact = match (a, b) {
@@ -119,7 +122,10 @@ async fn same_id_with_changed_input_or_parent_is_a_conflict() {
         },
     ] {
         assert_eq!(
-            runtime.observe_tool_request(&changed).await.unwrap(),
+            runtime
+                .observe_tool_request(&changed, "test-owner", "{}")
+                .await
+                .unwrap(),
             ToolRequestObservation::IdentityConflict
         );
     }
@@ -248,8 +254,10 @@ async fn successful_execution_survives_hook_rejection_and_result_cleanup() {
         .forget_tool_results(fact.request_sequence)
         .await
         .unwrap();
-    let ToolRequestObservation::Replay(recovered) =
-        runtime.observe_tool_request(&request).await.unwrap()
+    let ToolRequestObservation::Replay(recovered) = runtime
+        .observe_tool_request(&request, "test-owner", "{}")
+        .await
+        .unwrap()
     else {
         panic!("receipt")
     };
@@ -378,14 +386,14 @@ async fn unknown_effects_cannot_be_accepted_or_reexecuted() {
 }
 
 #[tokio::test]
-async fn oversize_results_keep_receipts_and_thread_deletion_removes_all_facts() {
+async fn large_results_keep_complete_bodies_and_thread_deletion_removes_all_facts() {
     let (runtime, request) = setup().await;
     let fact = observe(&runtime, &request).await;
     runtime
         .claim_tool_attempt(fact.request_sequence, "attempt", "owner", "effective", "{}")
         .await
         .unwrap();
-    let body = "x".repeat(MAX_TOOL_RESULT_BYTES + 1);
+    let body = "x".repeat(4 * 1024 * 1024 + 1);
     runtime
         .complete_tool_attempt(
             fact.request_sequence,
@@ -396,13 +404,14 @@ async fn oversize_results_keep_receipts_and_thread_deletion_removes_all_facts() 
         )
         .await
         .unwrap();
-    assert!(
+    assert_eq!(
         runtime
             .read_tool_results(fact.request_sequence)
             .await
             .unwrap()
             .execution
-            .is_none()
+            .as_deref(),
+        Some(body.as_str())
     );
     runtime
         .delete_thread(ThreadId::from_string(&request.thread_id).unwrap())
@@ -428,7 +437,7 @@ async fn denied_observation_cannot_be_claimed_or_counted_again() {
     let (runtime, request) = setup().await;
     let fact = observe(&runtime, &request).await;
     runtime
-        .deny_tool_request(fact.request_sequence)
+        .deny_tool_request(fact.request_sequence, "test denial")
         .await
         .unwrap();
     let ToolAttemptClaim::Existing(denied) = runtime
@@ -441,7 +450,10 @@ async fn denied_observation_cannot_be_claimed_or_counted_again() {
     assert_eq!(denied.resolution, crate::ToolRequestResolution::Denied);
     assert_eq!(denied.attempt, None);
     assert!(matches!(
-        runtime.observe_tool_request(&request).await.unwrap(),
+        runtime
+            .observe_tool_request(&request, "test-owner", "{}")
+            .await
+            .unwrap(),
         ToolRequestObservation::Replay(_)
     ));
     assert_eq!(

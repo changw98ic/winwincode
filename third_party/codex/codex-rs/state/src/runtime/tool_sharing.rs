@@ -1,6 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
 use super::StateRuntime;
-use crate::MAX_TOOL_RESULT_BYTES;
 use crate::ToolCoalescingPermission;
 use crate::ToolOutputDelivery;
 use crate::ToolOutputDisposition;
@@ -46,7 +45,7 @@ impl StateRuntime {
                 "source is not reusable"
             );
         }
-        let unclaimed: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM tool_requests r WHERE r.sequence=? AND r.thread_id=? AND r.resolution='observed' AND NOT EXISTS(SELECT 1 FROM tool_attempts a WHERE a.request_sequence=r.sequence))")
+        let unclaimed: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM tool_requests r WHERE r.sequence=? AND r.thread_id=? AND r.resolution='observed' AND r.call_status='pending' AND NOT EXISTS(SELECT 1 FROM tool_attempts a WHERE a.request_sequence=r.sequence))")
             .bind(fact.request_sequence).bind(&fact.thread_id).fetch_one(&mut *tx).await?;
         ensure!(
             unclaimed,
@@ -107,10 +106,14 @@ impl StateRuntime {
             "shared execution is not complete"
         );
         fact.disposition = disposition;
-        let retained = (body.len() <= MAX_TOOL_RESULT_BYTES).then_some(body);
+        let retained = Some(body);
         sqlx::query("UPDATE tool_sharing SET fact_json=?,accepted_result=?,rejection=? WHERE request_sequence=?")
             .bind(serde_json::to_string(&fact)?).bind(if disposition == ToolOutputDisposition::Accepted { retained } else { None })
             .bind(if disposition == ToolOutputDisposition::Rejected { retained } else { None }).bind(sequence).execute(&mut *tx).await?;
+        let status = super::tool_execution::logical_output_status(disposition, body);
+        let changed = sqlx::query("UPDATE tool_requests SET call_status=?,call_result=? WHERE sequence=? AND call_status='pending'")
+            .bind(status).bind(body).bind(sequence).execute(&mut *tx).await?.rows_affected();
+        ensure!(changed == 1, "shared tool call is already closed");
         append(&mut tx, &fact).await?;
         tx.commit().await?;
         Ok(())
@@ -139,7 +142,10 @@ async fn load(connection: &mut SqliteConnection, sequence: i64) -> anyhow::Resul
             .await?;
     Ok(serde_json::from_str(&encoded)?)
 }
-async fn update(connection: &mut SqliteConnection, fact: &ToolSharingFact) -> anyhow::Result<()> {
+pub(super) async fn update(
+    connection: &mut SqliteConnection,
+    fact: &ToolSharingFact,
+) -> anyhow::Result<()> {
     sqlx::query("UPDATE tool_sharing SET fact_json=? WHERE request_sequence=?")
         .bind(serde_json::to_string(fact)?)
         .bind(fact.request_sequence)
@@ -173,7 +179,7 @@ impl StateRuntime {
 impl StateRuntime {
     pub async fn cancel_tool_waiter(&self, sequence: i64) -> anyhow::Result<()> {
         let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
-        let row = sqlx::query("SELECT r.thread_id,COALESCE(s.source_request_sequence,r.sequence) AS source FROM tool_requests r LEFT JOIN tool_sharing s ON s.request_sequence=r.sequence LEFT JOIN tool_attempts a ON a.request_sequence=r.sequence WHERE r.sequence=? AND (a.delivery='pending' OR json_extract(s.fact_json,'$.delivery')='pending')")
+        let row = sqlx::query("SELECT r.thread_id,COALESCE(s.source_request_sequence,r.sequence) AS source FROM tool_requests r LEFT JOIN tool_sharing s ON s.request_sequence=r.sequence LEFT JOIN tool_attempts a ON a.request_sequence=r.sequence WHERE r.sequence=? AND (r.call_status='pending' OR a.delivery='pending' OR json_extract(s.fact_json,'$.delivery')='pending')")
             .bind(sequence).fetch_optional(&mut *tx).await?;
         let Some(row) = row else {
             return Ok(());
@@ -181,6 +187,9 @@ impl StateRuntime {
         let inserted = sqlx::query("INSERT INTO tool_waiter_cancellations(request_sequence) VALUES (?) ON CONFLICT(request_sequence) DO NOTHING")
             .bind(sequence).execute(&mut *tx).await?.rows_affected() == 1;
         if inserted {
+            sqlx::query("UPDATE tool_requests SET call_status='cancelled',call_result=? WHERE sequence=? AND call_status='pending'")
+                .bind(serde_json::json!({"status":"cancelled","code":"tool_waiter_cancelled","effects":"unknown"}).to_string())
+                .bind(sequence).execute(&mut *tx).await?;
             let fact = crate::ToolWaiterCancellationFact {
                 schema_version: 1,
                 thread_id: row.try_get("thread_id")?,

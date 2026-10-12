@@ -726,8 +726,7 @@ impl StoredCandidateArtifact {
                 || replacement.predecessor_lease.worker_instance_id
                     == self.open_message.lease.worker_instance_id
                 || replacement.logical_job_digest != self.logical_job_digest
-                || !same_work_contract_item_scope(&replacement.scope, &self.scope)
-                || !different_work_run(&replacement.scope, &self.scope)
+                || !same_replacement_scope(&replacement.scope, &self.scope)
                 || !lowercase_sha256(&replacement.receipt_digest.0)
                 || !lowercase_sha256(&replacement.logical_job_digest.0)
             {
@@ -735,9 +734,10 @@ impl StoredCandidateArtifact {
             }
             if let Some(predecessor_session) = replacement.predecessor_session_identity.as_ref()
                 && (predecessor_session.worker_session_id == self.open_message.worker_session_id
-                    || !same_predecessor_session_scope(predecessor_session, &replacement.scope)
-                    || predecessor_session.work_run_id
-                        == self.open_message.session_identity.work_run_id)
+                    || !scope_matches_session(&replacement.scope, predecessor_session)
+                    || (predecessor_session.work_run_id.is_some()
+                        && predecessor_session.work_run_id
+                            == self.open_message.session_identity.work_run_id))
             {
                 return Err(AdapterStoreError::Corrupt);
             }
@@ -902,7 +902,7 @@ fn replacement_record(
     }
     if record.logical_job_digest != upload.logical_job_digest
         || record.execution_profile != upload.execution_profile
-        || !same_work_run_identity(&record.scope, &upload.scope)
+        || !same_replacement_scope(&record.scope, &upload.scope)
         || record.descriptor.size_bytes
             != i64::try_from(upload.bytes.len()).map_err(|_| AdapterStoreError::Conflict)?
         || record.descriptor.digest != upload.digest
@@ -914,47 +914,6 @@ fn replacement_record(
 
 fn same_work_contract_item_scope(left: &ExecutionScope, right: &ExecutionScope) -> bool {
     match (left, right) {
-        (ExecutionScope::WorkRunExecutionScope(a), ExecutionScope::WorkRunExecutionScope(b)) => {
-            a.product_session_id == b.product_session_id
-                && a.work_contract_id == b.work_contract_id
-                && a.work_contract_revision == b.work_contract_revision
-                && a.work_item_id == b.work_item_id
-                && a.work_item_revision == b.work_item_revision
-        }
-        (
-            ExecutionScope::ProductSessionExecutionScope(a),
-            ExecutionScope::ProductSessionExecutionScope(b),
-        ) => a == b,
-        _ => false,
-    }
-}
-
-fn different_work_run(left: &ExecutionScope, right: &ExecutionScope) -> bool {
-    match (left, right) {
-        (ExecutionScope::WorkRunExecutionScope(a), ExecutionScope::WorkRunExecutionScope(b)) => {
-            a.work_run_id != b.work_run_id
-        }
-        _ => false,
-    }
-}
-
-fn same_predecessor_session_scope(
-    session: &winwincode_domain::SessionIdentity,
-    scope: &ExecutionScope,
-) -> bool {
-    match scope {
-        ExecutionScope::WorkRunExecutionScope(scope) => {
-            session.product_session_id == scope.product_session_id
-                && session.work_run_id.as_ref() == Some(&scope.work_run_id)
-        }
-        ExecutionScope::ProductSessionExecutionScope(scope) => {
-            session.product_session_id == scope.product_session_id && session.work_run_id.is_none()
-        }
-    }
-}
-
-fn same_work_run_identity(left: &ExecutionScope, right: &ExecutionScope) -> bool {
-    match (left, right) {
         (
             ExecutionScope::ProductSessionExecutionScope(a),
             ExecutionScope::ProductSessionExecutionScope(b),
@@ -965,10 +924,26 @@ fn same_work_run_identity(left: &ExecutionScope, right: &ExecutionScope) -> bool
                 && a.work_contract_revision == b.work_contract_revision
                 && a.work_item_id == b.work_item_id
                 && a.work_item_revision == b.work_item_revision
-                && a.work_run_id != b.work_run_id
         }
         _ => false,
     }
+}
+
+// Chat replacements keep their ProductSession; Delivery replacements keep the
+// contract/item revisions and allocate a different WorkRun.
+fn same_replacement_scope(left: &ExecutionScope, right: &ExecutionScope) -> bool {
+    same_work_contract_item_scope(left, right)
+        && match (left, right) {
+            (
+                ExecutionScope::WorkRunExecutionScope(a),
+                ExecutionScope::WorkRunExecutionScope(b),
+            ) => a.work_run_id != b.work_run_id,
+            (
+                ExecutionScope::ProductSessionExecutionScope(_),
+                ExecutionScope::ProductSessionExecutionScope(_),
+            ) => true,
+            _ => false,
+        }
 }
 
 fn validate_upload(upload: &CandidateArtifactUpload) -> Result<(), AdapterStoreError> {
@@ -1003,7 +978,7 @@ fn validate_replacement_upload(
         || replacement.predecessor_lease.worker_id != upload.lease.worker_id
         || replacement.predecessor_lease.worker_instance_id == upload.lease.worker_instance_id
         || replacement.logical_job_digest != upload.logical_job_digest
-        || !same_work_run_identity(&replacement.scope, &upload.scope)
+        || !same_replacement_scope(&replacement.scope, &upload.scope)
         || !lowercase_sha256(&replacement.receipt_digest.0)
         || !lowercase_sha256(&replacement.logical_job_digest.0)
     {
@@ -1682,7 +1657,8 @@ mod tests {
         WorkerSessionId,
     };
     use winwincode_execution_port::generated::{
-        ArtifactAckMessageKind, ExecutionPortError, ExecutionPortErrorCode, WorkRunExecutionScope,
+        ArtifactAckMessageKind, ExecutionPortError, ExecutionPortErrorCode,
+        ProductSessionExecutionScope, ProductSessionExecutionScopeKind, WorkRunExecutionScope,
         WorkRunExecutionScopeKind,
     };
 
@@ -1790,6 +1766,17 @@ mod tests {
         }
     }
 
+    fn chat_upload(bytes: Vec<u8>) -> CandidateArtifactUpload {
+        let mut upload = upload(bytes);
+        upload.execution_profile = "codex-chat".into();
+        upload.scope = ExecutionScope::ProductSessionExecutionScope(ProductSessionExecutionScope {
+            kind: ProductSessionExecutionScopeKind::ProductSession,
+            product_session_id: upload.session_identity.product_session_id.clone(),
+        });
+        upload.session_identity.work_run_id = None;
+        upload
+    }
+
     fn replacement_upload(predecessor: &CandidateArtifactUpload) -> CandidateArtifactUpload {
         let mut successor = predecessor.clone();
         successor.job_digest = Sha256Digest(format!(
@@ -1803,11 +1790,11 @@ mod tests {
             WorkerInstanceId("wki_00000000000000000000000003".to_owned());
         successor.worker_session_id = WorkerSessionId("wsn_00000000000000000000000006".to_owned());
         successor.session_identity.worker_session_id = successor.worker_session_id.clone();
-        successor.session_identity.work_run_id =
-            Some(WorkRunId("wrn_0000000000000000000000000A".to_owned()));
         successor.session_identity.codex_thread_id =
             CodexThreadId("cdx_0000000000000000000000000H".to_owned());
         if let ExecutionScope::WorkRunExecutionScope(scope) = &mut successor.scope {
+            successor.session_identity.work_run_id =
+                Some(WorkRunId("wrn_0000000000000000000000000A".to_owned()));
             scope.attempt = successor.lease.attempt;
             scope.work_run_id = successor
                 .session_identity
@@ -2450,6 +2437,140 @@ mod tests {
     }
 
     #[test]
+    fn chat_replacement_retains_and_recovers_the_exact_candidate_ack() {
+        let root = test_root("chat-replacement");
+        let predecessor = chat_upload(b"frozen Chat project ZIP".to_vec());
+        let successor = replacement_upload(&predecessor);
+        let (candidate, execution) = open_ledgers(&root).unwrap();
+        let retained = candidate
+            .retain(&successor)
+            .expect("retain replacement Chat ZIP");
+        assert_eq!(retained.authority, successor.authority());
+        assert_eq!(retained.deliveries.len(), 2);
+        assert!(retained.authority.session_identity.work_run_id.is_none());
+        drop(candidate);
+        drop(execution);
+
+        let (candidate, execution) = open_ledgers(&root).unwrap();
+        let replay = candidate
+            .retain(&successor)
+            .expect("recover Chat ZIP after restart");
+        assert_eq!(replay.artifact, retained.artifact);
+        assert_eq!(replay.authority, retained.authority);
+        assert!(replay.deliveries.is_empty());
+        assert!(!replay.already_accepted);
+        assert_eq!(execution.pending().unwrap(), retained.deliveries);
+        let final_ack = acknowledgement(&retained, &successor, 1, LeaseWriteStatus::Accepted);
+        let mut foreign_ack = final_ack.clone();
+        foreign_ack.session_identity.codex_thread_id = predecessor.session_identity.codex_thread_id;
+        assert_eq!(
+            candidate.apply_ack(&foreign_ack),
+            Err(AdapterStoreError::Conflict)
+        );
+        assert_eq!(
+            candidate
+                .accepted_reference(&successor.authority())
+                .unwrap(),
+            None
+        );
+        assert_eq!(
+            candidate.apply_ack(&final_ack).unwrap(),
+            CandidateArtifactAckOutcome::Accepted(retained.artifact.clone())
+        );
+        drop(candidate);
+        drop(execution);
+
+        let (candidate, execution) = open_ledgers(&root).unwrap();
+        assert_eq!(
+            candidate.apply_ack(&final_ack).unwrap(),
+            CandidateArtifactAckOutcome::Accepted(retained.artifact.clone())
+        );
+        let accepted = candidate.retain(&successor).unwrap();
+        assert!(accepted.already_accepted);
+        assert_eq!(accepted.artifact, retained.artifact);
+        assert!(execution.pending().unwrap().is_empty());
+        drop(candidate);
+        drop(execution);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn replacement_candidate_rejects_foreign_scope_and_session_before_writes() {
+        for predecessor in [
+            upload(b"candidate".to_vec()),
+            chat_upload(b"project ZIP".to_vec()),
+        ] {
+            let root = test_root("replacement-authority-negative");
+            let successor = replacement_upload(&predecessor);
+            let (candidate, execution) = open_ledgers(&root).unwrap();
+            for field in 0..8 {
+                let mut bad = successor.clone();
+                let proof = bad.replacement_authority.as_mut().unwrap();
+                match field {
+                    0 => match &mut proof.scope {
+                        ExecutionScope::ProductSessionExecutionScope(scope) => {
+                            scope.product_session_id =
+                                winwincode_domain::ProductSessionId("psn_foreign".into());
+                        }
+                        ExecutionScope::WorkRunExecutionScope(scope) => {
+                            scope.work_item_revision.0 += 1;
+                        }
+                    },
+                    1 => {
+                        proof
+                            .predecessor_session_identity
+                            .as_mut()
+                            .unwrap()
+                            .product_session_id =
+                            winwincode_domain::ProductSessionId("psn_foreign".into());
+                    }
+                    2 => {
+                        proof
+                            .predecessor_session_identity
+                            .as_mut()
+                            .unwrap()
+                            .work_run_id = Some(WorkRunId("wrn_foreign".into()));
+                    }
+                    3 => {
+                        proof
+                            .predecessor_session_identity
+                            .as_mut()
+                            .unwrap()
+                            .worker_session_id = bad.worker_session_id.clone();
+                    }
+                    4 => {
+                        proof.predecessor_lease.worker_instance_id =
+                            bad.lease.worker_instance_id.clone();
+                    }
+                    5 => proof.successor_lease.fencing_token = FencingToken("foreign".into()),
+                    6 => proof.receipt_digest = Sha256Digest("invalid".into()),
+                    _ => match &mut proof.scope {
+                        ExecutionScope::ProductSessionExecutionScope(_) => {
+                            proof.scope = upload(vec![1]).scope;
+                        }
+                        ExecutionScope::WorkRunExecutionScope(scope) => {
+                            scope.work_run_id = bad.session_identity.work_run_id.clone().unwrap();
+                            proof
+                                .predecessor_session_identity
+                                .as_mut()
+                                .unwrap()
+                                .work_run_id = Some(scope.work_run_id.clone());
+                        }
+                    },
+                }
+                assert!(
+                    candidate.retain(&bad).is_err(),
+                    "foreign replacement field {field}"
+                );
+                assert!(execution.pending().unwrap().is_empty());
+            }
+            drop(candidate);
+            drop(execution);
+            std::fs::remove_dir_all(root).unwrap();
+        }
+    }
+
+    #[test]
     fn replacement_authority_cancels_a_retained_predecessor_after_restart() {
         let root = test_root("replacement-cancel");
         let predecessor = upload(br#"{"candidate":"replacement-cancel"}"#.to_vec());
@@ -2475,64 +2596,68 @@ mod tests {
 
     #[test]
     fn sealed_replacement_reuses_the_predecessor_artifact_and_original_frames() {
-        let root = test_root("replacement-stream");
-        let predecessor = upload(br#"{"candidate":"replacement"}"#.to_vec());
-        let (candidate, execution) = open_ledgers(&root).expect("open ledgers");
-        let original = candidate
-            .retain(&predecessor)
-            .expect("retain predecessor candidate");
-        assert_eq!(original.authority, predecessor.authority());
-        assert_eq!(original.deliveries.len(), 2);
-        for delivery in &original.deliveries {
-            execution
-                .record_sent(&delivery.delivery_id)
-                .expect("record predecessor send");
+        for predecessor in [
+            upload(br#"{"candidate":"replacement"}"#.to_vec()),
+            chat_upload(b"frozen Chat project ZIP".to_vec()),
+        ] {
+            let root = test_root("replacement-stream");
+            let (candidate, execution) = open_ledgers(&root).expect("open ledgers");
+            let original = candidate
+                .retain(&predecessor)
+                .expect("retain predecessor candidate");
+            assert_eq!(original.authority, predecessor.authority());
+            assert_eq!(original.deliveries.len(), 2);
+            for delivery in &original.deliveries {
+                execution
+                    .record_sent(&delivery.delivery_id)
+                    .expect("record predecessor send");
+            }
+
+            let successor = replacement_upload(&predecessor);
+            let resumed = candidate
+                .retain(&successor)
+                .expect("resume sealed predecessor stream");
+            assert_eq!(resumed.artifact, original.artifact);
+            assert_eq!(resumed.authority, predecessor.authority());
+            assert!(resumed.deliveries.is_empty());
+            assert!(!resumed.already_accepted);
+            assert_eq!(
+                execution.pending().expect("original pending frames"),
+                original.deliveries
+            );
+
+            let mut changed = successor.clone();
+            changed.bytes.push(b'!');
+            changed.digest = Sha256Digest(format!("sha256:{:x}", Sha256::digest(&changed.bytes)));
+            assert_eq!(candidate.retain(&changed), Err(AdapterStoreError::Conflict));
+
+            let final_ack = acknowledgement(&original, &predecessor, 1, LeaseWriteStatus::Accepted);
+            assert_eq!(
+                candidate
+                    .apply_ack(&final_ack)
+                    .expect("accept original stream"),
+                CandidateArtifactAckOutcome::Accepted(original.artifact.clone())
+            );
+            let accepted = candidate
+                .retain(&successor)
+                .expect("successor recovers accepted predecessor reference");
+            assert_eq!(accepted.artifact, original.artifact);
+            assert_eq!(accepted.authority, predecessor.authority());
+            assert!(accepted.already_accepted);
+            assert_eq!(
+                candidate
+                    .accepted_reference(&predecessor.authority())
+                    .expect("predecessor accepted reference"),
+                Some(original.artifact.clone())
+            );
+            assert_eq!(
+                candidate
+                    .accepted_reference(&successor.authority())
+                    .expect("successor accepted reference stays exact"),
+                None
+            );
+            std::fs::remove_dir_all(root).expect("remove fixture");
         }
-
-        let successor = replacement_upload(&predecessor);
-        let resumed = candidate
-            .retain(&successor)
-            .expect("resume sealed predecessor stream");
-        assert_eq!(resumed.artifact, original.artifact);
-        assert_eq!(resumed.authority, predecessor.authority());
-        assert!(resumed.deliveries.is_empty());
-        assert!(!resumed.already_accepted);
-        assert_eq!(
-            execution.pending().expect("original pending frames"),
-            original.deliveries
-        );
-
-        let mut changed = successor.clone();
-        changed.bytes.push(b'!');
-        changed.digest = Sha256Digest(format!("sha256:{:x}", Sha256::digest(&changed.bytes)));
-        assert_eq!(candidate.retain(&changed), Err(AdapterStoreError::Conflict));
-
-        let final_ack = acknowledgement(&original, &predecessor, 1, LeaseWriteStatus::Accepted);
-        assert_eq!(
-            candidate
-                .apply_ack(&final_ack)
-                .expect("accept original stream"),
-            CandidateArtifactAckOutcome::Accepted(original.artifact.clone())
-        );
-        let accepted = candidate
-            .retain(&successor)
-            .expect("successor recovers accepted predecessor reference");
-        assert_eq!(accepted.artifact, original.artifact);
-        assert_eq!(accepted.authority, predecessor.authority());
-        assert!(accepted.already_accepted);
-        assert_eq!(
-            candidate
-                .accepted_reference(&predecessor.authority())
-                .expect("predecessor accepted reference"),
-            Some(original.artifact.clone())
-        );
-        assert_eq!(
-            candidate
-                .accepted_reference(&successor.authority())
-                .expect("successor accepted reference stays exact"),
-            None
-        );
-        std::fs::remove_dir_all(root).expect("remove fixture");
     }
 
     #[test]

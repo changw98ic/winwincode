@@ -70,6 +70,7 @@ pub enum SandboxErr {
 pub struct CodexErr {
     details: CodexErrorDetails,
     retry_delay: Option<Duration>,
+    retry_suppressed: bool,
 }
 
 /// The semantic category and diagnostic payload for a [`CodexErr`].
@@ -84,6 +85,14 @@ pub enum CodexErrorDetails {
 
     #[error("shared rollout token budget exhausted")]
     SessionBudgetExceeded,
+
+    /// The embedding host fenced the original execution because its lease expired.
+    #[error("execution lease expired")]
+    ExecutionLeaseExpired,
+
+    /// The host refused a model call under an expired execution authority.
+    #[error("model call authority expired")]
+    ModelAuthorityExpired,
 
     /// Returned by ResponsesClient when the SSE stream disconnects or errors out **after** the HTTP
     /// handshake has succeeded but **before** it finished emitting `response.completed`.
@@ -218,6 +227,7 @@ impl From<CodexErrorDetails> for CodexErr {
         Self {
             details,
             retry_delay: None,
+            retry_suppressed: false,
         }
     }
 }
@@ -282,6 +292,7 @@ macro_rules! codex_err_unit_constructors {
             pub const $variant: Self = Self {
                 details: CodexErrorDetails::$variant,
                 retry_delay: None,
+                retry_suppressed: false,
             };
         )*
     };
@@ -306,6 +317,8 @@ impl CodexErr {
     codex_err_unit_constructors!(
         TurnAborted,
         SessionBudgetExceeded,
+        ExecutionLeaseExpired,
+        ModelAuthorityExpired,
         ContextWindowExceeded,
         SessionConfiguredNotFirstEvent,
         Timeout,
@@ -362,8 +375,13 @@ impl CodexErr {
     }
 
     pub fn is_retryable(&self) -> bool {
+        if self.retry_suppressed {
+            return false;
+        }
         match self.details() {
             CodexErrorDetails::TurnAborted
+            | CodexErrorDetails::ExecutionLeaseExpired
+            | CodexErrorDetails::ModelAuthorityExpired
             | CodexErrorDetails::SessionBudgetExceeded
             | CodexErrorDetails::Interrupted
             | CodexErrorDetails::EnvVar(_)
@@ -403,6 +421,12 @@ impl CodexErr {
         }
     }
 
+    /// The host owns physical retry policy; exhaustion preserves the source category.
+    pub fn without_retry(mut self) -> Self {
+        self.retry_suppressed = true;
+        self
+    }
+
     pub fn retry_delay(&self) -> Option<Duration> {
         self.retry_delay
     }
@@ -424,6 +448,8 @@ impl CodexErr {
         match &self.details {
             CodexErrorDetails::ContextWindowExceeded => CodexErrorInfo::ContextWindowExceeded,
             CodexErrorDetails::SessionBudgetExceeded => CodexErrorInfo::SessionBudgetExceeded,
+            CodexErrorDetails::ExecutionLeaseExpired => CodexErrorInfo::ExecutionLeaseExpired,
+            CodexErrorDetails::ModelAuthorityExpired => CodexErrorInfo::ModelAuthorityExpired,
             CodexErrorDetails::UsageLimitReached(_)
             | CodexErrorDetails::QuotaExceeded
             | CodexErrorDetails::UsageNotIncluded => CodexErrorInfo::UsageLimitExceeded,
@@ -446,7 +472,23 @@ impl CodexErr {
             CodexErrorDetails::RefreshTokenFailed(_) => CodexErrorInfo::Unauthorized,
             CodexErrorDetails::SessionConfiguredNotFirstEvent
             | CodexErrorDetails::InternalServerError
-            | CodexErrorDetails::InternalAgentDied => CodexErrorInfo::InternalServerError,
+            | CodexErrorDetails::InternalAgentDied
+            | CodexErrorDetails::Fatal(_) => CodexErrorInfo::InternalServerError,
+            CodexErrorDetails::UnexpectedStatus(details)
+                if matches!(details.status.as_u16(), 401 | 403) =>
+            {
+                CodexErrorInfo::Unauthorized
+            }
+            CodexErrorDetails::UnexpectedStatus(_) => CodexErrorInfo::HttpConnectionFailed {
+                http_status_code: self.http_status_code_value(),
+            },
+            CodexErrorDetails::RequestTimeout => CodexErrorInfo::ResponseStreamConnectionFailed {
+                http_status_code: None,
+            },
+            CodexErrorDetails::Stream(_) => CodexErrorInfo::ResponseStreamDisconnected {
+                http_status_code: None,
+            },
+            CodexErrorDetails::InvalidRequest(_) => CodexErrorInfo::BadRequest,
             CodexErrorDetails::UnsupportedOperation(_)
             | CodexErrorDetails::ThreadNotFound(_)
             | CodexErrorDetails::AgentLimitReached { .. } => CodexErrorInfo::BadRequest,
@@ -852,3 +894,45 @@ pub fn get_error_message_ui(e: &CodexErr) -> String {
 #[cfg(test)]
 #[path = "error_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+mod host_terminal_retry_tests {
+    use super::*;
+
+    #[test]
+    fn suppressing_host_retries_preserves_timeout_and_stream_categories() {
+        for error in [
+            CodexErr::RequestTimeout,
+            CodexErr::Stream("host stream failed".to_owned()),
+        ] {
+            assert!(error.is_retryable());
+            let kind = CodexErrKind::from(&error);
+            let info = error.to_codex_protocol_error();
+            let terminal = error
+                .without_retry()
+                .with_retry_delay(Duration::from_millis(750));
+            assert!(!terminal.is_retryable());
+            assert_eq!(CodexErrKind::from(&terminal), kind);
+            assert_eq!(terminal.to_codex_protocol_error(), info);
+            assert_eq!(terminal.retry_delay(), Some(Duration::from_millis(750)));
+        }
+    }
+
+    #[test]
+    fn fatal_tool_runtime_is_infrastructure_and_invalid_request_is_bad_request() {
+        assert_eq!(
+            CodexErr::Fatal("tool runtime failed".to_owned()).to_codex_protocol_error(),
+            CodexErrorInfo::InternalServerError
+        );
+        assert_eq!(
+            CodexErr::InvalidRequest("invalid request".to_owned()).to_codex_protocol_error(),
+            CodexErrorInfo::BadRequest
+        );
+        assert_eq!(
+            CodexErr::RequestTimeout.to_codex_protocol_error(),
+            CodexErrorInfo::ResponseStreamConnectionFailed {
+                http_status_code: None
+            }
+        );
+    }
+}

@@ -354,6 +354,20 @@ impl ChangeBatchStore {
             )
             .map_err(|_| unavailable())?;
         connection.execute_batch(SCHEMA).map_err(|_| corrupt())?;
+        let has_cancelled_at = connection
+            .prepare("PRAGMA table_info(change_batch_observation)")
+            .map_err(|_| unavailable())?
+            .query_map([], |row| row.get::<_, String>(1))
+            .map_err(|_| unavailable())?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|_| unavailable())?
+            .iter()
+            .any(|column| column == "cancelled_at");
+        if !has_cancelled_at {
+            connection
+                .execute_batch("ALTER TABLE change_batch_observation ADD COLUMN cancelled_at TEXT")
+                .map_err(|_| unavailable())?;
+        }
         Ok(Self {
             connection,
             database,
@@ -1572,35 +1586,47 @@ impl ChangeBatchStore {
         Ok(matching.pop())
     }
 
-    /// Marks an unfinished Observer exchange terminal before Job cancellation.
+    /// Retains the first cancellation time before retiring an Observer exchange.
     ///
     /// # Errors
     ///
-    /// Rejects an unknown or already-terminal exchange.
+    /// Rejects an unknown exchange or an invalid cancellation time.
     pub fn cancel_observation_model(
         &mut self,
         batch_id: &ChangeBatchId,
         now: &Instant,
-    ) -> Result<StoreRetention, ChangeBatchStoreError> {
-        if now.0.is_empty() {
+    ) -> Result<Instant, ChangeBatchStoreError> {
+        if !winwincode_execution_port::execution_identity::canonical_instant(now) {
             return Err(invalid("ChangeBatch Observer cancellation is invalid"));
         }
-        let changed = self
-            .connection
+        let transaction = self.connection.transaction().map_err(|_| unavailable())?;
+        let changed = transaction
             .execute(
                 "UPDATE change_batch_observation
-                 SET terminal_status = 'provider_error', updated_at = ?2
-                 WHERE batch_id = ?1 AND terminal_status IS NULL",
+                 SET terminal_status = COALESCE(terminal_status, 'provider_error'),
+                     updated_at = CASE WHEN terminal_status IS NULL THEN ?2 ELSE updated_at END,
+                     cancelled_at = COALESCE(cancelled_at, ?2)
+                 WHERE batch_id = ?1",
                 params![batch_id.0, now.0],
             )
             .map_err(|_| unavailable())?;
-        if changed == 1 {
-            Ok(StoreRetention::Inserted)
-        } else if changed == 0 {
-            Ok(StoreRetention::Replay)
-        } else {
-            Err(conflict())
+        if changed != 1 {
+            return Err(conflict());
         }
+        let cancelled_at = Instant(
+            transaction
+                .query_row(
+                    "SELECT cancelled_at FROM change_batch_observation WHERE batch_id = ?1",
+                    params![batch_id.0],
+                    |row| row.get::<_, String>(0),
+                )
+                .map_err(|_| unavailable())?,
+        );
+        if !winwincode_execution_port::execution_identity::canonical_instant(&cancelled_at) {
+            return Err(corrupt());
+        }
+        transaction.commit().map_err(|_| unavailable())?;
+        Ok(cancelled_at)
     }
 
     /// Retains one contiguous, content-bound Observer model frame.
@@ -2201,6 +2227,7 @@ CREATE TABLE IF NOT EXISTS change_batch_observation (
     response_json BLOB NOT NULL DEFAULT x'',
     model_usage_json BLOB,
     terminal_status TEXT,
+    cancelled_at TEXT,
     receipt_json BLOB,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
@@ -3437,6 +3464,49 @@ mod tests {
             Some(&revision(RESULT))
         );
         assert_eq!(binding.checkpoint_delta_digest.as_ref(), Some(&digest('3')));
+    }
+
+    #[test]
+    fn observer_cancellation_reopens_legacy_storage_with_its_first_time_and_original_open() {
+        let (directory, mut store) = open_store();
+        let identity = claim(&mut store);
+        let exchange = open_observation_exchange(&mut store, &identity);
+        let original = store.observation_model_record(&exchange).unwrap().unwrap();
+        store
+            .connection
+            .execute_batch("ALTER TABLE change_batch_observation DROP COLUMN cancelled_at")
+            .unwrap();
+        drop(store);
+        let mut store = ChangeBatchStore::open(directory.path()).unwrap();
+        assert_eq!(
+            store.observation_model_record(&exchange).unwrap().unwrap(),
+            original
+        );
+        let cancelled_at = instant();
+        assert_eq!(
+            store
+                .cancel_observation_model(&identity.batch_id, &cancelled_at)
+                .unwrap(),
+            cancelled_at
+        );
+        drop(store);
+        let mut store = ChangeBatchStore::open(directory.path()).unwrap();
+        let later = Instant("2027-01-15T08:01:00.000Z".into());
+        assert_eq!(
+            store
+                .cancel_observation_model(&identity.batch_id, &later)
+                .unwrap(),
+            cancelled_at
+        );
+        let cancelled = store.observation_model_record(&exchange).unwrap().unwrap();
+        assert_eq!(cancelled.model_open, original.model_open);
+        assert_eq!(cancelled.request, original.request);
+        assert_eq!(cancelled.terminal_status.as_deref(), Some("provider_error"));
+        assert!(
+            store
+                .cancel_observation_model(&ChangeBatchId("missing".into()), &later)
+                .is_err()
+        );
     }
 
     #[test]

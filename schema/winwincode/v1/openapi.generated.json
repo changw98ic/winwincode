@@ -3169,6 +3169,13 @@
           "id": {
             "$ref": "#/components/schemas/ChatMessageId"
           },
+          "outputPreparation": {
+            "description": "The exact Chat execution has frozen its project output and is waiting for durable output delivery. The message terminal state is accepted separately.",
+            "enum": [
+              "preparing"
+            ],
+            "type": "string"
+          },
           "productSessionId": {
             "$ref": "#/components/schemas/ProductSessionId"
           },
@@ -15251,7 +15258,11 @@
           "EXECUTION_FAILED",
           "INFRASTRUCTURE_ERROR",
           "CANDIDATE_UNCHANGED",
-          "CANDIDATE_PREPARATION_FAILED"
+          "CANDIDATE_PREPARATION_FAILED",
+          "DEVICE_PROVIDER_STATE_INVALID",
+          "DEVICE_PROVIDER_STORAGE_UNAVAILABLE",
+          "DEVICE_PROVIDER_FILESYSTEM_UNAVAILABLE",
+          "DEVICE_PROVIDER_ENCODING_INVALID"
         ],
         "type": "string"
       },
@@ -17020,6 +17031,99 @@
         "pattern": "^mdl_[0-9A-HJKMNP-TV-Z]{26}$",
         "type": "string"
       },
+      "ModelFailureAcceptance": {
+        "enum": [
+          "not_sent",
+          "unknown",
+          "response_received"
+        ],
+        "type": "string"
+      },
+      "ModelFailureCause": {
+        "enum": [
+          "connection_unavailable",
+          "transport_interrupted",
+          "timeout",
+          "rate_limited",
+          "server_transient",
+          "authentication",
+          "authorization",
+          "request_invalid",
+          "protocol_invalid",
+          "integrity_invalid",
+          "tls_invalid",
+          "stream_incomplete",
+          "empty_response",
+          "cancelled",
+          "authority_expired",
+          "storage_unavailable"
+        ],
+        "type": "string"
+      },
+      "ModelFailureFacts": {
+        "additionalProperties": false,
+        "description": "Bounded source facts for a model-attempt failure. Missing acceptance stays unknown. Full private receipts remain in the original attempt ledger.",
+        "properties": {
+          "acceptance": {
+            "$ref": "#/components/schemas/ModelFailureAcceptance"
+          },
+          "attemptId": {
+            "maxLength": 200,
+            "minLength": 1,
+            "pattern": "^[a-zA-Z0-9_:-]+$",
+            "type": "string"
+          },
+          "cause": {
+            "$ref": "#/components/schemas/ModelFailureCause"
+          },
+          "networkDiagnosticCode": {
+            "$ref": "#/components/schemas/ModelNetworkDiagnosticCode"
+          },
+          "parserDiagnostic": {
+            "$ref": "#/components/schemas/ProviderModelFailureDiagnostic"
+          },
+          "phase": {
+            "$ref": "#/components/schemas/ModelFailurePhase"
+          },
+          "scope": {
+            "enum": [
+              "model_attempt"
+            ],
+            "type": "string"
+          },
+          "sourceCode": {
+            "$ref": "#/components/schemas/ExecutionPortErrorCode"
+          },
+          "stopReason": {
+            "$ref": "#/components/schemas/ModelFailureStopReason"
+          }
+        },
+        "required": [
+          "sourceCode",
+          "scope"
+        ],
+        "type": "object"
+      },
+      "ModelFailurePhase": {
+        "enum": [
+          "connect",
+          "response_headers",
+          "response_body",
+          "stream",
+          "decode",
+          "persist"
+        ],
+        "type": "string"
+      },
+      "ModelFailureStopReason": {
+        "enum": [
+          "permanent_failure",
+          "recovery_disabled",
+          "reconcile_required",
+          "retry_budget_exhausted"
+        ],
+        "type": "string"
+      },
       "ModelGatewayRoute": {
         "additionalProperties": false,
         "properties": {
@@ -17039,6 +17143,41 @@
           "capability"
         ],
         "type": "object"
+      },
+      "ModelNetworkDiagnosticCode": {
+        "enum": [
+          "http_status",
+          "dns",
+          "connect",
+          "io",
+          "timeout",
+          "tls",
+          "tls_certificate",
+          "http_protocol",
+          "request_uri",
+          "request_headers",
+          "proxy",
+          "redirect",
+          "response_headers_too_large",
+          "body_too_large",
+          "content_type",
+          "transport_other",
+          "json_syntax",
+          "json_schema",
+          "response_invariant",
+          "schema_version",
+          "sse_framing",
+          "sse_event",
+          "stream_conversion",
+          "stream_incomplete",
+          "empty_response",
+          "identity_conflict",
+          "credential_blocked",
+          "storage",
+          "configuration",
+          "authority_ended"
+        ],
+        "type": "string"
       },
       "ModelOpenMessage": {
         "additionalProperties": false,
@@ -20830,6 +20969,31 @@
           "workspaceId",
           "projectId"
         ],
+        "type": "object"
+      },
+      "ProviderModelFailureDiagnostic": {
+        "additionalProperties": false,
+        "properties": {
+          "eventType": {
+            "maxLength": 256,
+            "minLength": 1,
+            "pattern": "^[^\\u0000-\\u001f\\u007f]+$",
+            "type": "string"
+          },
+          "fieldPath": {
+            "maxLength": 256,
+            "minLength": 1,
+            "pattern": "^[^\\u0000-\\u001f\\u007f]+$",
+            "type": "string"
+          },
+          "stage": {
+            "maxLength": 256,
+            "minLength": 1,
+            "pattern": "^[^\\u0000-\\u001f\\u007f]+$",
+            "type": "string"
+          }
+        },
+        "required": [],
         "type": "object"
       },
       "PublicationCancelCommand": {
@@ -29238,7 +29402,7 @@
     "https://schemas.winwincode.dev/winwincode/v1/domain.schema.json",
     "https://schemas.winwincode.dev/winwincode/v1/execution-port.schema.json"
   ],
-  "x-source-digest": "sha256:0c2454a5c027fb0dbd7f2bdef66708ad77b00203f4d6386c0d29fa763d20776b",
+  "x-source-digest": "sha256:1e06b28cb674b7876feb747b3645d3ea2dc28b9b16f4df046610d508317db636",
   "x-winwincode-client-metadata": {
     "http": {
       "authentication": {

@@ -573,6 +573,92 @@ fn runtime_ack_rejects_an_inactive_lease_before_reading_the_store() {
 }
 
 #[test]
+fn retained_runtime_ack_proves_only_an_already_accepted_exact_original() {
+    let (mut store, authority, first, _second, _third, _request) = seeded_runtime();
+    let responder = RuntimeReplayResponder::new();
+    let original = runtime_ack(&first, LeaseWriteStatus::Accepted, 1, None);
+    responder
+        .acknowledge(&mut store, &authority, &original)
+        .unwrap();
+    let writes = store.writes;
+    let inactive = WorkerAuthority {
+        valid: false,
+        error: AuthorityError::Stale,
+    };
+    assert!(
+        responder
+            .acknowledge(&mut store, &inactive, &original)
+            .is_err()
+    );
+    let receipt = responder
+        .retained_acknowledgement::<_, WorkerAuthority>(&mut store, &original)
+        .unwrap()
+        .expect("historical exact accepted receipt");
+    assert_eq!(receipt.ack_sequence, ExecutionAckSequence(1));
+    assert_eq!(receipt.highest_sequence, ExecutionAckSequence(3));
+    assert!(receipt.replay.is_none());
+    assert_eq!(
+        store.writes, writes,
+        "historical proof performs no mutation"
+    );
+
+    let mut renewed = original.clone();
+    renewed.lease.expires_at.0 = "2026-08-24T13:00:00.000Z".into();
+    assert_eq!(
+        runtime_ack_stream_key(&original),
+        runtime_ack_stream_key(&renewed)
+    );
+    assert!(
+        responder
+            .retained_acknowledgement::<_, WorkerAuthority>(&mut store, &renewed)
+            .is_err()
+    );
+    let mut malformed = original.clone();
+    malformed.sent_at.0 = "2026-08-24T11:59:59.000Z".into();
+    assert!(
+        responder
+            .retained_acknowledgement::<_, WorkerAuthority>(&mut store, &malformed)
+            .is_err()
+    );
+    malformed = original.clone();
+    malformed.message_id.0 = "xmsg_invalid".into();
+    assert!(
+        responder
+            .retained_acknowledgement::<_, WorkerAuthority>(&mut store, &malformed)
+            .is_err()
+    );
+    for mut unrelated in [
+        runtime_ack(&first, LeaseWriteStatus::Accepted, 0, None),
+        runtime_ack(&first, LeaseWriteStatus::Accepted, 2, None),
+        runtime_ack(&first, LeaseWriteStatus::Accepted, 99, None),
+        runtime_ack(&first, LeaseWriteStatus::Gap, 1, Some(2)),
+    ] {
+        assert!(
+            responder
+                .retained_acknowledgement::<_, WorkerAuthority>(&mut store, &unrelated)
+                .unwrap()
+                .is_none()
+        );
+        unrelated.session_identity.product_session_id.0 = "ses_00000000000000000000000999".into();
+        assert!(
+            responder
+                .retained_acknowledgement::<_, WorkerAuthority>(&mut store, &unrelated)
+                .unwrap()
+                .is_none()
+        );
+    }
+    store.snapshots.values_mut().next().unwrap().events.clear();
+    assert!(
+        responder
+            .retained_acknowledgement::<_, WorkerAuthority>(&mut store, &original)
+            .unwrap()
+            .is_none(),
+        "watermark without original identity cannot prove receipt"
+    );
+    assert_eq!(store.writes, writes);
+}
+
+#[test]
 fn worker_retain_handles_duplicate_changed_body_and_gap_without_advancing_highest() {
     let (first, second, third, _request) = runtime_messages();
     let authority = WorkerAuthority {

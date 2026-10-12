@@ -93,7 +93,7 @@
   "currentCanonicalSources": [
     {
       "path": "schema/winwincode/v1/domain.schema.json",
-      "sha256": "132acd0624f11b3741ac6ff84f32b9838107ecaa0fe16d765f1a018c74c3ae57",
+      "sha256": "78728221b853767bc37ae4b54c4a4ada55499e1a028485e387ae4b54fa3fde20",
       "facts": [
         "WorkContract",
         "WorkItem",
@@ -110,7 +110,7 @@
     },
     {
       "path": "schema/winwincode/v1/control-plane-http.schema.json",
-      "sha256": "c71e1e3d3a4aafb6136b7eb4e5a0ab94d789c40ea7049ebeb75dc7a001fca86b",
+      "sha256": "9e0665870ec30a4dd5bffa23366de45615a3388416c89eb084a1fcdfc1d7cf5e",
       "facts": [
         "HTTP command envelope",
         "WorkItem and WorkRun commands, queries, and projections",
@@ -120,7 +120,7 @@
     },
     {
       "path": "schema/winwincode/v1/execution-port.schema.json",
-      "sha256": "8500171b196e64783be8e72607561086e669432446f3062d323e737a373df118",
+      "sha256": "9861c0e1e54bff0db54dd3cca17acf9ed85c4b50f6799d4a10adf95a7795397c",
       "facts": [
         "Worker execution transport and fenced identity",
         "Snapshot freeze request, freeze receipt and verification dispatch"
@@ -162,7 +162,7 @@
     },
     {
       "path": "crates/winwincode-storage/src/execution_registry.rs",
-      "sha256": "be7a7c2c9dd146be310016fc2955c3b8318d6f0ca824180d004cbd2124377051",
+      "sha256": "69c03f6c44490920e535264ac60743a0cee9f80ec6e1b64735cbaacc7ace0e3c",
       "facts": [
         "attempt replacement",
         "lease/fencing/worker-instance authority",

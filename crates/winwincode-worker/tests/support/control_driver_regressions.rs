@@ -223,6 +223,101 @@ async fn renewal_from_send_response_precedes_next_send_and_core_poll() {
 }
 
 #[tokio::test]
+async fn required_action_storage_retries_the_original_control_without_confirming_or_failing_the_job()
+ {
+    let (mut worker, port, codex) = started_worker().await;
+    let active = worker.active_jobs()[0].clone();
+    let receipt = execution_port_fixture("action.enforcement_receipt");
+    let message_id = ExecutionMessageId(
+        serde_json::to_value(&receipt).unwrap()["messageId"]
+            .as_str()
+            .unwrap()
+            .into(),
+    );
+    codex
+        .state
+        .lock()
+        .unwrap()
+        .failures
+        .insert(FailurePoint::ActionReceiptStorage);
+    let error = worker.accept_control(&receipt, now()).await.unwrap_err();
+    assert_eq!(error.code, WorkerErrorCode::CodexDurableState);
+    for _ in 0..3 {
+        port.controls
+            .queued
+            .borrow_mut()
+            .push_back((message_id.clone(), receipt.clone()));
+        worker
+            .drain_controls(&port.controls, || Ok(now()))
+            .await
+            .unwrap();
+    }
+    assert_eq!(
+        port.controls.trace.borrow().as_slice(),
+        vec![format!("retried:{}", message_id.0); 3]
+    );
+    assert_eq!(worker.active_jobs(), vec![&active]);
+    assert!(observed_outcomes(&port.recorded.messages).is_empty());
+    codex
+        .state
+        .lock()
+        .unwrap()
+        .failures
+        .remove(&FailurePoint::ActionReceiptStorage);
+    port.controls
+        .queued
+        .borrow_mut()
+        .push_back((message_id.clone(), receipt.clone()));
+    worker
+        .drain_controls(&port.controls, || Ok(now()))
+        .await
+        .unwrap();
+    assert_eq!(
+        port.controls.trace.borrow().last(),
+        Some(&format!("confirmed:{}", message_id.0))
+    );
+    assert_eq!(worker.active_jobs(), vec![&active]);
+    assert!(observed_outcomes(&port.recorded.messages).is_empty());
+}
+
+#[tokio::test]
+async fn rejected_action_control_is_permanent_and_never_confirmed_as_storage_recovery() {
+    let (mut worker, port, codex) = started_worker().await;
+    codex
+        .state
+        .lock()
+        .unwrap()
+        .failures
+        .insert(FailurePoint::ActionReceiptRejected);
+    let receipt = execution_port_fixture("action.enforcement_receipt");
+    let message_id = ExecutionMessageId(
+        serde_json::to_value(&receipt).unwrap()["messageId"]
+            .as_str()
+            .unwrap()
+            .into(),
+    );
+    port.controls
+        .queued
+        .borrow_mut()
+        .push_back((message_id.clone(), receipt));
+    let error = worker
+        .drain_controls(&port.controls, || Ok(now()))
+        .await
+        .unwrap_err();
+    assert_eq!(
+        error
+            .downcast_ref::<winwincode_worker::WorkerError>()
+            .unwrap()
+            .code,
+        WorkerErrorCode::UnexpectedMessage
+    );
+    assert_eq!(
+        port.controls.trace.borrow().as_slice(),
+        [format!("retried:{}", message_id.0)]
+    );
+}
+
+#[tokio::test]
 async fn cancellation_from_send_response_interrupts_before_core_poll() {
     let (mut worker, port, codex) = started_worker().await;
     let active = worker.active_jobs()[0].clone();
@@ -238,8 +333,11 @@ async fn cancellation_from_send_response_interrupts_before_core_poll() {
     assert!(!calls.iter().any(|call| call.starts_with("poll:")));
     codex.queue_poll(
         &active.codex_thread_id,
-        Ok(CodexPoll::Cancelled(
-            secret_safe_runtime_summary("cancelled fixture").unwrap(),
+        Ok(CodexPoll::terminal(
+            winwincode_codex::CodexExecutionOutcome::Cancelled(
+                secret_safe_runtime_summary("cancelled fixture").unwrap(),
+            ),
+            Vec::new(),
         )),
     );
     assert!(drive(&mut worker, &port).await.is_none());
@@ -440,11 +538,14 @@ async fn candidate_git_failure_retains_stage_and_cause_without_private_path() {
     std::fs::write(&path, "SYNTHETIC_PRIVATE_LOCK_CONTENT\n").unwrap();
     codex.queue_poll(
         &active.codex_thread_id,
-        Ok(CodexPoll::Completed(CodexTurnCompletion {
-            summary: secret_safe_runtime_summary("candidate fixture completed").unwrap(),
-            artifacts: Vec::new(),
-            usage: Some(measured_completion_usage()),
-        })),
+        Ok(CodexPoll::terminal(
+            winwincode_codex::CodexExecutionOutcome::Completed(CodexTurnCompletion {
+                summary: secret_safe_runtime_summary("candidate fixture completed").unwrap(),
+                artifacts: Vec::new(),
+                usage: Some(measured_completion_usage()),
+            }),
+            Vec::new(),
+        )),
     );
     worker.poll_codex_boxed().await.unwrap();
     let outcomes = observed_outcomes(&messages);

@@ -41,7 +41,7 @@ impl CodexLoginBinding {
         let home = std::env::var_os("CODEX_HOME")
             .map(PathBuf::from)
             .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".codex")))
-            .ok_or(DeviceProviderError)?;
+            .ok_or(DeviceProviderError::StateInvalid)?;
         Self::at(&home)
     }
 
@@ -57,10 +57,10 @@ impl CodexLoginBinding {
     pub(crate) fn resolve(&self) -> Result<(ResolvedSecret, String), DeviceProviderError> {
         let tokens = read_tokens(&self.codex_home)?;
         if tokens.account_id != self.account_id {
-            return Err(DeviceProviderError);
+            return Err(DeviceProviderError::StateInvalid);
         }
         let secret = ResolvedSecret::from_bytes(tokens.access_token.into_bytes())
-            .map_err(|_| DeviceProviderError)?;
+            .map_err(|_| DeviceProviderError::StateInvalid)?;
         Ok((secret, self.account_id.clone()))
     }
 }
@@ -77,13 +77,13 @@ fn read_tokens(home: &Path) -> Result<Tokens, DeviceProviderError> {
         || after.mode() & 0o077 != 0
         || after.len() > 65_536
     {
-        return Err(DeviceProviderError);
+        return Err(DeviceProviderError::StateInvalid);
     }
     let mut bytes = Vec::new();
     file.take(65_537).read_to_end(&mut bytes)?;
     if bytes.len() > 65_536 {
         bytes.fill(0);
-        return Err(DeviceProviderError);
+        return Err(DeviceProviderError::StateInvalid);
     }
     let parsed = serde_json::from_slice::<AuthFile>(&bytes);
     bytes.fill(0);
@@ -94,9 +94,9 @@ fn read_tokens(home: &Path) -> Result<Tokens, DeviceProviderError> {
             .as_deref()
             .is_some_and(|mode| mode != "chatgpt")
     {
-        return Err(DeviceProviderError);
+        return Err(DeviceProviderError::StateInvalid);
     }
-    let tokens = auth.tokens.ok_or(DeviceProviderError)?;
+    let tokens = auth.tokens.ok_or(DeviceProviderError::StateInvalid)?;
     validate_tokens(&tokens)?;
     Ok(tokens)
 }
@@ -107,27 +107,27 @@ fn validate_tokens(tokens: &Tokens) -> Result<(), DeviceProviderError> {
         || tokens.account_id.chars().any(char::is_control)
         || tokens.access_token.len() > 16_384
     {
-        return Err(DeviceProviderError);
+        return Err(DeviceProviderError::StateInvalid);
     }
     let mut parts = tokens.access_token.split('.');
-    let _header = parts.next().ok_or(DeviceProviderError)?;
-    let claims = parts.next().ok_or(DeviceProviderError)?;
+    let _header = parts.next().ok_or(DeviceProviderError::StateInvalid)?;
+    let claims = parts.next().ok_or(DeviceProviderError::StateInvalid)?;
     if parts.next().is_none() || parts.next().is_some() {
-        return Err(DeviceProviderError);
+        return Err(DeviceProviderError::StateInvalid);
     }
     let mut bytes = URL_SAFE_NO_PAD
         .decode(claims)
-        .map_err(|_| DeviceProviderError)?;
+        .map_err(|_| DeviceProviderError::EncodingInvalid)?;
     let parsed = serde_json::from_slice::<serde_json::Value>(&bytes);
     bytes.fill(0);
     let claims = parsed?;
     let expires = claims
         .get("exp")
         .and_then(serde_json::Value::as_u64)
-        .ok_or(DeviceProviderError)?;
+        .ok_or(DeviceProviderError::StateInvalid)?;
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .map_err(|_| DeviceProviderError)?
+        .map_err(|_| DeviceProviderError::StateInvalid)?
         .as_secs();
     if expires <= now.saturating_add(60)
         || claims
@@ -135,7 +135,7 @@ fn validate_tokens(tokens: &Tokens) -> Result<(), DeviceProviderError> {
             .and_then(serde_json::Value::as_str)
             != Some(tokens.account_id.as_str())
     {
-        return Err(DeviceProviderError);
+        return Err(DeviceProviderError::StateInvalid);
     }
     Ok(())
 }

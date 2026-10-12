@@ -40,14 +40,12 @@
 
 use std::fmt;
 
-use winwincode_domain::{ExecutionJobId, Instant, RequestId, UserId, WorkRunId};
-use winwincode_execution_port::generated::{ExecutionJob, ExecutionWorkspaceWriteMode};
+use winwincode_domain::{Instant, RequestId, UserId, WorkRunId};
+use winwincode_execution_port::generated::ExecutionJob;
 use winwincode_storage::{
     DeviceExecutionBindingIssuance, DeviceExecutionBindingRecord, DeviceExecutionBindingState,
-    DeviceExecutionFactsAttachment, DeviceExecutionReservationFacts, ExecutionAdmissionBoundary,
-    ExecutionAdmissionErrorCode, ExecutionJobRecord, ExecutionQueueScope,
-    ExecutionRepositoryAccess, ExecutionReservationRequest, ExecutionReservationState,
-    ProductStateStorage, SqliteStorage, WorkerPoolId,
+    DeviceExecutionFactsAttachment, DeviceExecutionReservationFacts, ExecutionJobRecord,
+    ExecutionReservationState, ProductStateStorage, SqliteStorage, WorkerPoolId,
 };
 
 use crate::client_launch_grant::{
@@ -56,6 +54,10 @@ use crate::client_launch_grant::{
 use crate::device_execution_binding::DeviceExecutionBindingService;
 use crate::device_session_gate::{
     DeviceSessionGateDenial, DeviceSessionGateInput, authorize_device_session,
+};
+use crate::execution_admission::{
+    execution_admission_boundaries, execution_admission_deferred, execution_admission_job,
+    execution_reservation_request,
 };
 use crate::quick_device_execution::derived_id;
 
@@ -206,7 +208,8 @@ pub fn dispatch_work_run_to_device_worker(
         // nothing is routable.
         return Ok(None);
     };
-    let job = decode_execution_job(&record)?;
+    let (job, _) = execution_admission_job(&record)
+        .map_err(|error| StrongflowDeviceDispatchError::corrupt(error.to_string()))?;
     let role = job.execution_profile.as_str();
     if !STRONGFLOW_DEVICE_ROLES.contains(&role) {
         // Not a StrongFlow role execution: keep the local path unchanged.
@@ -385,7 +388,8 @@ fn ensure_work_run_facts(
     // The dispatch reservation runs under the anchor holder's admission
     // identity, so the durable device facts join the reservation user to the
     // grant holder exactly.
-    let job = decode_execution_job(record)?;
+    let (job, _) = execution_admission_job(record)
+        .map_err(|error| StrongflowDeviceDispatchError::corrupt(error.to_string()))?;
     ensure_device_admission_reservation(storage, record, &job, anchor)?;
     let attachment = DeviceExecutionFactsAttachment::try_new_with_role(
         derived_id("req_", FACTS_REQUEST_NAMESPACE, &record.job_id.0),
@@ -438,13 +442,24 @@ fn ensure_device_admission_reservation(
     job: &ExecutionJob,
     anchor: &WorkerLaunchGrantRecord,
 ) -> Result<(), StrongflowDeviceDispatchError> {
-    let runtime_limit_millis = job_runtime_limit_millis(job)?;
+    let request = execution_reservation_request(
+        record,
+        job,
+        UserId(anchor.holder_user_id.clone()),
+        WorkerPoolId(STRONGFLOW_DEVICE_WORKER_POOL_ID.to_owned()),
+        RequestId(derived_id(
+            "req_",
+            RESERVATION_REQUEST_NAMESPACE,
+            &record.job_id.0,
+        )),
+    )
+    .map_err(|error| StrongflowDeviceDispatchError::corrupt(error.to_string()))?;
     let mut admission = storage
         .execution_admission()
         .map_err(|_| StrongflowDeviceDispatchError::storage())?;
-    for boundary in admission_boundaries(&record.scope) {
+    for boundary in execution_admission_boundaries(&record.scope, &request.worker_pool_id) {
         admission
-            .configure_runtime_policy(boundary, runtime_limit_millis.is_some())
+            .configure_runtime_policy(boundary, request.runtime_limit_millis.is_some())
             .map_err(|error| admission_error(&error))?;
     }
     if let Some(existing) = admission
@@ -461,113 +476,10 @@ fn ensure_device_admission_reservation(
             }
         };
     }
-    let request = ExecutionReservationRequest {
-        scope: record.scope.clone(),
-        user_id: UserId(anchor.holder_user_id.clone()),
-        worker_pool_id: WorkerPoolId(STRONGFLOW_DEVICE_WORKER_POOL_ID.to_owned()),
-        job_id: record.job_id.clone(),
-        request_id: RequestId(derived_id(
-            "req_",
-            RESERVATION_REQUEST_NAMESPACE,
-            &record.job_id.0,
-        )),
-        repository_access: repository_access(job, &record.job_id),
-        reserved_tokens: None,
-        reserved_cost_microunits: None,
-        runtime_limit_millis,
-        submitted_at: record.submitted_at.clone(),
-    };
     admission
         .reserve(&request)
         .map(|_| ())
         .map_err(|error| admission_error(&error))
-}
-
-fn decode_execution_job(
-    record: &ExecutionJobRecord,
-) -> Result<ExecutionJob, StrongflowDeviceDispatchError> {
-    let job: ExecutionJob = serde_json::from_slice(&record.dispatch_payload).map_err(|_| {
-        StrongflowDeviceDispatchError::corrupt("the queued dispatch payload is not an ExecutionJob")
-    })?;
-    if job.job_id != record.job_id
-        || job.payload_digest != record.payload_digest
-        || job.attempt != i64::try_from(record.attempt).unwrap_or(-1)
-    {
-        return Err(StrongflowDeviceDispatchError::corrupt(
-            "the queued dispatch payload does not match its durable job",
-        ));
-    }
-    Ok(job)
-}
-
-fn job_runtime_limit_millis(
-    job: &ExecutionJob,
-) -> Result<Option<u64>, StrongflowDeviceDispatchError> {
-    if job.limits.deadline_at.is_some() != job.limits.max_runtime_seconds.is_some() {
-        return Err(StrongflowDeviceDispatchError::corrupt(
-            "the queued job runtime policy is inconsistent",
-        ));
-    }
-    job.limits
-        .max_runtime_seconds
-        .map(|seconds| {
-            u64::try_from(seconds)
-                .ok()
-                .filter(|seconds| (1..=604_800).contains(seconds))
-                .and_then(|seconds| seconds.checked_mul(1_000))
-                .ok_or_else(|| {
-                    StrongflowDeviceDispatchError::corrupt(
-                        "the queued job execution deadline is invalid",
-                    )
-                })
-        })
-        .transpose()
-}
-
-fn repository_access(job: &ExecutionJob, job_id: &ExecutionJobId) -> ExecutionRepositoryAccess {
-    match job.workspace.write_mode {
-        // A read-only role (planner, reviewer, verifier) stays read-only on
-        // the device; only writer roles receive an isolated candidate
-        // worktree, so Reviewer/Verifier can never write the Candidate.
-        ExecutionWorkspaceWriteMode::ReadOnly => ExecutionRepositoryAccess::ReadOnly,
-        ExecutionWorkspaceWriteMode::Candidate => ExecutionRepositoryAccess::IsolatedWrite {
-            worktree_key: format!("job-{}", job_id.0),
-        },
-    }
-}
-
-fn admission_boundaries(scope: &ExecutionQueueScope) -> Vec<ExecutionAdmissionBoundary> {
-    let pool = WorkerPoolId(STRONGFLOW_DEVICE_WORKER_POOL_ID.to_owned());
-    let mut boundaries = vec![
-        ExecutionAdmissionBoundary::Organization {
-            organization_id: scope.organization_id.clone(),
-        },
-        ExecutionAdmissionBoundary::Project {
-            organization_id: scope.organization_id.clone(),
-            project_id: scope.project_id.clone(),
-        },
-        ExecutionAdmissionBoundary::Repository {
-            organization_id: scope.organization_id.clone(),
-            project_id: scope.project_id.clone(),
-            repository_id: scope.repository_id.clone(),
-        },
-        ExecutionAdmissionBoundary::ProductSession {
-            organization_id: scope.organization_id.clone(),
-            project_id: scope.project_id.clone(),
-            product_session_id: scope.product_session_id.clone(),
-        },
-        ExecutionAdmissionBoundary::WorkerPool {
-            organization_id: scope.organization_id.clone(),
-            worker_pool_id: pool,
-        },
-    ];
-    if let Some(delivery_id) = &scope.delivery_id {
-        boundaries.push(ExecutionAdmissionBoundary::Delivery {
-            organization_id: scope.organization_id.clone(),
-            delivery_id: delivery_id.clone(),
-        });
-    }
-    boundaries
 }
 
 /// Ordinary admission backpressure defers the dispatch instead of failing
@@ -576,15 +488,7 @@ fn admission_boundaries(scope: &ExecutionQueueScope) -> Vec<ExecutionAdmissionBo
 fn admission_error(
     error: &winwincode_storage::ExecutionAdmissionError,
 ) -> StrongflowDeviceDispatchError {
-    if matches!(
-        error.code(),
-        ExecutionAdmissionErrorCode::QueueCapacityExhausted
-            | ExecutionAdmissionErrorCode::ConcurrencyExhausted
-            | ExecutionAdmissionErrorCode::TokenBudgetExhausted
-            | ExecutionAdmissionErrorCode::CostBudgetExhausted
-            | ExecutionAdmissionErrorCode::RepositoryWriteConflict
-            | ExecutionAdmissionErrorCode::RevisionConflict
-    ) {
+    if execution_admission_deferred(error.code()) {
         StrongflowDeviceDispatchError::new(
             StrongflowDeviceDispatchErrorKind::AdmissionUnavailable,
             "device dispatch admission is temporarily unavailable",

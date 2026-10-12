@@ -179,7 +179,7 @@ fn exercise_deferred(crash_resume: bool) {
         .unwrap()
         .with_specific_tls_roots(vec![certificate.to_vec()])
         .unwrap();
-        HttpsSseProviderAdapter::try_new(config).map_err(|_| DeviceProviderError)
+        HttpsSseProviderAdapter::try_new(config).map_err(|_| DeviceProviderError::StateInvalid)
     };
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         store.execute_model_using(

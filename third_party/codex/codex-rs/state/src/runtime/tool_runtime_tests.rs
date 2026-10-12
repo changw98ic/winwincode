@@ -19,7 +19,10 @@ async fn request(store: &StateRuntime, logical: &str) -> i64 {
         source: "model".into(),
         binding: "input".into(),
     };
-    let ToolRequestObservation::New(fact) = store.observe_tool_request(&identity).await.unwrap()
+    let ToolRequestObservation::New(fact) = store
+        .observe_tool_request(&identity, "test-owner", "{}")
+        .await
+        .unwrap()
     else {
         panic!("new")
     };

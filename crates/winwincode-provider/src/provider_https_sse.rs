@@ -57,6 +57,44 @@ pub enum ProviderTlsRoots {
     Specific(Vec<Vec<u8>>),
 }
 
+impl ProviderTlsRoots {
+    pub(crate) fn validate(&self) -> Result<(), HttpsSseProviderError> {
+        if let Self::Specific(roots) = self
+            && (roots.is_empty()
+                || roots.len() > 32
+                || roots
+                    .iter()
+                    .any(|root| root.is_empty() || root.len() > 64 * 1024))
+        {
+            return Err(HttpsSseProviderError::new(
+                HttpsSseProviderErrorKind::InvalidConfiguration,
+            ));
+        }
+        if let Self::Specific(roots) = self {
+            let mut parsed = rustls::RootCertStore::empty();
+            for root in roots {
+                parsed
+                    .add(rustls::pki_types::CertificateDer::from(root.clone()))
+                    .map_err(|_| {
+                        HttpsSseProviderError::new(HttpsSseProviderErrorKind::InvalidConfiguration)
+                    })?;
+            }
+        }
+        Ok(())
+    }
+
+    pub(crate) fn root_certs(&self) -> ureq::tls::RootCerts {
+        match self {
+            Self::WebPki => ureq::tls::RootCerts::WebPki,
+            Self::Specific(values) => values
+                .iter()
+                .map(|value| ureq::tls::Certificate::from_der(value).to_owned())
+                .collect::<Vec<_>>()
+                .into(),
+        }
+    }
+}
+
 /// All transport deadlines applied to one HTTPS/SSE exchange.
 #[derive(Clone, Copy, Debug)]
 pub struct HttpsSseProviderTimeouts {
@@ -397,17 +435,9 @@ impl HttpsSseProviderConfig {
         mut self,
         roots: Vec<Vec<u8>>,
     ) -> Result<Self, HttpsSseProviderError> {
-        if roots.is_empty()
-            || roots.len() > 32
-            || roots
-                .iter()
-                .any(|root| root.is_empty() || root.len() > 64 * 1024)
-        {
-            return Err(HttpsSseProviderError::new(
-                HttpsSseProviderErrorKind::InvalidConfiguration,
-            ));
-        }
-        self.tls_roots = ProviderTlsRoots::Specific(roots);
+        let roots = ProviderTlsRoots::Specific(roots);
+        roots.validate()?;
+        self.tls_roots = roots;
         self.validate()?;
         Ok(self)
     }
@@ -1134,14 +1164,7 @@ impl HttpsSseProviderAdapter {
         config: &HttpsSseProviderConfig,
         io: Arc<crate::provider_transport::ExchangeIo>,
     ) -> ureq::Agent {
-        let root_certs = match &config.tls_roots {
-            ProviderTlsRoots::WebPki => ureq::tls::RootCerts::WebPki,
-            ProviderTlsRoots::Specific(values) => values
-                .iter()
-                .map(|value| ureq::tls::Certificate::from_der(value).to_owned())
-                .collect::<Vec<_>>()
-                .into(),
-        };
+        let root_certs = config.tls_roots.root_certs();
         let tls = ureq::tls::TlsConfig::builder()
             .provider(ureq::tls::TlsProvider::Rustls)
             .root_certs(root_certs)
@@ -2155,18 +2178,20 @@ impl HttpsSseProviderAdapter {
         io: &winwincode_network::transport::ExchangeIo,
         error: &ureq::Error,
     ) -> winwincode_network::NetworkFailure {
+        let connected = io.connection_established();
+        let phase = if connected {
+            winwincode_network::Phase::ResponseHeaders
+        } else {
+            winwincode_network::Phase::Connect
+        };
         if io.is_cancelled() {
             winwincode_network::NetworkFailure::new(
                 winwincode_network::ErrorKind::Cancelled,
                 winwincode_network::Acceptance::Unknown,
-                winwincode_network::Phase::ResponseHeaders,
+                phase,
             )
         } else {
-            winwincode_network::classify_ureq(
-                error,
-                !io.connection_established(),
-                winwincode_network::Phase::ResponseHeaders,
-            )
+            winwincode_network::classify_ureq(error, !connected, phase)
         }
     }
 

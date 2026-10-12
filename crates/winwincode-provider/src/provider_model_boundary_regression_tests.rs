@@ -1,4 +1,43 @@
 // SPDX-License-Identifier: Apache-2.0
+#[test]
+fn refused_tcp_open_retains_connect_phase_and_not_sent_proof() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let endpoint = format!("https://{}/v1/model", listener.local_addr().unwrap());
+    drop(listener);
+    let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+    let settings = HttpsSseProviderConfig::try_new(
+        "refused-tcp-fixture".to_owned(),
+        endpoint.clone(),
+        HttpsSseProviderTimeouts {
+            connect: Duration::from_millis(200),
+            idle: Duration::from_millis(100),
+            total: Duration::from_secs(1),
+        },
+        HttpsSseProviderLimits {
+            response_bytes: 64 * 1024,
+            event_bytes: 8 * 1024,
+            events: 64,
+        },
+    )
+    .unwrap();
+    let io =
+        crate::provider_transport::ExchangeIo::new(settings.connect_timeout, settings.idle_timeout);
+    let agent = HttpsSseProviderAdapter::agent(&settings, Arc::clone(&io));
+    let error = agent.post(&endpoint).send(PAYLOAD).unwrap_err();
+    assert!(!io.connection_established());
+    let failure = HttpsSseProviderAdapter::http_open_failure(&io, &error);
+    assert_eq!(
+        failure.kind,
+        winwincode_network::ErrorKind::ConnectionUnavailable
+    );
+    assert_eq!(failure.acceptance, winwincode_network::Acceptance::NotSent);
+    assert_eq!(failure.phase, winwincode_network::Phase::Connect);
+    assert_eq!(
+        failure.diagnostic.unwrap().io_kind,
+        Some(winwincode_network::IoFailureKind::ConnectionRefused)
+    );
+}
+
 type AuditReaderReadAction = Box<dyn FnMut(usize, usize)>;
 
 thread_local! {
@@ -1048,15 +1087,25 @@ fn mechanism_actual_tls_size_limit_preserves_already_read_usage_receipt() {
         error.observed_receipt().is_some(),
         "size-limit must retain a known valid usage prefix"
     );
-    assert!(error.response().is_some());
+    assert!(
+        error
+            .response()
+            .is_some_and(|bytes| bytes.starts_with(prefix.as_bytes()))
+    );
+    let observed = error.observed_receipt().unwrap();
+    assert_eq!(observed.1.input_tokens, 11);
+    assert_eq!(observed.1.output_tokens, 5);
     assert!(error.response_bytes_received() > (prefix.len() + 64) as u64);
     assert!(
         !error.retryable(),
         "the unchanged response size limit must terminate this attempt"
     );
-    assert!(
-        reads.last().unwrap().0 >= prefix.len(),
-        "actual reader already retained complete usage prefix before crossing limit"
+    let (retained_before_read, fresh_read) = *reads.last().unwrap();
+    let received = retained_before_read + fresh_read;
+    assert!(received >= prefix.len());
+    assert_eq!(
+        u64::try_from(received).unwrap(),
+        error.response_bytes_received()
     );
     assert_eq!(fixture.finish().len(), 1);
     audit_provider_report(
@@ -1139,7 +1188,7 @@ fn mechanism_actual_tls_size_limit_device_accounting_preserves_known_usage() {
                 HttpsSseProviderAdapter::try_new(
                     settings.with_openai_responses_text(32_768).unwrap(),
                 )
-                .map_err(|_| crate::DeviceProviderError)
+                .map_err(|_| crate::DeviceProviderError::StateInvalid)
             },
         )
         .unwrap();
@@ -1181,7 +1230,10 @@ fn mechanism_actual_tls_size_limit_device_accounting_preserves_known_usage() {
     assert_eq!(factory_calls.get(), 1);
     assert_eq!(attempt_count, 1);
     assert_eq!(fixture.finish().len(), 1);
-    assert!(reads.last().unwrap().0 >= prefix.len());
+    let (retained_before_read, fresh_read) = *reads.last().unwrap();
+    let observed_received = retained_before_read + fresh_read;
+    assert!(observed_received >= prefix.len());
+    assert_eq!(i64::try_from(observed_received).unwrap(), received);
     assert!(chunks.last().unwrap().is_final);
     assert_eq!(chunks.len(), 1);
     assert!(!chunks[0].error.as_ref().unwrap().retryable);
@@ -1373,7 +1425,7 @@ fn mechanism_actual_tls_failed_partial_retries_with_a_fresh_decoder() {
                 HttpsSseProviderAdapter::try_new(
                     config(&fixture).with_openai_responses_text(32_768).unwrap(),
                 )
-                .map_err(|_| crate::DeviceProviderError)
+                .map_err(|_| crate::DeviceProviderError::StateInvalid)
             },
         )
         .unwrap();

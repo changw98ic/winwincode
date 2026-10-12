@@ -210,8 +210,10 @@ async fn fixture(enabled: bool, same_owner: bool) -> Fixture {
         source: "model".into(),
         binding: digest(payload_value(&invocation.payload)),
     };
-    let ToolRequestObservation::New(parent_observed) =
-        store.observe_tool_request(&parent_request).await.unwrap()
+    let ToolRequestObservation::New(parent_observed) = store
+        .observe_tool_request(&parent_request, "test-owner", "{}")
+        .await
+        .unwrap()
     else {
         panic!("new parent")
     };
@@ -267,8 +269,10 @@ async fn fixture(enabled: bool, same_owner: bool) -> Fixture {
         source: "code_mode".into(),
         binding: digest(payload_value(&control.payload)),
     };
-    let ToolRequestObservation::New(input_observed) =
-        store.observe_tool_request(&input_request).await.unwrap()
+    let ToolRequestObservation::New(input_observed) = store
+        .observe_tool_request(&input_request, "test-owner", "{}")
+        .await
+        .unwrap()
     else {
         panic!("new input")
     };

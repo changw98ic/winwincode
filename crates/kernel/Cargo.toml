@@ -25,6 +25,7 @@ codex-skills-extension = { path = "../../third_party/codex/codex-rs/ext/skills" 
 codex-protocol.workspace = true
 codex-model-provider-info.workspace = true
 futures.workspace = true
+http.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 tokio.workspace = true

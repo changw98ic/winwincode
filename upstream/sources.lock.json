@@ -136,7 +136,8 @@
       "TurnInput",
       "Op",
       "EventMsg",
-      "SessionSource"
+      "SessionSource",
+      "StateRuntime"
     ]
   },
   "historicalSources": [
@@ -1507,6 +1508,120 @@
         "codex-rs/core/src/tools/tool_reconciliation_tests.rs",
         "codex-rs/core/tests/suite/prompt_caching.rs",
         "codex-rs/core/tests/suite/request_user_input.rs"
+      ]
+    },
+    {
+      "id": "codex-host-model-retry-semantics",
+      "file": "upstream/patches/codex/0105-host-model-retry-semantics.patch",
+      "planned": false,
+      "patchSha256": "de858c5c545ee6484a5225423f5705fd39bea001cd1517a5cba9a361f7e684e0",
+      "targets": [
+        "codex-rs/codex-api/src/error.rs",
+        "codex-rs/codex-api/src/api_bridge.rs",
+        "codex-rs/protocol/src/error.rs",
+        "codex-rs/response-debug-context/src/lib.rs",
+        "codex-rs/cli/src/doctor.rs",
+        "codex-rs/ext/guardian-v2/src/async_scorer/sampler.rs"
+      ]
+    },
+    {
+      "id": "codex-required-tool-fact-storage-fatal",
+      "file": "upstream/patches/codex/0106-required-tool-fact-storage-fatal.patch",
+      "planned": false,
+      "patchSha256": "73b5627d8b21969e9e42cf0ed7fa3bc48f95d27ac86eceaa781666b17b97842a",
+      "targets": [
+        "codex-rs/core/src/tools/execution_facts.rs",
+        "codex-rs/core/src/tools/execution_facts_tests.rs",
+        "codex-rs/core/src/tools/code_mode/terminal.rs",
+        "codex-rs/core/src/tools/code_mode/delegate.rs",
+        "codex-rs/core/src/tools/code_mode/execute_handler.rs",
+        "codex-rs/core/src/tools/code_mode/wait_handler.rs",
+        "codex-rs/core/src/tools/code_mode/terminal_tests.rs"
+      ]
+    },
+    {
+      "id": "codex-terminal-core-error-rollout",
+      "file": "upstream/patches/codex/0107-terminal-core-error-rollout.patch",
+      "planned": false,
+      "patchSha256": "fb39d361748a89dc32d39cc811f4a06cdc77dff2ac0e2789c1a52bcf3b533395",
+      "targets": [
+        "codex-rs/rollout/src/policy.rs",
+        "codex-rs/rollout/src/recorder_tests.rs"
+      ]
+    },
+    {
+      "id": "codex-mcp-timeout-and-test-runtime",
+      "file": "upstream/patches/codex/0108-mcp-timeout-and-test-runtime.patch",
+      "planned": false,
+      "patchSha256": "dedabbf266d29f4d99d2bcb610431faeee9490e494af5d5198f4272b4163d441",
+      "targets": [
+        "codex-rs/codex-mcp/src/connection_manager.rs",
+        "codex-rs/codex-mcp/src/connection_manager_tests.rs",
+        "codex-rs/config/src/mcp_types.rs",
+        "codex-rs/core/tests/suite/openai_file_mcp.rs",
+        "codex-rs/ext/agent/tests/agent_service.rs"
+      ]
+    },
+    {
+      "id": "codex-execution-terminal-cause-and-drain",
+      "file": "upstream/patches/codex/0109-execution-terminal-cause-and-drain.patch",
+      "planned": false,
+      "patchSha256": "8577cbbc249c84cd315f7df99560f64fb90424e0de01c38a068d163a09667ed6",
+      "targets": [
+        "codex-rs/core/src/session/turn.rs",
+        "codex-rs/core/src/session/turn_tests.rs",
+        "codex-rs/codex-api/src/error.rs",
+        "codex-rs/codex-api/src/api_bridge.rs",
+        "codex-rs/protocol/src/error.rs",
+        "codex-rs/protocol/src/protocol.rs",
+        "codex-rs/response-debug-context/src/lib.rs",
+        "codex-rs/cli/src/doctor.rs",
+        "codex-rs/ext/guardian-v2/src/async_scorer/sampler.rs",
+        "codex-rs/app-server-protocol/src/protocol/v2/shared.rs"
+      ]
+    },
+    {
+      "id": "codex-model-authority-expiry-cause",
+      "file": "upstream/patches/codex/0110-model-authority-expiry-cause.patch",
+      "planned": false,
+      "patchSha256": "a07abf0be69e2608756a49864d89344de14160bd0f6670d2be504890cae0cfe7",
+      "targets": [
+        "codex-rs/codex-api/src/error.rs",
+        "codex-rs/codex-api/src/api_bridge.rs",
+        "codex-rs/protocol/src/error.rs",
+        "codex-rs/protocol/src/protocol.rs",
+        "codex-rs/response-debug-context/src/lib.rs",
+        "codex-rs/cli/src/doctor.rs",
+        "codex-rs/ext/guardian-v2/src/async_scorer/sampler.rs",
+        "codex-rs/app-server-protocol/src/protocol/v2/shared.rs"
+      ]
+    },
+    {
+      "id": "codex-tool-execution-facts-call-pairs",
+      "file": "upstream/patches/codex/0111-tool-call-request-result-pairs.patch",
+      "planned": false,
+      "patchSha256": "5608f8c1e3894151502bf2eac03fb5ceefc895f3723c80204a3d059047a29c54",
+      "targets": [
+        "codex-rs/core-api/src/lib.rs",
+        "codex-rs/core/src/tools/control_input_recovery_tests.rs",
+        "codex-rs/core/src/tools/execution_facts.rs",
+        "codex-rs/core/src/tools/execution_facts_tests.rs",
+        "codex-rs/core/src/tools/registry.rs",
+        "codex-rs/core/src/tools/tool_fact_owner.rs",
+        "codex-rs/core/src/tools/tool_sharing.rs",
+        "codex-rs/state/migrations/0051_tool_execution_facts.sql",
+        "codex-rs/state/src/runtime/tool_call_records.rs",
+        "codex-rs/state/src/runtime/tool_control_input_recovery_tests.rs",
+        "codex-rs/state/src/runtime/tool_dependencies_tests.rs",
+        "codex-rs/state/src/runtime/tool_diagnostics_tests.rs",
+        "codex-rs/state/src/runtime/tool_execution.rs",
+        "codex-rs/state/src/runtime/tool_execution_migration_tests.rs",
+        "codex-rs/state/src/runtime/tool_execution_tests.rs",
+        "codex-rs/state/src/runtime/tool_reconciliation_tests.rs",
+        "codex-rs/state/src/runtime/tool_runtime_tests.rs",
+        "codex-rs/state/src/runtime/tool_sharing.rs",
+        "codex-rs/state/src/runtime/tool_sharing_tests.rs",
+        "codex-rs/state/src/tool_execution.rs"
       ]
     }
   ],

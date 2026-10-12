@@ -386,7 +386,10 @@ impl LunaSampler {
             | LunaSamplerError::OutputTooLarge
             | LunaSamplerError::Superseded
             | LunaSamplerError::Api(
-                ApiError::Transport(TransportError::Build(_))
+                ApiError::HostTerminal { .. }
+                | ApiError::ExecutionLeaseExpired
+                | ApiError::ModelAuthorityExpired
+                | ApiError::Transport(TransportError::Build(_))
                 | ApiError::ContextWindowExceeded
                 | ApiError::QuotaExceeded
                 | ApiError::UsageNotIncluded

@@ -101,7 +101,22 @@ impl<'storage> RepositoryExecutionScheduler<'storage> {
         &mut self,
         request: &RepositorySchedulerClaimRequest,
     ) -> Result<Option<JobDispatchMessage>, RepositoryExecutionSchedulerError> {
-        let receipt = self.storage.repository_scheduler()?.claim_next(request)?;
+        self.claim_next_with_capacity(request, true)
+    }
+
+    /// Restores original dispatches while admission or capacity defers new claims.
+    ///
+    /// # Errors
+    /// Applies the same durable authority and sealed input checks as [`Self::claim_next`].
+    pub fn claim_next_with_capacity(
+        &mut self,
+        request: &RepositorySchedulerClaimRequest,
+        new_claim_allowed: bool,
+    ) -> Result<Option<JobDispatchMessage>, RepositoryExecutionSchedulerError> {
+        let receipt = self
+            .storage
+            .repository_scheduler()?
+            .claim_next_with_capacity(request, new_claim_allowed)?;
         receipt
             .map(|receipt| {
                 let replacement = self
@@ -331,7 +346,8 @@ impl<'storage> RepositoryExecutionScheduler<'storage> {
         cancel_message(self.storage, &receipt)
     }
 
-    /// Rebuilds every outstanding exact `job.cancel` command after restart.
+    /// Rebuilds every unconfirmed exact `job.cancel` command after restart.
+    /// A positive Worker ACK confirms consumption without terminalizing its Job.
     ///
     /// # Errors
     ///
@@ -373,6 +389,13 @@ impl<'storage> RepositoryExecutionScheduler<'storage> {
                     .repository_scheduler()?
                     .request_cancellation(&request)?
             };
+            if crate::execution_cancellation_receipt::control_consumed(
+                self.storage,
+                &domain_scope(scope),
+                &receipt,
+            )? {
+                continue;
+            }
             if let Some(message) = cancel_message(self.storage, &receipt)? {
                 messages.push(message);
             }

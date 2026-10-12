@@ -1,0 +1,350 @@
+diff --git a/codex-rs/codex-api/src/api_bridge.rs b/codex-rs/codex-api/src/api_bridge.rs
+index aa536e0a..98241907 100644
+--- a/codex-rs/codex-api/src/api_bridge.rs
++++ b/codex-rs/codex-api/src/api_bridge.rs
+@@ -19,6 +19,7 @@ use serde_json::Value;
+ 
+ pub fn map_api_error(err: ApiError) -> CodexErr {
+     match err {
++        ApiError::HostTerminal { source } => map_api_error(*source).without_retry(),
+         ApiError::ContextWindowExceeded => CodexErr::ContextWindowExceeded,
+         ApiError::QuotaExceeded => CodexErr::QuotaExceeded,
+         ApiError::UsageNotIncluded => CodexErr::UsageNotIncluded,
+@@ -200,6 +201,60 @@ const CLOUDFLARE_BLOCKED_MESSAGE: &str =
+ #[path = "api_bridge_tests.rs"]
+ mod tests;
+ 
++#[cfg(test)]
++mod host_terminal_retry_tests {
++    use super::*;
++    use std::time::Duration;
++
++    #[test]
++    fn exhausted_host_http_attempt_preserves_status_request_id_and_category() {
++        let mut headers = HeaderMap::new();
++        headers.insert(
++            "x-request-id",
++            http::HeaderValue::from_static("upstream-42"),
++        );
++        let error = map_api_error(
++            ApiError::Transport(TransportError::Http {
++                status: http::StatusCode::TOO_MANY_REQUESTS,
++                url: None,
++                headers: Some(headers),
++                body: Some("safe host summary".to_owned()),
++            })
++            .without_retry(),
++        );
++        assert!(!error.is_retryable());
++        assert!(
++            matches!(error.details(), CodexErrorDetails::RetryLimit(details) if details.status.as_u16() == 429 && details.request_id.as_deref() == Some("upstream-42"))
++        );
++        assert_eq!(
++            error.to_codex_protocol_error(),
++            codex_protocol::protocol::CodexErrorInfo::ResponseTooManyFailedAttempts {
++                http_status_code: Some(429)
++            }
++        );
++    }
++
++    #[test]
++    fn host_terminal_retains_original_transport_timeout_and_retry_delay() {
++        let timeout = map_api_error(ApiError::Transport(TransportError::Timeout).without_retry());
++        assert!(!timeout.is_retryable());
++        assert!(matches!(
++            timeout.details(),
++            CodexErrorDetails::RequestTimeout
++        ));
++        let delayed = map_api_error(
++            ApiError::Retryable {
++                message: "host stream failed".to_owned(),
++                delay: Some(Duration::from_millis(750)),
++            }
++            .without_retry(),
++        );
++        assert!(!delayed.is_retryable());
++        assert!(matches!(delayed.details(), CodexErrorDetails::Stream(_)));
++        assert_eq!(delayed.retry_delay(), Some(Duration::from_millis(750)));
++    }
++}
++
+ fn extract_request_tracking_id(headers: Option<&HeaderMap>) -> Option<String> {
+     extract_request_id(headers).or_else(|| extract_header(headers, CF_RAY_HEADER))
+ }
+diff --git a/codex-rs/codex-api/src/error.rs b/codex-rs/codex-api/src/error.rs
+index 7929326a..6f369f49 100644
+--- a/codex-rs/codex-api/src/error.rs
++++ b/codex-rs/codex-api/src/error.rs
+@@ -6,6 +6,10 @@ use thiserror::Error;
+ 
+ #[derive(Debug, Error)]
+ pub enum ApiError {
++    /// The host exhausted its physical attempt policy. Core must consume the
++    /// original semantic failure rather than start a second retry budget.
++    #[error(transparent)]
++    HostTerminal { source: Box<ApiError> },
+     #[error(transparent)]
+     Transport(#[from] TransportError),
+     #[error("api error {status}: {message}")]
+@@ -40,3 +44,11 @@ impl From<RateLimitError> for ApiError {
+         Self::RateLimit(err.to_string())
+     }
+ }
++
++impl ApiError {
++    pub fn without_retry(self) -> Self {
++        Self::HostTerminal {
++            source: Box::new(self),
++        }
++    }
++}
+diff --git a/codex-rs/protocol/src/error.rs b/codex-rs/protocol/src/error.rs
+index 65ed48e0..712dc6a7 100644
+--- a/codex-rs/protocol/src/error.rs
++++ b/codex-rs/protocol/src/error.rs
+@@ -70,6 +70,7 @@ pub enum SandboxErr {
+ pub struct CodexErr {
+     details: CodexErrorDetails,
+     retry_delay: Option<Duration>,
++    retry_suppressed: bool,
+ }
+ 
+ /// The semantic category and diagnostic payload for a [`CodexErr`].
+@@ -218,6 +219,7 @@ impl From<CodexErrorDetails> for CodexErr {
+         Self {
+             details,
+             retry_delay: None,
++            retry_suppressed: false,
+         }
+     }
+ }
+@@ -282,6 +284,7 @@ macro_rules! codex_err_unit_constructors {
+             pub const $variant: Self = Self {
+                 details: CodexErrorDetails::$variant,
+                 retry_delay: None,
++                retry_suppressed: false,
+             };
+         )*
+     };
+@@ -362,6 +365,9 @@ impl CodexErr {
+     }
+ 
+     pub fn is_retryable(&self) -> bool {
++        if self.retry_suppressed {
++            return false;
++        }
+         match self.details() {
+             CodexErrorDetails::TurnAborted
+             | CodexErrorDetails::SessionBudgetExceeded
+@@ -403,6 +409,12 @@ impl CodexErr {
+         }
+     }
+ 
++    /// The host owns physical retry policy; exhaustion preserves the source category.
++    pub fn without_retry(mut self) -> Self {
++        self.retry_suppressed = true;
++        self
++    }
++
+     pub fn retry_delay(&self) -> Option<Duration> {
+         self.retry_delay
+     }
+@@ -446,7 +458,23 @@ impl CodexErr {
+             CodexErrorDetails::RefreshTokenFailed(_) => CodexErrorInfo::Unauthorized,
+             CodexErrorDetails::SessionConfiguredNotFirstEvent
+             | CodexErrorDetails::InternalServerError
+-            | CodexErrorDetails::InternalAgentDied => CodexErrorInfo::InternalServerError,
++            | CodexErrorDetails::InternalAgentDied
++            | CodexErrorDetails::Fatal(_) => CodexErrorInfo::InternalServerError,
++            CodexErrorDetails::UnexpectedStatus(details)
++                if matches!(details.status.as_u16(), 401 | 403) =>
++            {
++                CodexErrorInfo::Unauthorized
++            }
++            CodexErrorDetails::UnexpectedStatus(_) => CodexErrorInfo::HttpConnectionFailed {
++                http_status_code: self.http_status_code_value(),
++            },
++            CodexErrorDetails::RequestTimeout => CodexErrorInfo::ResponseStreamConnectionFailed {
++                http_status_code: None,
++            },
++            CodexErrorDetails::Stream(_) => CodexErrorInfo::ResponseStreamDisconnected {
++                http_status_code: None,
++            },
++            CodexErrorDetails::InvalidRequest(_) => CodexErrorInfo::BadRequest,
+             CodexErrorDetails::UnsupportedOperation(_)
+             | CodexErrorDetails::ThreadNotFound(_)
+             | CodexErrorDetails::AgentLimitReached { .. } => CodexErrorInfo::BadRequest,
+@@ -852,3 +880,45 @@ pub fn get_error_message_ui(e: &CodexErr) -> String {
+ #[cfg(test)]
+ #[path = "error_tests.rs"]
+ mod tests;
++
++#[cfg(test)]
++mod host_terminal_retry_tests {
++    use super::*;
++
++    #[test]
++    fn suppressing_host_retries_preserves_timeout_and_stream_categories() {
++        for error in [
++            CodexErr::RequestTimeout,
++            CodexErr::Stream("host stream failed".to_owned()),
++        ] {
++            assert!(error.is_retryable());
++            let kind = CodexErrKind::from(&error);
++            let info = error.to_codex_protocol_error();
++            let terminal = error
++                .without_retry()
++                .with_retry_delay(Duration::from_millis(750));
++            assert!(!terminal.is_retryable());
++            assert_eq!(CodexErrKind::from(&terminal), kind);
++            assert_eq!(terminal.to_codex_protocol_error(), info);
++            assert_eq!(terminal.retry_delay(), Some(Duration::from_millis(750)));
++        }
++    }
++
++    #[test]
++    fn fatal_tool_runtime_is_infrastructure_and_invalid_request_is_bad_request() {
++        assert_eq!(
++            CodexErr::Fatal("tool runtime failed".to_owned()).to_codex_protocol_error(),
++            CodexErrorInfo::InternalServerError
++        );
++        assert_eq!(
++            CodexErr::InvalidRequest("invalid request".to_owned()).to_codex_protocol_error(),
++            CodexErrorInfo::BadRequest
++        );
++        assert_eq!(
++            CodexErr::RequestTimeout.to_codex_protocol_error(),
++            CodexErrorInfo::ResponseStreamConnectionFailed {
++                http_status_code: None
++            }
++        );
++    }
++}
+diff --git a/codex-rs/response-debug-context/src/lib.rs b/codex-rs/response-debug-context/src/lib.rs
+index 822210d1..7f0c2320 100644
+--- a/codex-rs/response-debug-context/src/lib.rs
++++ b/codex-rs/response-debug-context/src/lib.rs
+@@ -55,6 +55,7 @@ pub fn extract_response_debug_context(transport: &TransportError) -> ResponseDeb
+ 
+ pub fn extract_response_debug_context_from_api_error(error: &ApiError) -> ResponseDebugContext {
+     match error {
++        ApiError::HostTerminal { source } => extract_response_debug_context_from_api_error(source),
+         ApiError::Transport(transport) => extract_response_debug_context(transport),
+         _ => ResponseDebugContext::default(),
+     }
+@@ -73,6 +74,7 @@ pub fn telemetry_transport_error_message(error: &TransportError) -> String {
+ 
+ pub fn telemetry_api_error_message(error: &ApiError) -> String {
+     match error {
++        ApiError::HostTerminal { source } => telemetry_api_error_message(source),
+         ApiError::Transport(transport) => telemetry_transport_error_message(transport),
+         ApiError::Api { status, .. } => format!("api error {}", status.as_u16()),
+         ApiError::Stream(err) => err.to_string(),
+@@ -88,6 +90,81 @@ pub fn telemetry_api_error_message(error: &ApiError) -> String {
+     }
+ }
+ 
++#[cfg(test)]
++mod host_terminal_retry_tests {
++    use super::*;
++    use http::HeaderMap;
++    use http::HeaderValue;
++    use http::StatusCode;
++
++    #[test]
++    fn host_terminal_telemetry_retains_safe_semantic_categories() {
++        for (error, expected) in [
++            (
++                ApiError::RateLimit("private-rate-limit-payload".to_owned()),
++                "rate limit",
++            ),
++            (
++                ApiError::InvalidRequest {
++                    message: "private-request-payload".to_owned(),
++                },
++                "invalid request",
++            ),
++            (
++                ApiError::Api {
++                    status: StatusCode::SERVICE_UNAVAILABLE,
++                    message: "private-api-payload".to_owned(),
++                },
++                "api error 503",
++            ),
++        ] {
++            assert_eq!(telemetry_api_error_message(&error), expected);
++            assert_eq!(
++                telemetry_api_error_message(&error.without_retry()),
++                expected
++            );
++        }
++    }
++
++    #[test]
++    fn host_terminal_telemetry_omits_http_body_url_and_private_headers() {
++        let mut headers = HeaderMap::new();
++        headers.insert(
++            "authorization",
++            HeaderValue::from_static("Bearer private-header"),
++        );
++        let error = ApiError::Transport(TransportError::Http {
++            status: StatusCode::UNAUTHORIZED,
++            url: Some("https://private-url.invalid/private-path".to_owned()),
++            headers: Some(headers),
++            body: Some("private-http-body".to_owned()),
++        });
++        assert_eq!(telemetry_api_error_message(&error), "http 401");
++        assert_eq!(
++            telemetry_api_error_message(&error.without_retry()),
++            "http 401"
++        );
++    }
++
++    #[test]
++    fn host_terminal_preserves_original_response_request_id() {
++        let mut headers = HeaderMap::new();
++        headers.insert("x-request-id", HeaderValue::from_static("upstream-42"));
++        let error = ApiError::Transport(TransportError::Http {
++            status: StatusCode::TOO_MANY_REQUESTS,
++            url: None,
++            headers: Some(headers),
++            body: None,
++        });
++        let original = extract_response_debug_context_from_api_error(&error);
++        assert_eq!(original.request_id.as_deref(), Some("upstream-42"));
++        assert_eq!(
++            extract_response_debug_context_from_api_error(&error.without_retry()),
++            original
++        );
++    }
++}
++
+ #[cfg(test)]
+ mod tests {
+     use super::ResponseDebugContext;
+diff --git a/codex-rs/cli/src/doctor.rs b/codex-rs/cli/src/doctor.rs
+index db312c9c..a01f8dd0 100644
+--- a/codex-rs/cli/src/doctor.rs
++++ b/codex-rs/cli/src/doctor.rs
+@@ -2469,6 +2469,7 @@ fn websocket_probe_warning(
+ 
+ fn websocket_error_detail(err: &ApiError) -> String {
+     match err {
++        ApiError::HostTerminal { source } => websocket_error_detail(source),
+         ApiError::Transport(transport) => format!("handshake transport error: {transport}"),
+         ApiError::Api { status, message } => {
+             format!("handshake API error: {status} {message}")
+diff --git a/codex-rs/ext/guardian-v2/src/async_scorer/sampler.rs b/codex-rs/ext/guardian-v2/src/async_scorer/sampler.rs
+index 258e9a9c..753c812f 100644
+--- a/codex-rs/ext/guardian-v2/src/async_scorer/sampler.rs
++++ b/codex-rs/ext/guardian-v2/src/async_scorer/sampler.rs
+@@ -386,7 +386,8 @@ impl LunaSampler {
+             | LunaSamplerError::OutputTooLarge
+             | LunaSamplerError::Superseded
+             | LunaSamplerError::Api(
+-                ApiError::Transport(TransportError::Build(_))
++                ApiError::HostTerminal { .. }
++                | ApiError::Transport(TransportError::Build(_))
+                 | ApiError::ContextWindowExceeded
+                 | ApiError::QuotaExceeded
+                 | ApiError::UsageNotIncluded

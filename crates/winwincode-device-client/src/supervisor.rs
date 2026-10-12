@@ -71,6 +71,8 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 #[cfg(unix)]
+use std::os::unix::fs::OpenOptionsExt;
+#[cfg(unix)]
 use std::os::unix::process::CommandExt;
 
 use time::OffsetDateTime;
@@ -487,6 +489,66 @@ impl SessionSupervisor {
     #[must_use]
     pub fn config(&self) -> &SupervisorConfig {
         &self.inner.config
+    }
+
+    /// Required request/result recovery before reporting a confirmed process
+    /// closure. The shipped Worker delegates model and tool writes to their owners.
+    pub(crate) fn recover_terminated_calls(
+        &self,
+        record: &WorkerProcessRecord,
+    ) -> Result<(), SupervisorError> {
+        if !matches!(
+            record.state.as_str(),
+            WORKER_STATE_EXITED | WORKER_STATE_CRASHED | WORKER_STATE_MISSING
+        ) {
+            return Err(SupervisorError::InvalidInput(
+                "call recovery requires a terminated process".into(),
+            ));
+        }
+        let config_path = Path::new(&record.data_directory).join(MANAGED_SESSION_CONFIG_FILE);
+        let config: serde_json::Value = serde_json::from_slice(
+            &fs::read(&config_path)
+                .map_err(|error| SupervisorError::InvalidInput(error.to_string()))?,
+        )
+        .map_err(|error| SupervisorError::InvalidInput(error.to_string()))?;
+        if config["workerSessionId"] != record.worker_session_id
+            || config["workerInstanceId"] != record.worker_instance_id
+        {
+            return Err(SupervisorError::InvalidInput(
+                "call recovery process identity mismatch".into(),
+            ));
+        }
+        let has_core = Path::new(&record.data_directory)
+            .join("codex-runtime/kernel-home")
+            .is_dir();
+        let has_model = config["providerDirectory"]
+            .as_str()
+            .is_some_and(|path| Path::new(path).join("providers.sqlite3").is_file());
+        if !has_core && !has_model {
+            return Ok(());
+        }
+        let log = fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .mode(0o600)
+            .open(Path::new(&record.data_directory).join("call-recovery.log"))
+            .map_err(|error| SupervisorError::WorkerLogs(error.to_string()))?;
+        let status = Command::new(self.resolve_worker_binary()?)
+            .arg("--recover-interrupted-calls")
+            .arg(&config_path)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::from(log))
+            .status()
+            .map_err(|error| SupervisorError::Spawn {
+                reason: error.to_string(),
+            })?;
+        if !status.success() {
+            return Err(SupervisorError::InvalidInput(
+                "terminated call recovery failed".into(),
+            ));
+        }
+        Ok(())
     }
 
     /// Loads one worker-process registry row.

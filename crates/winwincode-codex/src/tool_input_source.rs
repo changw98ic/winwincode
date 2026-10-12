@@ -367,6 +367,14 @@ mod tests {
         fs::write(&source, "original").unwrap();
         let before = checked_metadata(&source).unwrap();
         fs::write(&source, "modified").unwrap();
+        // Two writes can share a filesystem timestamp. Give the metadata
+        // check a deterministic change; source digest tests cover byte identity.
+        File::open(&source)
+            .unwrap()
+            .set_times(
+                FileTimes::new().set_modified(before.modified().unwrap() + Duration::from_secs(1)),
+            )
+            .unwrap();
         assert!(!same_metadata(&before, &checked_metadata(&source).unwrap()));
         let opened = File::open(&source).unwrap();
         fs::rename(&source, checkout.0.join("previous.py")).unwrap();

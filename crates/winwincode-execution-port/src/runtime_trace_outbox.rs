@@ -636,6 +636,25 @@ impl WorkerRuntimeTraceOutbox {
         self.responder
             .acknowledge(store, authority, acknowledgement)
     }
+
+    /// Proves historical transport cleanup from an already acknowledged
+    /// original frame without live authority lookup or cursor writes.
+    ///
+    /// # Errors
+    ///
+    /// Forwards malformed acknowledgement, original-frame and storage errors.
+    pub fn retained_acknowledgement<S, A>(
+        &self,
+        store: &mut S,
+        acknowledgement: &RuntimeAckMessage,
+    ) -> Result<Option<RuntimeReplayAckReceipt>, RuntimeReplayError<A::Error, S::Error>>
+    where
+        S: ReplayAcknowledgementStore,
+        A: ReplayAuthority<Context = RuntimeReplayIdentity>,
+    {
+        self.responder
+            .retained_acknowledgement::<S, A>(store, acknowledgement)
+    }
 }
 
 fn build_message(

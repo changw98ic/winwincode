@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::fmt;
 use std::future::Future;
 use std::sync::{Arc, Mutex, MutexGuard, RwLock};
@@ -11,10 +11,10 @@ use crate::{
     action_bridge::ExecutionPortActionGate,
     authority_clock::{AuthorityClock, AuthorityClockError, canonical_instant},
     model_port_client::{
-        ModelAuthorityRejection, ModelChunkDelivery, ModelChunkDisposition, ModelChunkSink,
-        ModelCursorStore, ModelLeaseAuthority, ModelLeaseAuthoritySource, ModelMessageMetadata,
-        ModelPortClientErrorCode, ModelSinkDeliveryStatus, ModelTerminationReason,
-        OpenModelExchangeCommand, WorkerModelPortClient, chunk_termination,
+        ModelAuthorityRejection, ModelChunkDelivery, ModelChunkDisposition, ModelChunkFingerprint,
+        ModelChunkSink, ModelCursorStore, ModelLeaseAuthority, ModelLeaseAuthoritySource,
+        ModelMessageMetadata, ModelPortClientErrorCode, ModelSinkDeliveryStatus,
+        ModelTerminationReason, OpenModelExchangeCommand, WorkerModelPortClient, chunk_termination,
     },
 };
 use base64::{Engine as _, engine::general_purpose::STANDARD};
@@ -25,12 +25,12 @@ use tokio::sync::{Mutex as AsyncMutex, mpsc};
 use winwincode_domain::{CodexThreadId, ExecutionMessageId, Instant, ModelExchangeId, RequestId};
 use winwincode_execution_port::{
     generated::{
-        EncodedPayload, ExecutionPortError, ExecutionPortMessage, ModelChunkMessage,
-        ModelGatewayRoute,
+        EncodedPayload, ExecutionPortError, ExecutionPortMessage, LeaseWriteStatus,
+        ModelAckMessage, ModelAckMessageKind, ModelChunkMessage, ModelGatewayRoute,
     },
     replay::{ReplayAuthority, ReplayStreamKey},
     runtime_replay::RuntimeReplayIdentity,
-    typed_replay::frame_from_message,
+    typed_replay::{frame_from_message, stream_key_from_message},
 };
 use winwincode_kernel::{ModelPort, ModelPortFailure, ModelPortRequest, ModelPortStream};
 
@@ -54,6 +54,11 @@ pub(crate) struct ModelRunBinding {
 #[derive(Clone, Default)]
 pub(crate) struct SharedAuthoritySource {
     current: Arc<RwLock<HashMap<String, ModelLeaseAuthority>>>,
+    /// Live Core aliases shared by model, action, input and result-read gates.
+    pub(crate) bindings: Arc<RwLock<HashMap<String, ModelRunBinding>>>,
+    /// Cancellation closes the complete run. Durable lineage remains readable
+    /// for original receipts, but cannot reinstall a live root or child alias.
+    fenced_runs: Arc<RwLock<HashSet<String>>>,
     /// Exact authority for every Core thread in a run, including spawned
     /// descendants.  The job-key map above remains the trusted root lease;
     /// this map prevents a child from inheriting authority merely because it
@@ -67,6 +72,169 @@ pub(crate) struct SharedAuthoritySource {
 }
 
 impl SharedAuthoritySource {
+    pub(crate) fn install_run_binding(
+        &self,
+        binding: ModelRunBinding,
+        replace_fenced_run: bool,
+    ) -> Result<HashSet<String>, BridgeError> {
+        let fenced_runs = self
+            .fenced_runs
+            .read()
+            .map_err(|_| BridgeError::Unavailable)?;
+        if fenced_runs.contains(&binding.run_key) || self.durably_fenced(&binding.run_key)? {
+            return Err(BridgeError::StaleAuthority);
+        }
+        let kernel_session_id = binding.kernel_session_id.clone();
+        let thread_id = binding.canonical_thread_id.0.clone();
+        let stale_session_ids = {
+            let mut bindings = self
+                .bindings
+                .write()
+                .map_err(|_| BridgeError::Unavailable)?;
+
+            // Re-installing the exact root authority is an idempotent
+            // recovery operation, not a new fencing event.  Preserve its
+            // already-discovered child aliases; only a changed root may
+            // invalidate the complete run lineage.
+            let fence_lineage = replace_fenced_run
+                && !bindings
+                    .get(&thread_id)
+                    .is_some_and(|existing| same_binding(existing, &binding));
+            for alias in [&kernel_session_id, &thread_id] {
+                if bindings.get(alias).is_some_and(|existing| {
+                    !same_binding(existing, &binding)
+                        && (!fence_lineage
+                            || existing.authority.lease.job_id != binding.authority.lease.job_id)
+                }) {
+                    return Err(BridgeError::Conflict);
+                }
+            }
+            if replace_fenced_run {
+                self.install(&binding.run_key, binding.authority.clone())?;
+                if extend_binding_lineage(&mut bindings, &binding) {
+                    return Ok(HashSet::new());
+                }
+            } else {
+                self.install_child(&binding.run_key, binding.authority.clone())?;
+            }
+            let stale_session_ids = bindings
+                .values()
+                .filter(|existing| {
+                    fence_lineage
+                        && existing.authority.lease.job_id == binding.authority.lease.job_id
+                        && !same_binding(existing, &binding)
+                })
+                .flat_map(|existing| {
+                    [
+                        existing.kernel_session_id.clone(),
+                        existing.canonical_thread_id.0.clone(),
+                    ]
+                })
+                .collect::<HashSet<_>>();
+            if fence_lineage {
+                // A replacement root fences the complete run lineage.  Do not
+                // preserve descendants merely because they share the run key:
+                // their old lease must not resolve a tool request after the
+                // replacement is installed.
+                bindings.retain(|_, existing| {
+                    existing.authority.lease.job_id != binding.authority.lease.job_id
+                        || same_binding(existing, &binding)
+                });
+            } else {
+                bindings.retain(|_, existing| {
+                    existing.authority.lease.job_id != binding.authority.lease.job_id
+                        || (existing.run_key == binding.run_key
+                            && existing.canonical_thread_id != binding.canonical_thread_id)
+                        || same_binding(existing, &binding)
+                });
+            }
+            // Core tool-gate requests identify the live Core thread, while
+            // model and runtime envelopes may use the registered session key.
+            // Keep both aliases bound to the same immutable authority,
+            // especially for spawned child threads.
+            bindings.insert(binding.kernel_session_id.clone(), binding.clone());
+            bindings.insert(binding.canonical_thread_id.0.clone(), binding);
+            stale_session_ids
+        };
+        Ok(stale_session_ids)
+    }
+
+    pub(crate) fn binding_for_alias(
+        &self,
+        alias: &str,
+    ) -> Result<Option<ModelRunBinding>, BridgeError> {
+        Ok(self
+            .bindings
+            .read()
+            .map_err(|_| BridgeError::Unavailable)?
+            .get(alias)
+            .cloned())
+    }
+
+    /// Closes live operations while retaining durable lineage for original ACKs.
+    pub(crate) fn detach_run(&self, run_key: &str) -> Result<HashSet<String>, BridgeError> {
+        let mut bindings = self
+            .bindings
+            .write()
+            .map_err(|_| BridgeError::Unavailable)?;
+        let aliases = bindings
+            .iter()
+            .filter(|(_, binding)| binding.run_key == run_key)
+            .map(|(alias, _)| alias.clone())
+            .collect();
+        bindings.retain(|_, binding| binding.run_key != run_key);
+        Ok(aliases)
+    }
+
+    fn durably_fenced(&self, run_key: &str) -> Result<bool, BridgeError> {
+        let Some(store) = &self.store else {
+            return Ok(false);
+        };
+        let record = store
+            .load_run_header::<serde_json::Value>(run_key)
+            .map_err(|_| BridgeError::Unavailable)?;
+        Ok(record.is_some_and(|record| {
+            [
+                "operationFencedAt",
+                "terminalMessageId",
+                "terminal",
+                "finalCandidateFreeze",
+                "delegatedStop",
+            ]
+            .into_iter()
+            .any(|field| !record[field].is_null())
+        }))
+    }
+
+    fn fence_run(&self, run_key: &str) -> Result<HashSet<String>, BridgeError> {
+        self.fenced_runs
+            .write()
+            .map_err(|_| BridgeError::Unavailable)?
+            .insert(run_key.to_owned());
+        self.detach_run(run_key)
+    }
+
+    /// A retained exchange may settle after Core closes, but only a live binding
+    /// can begin another physical model attempt.
+    pub(crate) fn validate_invocation(
+        &self,
+        authority: &ModelLeaseAuthority,
+        exchange: &ModelExchangeId,
+    ) -> Result<(), ModelAuthorityRejection> {
+        let binding = self
+            .binding_for_alias(&authority.session_identity.codex_thread_id.0)
+            .map_err(|_| ModelAuthorityRejection::Unavailable)?
+            .ok_or(ModelAuthorityRejection::StaleLease)?;
+        if !same_binding_with_extended_lease(authority, &binding.authority) {
+            return Err(ModelAuthorityRejection::StaleLease);
+        }
+        let now = self
+            .observed_now()
+            .map_err(|_| ModelAuthorityRejection::Unavailable)?
+            .ok_or(ModelAuthorityRejection::Unavailable)?;
+        self.validate_exchange(authority, exchange, &now)
+    }
+
     pub(crate) fn with_store(mut self, store: AdapterStore) -> Self {
         self.store = Some(store);
         self
@@ -472,6 +640,23 @@ impl QueuedModelPort {
         Ok(self.lock()?.drain(..).collect())
     }
 
+    fn enqueue(&self, mut message: ExecutionPortMessage) -> Result<(), BridgeError> {
+        if let ExecutionPortMessage::ModelAckMessage(acknowledgement) = &mut message {
+            // The client determines status and cumulative cursors only after
+            // checking its durable consumption ledger. Bind the complete actual
+            // ACK facts, rather than predicting them from retained Provider frames.
+            let mut facts =
+                serde_json::to_value(&*acknowledgement).map_err(|_| BridgeError::InvalidPayload)?;
+            let facts = facts.as_object_mut().ok_or(BridgeError::InvalidPayload)?;
+            facts.remove("messageId");
+            facts.remove("sentAt");
+            let facts = serde_json::to_string(facts).map_err(|_| BridgeError::InvalidPayload)?;
+            acknowledgement.message_id = execution_message_id(b"model-ack-facts-v1", &facts);
+        }
+        self.lock()?.push_back(message);
+        Ok(())
+    }
+
     fn discard_for_thread(&self, thread_id: &CodexThreadId) -> Result<(), BridgeError> {
         self.lock()?.retain(|message| match message {
             ExecutionPortMessage::ModelOpenMessage(message) => {
@@ -497,8 +682,7 @@ impl WorkerExecutionPort for QueuedModelPort {
         &mut self,
         message: ExecutionPortMessage,
     ) -> impl Future<Output = Result<(), Self::Error>> {
-        let result = self.lock().map(|mut messages| messages.push_back(message));
-        std::future::ready(result)
+        std::future::ready(self.enqueue(message))
     }
 }
 
@@ -616,13 +800,9 @@ pub(crate) struct ExecutionPortModelBridge {
     client: AsyncMutex<ModelClient>,
     ordinal_store: AdapterStore,
     outbox: ExecutionOutbox,
-    bindings: RwLock<HashMap<String, ModelRunBinding>>,
     exchanges: Mutex<HashMap<String, ModelExchangeOwner>>,
-    /// The action gate is attached after both sides are constructed.  A
-    /// model stream can discover a durable child lineage and immediately
-    /// reach a Core tool handler in the same `next_event` call; installing
-    /// the binding only after that call returns leaves a TOCTOU window where
-    /// the child is known to the model bridge but not to the action gate.
+    /// The action gate shares the live authority source. Its attachment
+    /// lets replacement and cancellation also wake obsolete action waiters.
     action_gate: RwLock<Option<Arc<ExecutionPortActionGate>>>,
 }
 
@@ -674,7 +854,6 @@ impl ExecutionPortModelBridge {
             client: AsyncMutex::new(client),
             ordinal_store: store,
             outbox,
-            bindings: RwLock::new(HashMap::new()),
             exchanges: Mutex::new(HashMap::new()),
             action_gate: RwLock::new(None),
         }
@@ -696,6 +875,9 @@ impl ExecutionPortModelBridge {
         &self,
         action_gate: Arc<ExecutionPortActionGate>,
     ) -> Result<(), BridgeError> {
+        if !action_gate.uses_authority(&self.authority) {
+            return Err(BridgeError::Conflict);
+        }
         let mut installed = self
             .action_gate
             .write()
@@ -710,33 +892,17 @@ impl ExecutionPortModelBridge {
         Ok(())
     }
 
-    fn sync_action_binding(&self, binding: &ModelRunBinding) -> Result<(), BridgeError> {
-        let action_gate = self
+    fn fence_action_sessions(&self, sessions: HashSet<String>) -> Result<(), BridgeError> {
+        let gate = self
             .action_gate
             .read()
             .map_err(|_| BridgeError::Unavailable)?
             .clone();
-        if let Some(action_gate) = action_gate {
-            action_gate
-                .install_child_binding(binding.clone())
-                .map_err(|error| match error {
-                    crate::action_bridge::ActionBridgeError::Conflict => BridgeError::Conflict,
-                    _ => BridgeError::Unavailable,
-                })?;
-        }
-        Ok(())
-    }
-
-    fn sync_action_clock(&self, now: &Instant) -> Result<(), BridgeError> {
-        let action_gate = self
-            .action_gate
-            .read()
-            .map_err(|_| BridgeError::Unavailable)?
-            .clone();
-        if let Some(action_gate) = action_gate {
-            action_gate
-                .update_now(now)
-                .map_err(|_| BridgeError::Unavailable)?;
+        if let Some(gate) = gate {
+            for session in sessions {
+                gate.cancel_session(&session)
+                    .map_err(|_| BridgeError::Unavailable)?;
+            }
         }
         Ok(())
     }
@@ -774,62 +940,44 @@ impl ExecutionPortModelBridge {
     }
 
     pub(crate) fn install_binding(&self, binding: ModelRunBinding) -> Result<(), BridgeError> {
+        let stale = self.authority.install_run_binding(binding, true)?;
+        self.fence_action_sessions(stale)
+    }
+
+    /// Extends only original receipt authority while a closed Core drains its
+    /// retained result. A renewal never reinstalls cancelled live aliases.
+    pub(crate) fn renew_retained_binding(
+        &self,
+        binding: &ModelRunBinding,
+    ) -> Result<(), BridgeError> {
+        let Some((run_key, original)) = self
+            .authority
+            .load_lineage_binding(&binding.canonical_thread_id.0)?
+        else {
+            return Err(BridgeError::StaleAuthority);
+        };
+        if run_key != binding.run_key
+            || !same_binding_with_extended_lease(&original, &binding.authority)
+            || self
+                .authority
+                .read_authorities()?
+                .get(&binding.authority.lease.job_id.0)
+                .is_some_and(|current| {
+                    !same_binding_with_extended_lease(current, &binding.authority)
+                })
+        {
+            return Err(BridgeError::StaleAuthority);
+        }
         self.authority
-            .install(&binding.run_key, binding.authority.clone())?;
-        self.insert_binding(binding, true)
+            .install(&binding.run_key, binding.authority.clone())
     }
 
     pub(crate) fn install_child_binding(
         &self,
         binding: ModelRunBinding,
     ) -> Result<(), BridgeError> {
-        self.authority
-            .install_child(&binding.run_key, binding.authority.clone())?;
-        self.insert_binding(binding, false)
-    }
-
-    fn insert_binding(
-        &self,
-        binding: ModelRunBinding,
-        replace_fenced_run: bool,
-    ) -> Result<(), BridgeError> {
-        let mut bindings = self
-            .bindings
-            .write()
-            .map_err(|_| BridgeError::Unavailable)?;
-        if replace_fenced_run && extend_binding_lineage(&mut bindings, &binding) {
-            return Ok(());
-        }
-        // An idempotent root rebind after restart must not fence child
-        // aliases which were already restored for the same immutable
-        // authority.  A changed root remains the only operation that fences
-        // the full run lineage.
-        let fence_lineage = replace_fenced_run
-            && !bindings
-                .get(&binding.canonical_thread_id.0)
-                .is_some_and(|existing| same_binding(existing, &binding));
-        for alias in [&binding.kernel_session_id, &binding.canonical_thread_id.0] {
-            if let Some(existing) = bindings.get(alias)
-                && !same_binding(existing, &binding)
-                && (!fence_lineage
-                    || existing.authority.lease.job_id != binding.authority.lease.job_id)
-            {
-                return Err(BridgeError::Conflict);
-            }
-        }
-        if fence_lineage {
-            // A replacement lease fences every descendant of the preceding
-            // attempt. Drop its process-local aliases before inserting the
-            // new root so stale child requests cannot resolve to an old
-            // authority during the replacement window.
-            let job_id = binding.authority.lease.job_id.clone();
-            bindings.retain(|_, existing| {
-                existing.authority.lease.job_id != job_id || same_binding(existing, &binding)
-            });
-        }
-        bindings.insert(binding.kernel_session_id.clone(), binding.clone());
-        bindings.insert(binding.canonical_thread_id.0.clone(), binding);
-        Ok(())
+        let stale = self.authority.install_run_binding(binding, false)?;
+        self.fence_action_sessions(stale)
     }
 
     /// Detaches the live model binding while retaining the exact replay
@@ -839,10 +987,33 @@ impl ExecutionPortModelBridge {
     /// original lease/session lineage for validation. A later attempt replaces
     /// this authority through `install_binding`, invalidating the predecessor.
     pub(crate) fn detach_binding(&self, binding: &ModelRunBinding) -> Result<(), BridgeError> {
-        self.bindings
-            .write()
-            .map_err(|_| BridgeError::Unavailable)?
-            .retain(|_, candidate| candidate.run_key != binding.run_key);
+        let aliases = self.authority.detach_run(&binding.run_key)?;
+        self.fence_action_sessions(aliases)
+    }
+
+    /// Synchronously stops every root/child operation before slow cleanup.
+    /// The physical exchange cancellation is durable before the async protocol
+    /// cancellation releases its stream and retains the original ACK.
+    pub(crate) fn fence_binding(&self, binding: &ModelRunBinding) -> Result<(), BridgeError> {
+        let aliases = self.authority.fence_run(&binding.run_key)?;
+        self.fence_action_sessions(aliases)?;
+        if let Some(directory) = self.device_provider_directory.get() {
+            let exchanges = self
+                .exchanges
+                .lock()
+                .map_err(|_| BridgeError::Unavailable)?
+                .iter()
+                .filter(|(_, owner)| owner.run_key == binding.run_key)
+                .map(|(exchange, _)| exchange.clone())
+                .collect::<Vec<_>>();
+            let device = winwincode_provider::DeviceProviderStore::open(directory)
+                .map_err(|_| BridgeError::Unavailable)?;
+            for exchange in exchanges {
+                device
+                    .cancel_model(&exchange)
+                    .map_err(|_| BridgeError::Unavailable)?;
+            }
+        }
         Ok(())
     }
 
@@ -944,6 +1115,87 @@ impl ExecutionPortModelBridge {
         Ok((disposition, pre_retained))
     }
 
+    /// A replacement root can remove the original lineage while the Provider
+    /// still needs its terminal transport acknowledgement. Only the complete
+    /// fingerprint of an already-consumed final frame proves this cleanup.
+    pub(crate) fn acknowledge_consumed_terminal_without_owner(
+        &self,
+        chunk: &ModelChunkMessage,
+        received_at: &Instant,
+    ) -> Result<Option<ModelChunkDisposition>, BridgeError> {
+        if !chunk.is_final {
+            return Ok(None);
+        }
+        match self.resolve_chunk_owner(chunk) {
+            Ok(_) => return Ok(None),
+            Err(BridgeError::StaleAuthority | BridgeError::UnknownExchange) => {}
+            Err(error) => return Err(error),
+        }
+        if !canonical_instant(received_at)
+            || !canonical_instant(&chunk.sent_at)
+            || !canonical_instant(&chunk.lease.issued_at)
+            || !canonical_instant(&chunk.lease.expires_at)
+            || chunk.lease.issued_at.0 >= chunk.lease.expires_at.0
+            || received_at.0 < chunk.sent_at.0
+            || chunk.sent_at.0 < chunk.lease.issued_at.0
+        {
+            return Err(BridgeError::StaleAuthority);
+        }
+        validate_chunk_for_retention(chunk)?;
+        let mapped = frame_from_message(&ExecutionPortMessage::ModelChunkMessage(chunk.clone()))
+            .map_err(|_| BridgeError::InvalidPayload)?;
+        let mut store = self.ordinal_store.clone();
+        let head = ModelCursorStore::load_head(&mut store, &mapped.stream)
+            .map_err(model_frame_store_error)?;
+        if head.corrupt
+            || head.cancellation.is_some()
+            || head.confirmed_sequence != mapped.frame.sequence
+            || head.termination != chunk_termination(chunk)
+        {
+            return Ok(None);
+        }
+        let fingerprint = ModelChunkFingerprint {
+            sequence: mapped.frame.sequence,
+            message_id: chunk.message_id.clone(),
+            digest: winwincode_domain::Sha256Digest(mapped.frame.digest),
+            is_final: chunk.is_final,
+            has_error: chunk.error.is_some(),
+        };
+        let retained =
+            ModelCursorStore::load_fingerprint(&mut store, &mapped.stream, fingerprint.sequence)
+                .map_err(model_frame_store_error)?;
+        if retained.as_ref() != Some(&fingerprint) {
+            return Err(BridgeError::Conflict);
+        }
+        let acknowledgement = ExecutionPortMessage::ModelAckMessage(ModelAckMessage {
+            ack_sequence: winwincode_domain::ExecutionAckSequence(
+                i64::try_from(head.confirmed_sequence).map_err(|_| BridgeError::InvalidPayload)?,
+            ),
+            error: None,
+            kind: ModelAckMessageKind::ModelAck,
+            lease: chunk.lease.clone(),
+            message_id: execution_message_id(b"model-ack", &chunk.message_id.0),
+            model_exchange_id: chunk.model_exchange_id.clone(),
+            replay_from_sequence: None,
+            schema_version: winwincode_domain::SchemaVersion::WinwincodeV1,
+            sent_at: received_at.clone(),
+            session_identity: chunk.session_identity.clone(),
+            status: LeaseWriteStatus::Duplicate,
+            worker_session_id: chunk.worker_session_id.clone(),
+        });
+        if stream_key_from_message(&acknowledgement)
+            .map_err(|_| BridgeError::InvalidPayload)?
+            .stream
+            != mapped.stream
+        {
+            return Err(BridgeError::Conflict);
+        }
+        self.queue.enqueue(acknowledgement)?;
+        Ok(Some(ModelChunkDisposition::Duplicate {
+            confirmed_sequence: head.confirmed_sequence,
+        }))
+    }
+
     #[allow(
         clippy::too_many_lines,
         reason = "Authority, durable frame and live or detached stream intake share one checked envelope"
@@ -953,6 +1205,11 @@ impl ExecutionPortModelBridge {
         chunk: &ModelChunkMessage,
         received_at: &Instant,
     ) -> Result<ModelChunkDisposition, BridgeError> {
+        if let Some(disposition) =
+            self.acknowledge_consumed_terminal_without_owner(chunk, received_at)?
+        {
+            return Ok(disposition);
+        }
         let (owner, binding, process_exchange) = self
             .resolve_chunk_owner(chunk)
             .inspect_err(|error| log_model_intake_failure(chunk, "resolve", *error))?;
@@ -963,10 +1220,8 @@ impl ExecutionPortModelBridge {
         self.validate_chunk_authority(chunk, &binding, received_at)
             .inspect_err(|error| log_model_intake_failure(chunk, "authority", *error))?;
         // The sink can wake Core synchronously while `accept_chunk` is
-        // awaiting. Advance the action gate only after the complete chunk
-        // authority check succeeds, but before the frame is delivered to
-        // Core, so a tool request cannot race with the trusted-clock update.
-        self.sync_action_clock(received_at)?;
+        // awaiting. The shared authority clock advances before Core receives
+        // the frame, so model and action gates observe the same trusted time.
         // Keep the exact response frame before handing it to Core.  This
         // closes the crash window where Core has consumed a final chunk but
         // the private replay ledger has not yet been written.  A gap or a
@@ -1117,7 +1372,7 @@ impl ExecutionPortModelBridge {
             let mapped =
                 frame_from_message(&ExecutionPortMessage::ModelChunkMessage(frame.clone()))
                     .map_err(|_| BridgeError::InvalidPayload)?;
-            let fingerprint = crate::model_port_client::ModelChunkFingerprint {
+            let fingerprint = ModelChunkFingerprint {
                 sequence: u64::try_from(frame.sequence.0)
                     .map_err(|_| BridgeError::InvalidPayload)?,
                 message_id: frame.message_id.clone(),
@@ -1163,15 +1418,71 @@ impl ExecutionPortModelBridge {
             .retain_device_jev_receipts(owner, &chunk.model_exchange_id, received_at)
             .is_ok();
         let observed_usage = primary_model_usage(chunk).ok().flatten();
-        let usage = observed_usage.unwrap_or_default();
+        let mut usage = observed_usage.unwrap_or_default();
+        let mut usage_known = observed_usage.is_some();
+        let mut cache_breakdown_known = usage_known && usage.cached.is_some();
+        if let Some(directory) = self.device_provider_directory.get() {
+            let physical_usage = (|| {
+                let open = self
+                    .outbox
+                    .retained_model_open(&chunk.model_exchange_id)
+                    .map_err(|_| BridgeError::Unavailable)?
+                    .ok_or(BridgeError::Conflict)?;
+                let device = winwincode_provider::DeviceProviderStore::open(directory)
+                    .map_err(|_| BridgeError::Unavailable)?;
+                let physical = device
+                    .model_primary_usage(&open)
+                    .map_err(|_| BridgeError::Unavailable)?;
+                let input = i64::try_from(physical.input_tokens)
+                    .map_err(|_| BridgeError::InvalidPayload)?;
+                let cached = physical
+                    .cached_input_tokens
+                    .map(i64::try_from)
+                    .transpose()
+                    .map_err(|_| BridgeError::InvalidPayload)?;
+                let output = i64::try_from(physical.output_tokens)
+                    .map_err(|_| BridgeError::InvalidPayload)?;
+                let actual_cost_microunits = physical
+                    .cost_microunits
+                    .map(i64::try_from)
+                    .transpose()
+                    .map_err(|_| BridgeError::InvalidPayload)?;
+                Ok::<_, BridgeError>((
+                    PrimaryModelUsage {
+                        input: input
+                            .checked_sub(cached.unwrap_or(0))
+                            .ok_or(BridgeError::InvalidPayload)?,
+                        cached,
+                        output,
+                        actual_cost_microunits,
+                    },
+                    physical.usage_known,
+                ))
+            })();
+            if let Ok((physical, complete)) = physical_usage {
+                usage = if complete {
+                    physical
+                } else {
+                    primary_model_usage_lower_bound(usage, physical)
+                };
+                usage_known = complete;
+                cache_breakdown_known = complete && usage.cached.is_some();
+            } else {
+                // The successful final frame is a measured lower bound.
+                // A failed physical receipt read cannot prove the full bill.
+                usage_known = false;
+                cache_breakdown_known = false;
+                usage.actual_cost_microunits = None;
+            }
+        }
         let _ = self.ordinal_store.record_performance_completion(
             &owner.run_key,
             PerformanceOperationKind::PrimaryModel,
             &owner.model_call_id,
             received_at,
             PerformanceOperationCompletion {
-                usage_known: observed_usage.is_some(),
-                cache_breakdown_known: observed_usage.is_some() && usage.cached.is_some(),
+                usage_known,
+                cache_breakdown_known,
                 duration_millis: None,
                 input_tokens: usage.input,
                 cached_tokens: usage.cached.unwrap_or(0),
@@ -1322,14 +1633,18 @@ impl ExecutionPortModelBridge {
         thread_id: &CodexThreadId,
         cancelled_at: &Instant,
     ) -> Result<(), BridgeError> {
-        let run_keys = self
+        let mut run_keys = self
+            .authority
             .bindings
             .read()
             .map_err(|_| BridgeError::Unavailable)?
             .values()
             .filter(|binding| binding.canonical_thread_id == *thread_id)
             .map(|binding| binding.run_key.clone())
-            .collect::<std::collections::HashSet<_>>();
+            .collect::<HashSet<_>>();
+        if let Some((run_key, _)) = self.authority.load_lineage_binding(&thread_id.0)? {
+            run_keys.insert(run_key);
+        }
         let exchanges = self
             .exchanges
             .lock()
@@ -1400,15 +1715,15 @@ impl ExecutionPortModelBridge {
         self.queue.discard_for_thread(thread_id)
     }
 
-    /// Looks up the exact authority installed for a Core thread.  The
-    /// adapter uses this after the first child chunk to install the same
-    /// lineage binding in the action gate before that child can dispatch a
-    /// tool; callers never synthesize authority from a chunk alone.
+    /// Reads the exact Core thread alias from the live authority source
+    /// shared by model, action and input gates. A chunk cannot create a new
+    /// alias or restore a fenced execution permission.
     pub(crate) fn binding_for_thread(
         &self,
         thread_id: &CodexThreadId,
     ) -> Result<Option<ModelRunBinding>, BridgeError> {
         Ok(self
+            .authority
             .bindings
             .read()
             .map_err(|_| BridgeError::Unavailable)?
@@ -1421,7 +1736,11 @@ impl ExecutionPortModelBridge {
         envelope: &KernelRequestEnvelope,
     ) -> Result<ModelRunBinding, BridgeError> {
         let binding = {
-            let bindings = self.bindings.read().map_err(|_| BridgeError::Unavailable)?;
+            let bindings = self
+                .authority
+                .bindings
+                .read()
+                .map_err(|_| BridgeError::Unavailable)?;
             bindings
                 .get(&envelope.thread_id)
                 .or_else(|| bindings.get(&envelope.session_id))
@@ -1471,6 +1790,7 @@ impl ExecutionPortModelBridge {
         // durable.  Loading that authority preserves the same root lease and
         // lets `install_child_binding` re-establish the edge atomically.
         let parent = if let Some(parent) = self
+            .authority
             .bindings
             .read()
             .map_err(|_| BridgeError::Unavailable)?
@@ -1529,7 +1849,11 @@ impl ExecutionPortModelBridge {
             OpenStreamPreparation::Replay(stream) => return Ok(stream),
             OpenStreamPreparation::Open(exchange) => *exchange,
         };
-        let command = self.open_command(&exchange)?;
+        // Core may wait for another exchange to release the client while the
+        // Worker installs a legitimate renewal. Read the live binding only
+        // after that wait, at the actual model-open admission boundary.
+        let mut client = self.client.lock().await;
+        let command = self.open_command(&exchange);
         let receiver = self
             .sink
             .register(&exchange.exchange)
@@ -1545,7 +1869,39 @@ impl ExecutionPortModelBridge {
                     model_call_id: exchange.model_call_id.clone(),
                 },
             );
-        let opened = self.client.lock().await.open(command).await;
+        let opened = match command {
+            Ok(command) => client
+                .open(command)
+                .await
+                .map_err(|error| match error.code() {
+                    ModelPortClientErrorCode::ExpiredLease => ModelPortFailure::new(
+                        "MODEL_AUTHORITY_EXPIRED",
+                        "model call authority has expired",
+                    ),
+                    ModelPortClientErrorCode::StaleAuthority => {
+                        model_failure(BridgeError::StaleAuthority)
+                    }
+                    ModelPortClientErrorCode::InvalidInput
+                    | ModelPortClientErrorCode::CanonicalMapping => {
+                        model_failure(BridgeError::InvalidPayload)
+                    }
+                    ModelPortClientErrorCode::UnknownExchange => {
+                        model_failure(BridgeError::UnknownExchange)
+                    }
+                    ModelPortClientErrorCode::AlreadyTerminal
+                    | ModelPortClientErrorCode::ExchangeConflict
+                    | ModelPortClientErrorCode::CursorCorrupt => {
+                        model_failure(BridgeError::Conflict)
+                    }
+                    ModelPortClientErrorCode::CursorStore
+                    | ModelPortClientErrorCode::CodexSink
+                    | ModelPortClientErrorCode::ExecutionPort => {
+                        model_failure(BridgeError::Unavailable)
+                    }
+                }),
+            Err(error) => Err(error),
+        };
+        drop(client);
         if let Err(error) = opened {
             let closed_at = self
                 .authority
@@ -1562,30 +1918,7 @@ impl ExecutionPortModelBridge {
                 exchanges.remove(&exchange.exchange.0);
             }
             close.map_err(model_store_failure)?;
-            return Err(match error.code() {
-                ModelPortClientErrorCode::ExpiredLease => ModelPortFailure::new(
-                    "MODEL_AUTHORITY_EXPIRED",
-                    "model call authority has expired",
-                ),
-                ModelPortClientErrorCode::StaleAuthority => {
-                    model_failure(BridgeError::StaleAuthority)
-                }
-                ModelPortClientErrorCode::InvalidInput
-                | ModelPortClientErrorCode::CanonicalMapping => {
-                    model_failure(BridgeError::InvalidPayload)
-                }
-                ModelPortClientErrorCode::UnknownExchange => {
-                    model_failure(BridgeError::UnknownExchange)
-                }
-                ModelPortClientErrorCode::AlreadyTerminal
-                | ModelPortClientErrorCode::ExchangeConflict
-                | ModelPortClientErrorCode::CursorCorrupt => model_failure(BridgeError::Conflict),
-                ModelPortClientErrorCode::CursorStore
-                | ModelPortClientErrorCode::CodexSink
-                | ModelPortClientErrorCode::ExecutionPort => {
-                    model_failure(BridgeError::Unavailable)
-                }
-            });
+            return Err(error);
         }
         let stream = stream::unfold(receiver, |mut receiver| async move {
             receiver.recv().await.map(|item| (item, receiver))
@@ -1686,10 +2019,9 @@ impl ExecutionPortModelBridge {
             validate_model_selection(&envelope, stored.as_ref(), &self.expected_provider)?;
         }
         // Child bindings can be restored from the durable lineage table while
-        // the Kernel is already processing the replayed model response.  Put
-        // the exact binding in the action gate before Core can authorize a
-        // tool, rather than waiting for the outer adapter poll loop.
-        self.sync_action_binding(&binding).map_err(model_failure)?;
+        // the Kernel is already processing the replayed model response. The
+        // shared source makes this exact binding available to the action gate
+        // before Core can authorize a tool.
         let payload_bytes = self.prepare_host_payload(
             request,
             stored.as_ref(),
@@ -1775,48 +2107,64 @@ impl ExecutionPortModelBridge {
         &self,
         exchange: &OpenStreamExchange,
     ) -> Result<OpenModelExchangeCommand, ModelPortFailure> {
-        let command = match self
+        let command = if let Some(open) = self
             .outbox
             .retained_model_open(&exchange.exchange)
             .map_err(|_| model_failure(BridgeError::Unavailable))?
         {
-            Some(open) => {
-                let original_request = decode_payload(&open.request).map_err(model_failure)?;
-                let original_digest =
-                    model_open_request_digest(&original_request).map_err(model_failure)?;
-                let original_authority = ModelLeaseAuthority {
-                    lease: open.lease.clone(),
-                    worker_session_id: open.worker_session_id.clone(),
-                    session_identity: open.session_identity.clone(),
-                };
-                if !same_binding_with_extended_lease(
-                    &original_authority,
-                    &exchange.binding.authority,
-                ) || open.worker_session_id != exchange.binding.authority.worker_session_id
-                    || open.session_identity != exchange.binding.authority.session_identity
-                    || open.route != self.route
-                    || original_digest != exchange.request_digest
-                {
-                    return Err(model_failure(BridgeError::Conflict));
-                }
-                OpenModelExchangeCommand {
-                    metadata: ModelMessageMetadata {
-                        message_id: open.message_id,
-                        sent_at: open.sent_at,
-                    },
-                    authority: original_authority,
-                    model_exchange_id: exchange.exchange.clone(),
-                    request_id: open.request_id,
-                    route: open.route,
-                    request: open.request,
-                }
+            let original_request = decode_payload(&open.request).map_err(model_failure)?;
+            let original_digest =
+                model_open_request_digest(&original_request).map_err(model_failure)?;
+            let original_authority = ModelLeaseAuthority {
+                lease: open.lease.clone(),
+                worker_session_id: open.worker_session_id.clone(),
+                session_identity: open.session_identity.clone(),
+            };
+            if !same_binding_with_extended_lease(&original_authority, &exchange.binding.authority)
+                || open.worker_session_id != exchange.binding.authority.worker_session_id
+                || open.session_identity != exchange.binding.authority.session_identity
+                || open.route != self.route
+                || original_digest != exchange.request_digest
+            {
+                return Err(model_failure(BridgeError::Conflict));
             }
-            None => OpenModelExchangeCommand {
+            OpenModelExchangeCommand {
+                metadata: ModelMessageMetadata {
+                    message_id: open.message_id,
+                    sent_at: open.sent_at,
+                },
+                authority: original_authority,
+                model_exchange_id: exchange.exchange.clone(),
+                request_id: open.request_id,
+                route: open.route,
+                request: open.request,
+            }
+        } else {
+            let binding = self
+                .authority
+                .binding_for_alias(&exchange.binding.kernel_session_id)
+                .map_err(model_failure)?
+                .ok_or_else(|| model_failure(BridgeError::StaleAuthority))?;
+            let mut extended = exchange.binding.clone();
+            extended.authority.lease.expires_at = binding.authority.lease.expires_at.clone();
+            if !same_binding(&extended, &binding)
+                || !same_binding_with_extended_lease(
+                    &exchange.binding.authority,
+                    &binding.authority,
+                )
+                || self
+                    .authority
+                    .durably_fenced(&binding.run_key)
+                    .map_err(model_failure)?
+            {
+                return Err(model_failure(BridgeError::StaleAuthority));
+            }
+            OpenModelExchangeCommand {
                 metadata: ModelMessageMetadata {
                     message_id: execution_message_id(b"model-open", &exchange.exchange_identity),
                     sent_at: exchange.binding.opened_at.clone(),
                 },
-                authority: exchange.binding.authority.clone(),
+                authority: binding.authority,
                 model_exchange_id: exchange.exchange.clone(),
                 request_id: RequestId(canonical_id(
                     "req",
@@ -1825,7 +2173,7 @@ impl ExecutionPortModelBridge {
                 )),
                 route: self.route.clone(),
                 request: encoded(&exchange.payload_bytes),
-            },
+            }
         };
         Ok(command)
     }
@@ -2145,6 +2493,24 @@ fn decode_payload(payload: &EncodedPayload) -> Result<serde_json::Value, BridgeE
     Ok(request)
 }
 
+fn primary_model_usage_lower_bound(
+    observed: PrimaryModelUsage,
+    physical: PrimaryModelUsage,
+) -> PrimaryModelUsage {
+    // These sources can include the same successful invocation. Retain one
+    // complete measured vector, never their sum or per-component maxima.
+    let tokens = |usage: &PrimaryModelUsage| {
+        i128::from(usage.input) + i128::from(usage.cached.unwrap_or(0)) + i128::from(usage.output)
+    };
+    let mut usage = if tokens(&physical) > tokens(&observed) {
+        physical
+    } else {
+        observed
+    };
+    usage.actual_cost_microunits = None;
+    usage
+}
+
 fn primary_model_usage(
     chunk: &ModelChunkMessage,
 ) -> Result<Option<PrimaryModelUsage>, BridgeError> {
@@ -2253,6 +2619,7 @@ struct DeviceModelFailureMetadata {
     provider_retry_after_millis: Option<u64>,
     provider_request_id: Option<String>,
     diagnostic: Option<DeviceModelFailureDiagnostic>,
+    facts: Option<winwincode_execution_port::generated::ModelFailureFacts>,
 }
 
 #[derive(Deserialize)]
@@ -2263,17 +2630,10 @@ struct DeviceModelFailureDiagnostic {
     field_path: Option<String>,
 }
 
-fn decode_provider_failure(
+fn validate_provider_failure_metadata(
+    metadata: &DeviceModelFailureMetadata,
     error: &ExecutionPortError,
-    payload: Option<&EncodedPayload>,
-) -> Result<ModelPortFailure, BridgeError> {
-    let metadata: DeviceModelFailureMetadata = payload
-        .map(|payload| {
-            let json = decode_response_payload(payload).map_err(|_| BridgeError::InvalidPayload)?;
-            serde_json::from_str(&json).map_err(|_| BridgeError::InvalidPayload)
-        })
-        .transpose()?
-        .unwrap_or_default();
+) -> Result<(), BridgeError> {
     if metadata
         .status
         .is_some_and(|status| !(100..=599).contains(&status))
@@ -2301,14 +2661,60 @@ fn decode_provider_failure(
                 value.is_empty() || value.len() > 256 || value.chars().any(char::is_control)
             })
         })
+        || metadata.facts.as_ref().is_some_and(|facts| {
+            facts.source_code != error.code
+                || facts.attempt_id.as_ref().is_some_and(|value| {
+                    value.is_empty()
+                        || value.len() > 200
+                        || !value
+                            .bytes()
+                            .all(|byte| byte.is_ascii_alphanumeric() || b"_:-".contains(&byte))
+                })
+                || facts.parser_diagnostic.as_ref().is_some_and(|diagnostic| {
+                    [
+                        &diagnostic.stage,
+                        &diagnostic.event_type,
+                        &diagnostic.field_path,
+                    ]
+                    .into_iter()
+                    .flatten()
+                    .any(|value| {
+                        value.is_empty() || value.len() > 256 || value.chars().any(char::is_control)
+                    })
+                })
+        })
     {
         return Err(BridgeError::InvalidPayload);
     }
+    Ok(())
+}
+
+fn decode_provider_failure(
+    error: &ExecutionPortError,
+    payload: Option<&EncodedPayload>,
+) -> Result<ModelPortFailure, BridgeError> {
+    let metadata: DeviceModelFailureMetadata = payload
+        .map(|payload| {
+            let json = decode_response_payload(payload).map_err(|_| BridgeError::InvalidPayload)?;
+            serde_json::from_str(&json).map_err(|_| BridgeError::InvalidPayload)
+        })
+        .transpose()?
+        .unwrap_or_default();
+    validate_provider_failure_metadata(&metadata, error)?;
     let wire_code = serde_json::to_value(&error.code).map_err(|_| BridgeError::InvalidPayload)?;
     let wire_code = wire_code.as_str().ok_or(BridgeError::InvalidPayload)?;
     let code = match wire_code {
         "DEVICE_PROVIDER_RATE_LIMITED" => "RATE_LIMIT",
         "DEVICE_PROVIDER_UPSTREAM_FAILED" => "SERVER",
+        "DEVICE_PROVIDER_CONNECTION_FAILED" | "DEVICE_PROVIDER_TRANSPORT_FAILED"
+            if metadata
+                .facts
+                .as_ref()
+                .and_then(|facts| facts.cause.as_ref())
+                == Some(&winwincode_execution_port::generated::ModelFailureCause::Timeout) =>
+        {
+            "TIMEOUT"
+        }
         "DEVICE_PROVIDER_CONNECTION_FAILED" | "DEVICE_PROVIDER_TRANSPORT_FAILED" => "TRANSPORT",
         "DEVICE_PROVIDER_RESPONSE_INCOMPLETE" => "INCOMPLETE_STREAM",
         "DEVICE_PROVIDER_REQUEST_REJECTED" => match metadata.status {
@@ -2346,6 +2752,31 @@ fn decode_provider_failure(
         retryable: Some(error.retryable && !terminal_authority),
         provider_retry_after_millis: metadata.provider_retry_after_millis,
         provider_request_id: metadata.provider_request_id,
+        facts: metadata
+            .facts
+            .or_else(|| {
+                metadata.diagnostic.map(|diagnostic| {
+                    winwincode_execution_port::generated::ModelFailureFacts {
+                    source_code: error.code.clone(),
+                    scope:
+                        winwincode_execution_port::generated::ModelFailureFactsScope::ModelAttempt,
+                    parser_diagnostic: Some(
+                        winwincode_execution_port::generated::ProviderModelFailureDiagnostic {
+                            stage: diagnostic.stage,
+                            event_type: diagnostic.event_type,
+                            field_path: diagnostic.field_path,
+                        },
+                    ),
+                    acceptance: None,
+                    phase: None,
+                    cause: None,
+                    network_diagnostic_code: None,
+                    attempt_id: None,
+                    stop_reason: None,
+                }
+                })
+            })
+            .map(Box::new),
     })
 }
 
@@ -2489,7 +2920,11 @@ fn canonical_id(prefix: &str, namespace: &[u8], input: &str) -> String {
 }
 
 fn model_failure(error: BridgeError) -> ModelPortFailure {
-    ModelPortFailure::new(error.code(), error.to_string())
+    let mut failure = ModelPortFailure::new(error.code(), error.to_string());
+    // This host operation has failed closed. A fresh Core request cannot
+    // repair its durable identity, authority or required-frame failure.
+    failure.retryable = Some(false);
+    failure
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -2535,6 +2970,7 @@ mod tests {
     include!("model_mechanism_regression_tests.rs");
     include!("model_local_cancellation_tests.rs");
     include!("model_task_context_replay_tests.rs");
+    include!("model_ack_transport_identity_tests.rs");
     use serde_json::json;
     use std::sync::Arc;
     use winwincode_domain::{
@@ -2545,13 +2981,14 @@ mod tests {
 
     use super::{
         ExecutionPortModelBridge, ModelLeaseAuthority, ModelRunBinding, SharedAuthoritySource,
-        model_call_digest, primary_model_usage,
+        encoded, model_call_digest, primary_model_usage, primary_model_usage_lower_bound,
     };
     use crate::model_port_client::{
         ModelAuthorityRejection, ModelChunkDisposition, ModelChunkFingerprint, ModelCursorStore,
         ModelLeaseAuthoritySource, ModelTerminationReason,
     };
     use crate::outbox::ExecutionOutbox;
+    use crate::performance::PrimaryModelUsage;
     use crate::store::{AdapterStore, ModelCallPhase};
     use base64::Engine as _;
     use futures::StreamExt as _;
@@ -2693,6 +3130,121 @@ mod tests {
     }
 
     #[test]
+    fn exhausted_provider_failure_preserves_attempt_facts_and_parser_location() {
+        use winwincode_execution_port::generated::{
+            ExecutionPortError, ExecutionPortErrorCode, ModelFailureAcceptance, ModelFailureCause,
+            ModelFailureStopReason,
+        };
+        let authority = authority(&id("cdx", 'A'));
+        let payload = json!({"facts":{
+            "sourceCode":"DEVICE_PROVIDER_RATE_LIMITED","scope":"model_attempt",
+            "cause":"rate_limited","acceptance":"response_received","phase":"response_headers",
+            "attemptId":"physical_attempt_2","stopReason":"retry_budget_exhausted",
+            "networkDiagnosticCode":"http_status",
+            "parserDiagnostic":{"stage":"headers","eventType":"error","fieldPath":"status"}
+        },"status":429,"providerRequestId":"upstream-42"});
+        let mut chunk = test_chunk(
+            &authority,
+            &ModelExchangeId(id("mdl", 'A')),
+            1,
+            true,
+            payload.to_string().as_bytes(),
+            'F',
+        );
+        chunk.error = Some(ExecutionPortError {
+            code: ExecutionPortErrorCode::DeviceProviderRateLimited,
+            message: "limited".to_owned(),
+            retryable: false,
+        });
+        let failure =
+            super::decode_provider_failure(chunk.error.as_ref().unwrap(), chunk.payload.as_ref())
+                .unwrap();
+        assert_eq!(failure.code, "RATE_LIMIT");
+        assert_eq!(failure.retryable, Some(false));
+        assert_eq!(failure.provider_request_id.as_deref(), Some("upstream-42"));
+        let facts = failure.facts.unwrap();
+        assert_eq!(facts.cause, Some(ModelFailureCause::RateLimited));
+        assert_eq!(
+            facts.acceptance,
+            Some(ModelFailureAcceptance::ResponseReceived)
+        );
+        assert_eq!(
+            facts.stop_reason,
+            Some(ModelFailureStopReason::RetryBudgetExhausted)
+        );
+        assert_eq!(facts.attempt_id.as_deref(), Some("physical_attempt_2"));
+        assert_eq!(
+            facts.parser_diagnostic.unwrap().field_path.as_deref(),
+            Some("status")
+        );
+    }
+
+    #[test]
+    fn transport_timeout_is_distinct_from_lease_expiry_and_retains_unknown_acceptance() {
+        use winwincode_execution_port::generated::{
+            ExecutionPortError, ExecutionPortErrorCode, ModelFailureAcceptance, ModelFailureCause,
+        };
+        let authority = authority(&id("cdx", 'A'));
+        for cause in ["timeout", "transport_interrupted"] {
+            let payload = json!({"facts":{
+                "sourceCode":"DEVICE_PROVIDER_TRANSPORT_FAILED","scope":"model_attempt",
+                "cause":cause,"acceptance":"unknown","phase":"response_body",
+                "attemptId":"physical_attempt_2","stopReason":"retry_budget_exhausted"
+            }});
+            let chunk = test_chunk(
+                &authority,
+                &ModelExchangeId(id("mdl", 'A')),
+                1,
+                true,
+                payload.to_string().as_bytes(),
+                'F',
+            );
+            let failure = super::decode_provider_failure(
+                &ExecutionPortError {
+                    code: ExecutionPortErrorCode::DeviceProviderTransportFailed,
+                    message: "untrusted transport text".to_owned(),
+                    retryable: false,
+                },
+                chunk.payload.as_ref(),
+            )
+            .unwrap();
+            assert_eq!(
+                failure.code,
+                if cause == "timeout" {
+                    "TIMEOUT"
+                } else {
+                    "TRANSPORT"
+                }
+            );
+            let facts = failure.facts.unwrap();
+            assert_eq!(facts.acceptance, Some(ModelFailureAcceptance::Unknown));
+            assert_eq!(
+                facts.cause,
+                Some(if cause == "timeout" {
+                    ModelFailureCause::Timeout
+                } else {
+                    ModelFailureCause::TransportInterrupted
+                })
+            );
+        }
+        let lease = super::decode_provider_failure(
+            &ExecutionPortError {
+                code: ExecutionPortErrorCode::LeaseExpired,
+                message: "same transport text".to_owned(),
+                retryable: true,
+            },
+            None,
+        )
+        .unwrap();
+        assert_eq!(lease.code, "LEASE_EXPIRED");
+        assert_eq!(lease.retryable, Some(false));
+        assert!(
+            lease.facts.is_none(),
+            "missing certainty cannot be manufactured"
+        );
+    }
+
+    #[test]
     fn invalid_provider_failure_metadata_is_rejected_before_retention() {
         use winwincode_execution_port::generated::{ExecutionPortError, ExecutionPortErrorCode};
 
@@ -2704,6 +3256,9 @@ mod tests {
             json!({"providerRequestId":"request\nsecret"}),
             json!({"diagnostic":{"stage":12}}),
             json!({"tokenUsage":{"input_tokens":42}}),
+            json!({"facts":{"sourceCode":"CANCELLED","scope":"model_attempt"}}),
+            json!({"facts":{"sourceCode":"DEVICE_PROVIDER_RATE_LIMITED","scope":"model_attempt","acceptance":"assumed_not_sent"}}),
+            json!({"facts":{"sourceCode":"DEVICE_PROVIDER_RATE_LIMITED","scope":"model_attempt","attemptId":"secret\nbody"}}),
         ] {
             let mut chunk = test_chunk(
                 &lease,
@@ -2919,6 +3474,61 @@ mod tests {
         assert_jev_receipt_faults(&["pending"]).await;
     }
 
+    #[tokio::test]
+    async fn primary_receipt_gaps_preserve_measured_lower_bounds_and_unknown_budgets() {
+        assert_jev_receipt_faults(&[
+            "primary-missing",
+            "primary-corrupt",
+            "primary-authoritative",
+        ])
+        .await;
+    }
+
+    #[test]
+    fn primary_usage_lower_bound_preserves_one_whole_measured_vector() {
+        let usage = |input, cached, output| PrimaryModelUsage {
+            input,
+            cached,
+            output,
+            actual_cost_microunits: Some(99),
+        };
+        let without_cost = |mut usage: PrimaryModelUsage| {
+            usage.actual_cost_microunits = None;
+            usage
+        };
+        let outer = usage(10, None, 5);
+        assert_eq!(
+            primary_model_usage_lower_bound(outer, PrimaryModelUsage::default()),
+            without_cost(outer)
+        );
+        let physical = usage(2, Some(3), 20);
+        assert_eq!(
+            primary_model_usage_lower_bound(outer, physical),
+            without_cost(physical),
+            "the larger lower bound retains its input/cache/output vector"
+        );
+        let outer = usage(30, None, 2);
+        assert_eq!(
+            primary_model_usage_lower_bound(outer, physical),
+            without_cost(outer),
+            "crossed components do not manufacture a larger total"
+        );
+        let outer = usage(10, Some(50), 5);
+        let physical = usage(50, Some(0), 10);
+        assert_eq!(
+            primary_model_usage_lower_bound(outer, physical),
+            without_cost(outer),
+            "cached input contributes once to the complete measured total"
+        );
+        let outer = usage(i64::MAX - 1, Some(1), i64::MAX);
+        let physical = usage(i64::MAX, None, i64::MAX - 1);
+        assert_eq!(
+            primary_model_usage_lower_bound(outer, physical),
+            without_cost(outer),
+            "comparison cannot wrap across the i64 boundary"
+        );
+    }
+
     #[allow(
         clippy::too_many_lines,
         reason = "Exercise receipt faults through the real bridge, Device store and restart"
@@ -2985,8 +3595,15 @@ mod tests {
                         "resolvedModelId":null,"batchSize":1,"device":"remote","confidence":1.0},"failures":[],
                 }).to_string())
                 };
-                db.execute("INSERT INTO jev_context_exchanges(operation_id,digest,result) VALUES(?1,?2,?3)",
-                    rusqlite::params![format!("jev:{}:{index}",open.model_exchange_id.0),"a".repeat(64),run]).unwrap();
+                let scoring_request = json!([
+                    "jev-context.v1", "fixture-configuration",
+                    {"task":"JEV accounting","candidate":format!("candidate-{index}")},
+                    {}, {}
+                ])
+                .to_string();
+                let status = if run.is_some() { "failed" } else { "pending" };
+                db.execute("INSERT INTO jev_context_exchanges(operation_id,digest,result,request_json,call_status) VALUES(?1,?2,?3,?4,?5)",
+                    rusqlite::params![format!("jev:{}:{index}",open.model_exchange_id.0),format!("{:x}",Sha256::digest(scoring_request.as_bytes())),run,scoring_request,status]).unwrap();
             }
             assert_eq!(device.model_jev_receipts(&open).unwrap().len(), 2);
             match fault {
@@ -2994,7 +3611,7 @@ mod tests {
                 "partial" => store.lock().unwrap().execute_batch("CREATE TRIGGER deny_jev BEFORE INSERT ON performance_jev_receipt WHEN substr(NEW.operation_id,-2)=':1' BEGIN SELECT RAISE(FAIL,'second receipt unavailable'); END;").unwrap(),
                 "source" => { db.execute("UPDATE jev_context_exchanges SET result='corrupt'", []).unwrap(); },
                 "pending" => store.lock().unwrap().execute_batch("CREATE TRIGGER deny_primary_completion BEFORE UPDATE ON performance_operation BEGIN SELECT RAISE(FAIL,'optional completion unavailable'); END;").unwrap(),
-                "none" => {},
+                "none" | "primary-missing" | "primary-corrupt" | "primary-authoritative" => {},
                 _ => unreachable!(),
             }
             let mut chunk = final_chunk(&open, 'a');
@@ -3007,6 +3624,25 @@ mod tests {
                     Sha256::digest(payload)
                 )),
             });
+            if fault != "primary-missing" {
+                let mut physical = chunk.clone();
+                let physical_payload: &[u8] = if fault == "primary-authoritative" {
+                    br#"{"type":"completed","tokenUsage":{"inputTokens":5,"outputTokens":2},"actualCostMicros":7}"#
+                } else {
+                    br#"{"type":"completed","tokenUsage":{"inputTokens":10,"outputTokens":5},"actualCostMicros":15}"#
+                };
+                physical.payload = Some(encoded(physical_payload));
+                device
+                    .retain_stored_model_exchange_chunks(&open, &[physical])
+                    .unwrap();
+                if fault == "primary-corrupt" {
+                    db.execute(
+                        "UPDATE exchanges SET accounting_chunks='corrupt' WHERE exchange_id=?1",
+                        [&open.model_exchange_id.0],
+                    )
+                    .unwrap();
+                }
+            }
             bridge
                 .accept_chunk(&chunk, &lease.lease.issued_at)
                 .await
@@ -3034,7 +3670,11 @@ mod tests {
             assert_eq!(
                 imported,
                 match fault {
-                    "none" | "pending" => 2,
+                    "none"
+                    | "pending"
+                    | "primary-missing"
+                    | "primary-corrupt"
+                    | "primary-authoritative" => 2,
                     "partial" => 1,
                     _ => 0,
                 }
@@ -3046,11 +3686,34 @@ mod tests {
             );
             assert_eq!(
                 totals.usage_complete,
-                fault == "none",
+                matches!(fault, "none" | "primary-authoritative"),
                 "{fault}: missing receipts must not open token budgets"
             );
-            if fault == "none" {
+            if matches!(fault, "none" | "primary-missing" | "primary-corrupt") {
                 assert_eq!(totals.total_tokens, 115);
+            }
+            if fault == "primary-authoritative" {
+                assert_eq!(totals.total_tokens, 107);
+            }
+            if matches!(fault, "primary-missing" | "primary-corrupt") {
+                let outcome = store.retained_outcome_usage("run", 0).unwrap().unwrap();
+                assert_eq!(outcome.tokens, None);
+                assert_eq!(outcome.known_tokens, 115);
+                assert_eq!(outcome.cost_microunits, None);
+                assert_eq!(
+                    outcome.accounting_status,
+                    winwincode_execution_port::generated::ExecutionOutcomeUsageAccountingStatus::Unknown
+                );
+                let primary: (i64, i64, i64, bool, bool, Option<i64>) = store
+                    .lock()
+                    .unwrap()
+                    .query_row(
+                        "SELECT input_tokens,cached_tokens,output_tokens,usage_known,cache_breakdown_known,actual_cost_microunits FROM performance_operation WHERE operation_id='original-call'",
+                        [],
+                        |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?,row.get(4)?,row.get(5)?)),
+                    )
+                    .unwrap();
+                assert_eq!(primary, (10, 0, 5, false, false, None));
             }
             assert!(
                 !totals.cost_complete,
@@ -3080,7 +3743,20 @@ mod tests {
             let reopened = AdapterStore::open(&root).unwrap();
             let totals = reopened.delegated_performance_totals("run").unwrap();
             assert_eq!(totals.pending_model_calls, 0);
-            assert_eq!(totals.usage_complete, fault == "none");
+            assert_eq!(
+                totals.usage_complete,
+                matches!(fault, "none" | "primary-authoritative")
+            );
+            if matches!(fault, "primary-missing" | "primary-corrupt") {
+                let outcome = reopened.retained_outcome_usage("run", 0).unwrap().unwrap();
+                assert_eq!(outcome.tokens, None);
+                assert_eq!(outcome.known_tokens, 115);
+                assert_eq!(outcome.cost_microunits, None);
+                assert_eq!(
+                    outcome.accounting_status,
+                    winwincode_execution_port::generated::ExecutionOutcomeUsageAccountingStatus::Unknown
+                );
+            }
             assert!(!totals.cost_complete);
             drop(reopened);
             std::fs::remove_dir_all(root).unwrap();
@@ -3161,6 +3837,156 @@ mod tests {
             })
             .unwrap_or_else(|error| panic!("install {outbox_label} binding: {error:?}"));
         bridge
+    }
+
+    #[tokio::test]
+    async fn prepared_model_open_uses_renewal_installed_while_waiting_for_client() {
+        let root = std::env::temp_dir().join(format!("wwc-open-renewal-{}", uuid::Uuid::now_v7()));
+        let store = AdapterStore::open(&root).unwrap();
+        let original = authority(&id("cdx", 'A'));
+        let bridge = Arc::new(installed_loopback_bridge(
+            &store,
+            SharedAuthoritySource::default(),
+            "open renewal",
+            "run",
+            &original,
+            "kernel",
+        ));
+        let request = ModelPortRequest {
+            request_id: "renewing-call".into(),
+            payload_json: json!({
+                "requestId":"renewing-call", "provider":"loopback", "sessionId":"kernel",
+                "threadId":original.session_identity.codex_thread_id.0,
+                "request":{"model":"loopback", "input":[]},
+            })
+            .to_string(),
+        };
+        let client = bridge.client.lock().await;
+        let opening_bridge = bridge.clone();
+        let opening =
+            tokio::spawn(async move { opening_bridge.model_port().stream(request).await });
+        // The client lock cuts the exact await between request preparation and
+        // admission. The renewal comes from the shared installed root binding.
+        for _ in 0..1_000 {
+            if store
+                .model_call_phase("run", "renewing-call")
+                .unwrap()
+                .is_some()
+            {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(
+            store.model_call_phase("run", "renewing-call").unwrap(),
+            Some(ModelCallPhase::InFlight)
+        );
+        let mut renewed = original.clone();
+        renewed.lease.expires_at = Instant("2030-01-01T02:00:00.000Z".into());
+        bridge
+            .install_binding(ModelRunBinding {
+                run_key: "run".into(),
+                canonical_thread_id: renewed.session_identity.codex_thread_id.clone(),
+                kernel_session_id: "kernel".into(),
+                authority: renewed.clone(),
+                opened_at: renewed.lease.issued_at.clone(),
+            })
+            .unwrap();
+        drop(client);
+        let stream = opening
+            .await
+            .unwrap()
+            .expect("legitimate renewal keeps the new model call live");
+        let messages = bridge.take_messages().unwrap();
+        assert_eq!(messages.len(), 1);
+        let ExecutionPortMessage::ModelOpenMessage(open) = &messages[0] else {
+            panic!("one real ModelOpen is admitted");
+        };
+        assert_eq!(open.lease, renewed.lease);
+        assert_eq!(open.session_identity, original.session_identity);
+        assert_eq!(open.worker_session_id, original.worker_session_id);
+        assert_eq!(open.sent_at, original.lease.issued_at);
+        drop(stream);
+        drop(bridge);
+        drop(store);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn prepared_model_open_rejects_owner_replacement_and_cancellation() {
+        for change in ["attempt", "fence", "worker-instance", "cancel"] {
+            let root =
+                std::env::temp_dir().join(format!("wwc-open-owner-{}", uuid::Uuid::now_v7()));
+            let store = AdapterStore::open(&root).unwrap();
+            let original = authority(&id("cdx", 'A'));
+            let bridge = Arc::new(installed_loopback_bridge(
+                &store,
+                SharedAuthoritySource::default(),
+                "open owner",
+                "run",
+                &original,
+                "kernel",
+            ));
+            let client = bridge.client.lock().await;
+            let opening_bridge = bridge.clone();
+            let thread_id = original.session_identity.codex_thread_id.0.clone();
+            let opening = tokio::spawn(async move {
+                opening_bridge
+                    .model_port()
+                    .stream(ModelPortRequest {
+                        request_id: "replaced-call".into(),
+                        payload_json: json!({"requestId":"replaced-call", "provider":"loopback",
+                        "sessionId":"kernel", "threadId":thread_id,
+                        "request":{"model":"loopback", "input":[]}})
+                        .to_string(),
+                    })
+                    .await
+            });
+            for _ in 0..1_000 {
+                if store
+                    .model_call_phase("run", "replaced-call")
+                    .unwrap()
+                    .is_some()
+                {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+            assert_eq!(
+                store.model_call_phase("run", "replaced-call").unwrap(),
+                Some(ModelCallPhase::InFlight)
+            );
+            let mut binding = bridge
+                .binding_for_thread(&original.session_identity.codex_thread_id)
+                .unwrap()
+                .unwrap();
+            match change {
+                "attempt" => binding.authority.lease.attempt += 1,
+                "fence" => binding.authority.lease.fencing_token = FencingToken("2".into()),
+                "worker-instance" => {
+                    binding.authority.lease.worker_instance_id = WorkerInstanceId(id("wki", 'B'));
+                }
+                "cancel" => {}
+                _ => unreachable!(),
+            }
+            if change == "cancel" {
+                bridge.fence_binding(&binding).unwrap();
+            } else {
+                binding.run_key = "replacement-run".into();
+                bridge.install_binding(binding).unwrap();
+            }
+            drop(client);
+            let failure = opening
+                .await
+                .unwrap()
+                .err()
+                .expect("the prepared old owner stays fenced");
+            assert_eq!(failure.code, "MODEL_AUTHORITY_STALE", "{change}");
+            assert!(bridge.take_messages().unwrap().is_empty(), "{change}");
+            drop(bridge);
+            drop(store);
+            std::fs::remove_dir_all(root).unwrap();
+        }
     }
 
     #[tokio::test]
@@ -4079,6 +4905,270 @@ mod tests {
             drop(store);
             std::fs::remove_dir_all(root).unwrap();
         }
+    }
+
+    #[tokio::test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "Live final delivery, root replacement, restart and forged historical frames share one durable proof"
+    )]
+    async fn consumed_provider_final_replays_after_root_replacement_without_core_or_ledger_writes()
+    {
+        for failed in [false, true] {
+            let root =
+                std::env::temp_dir().join(format!("wwc-replaced-final-{}", uuid::Uuid::now_v7()));
+            let store = AdapterStore::open(&root).unwrap();
+            let original = authority(&id("cdx", 'A'));
+            let bridge = Arc::new(installed_loopback_bridge(
+                &store,
+                SharedAuthoritySource::default(),
+                "original live final",
+                "run",
+                &original,
+                "kernel",
+            ));
+            let mut stream = bridge
+                .model_port()
+                .stream(ModelPortRequest {
+                    request_id: "original-call".into(),
+                    payload_json: json!({"requestId":"original-call", "provider":"loopback", "sessionId":"kernel", "threadId":original.session_identity.codex_thread_id.0, "request":{"model":"loopback", "input":[]}}).to_string(),
+                })
+                .await
+                .unwrap();
+            let open = bridge
+                .take_messages()
+                .unwrap()
+                .into_iter()
+                .find_map(|message| match message {
+                    ExecutionPortMessage::ModelOpenMessage(open) => Some(open),
+                    _ => None,
+                })
+                .unwrap();
+            let first = test_chunk(
+                &original,
+                &open.model_exchange_id,
+                1,
+                false,
+                br#"{"type":"response.created"}"#,
+                'P',
+            );
+            bridge
+                .accept_chunk(&first, &original.lease.issued_at)
+                .await
+                .unwrap();
+            assert!(stream.next().await.unwrap().is_ok());
+            let mut final_frame = final_chunk(&open, 'F');
+            final_frame.sequence.0 = 2;
+            if failed {
+                final_frame.payload = None;
+                final_frame.error = Some(winwincode_execution_port::generated::ExecutionPortError {
+                    code: winwincode_execution_port::generated::ExecutionPortErrorCode::DeviceProviderRequestRejected,
+                    message: "provider rejected original request".into(),
+                    retryable: false,
+                });
+            }
+            bridge
+                .accept_chunk(&final_frame, &original.lease.issued_at)
+                .await
+                .unwrap();
+            assert_eq!(stream.next().await.unwrap().is_err(), failed);
+            assert!(stream.next().await.is_none());
+            bridge.take_messages().unwrap();
+            drop(stream);
+            drop(bridge);
+            drop(store);
+            let mut replacement = authority(&id("cdx", 'B'));
+            replacement.lease.attempt = 2;
+            replacement.lease.fencing_token.0 = "2".into();
+            replacement.lease.lease_id.0 = id("lse", 'B');
+            replacement.worker_session_id.0 = id("wsn", 'B');
+            replacement.session_identity.worker_session_id = replacement.worker_session_id.clone();
+            for _ in 0..2 {
+                let store = AdapterStore::open(&root).unwrap();
+                let bridge = Arc::new(installed_loopback_bridge(
+                    &store,
+                    SharedAuthoritySource::default(),
+                    "replacement owner",
+                    "replacement-run",
+                    &replacement,
+                    "replacement-kernel",
+                ));
+                assert!(
+                    store
+                        .load_model_thread_lineage(&original.session_identity.codex_thread_id.0)
+                        .unwrap()
+                        .is_none()
+                );
+                let mapped = frame_from_message(&ExecutionPortMessage::ModelChunkMessage(
+                    final_frame.clone(),
+                ))
+                .unwrap();
+                let mut cursor = store.clone();
+                let head = cursor.load_head(&mapped.stream).unwrap();
+                let fingerprint = cursor.load_fingerprint(&mapped.stream, 2).unwrap();
+                let frames = store
+                    .load_model_call_frames("run", "original-call")
+                    .unwrap();
+                let phase = store.model_call_phase("run", "original-call").unwrap();
+                let received_at = Instant("2030-01-02T00:00:00.000Z".into());
+                assert_eq!(
+                    bridge
+                        .accept_chunk(&final_frame, &received_at)
+                        .await
+                        .unwrap(),
+                    ModelChunkDisposition::Duplicate {
+                        confirmed_sequence: 2
+                    }
+                );
+                let acknowledgements = bridge.take_messages().unwrap();
+                assert_eq!(acknowledgements.len(), 1);
+                assert!(
+                    matches!(&acknowledgements[0], ExecutionPortMessage::ModelAckMessage(ack)
+                    if ack.status == winwincode_execution_port::generated::LeaseWriteStatus::Duplicate
+                        && ack.ack_sequence.0 == 2 && ack.lease == original.lease
+                        && ack.session_identity == original.session_identity)
+                );
+                assert!(bridge.sink.streams.lock().unwrap().is_empty());
+                assert!(bridge.exchanges.lock().unwrap().is_empty());
+                assert_eq!(cursor.load_head(&mapped.stream).unwrap(), head);
+                assert_eq!(
+                    cursor.load_fingerprint(&mapped.stream, 2).unwrap(),
+                    fingerprint
+                );
+                assert_eq!(
+                    store
+                        .load_model_call_frames("run", "original-call")
+                        .unwrap(),
+                    frames
+                );
+                assert_eq!(
+                    store.model_call_phase("run", "original-call").unwrap(),
+                    phase
+                );
+                bridge
+                    .authority
+                    .validate_current(&replacement, &replacement.lease.issued_at)
+                    .unwrap();
+                for change in 0..9 {
+                    let mut forged = final_frame.clone();
+                    match change {
+                        0 => forged.message_id.0 = id("xmsg", 'Z'),
+                        1 => forged.sent_at.0 = "2030-01-01T00:00:01.000Z".into(),
+                        2 => forged.lease.expires_at.0 = "2030-01-01T02:00:00.000Z".into(),
+                        3 => forged.lease.issued_at.0 = "2029-12-31T23:59:59.000Z".into(),
+                        4 => forged.session_identity.codex_thread_id.0 = id("cdx", 'Z'),
+                        5 => forged.is_final = false,
+                        6 => forged.sequence.0 = 3,
+                        7 => forged.lease.fencing_token.0 = "3".into(),
+                        _ => {
+                            forged.payload =
+                                test_chunk(&original, &open.model_exchange_id, 2, true, b"{}", 'F')
+                                    .payload;
+                        }
+                    }
+                    assert!(
+                        bridge.accept_chunk(&forged, &received_at).await.is_err(),
+                        "changed frame {change}"
+                    );
+                }
+                assert!(bridge.accept_chunk(&first, &received_at).await.is_err());
+                assert!(
+                    bridge
+                        .accept_chunk(&final_frame, &Instant("2029-12-31T23:59:59.000Z".into()))
+                        .await
+                        .is_err()
+                );
+                assert!(bridge.take_messages().unwrap().is_empty());
+                assert_eq!(cursor.load_head(&mapped.stream).unwrap(), head);
+                assert_eq!(
+                    store
+                        .load_model_call_frames("run", "original-call")
+                        .unwrap(),
+                    frames
+                );
+                assert_eq!(
+                    bridge
+                        .binding_for_thread(&replacement.session_identity.codex_thread_id)
+                        .unwrap()
+                        .unwrap()
+                        .run_key,
+                    "replacement-run"
+                );
+                drop(cursor);
+                drop(bridge);
+                drop(store);
+            }
+            std::fs::remove_dir_all(root).unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn reserved_provider_final_without_consumed_cursor_cannot_clean_replaced_transport() {
+        let root = std::env::temp_dir().join(format!(
+            "wwc-unconsumed-replaced-final-{}",
+            uuid::Uuid::now_v7()
+        ));
+        let store = AdapterStore::open(&root).unwrap();
+        let original = authority(&id("cdx", 'A'));
+        let bridge = Arc::new(installed_loopback_bridge(
+            &store,
+            SharedAuthoritySource::default(),
+            "unconsumed original",
+            "run",
+            &original,
+            "kernel",
+        ));
+        let stream = bridge.model_port().stream(ModelPortRequest {
+            request_id: "unconsumed-call".into(),
+            payload_json: json!({"requestId":"unconsumed-call", "provider":"loopback", "sessionId":"kernel", "threadId":original.session_identity.codex_thread_id.0, "request":{"model":"loopback", "input":[]}}).to_string(),
+        }).await.unwrap();
+        let open = bridge
+            .take_messages()
+            .unwrap()
+            .into_iter()
+            .find_map(|message| match message {
+                ExecutionPortMessage::ModelOpenMessage(open) => Some(open),
+                _ => None,
+            })
+            .unwrap();
+        let chunk = final_chunk(&open, 'U');
+        store
+            .retain_model_call_frame("run", "unconsumed-call", &chunk)
+            .unwrap();
+        drop(stream);
+        drop(bridge);
+        let mut replacement = authority(&id("cdx", 'B'));
+        replacement.lease.attempt = 2;
+        replacement.lease.fencing_token.0 = "2".into();
+        let restored = installed_loopback_bridge(
+            &store,
+            SharedAuthoritySource::default(),
+            "replacement",
+            "replacement-run",
+            &replacement,
+            "replacement-kernel",
+        );
+        assert!(
+            restored
+                .accept_chunk(&chunk, &original.lease.expires_at)
+                .await
+                .is_err()
+        );
+        assert!(restored.take_messages().unwrap().is_empty());
+        assert!(restored.sink.streams.lock().unwrap().is_empty());
+        assert_eq!(
+            store
+                .load_model_call_frames("run", "unconsumed-call")
+                .unwrap(),
+            vec![chunk]
+        );
+        assert_eq!(
+            store.model_call_phase("run", "unconsumed-call").unwrap(),
+            Some(ModelCallPhase::InFlight)
+        );
+        drop(restored);
+        drop(store);
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[tokio::test]
@@ -5001,7 +6091,7 @@ mod tests {
             .install_binding(renewed.clone())
             .expect("replay extension");
         {
-            let bindings = bridge.bindings.read().expect("bindings");
+            let bindings = bridge.authority.bindings.read().expect("bindings");
             for alias in [&child.kernel_session_id, &child.canonical_thread_id.0] {
                 let current = bindings.get(alias).expect("child alias retained");
                 assert_eq!(
@@ -5016,6 +6106,7 @@ mod tests {
         bridge.install_binding(renewed).expect("replace attempt");
         assert!(
             !bridge
+                .authority
                 .bindings
                 .read()
                 .expect("bindings")

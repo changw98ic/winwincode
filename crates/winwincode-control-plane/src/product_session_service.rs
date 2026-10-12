@@ -867,6 +867,7 @@ impl<'storage> ProductSessionService<'storage> {
             &command.product_session_id,
             persisted,
             None,
+            None,
         )
     }
 
@@ -960,6 +961,7 @@ impl<'storage> ProductSessionService<'storage> {
             &command.product_session_id,
             persisted,
             None,
+            None,
         )
     }
 
@@ -1046,6 +1048,7 @@ impl<'storage> ProductSessionService<'storage> {
             &command.product_session_id,
             persisted,
             None,
+            None,
         )
     }
 
@@ -1127,6 +1130,7 @@ impl<'storage> ProductSessionService<'storage> {
             catalog,
             &command.product_session_id,
             persisted,
+            None,
             None,
         )
     }
@@ -1215,6 +1219,7 @@ impl<'storage> ProductSessionService<'storage> {
             &command.product_session_id,
             persisted,
             None,
+            None,
         )
     }
 
@@ -1255,6 +1260,7 @@ impl<'storage> ProductSessionService<'storage> {
             catalog,
             &command.product_session_id,
             persisted,
+            None,
             None,
         )
     }
@@ -1300,6 +1306,7 @@ impl<'storage> ProductSessionService<'storage> {
             catalog,
             product_session_id,
             persisted,
+            None,
             None,
         )
     }
@@ -1483,6 +1490,7 @@ impl<'storage> ProductSessionService<'storage> {
         product_session_id: &ProductSessionId,
         persisted: PersistedProductSession,
         execution_job: Option<&PreparedProductSessionExecution>,
+        execution_terminal: Option<&crate::execution_outcome_commit::ExecutionOutcomeCommit<'_>>,
     ) -> Result<ProductSessionMutationReceipt, ProductSessionServiceError> {
         let expected_catalog_revision = catalog.revision;
         catalog.revision = catalog
@@ -1525,12 +1533,19 @@ impl<'storage> ProductSessionService<'storage> {
             state,
             events,
         );
-        let receipt = match execution_job {
-            Some(execution_job) => self
-                .storage
-                .commit_with_execution_job(&commit, &execution_job.submission)
-                .map(|receipt| receipt.state),
-            None => self.storage.commit(&commit),
+        let receipt = if let Some(terminal) = execution_terminal {
+            if execution_job.is_some() {
+                return Err(corrupt("a commit cannot start and finish an execution"));
+            }
+            crate::execution_outcome_commit::commit_accepted_outcome(self.storage, commit, terminal)
+        } else {
+            match execution_job {
+                Some(execution_job) => self
+                    .storage
+                    .commit_with_execution_job(&commit, &execution_job.submission)
+                    .map(|receipt| receipt.state),
+                None => self.storage.commit(&commit),
+            }
         }
         .map_err(|error| storage_error(&error))?;
         let decoded = decode_receipt(&receipt, kind, receipt.idempotent_replay)?;

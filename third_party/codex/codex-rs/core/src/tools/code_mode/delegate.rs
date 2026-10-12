@@ -311,6 +311,7 @@ impl CoreTurnHost {
         invocation: CodeModeNestedToolCall,
         cancellation_token: CancellationToken,
     ) -> Result<JsonValue, String> {
+        let cell_id = invocation.cell_id.clone();
         call_nested_tool(
             self.exec.clone(),
             self.tool_runtime.clone(),
@@ -318,7 +319,17 @@ impl CoreTurnHost {
             cancellation_token,
         )
         .await
-        .map_err(|error| error.to_string())
+        .map_err(|error| {
+            if let crate::function_tool::FunctionCallError::Fatal(message) = &error {
+                self.exec
+                    .session
+                    .services
+                    .code_mode_service
+                    .terminal_handoffs
+                    .publish_fatal(&cell_id, message.clone());
+            }
+            error.to_string()
+        })
     }
 
     async fn notify(&self, call_id: String, cell_id: CellId, text: String) -> Result<(), String> {

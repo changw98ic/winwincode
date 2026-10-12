@@ -298,9 +298,10 @@ impl ToolDispatch {
         tool: Arc<dyn CoreToolRuntime>,
     ) -> Result<AnyToolResult, FunctionCallError> {
         let result = handle_any_tool(tool.as_ref(), invocation).await;
-        self.facts
-            .completed(result.as_ref().ok().map(snapshot).transpose()?)
-            .await?;
+        match &result {
+            Ok(output) => self.facts.completed(Some(snapshot(output)?)).await?,
+            Err(error) => self.facts.failed(&error.to_string()).await?,
+        }
         if let Some((gate, context, input)) = &self.trusted
             && let Ok(result) = &result
         {

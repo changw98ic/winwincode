@@ -318,6 +318,7 @@ mod tests {
     #[test]
     fn conversation_context_keeps_recent_text_files_within_the_utf8_goal_bound() {
         let message = |content: String| winwincode_api::generated::ChatMessageProjection {
+            output_preparation: None,
             artifact_refs: None,
             attachments: Some(vec![winwincode_domain::ChatAttachment {
                 name: "context.ts".into(),

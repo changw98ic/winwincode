@@ -389,6 +389,137 @@ fn production_rework_dispatch_uses_failed_candidate_and_replays_after_restart() 
 }
 
 #[test]
+fn production_verdict_reads_indexed_history_and_rejects_missing_or_changed_events() {
+    for fault in [None, Some("missing"), Some("changed")] {
+        let seeded = seed_verdict("indexed-verdict", RuntimeFixture::Valid);
+        index_verification_history(&seeded, fault);
+        let command = verdict_command(&seeded, 920);
+        let before_revision = delivery_state_revision(&seeded.data);
+        let mut host = start(&seeded);
+        let result = host.delivery_submit_verdict(&command);
+        if fault.is_some() {
+            assert_eq!(
+                result
+                    .expect_err("incomplete or changed indexed evidence must fail closed")
+                    .code(),
+                winwincode_api::generated::ErrorCode::TrustedFactsUnavailable
+            );
+            assert_eq!(delivery_state_revision(&seeded.data), before_revision);
+        } else {
+            let completed = result.expect("production verdict from immutable indexed events");
+            assert_eq!(
+                completed.current_revision.0,
+                command.expected_revision.0 + 1
+            );
+            host.shutdown().expect("indexed verdict shutdown");
+            host = start(&seeded);
+            assert_eq!(
+                host.delivery_submit_verdict(&command)
+                    .expect("indexed verdict replay"),
+                completed
+            );
+        }
+        host.shutdown().expect("indexed history shutdown");
+        cleanup(seeded);
+    }
+}
+
+/// Seed the current durable layout from the existing exact role facts. Faults
+/// affect an interior event, so a valid header/tail cannot conceal missing evidence.
+fn index_verification_history(seeded: &SeededVerdict, fault: Option<&str>) {
+    let mut storage = SqliteStorage::open(&seeded.data).expect("indexed fixture storage");
+    let connection =
+        rusqlite::Connection::open(storage.database_path()).expect("fixture connection");
+    for (role_index, binding) in seeded
+        .delivery
+        .snapshot()
+        .session_bindings
+        .iter()
+        .filter(|binding| {
+            matches!(
+                binding.execution_profile.as_deref(),
+                Some("reviewer" | "verifier")
+            )
+        })
+        .enumerate()
+    {
+        let stream = runtime_stream_id(
+            &repository_scope_key(&seeded.scope),
+            &binding.execution_job_id,
+        );
+        let state = storage
+            .load_state(&stream)
+            .expect("runtime state")
+            .expect("role runtime");
+        let mut header: serde_json::Value =
+            serde_json::from_slice(&state.payload).expect("runtime header");
+        let events = header["events"].as_array().expect("legacy events").clone();
+        assert!(events.len() > 2, "fixture needs an interior event");
+        let mut chain = String::new();
+        for (index, entry) in events.iter().enumerate() {
+            let sequence = index + 1;
+            let next = format!(
+                "sha256:{:x}",
+                Sha256::new()
+                    .chain_update(b"winwincode-runtime-event-chain-v2")
+                    .chain_update(chain.as_bytes())
+                    .chain_update(
+                        entry["eventDigest"]
+                            .as_str()
+                            .expect("event digest")
+                            .as_bytes()
+                    )
+                    .finalize()
+            );
+            let mut indexed =
+                json!({"entry": entry, "previousChainDigest": chain, "chainDigest": next});
+            let is_fault = role_index == 0 && sequence == 2;
+            if is_fault && fault == Some("changed") {
+                indexed["entry"]["event"]["summary"] = json!("changed after acceptance");
+            }
+            let seed = 9_000_000 + role_index as u64 * 100 + sequence as u64 * 2;
+            if !(is_fault && fault == Some("missing")) {
+                write_state_once(
+                    &mut storage,
+                    format!(
+                        "runtime-ledger-record:{}:{sequence:020}",
+                        binding.execution_job_id.0
+                    ),
+                    serde_json::to_vec(&indexed).expect("indexed event"),
+                    seed,
+                );
+            }
+            write_state_once(
+                &mut storage,
+                format!(
+                    "runtime-ledger-identity:{}:{}",
+                    binding.execution_job_id.0,
+                    entry["event"]["eventId"].as_str().expect("event identity")
+                ),
+                serde_json::to_vec(&json!([sequence, entry["eventDigest"]]))
+                    .expect("identity marker"),
+                seed + 1,
+            );
+            chain = next;
+        }
+        header["schemaVersion"] = json!(2);
+        header["eventChainDigest"] = json!(chain);
+        header
+            .as_object_mut()
+            .expect("runtime object")
+            .remove("events");
+        connection
+            .execute(
+                "UPDATE product_state SET payload=?2 WHERE stream_id=?1",
+                rusqlite::params![stream, serde_json::to_vec(&header).expect("indexed header")],
+            )
+            .expect("seed indexed header");
+    }
+    drop(connection);
+    Box::new(storage).close().expect("close indexed fixture");
+}
+
+#[test]
 fn failed_or_cancelled_writer_has_no_current_candidate() {
     use winwincode_control_plane::strongflow_projection::{
         SqliteTrustedPublicationProjectionAdapter, TrustedPublicationProjectionAdapter,

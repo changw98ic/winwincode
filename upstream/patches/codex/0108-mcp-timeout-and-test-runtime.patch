@@ -1,0 +1,139 @@
+diff --git a/codex-rs/codex-mcp/src/connection_manager.rs b/codex-rs/codex-mcp/src/connection_manager.rs
+--- a/codex-rs/codex-mcp/src/connection_manager.rs
++++ b/codex-rs/codex-mcp/src/connection_manager.rs
+@@ -53,6 +53,7 @@
+ use anyhow::Result;
+ use anyhow::anyhow;
+ use anyhow::bail;
++use codex_config::McpServerConfig;
+ use codex_config::McpServerTransportConfig;
+ use codex_diagnostics::Gauge;
+ use codex_diagnostics::GaugeGuard;
+@@ -75,6 +76,13 @@
+ use tracing::warn;
+ 
+ static LIVE_CONNECTIONS: Gauge = Gauge::new("mcp.connections.live");
++
++fn configured_tool_timeout(config: &McpServerConfig) -> Option<Duration> {
++    config
++        .tool_timeout_sec
++        .or(Some(DEFAULT_TOOL_TIMEOUT))
++        .filter(|timeout| !timeout.is_zero())
++}
+ 
+ pub(crate) struct McpServerConnection {
+     identity: Option<McpServerConnectionIdentity>,
+@@ -291,11 +299,7 @@
+             let metadata = McpServerMetadata::from(&server);
+             let configured_config = server.config().clone();
+             let configured_tool_filter = ToolFilter::from_config(&configured_config);
+-            let configured_tool_timeout = Some(
+-                configured_config
+-                    .tool_timeout_sec
+-                    .unwrap_or(DEFAULT_TOOL_TIMEOUT),
+-            );
++            let configured_tool_timeout = configured_tool_timeout(&configured_config);
+             let resolved_environment =
+                 runtime_context.resolve_server_environment(&server_name, &configured_config);
+             // For built-in Codex Apps, `CODEX_CONNECTORS_TOKEN` is a debug
+diff --git a/codex-rs/codex-mcp/src/connection_manager_tests.rs b/codex-rs/codex-mcp/src/connection_manager_tests.rs
+--- a/codex-rs/codex-mcp/src/connection_manager_tests.rs
++++ b/codex-rs/codex-mcp/src/connection_manager_tests.rs
+@@ -4023,6 +4023,19 @@
+     }
+ }
+ 
++#[test]
++fn configured_mcp_tool_timeout_can_be_disabled() {
++    let mut config = reusable_server_config("https://example.com/mcp");
++    assert_eq!(configured_tool_timeout(&config), Some(DEFAULT_TOOL_TIMEOUT));
++    config.tool_timeout_sec = Some(Duration::ZERO);
++    assert_eq!(configured_tool_timeout(&config), None);
++    config.tool_timeout_sec = Some(Duration::from_secs(7));
++    assert_eq!(
++        configured_tool_timeout(&config),
++        Some(Duration::from_secs(7))
++    );
++}
++
+ fn reusable_server_runtime_context() -> McpRuntimeContext {
+     McpRuntimeContext::new(
+         Arc::new(environment_manager_without_environments()),
+@@ -4076,7 +4089,7 @@
+             }),
+             metadata: McpServerMetadata::from(&server),
+             tool_filter: ToolFilter::from_config(config),
+-            tool_timeout: Some(config.tool_timeout_sec.unwrap_or(DEFAULT_TOOL_TIMEOUT)),
++            tool_timeout: configured_tool_timeout(config),
+             catalog_item_limit: crate::pagination::MAX_MCP_CATALOG_ITEMS,
+         },
+     );
+@@ -4210,7 +4223,7 @@
+             }),
+             metadata: McpServerMetadata::from(&server),
+             tool_filter: ToolFilter::from_config(&config),
+-            tool_timeout: Some(config.tool_timeout_sec.unwrap_or(DEFAULT_TOOL_TIMEOUT)),
++            tool_timeout: configured_tool_timeout(&config),
+             catalog_item_limit: crate::pagination::MAX_MCP_CATALOG_ITEMS,
+         },
+     );
+diff --git a/codex-rs/config/src/mcp_types.rs b/codex-rs/config/src/mcp_types.rs
+--- a/codex-rs/config/src/mcp_types.rs
++++ b/codex-rs/config/src/mcp_types.rs
+@@ -218,7 +218,7 @@
+     )]
+     pub startup_timeout_sec: Option<Duration>,
+ 
+-    /// Default timeout for MCP tool calls initiated via this server.
++    /// Default timeout for MCP tool calls initiated via this server. Zero disables the deadline.
+     #[serde(default, with = "option_duration_secs")]
+     pub tool_timeout_sec: Option<Duration>,
+ 
+diff --git a/codex-rs/core/tests/suite/openai_file_mcp.rs b/codex-rs/core/tests/suite/openai_file_mcp.rs
+--- a/codex-rs/core/tests/suite/openai_file_mcp.rs
++++ b/codex-rs/core/tests/suite/openai_file_mcp.rs
+@@ -44,7 +44,6 @@
+ use wiremock::Mock;
+ use wiremock::MockServer;
+ use wiremock::ResponseTemplate;
+-use wiremock::matchers::body_json;
+ use wiremock::matchers::body_partial_json;
+ use wiremock::matchers::header;
+ use wiremock::matchers::method;
+diff --git a/codex-rs/ext/agent/tests/agent_service.rs b/codex-rs/ext/agent/tests/agent_service.rs
+--- a/codex-rs/ext/agent/tests/agent_service.rs
++++ b/codex-rs/ext/agent/tests/agent_service.rs
+@@ -8,8 +8,31 @@
+ use core_test_support::wait_for_event;
+ use pretty_assertions::assert_eq;
+ 
+-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+-async fn starts_resolved_agent_prompt_in_forked_thread() -> Result<()> {
++#[test]
++fn starts_resolved_agent_prompt_in_forked_thread() -> Result<()> {
++    const TEST_STACK_SIZE_BYTES: usize = 8 * 1024 * 1024;
++
++    let handle = std::thread::Builder::new()
++        .name("agent-service-test".to_string())
++        .stack_size(TEST_STACK_SIZE_BYTES)
++        .spawn(|| {
++            tokio::runtime::Builder::new_multi_thread()
++                .worker_threads(2)
++                .thread_stack_size(TEST_STACK_SIZE_BYTES)
++                .enable_all()
++                .build()
++                .expect("agent service test runtime should build")
++                .block_on(starts_resolved_agent_prompt_in_forked_thread_async())
++        })
++        .expect("agent service test thread should spawn");
++
++    match handle.join() {
++        Ok(result) => result,
++        Err(payload) => std::panic::resume_unwind(payload),
++    }
++}
++
++async fn starts_resolved_agent_prompt_in_forked_thread_async() -> Result<()> {
+     skip_if_no_network!(Ok(()));
+ 
+     let server = responses::start_mock_server().await;

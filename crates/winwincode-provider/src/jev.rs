@@ -18,7 +18,7 @@ use std::{
 
 use futures::future::BoxFuture;
 use serde::{Deserialize, Serialize};
-use tokio::time::{Instant, timeout};
+use tokio::time::Instant;
 use ureq::unversioned::transport::{Connector, RustlsConnector};
 
 use crate::canonical_https_endpoint;
@@ -36,14 +36,14 @@ pub const OPENJEV_LOCAL_RUNTIME_GAP: &str = "OpenJev local model runtime is not 
 pub const OPENJEV_DEFAULT_MODEL_ID: &str = "openjev-4b-v2";
 
 /// One natural-language inference request.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct JevHypothesis {
     pub premise: String,
     pub hypothesis: String,
 }
 
 /// Provider-neutral NLI probabilities.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, Serialize)]
 pub struct JevScores {
     pub entailment: f32,
     pub contradiction: f32,
@@ -117,7 +117,7 @@ pub struct JevExecutionOptions {
 }
 
 /// One scored hypothesis and its Provider-reported accounting.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct JevEvaluation {
     pub scores: JevScores,
     pub input_tokens: u64,
@@ -130,7 +130,7 @@ pub struct JevEvaluation {
 }
 
 /// One batch result and its Provider-reported accounting.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct JevBatchEvaluation {
     pub evaluations: Vec<JevScores>,
     pub input_tokens: u64,
@@ -422,6 +422,9 @@ impl<T> JevRun<T> {
     }
 }
 
+#[path = "jev_call_records.rs"]
+mod call_records;
+
 trait MeasuredJevResult {
     fn observation(
         &self,
@@ -524,7 +527,7 @@ impl JevRuntime {
         let connection = rusqlite::Connection::open(path)?;
         connection.busy_timeout(Duration::from_secs(5))?;
         let now = i64::try_from(winwincode_network::journal::now_millis())
-            .map_err(|_| crate::DeviceProviderError)?;
+            .map_err(|_| crate::DeviceProviderError::StateInvalid)?;
         connection.execute(
             "INSERT INTO jev_attempt_diagnostics (operation_id,sequence,role,recorded_ms,failure_json)
              SELECT ?1,COALESCE(MAX(sequence),0)+1,?2,?3,?4 FROM jev_attempt_diagnostics WHERE operation_id=?1",
@@ -555,7 +558,8 @@ impl JevRuntime {
         options: JevExecutionOptions,
         can_start: &(impl Fn() -> bool + ?Sized),
     ) -> JevRun<JevEvaluation> {
-        self.run(1, options, can_start, move |provider| {
+        let request = serde_json::json!({"inputs":[&input],"options":options});
+        self.run(1, options, &request, can_start, move |provider| {
             provider.evaluate(input.clone(), options)
         })
         .await
@@ -577,7 +581,8 @@ impl JevRuntime {
         can_start: &(impl Fn() -> bool + ?Sized),
     ) -> JevRun<JevBatchEvaluation> {
         let batch_size = inputs.len();
-        self.run(batch_size, options, can_start, move |provider| {
+        let request = serde_json::json!({"inputs":&inputs,"options":options});
+        self.run(batch_size, options, &request, can_start, move |provider| {
             provider.batch_evaluate(inputs.clone(), options)
         })
         .await
@@ -703,11 +708,12 @@ impl JevRuntime {
         &self,
         batch_size: usize,
         options: JevExecutionOptions,
+        request: &serde_json::Value,
         can_start: &(impl Fn() -> bool + ?Sized),
         operation: impl Fn(Arc<dyn JevProvider>) -> BoxFuture<'static, Result<T, JevProviderError>>,
     ) -> JevRun<T>
     where
-        T: MeasuredJevResult,
+        T: MeasuredJevResult + Serialize,
     {
         let mut failures = Vec::new();
         for provider in &self.providers {
@@ -740,41 +746,37 @@ impl JevRuntime {
                         winwincode_network::Acceptance::NotSent,
                     );
                 }
-                let inference = Box::pin(timeout(
-                    self.config.timeout,
-                    operation(Arc::clone(provider)),
-                ));
-                let result = if let Some(cancel) = &self.cancellation {
-                    match futures::future::select(inference, Box::pin(cancel.cancelled())).await {
-                        futures::future::Either::Left((result, _)) => result,
-                        futures::future::Either::Right(_) => {
-                            return self.stopped_run(
-                                failures,
-                                &capabilities.provider_id,
-                                winwincode_network::Acceptance::Unknown,
-                            );
-                        }
-                    }
-                } else {
-                    inference.await
+                let Ok(invocation) = self.begin_invocation(&capabilities, request) else {
+                    return Self::storage_failed_run(failures, &capabilities.provider_id);
+                };
+                let Some(result) = self.invoke(Arc::clone(provider), &operation).await else {
+                    return self.cancelled_invocation(
+                        invocation.as_ref(),
+                        failures,
+                        &capabilities.provider_id,
+                    );
                 };
                 let latency = started.elapsed();
                 let error = match result {
-                    Ok(Ok(value)) => {
+                    Ok(value) => {
                         if let Some(observation) =
                             value.observation(&capabilities, latency, batch_size)
                         {
-                            return JevRun {
-                                value: Some(value),
-                                observation: Some(observation),
+                            return Self::successful_run(
+                                invocation.as_ref(),
+                                value,
+                                observation,
                                 failures,
-                            };
+                                &capabilities.provider_id,
+                            );
                         }
                         JevProviderError::invalid_response()
                     }
-                    Ok(Err(error)) => error,
-                    Err(_) => JevProviderError::new(JevProviderErrorKind::Timeout),
+                    Err(error) => error,
                 };
+                if Self::finish_invocation(invocation.as_ref(),"failed",&serde_json::json!({"status":"failed","kind":error.kind(),"network":error.network_failure()})).is_err() {
+                    return Self::storage_failed_run(failures,&capabilities.provider_id);
+                }
                 if !self.retain_failure(
                     &mut failures,
                     &capabilities.provider_id,
@@ -1316,9 +1318,19 @@ impl HttpsJevRemoteTransport {
     ///
     /// Rejects non-HTTPS or otherwise invalid endpoints.
     pub fn try_new(config: &OpenJevRemoteConfig) -> Result<Self, JevProviderError> {
+        Self::try_new_with_tls_roots(config, &crate::ProviderTlsRoots::WebPki)
+    }
+
+    fn try_new_with_tls_roots(
+        config: &OpenJevRemoteConfig,
+        roots: &crate::ProviderTlsRoots,
+    ) -> Result<Self, JevProviderError> {
         if !canonical_https_endpoint(config.endpoint()) {
             return Err(JevProviderError::new(JevProviderErrorKind::InvalidRequest));
         }
+        roots
+            .validate()
+            .map_err(|_| JevProviderError::new(JevProviderErrorKind::InvalidRequest))?;
         let agent = ureq::Agent::config_builder()
             .http_status_as_error(false)
             .max_redirects(0)
@@ -1329,7 +1341,7 @@ impl HttpsJevRemoteTransport {
             .tls_config(
                 ureq::tls::TlsConfig::builder()
                     .provider(ureq::tls::TlsProvider::Rustls)
-                    .root_certs(ureq::tls::RootCerts::WebPki)
+                    .root_certs(roots.root_certs())
                     .use_sni(true)
                     .disable_verification(false)
                     .build(),
@@ -1359,10 +1371,17 @@ impl HttpsJevRemoteTransport {
     /// # Errors
     /// Rejects invalid HTTPS configuration or hardware settings the service cannot honor.
     pub fn try_new_system_one(config: &OpenJevRemoteConfig) -> Result<Self, JevProviderError> {
+        Self::try_new_system_one_with_tls_roots(config, &crate::ProviderTlsRoots::WebPki)
+    }
+
+    pub(crate) fn try_new_system_one_with_tls_roots(
+        config: &OpenJevRemoteConfig,
+        roots: &crate::ProviderTlsRoots,
+    ) -> Result<Self, JevProviderError> {
         if config.devices != [JevDevice::Remote] || config.dtypes != [JevDtype::Auto] {
             return Err(JevProviderError::new(JevProviderErrorKind::Unsupported));
         }
-        let mut transport = Self::try_new(config)?;
+        let mut transport = Self::try_new_with_tls_roots(config, roots)?;
         transport.system_one = true;
         Ok(transport)
     }

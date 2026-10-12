@@ -940,3 +940,23 @@ test('Chat renders canonical sharing and diagnostic relationships as text', () =
   assert.equal(findByClass(rootElement, 'wwc-chat-runtime').hidden, false)
   mounted.close()
 })
+
+
+test('Chat shows execution ended while project output is pending and exposes download only after acceptance', () => {
+  const document = new FakeDocument()
+  const rootElement = document.createElement('main')
+  const model = new FakeChatViewModel(state({ messages: [{ ...message(), outputPreparation: 'preparing' }] }))
+  const mounted = mountChatPage({ root: rootElement, model })
+  const article = rootElement.querySelector('[data-role="assistant"]')
+  assert.equal(findByClass(rootElement, 'wwc-chat-status').textContent, '项目文件准备中')
+  assert.equal(findByClass(rootElement, 'wwc-chat-message-state').textContent, '执行已结束，项目文件准备中')
+  assert.equal(article.getAttribute('aria-busy'), 'false')
+  assert.equal(findByClass(rootElement, 'wwc-chat-composer-input').disabled, true)
+  assert.equal(findByClass(rootElement, 'wwc-chat-cancel').hidden, false)
+  assert.equal(rootElement.textContent.includes('下载项目文件'), false)
+  model.publish(state({ messages: [{ ...message(), state: 'completed', artifactRefs: [{ artifactId: 'art_00000000000000000000000001', digest: `sha256:${'a'.repeat(64)}` }] }] }))
+  assert.equal(rootElement.textContent.includes('项目文件准备中'), false)
+  assert.equal(rootElement.textContent.includes('下载项目文件'), true)
+  assert.equal(rootElement.querySelector('[data-role="assistant"]'), article)
+  mounted.close()
+})

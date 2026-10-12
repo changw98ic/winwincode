@@ -129,9 +129,26 @@ impl SqliteStorage {
             )
             .map_err(adapter)?;
         let mut combined = usage.clone();
-        let mut query = self.connection()?.prepare("SELECT t.tokens,t.cost,COALESCE(t.known_tokens,0) FROM execution_attempt_accounting_pending p LEFT JOIN execution_attempt_accounting_totals t ON t.job_id=p.job_id AND t.attempt=p.attempt WHERE p.job_id=?1").map_err(adapter)?;
+        let physical: Option<(Option<i64>, Option<i64>, i64)> = self.connection()?.query_row(
+            "SELECT tokens,cost,known_tokens FROM execution_attempt_accounting_totals WHERE job_id=?1 AND attempt=?2",
+            params![lease.job_id.0,lease.attempt], |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?)),
+        ).optional().map_err(adapter)?;
+        if let Some((tokens, cost, lower)) = physical {
+            combined.tokens = tokens;
+            combined.cost_microunits = cost;
+            combined.known_tokens = combined.known_tokens.max(lower);
+            combined.accounting_status = if tokens.is_some() {
+                ExecutionOutcomeUsageAccountingStatus::Known
+            } else {
+                ExecutionOutcomeUsageAccountingStatus::Unknown
+            };
+            if !winwincode_execution_port::usage::valid_usage(&combined) {
+                return Err(invalid());
+            }
+        }
+        let mut query = self.connection()?.prepare("SELECT t.tokens,t.cost,COALESCE(t.known_tokens,0) FROM execution_attempt_accounting_pending p LEFT JOIN execution_attempt_accounting_totals t ON t.job_id=p.job_id AND t.attempt=p.attempt WHERE p.job_id=?1 AND p.attempt<>?2").map_err(adapter)?;
         let rows = query
-            .query_map([&lease.job_id.0], |row| {
+            .query_map(params![lease.job_id.0, lease.attempt], |row| {
                 Ok((
                     row.get::<_, Option<i64>>(0)?,
                     row.get::<_, Option<i64>>(1)?,
@@ -237,8 +254,10 @@ impl SqliteStorage {
                         || previous
                             .cost_microunits
                             .is_some_and(|value| receipt.cost_microunits != Some(value))
+                        || receipt.known_tokens < previous.known_tokens
                         || (previous.tokens == receipt.tokens
                             && previous.cost_microunits == receipt.cost_microunits
+                            && previous.known_tokens == receipt.known_tokens
                             && previous.source_digest != receipt.source_digest)
                     {
                         return Err(invalid());
@@ -268,6 +287,12 @@ impl SqliteStorage {
                         .transpose()
                         .map_err(adapter)?,
                 )?;
+                if let Some(receipt) = receipt.filter(|receipt| receipt.tokens.is_none()) {
+                    add_lower(
+                        &mut totals,
+                        i64::try_from(receipt.known_tokens).map_err(adapter)?,
+                    )?;
+                }
             }
             merge_terminal_metrics(&tx, statement, &mut totals)?;
             tx.execute("INSERT INTO execution_attempt_accounting_totals VALUES(?1,?2,?3,?4,?5) ON CONFLICT(job_id,attempt) DO UPDATE SET tokens=excluded.tokens,cost=excluded.cost,known_tokens=excluded.known_tokens",params![lease.job_id.0,statement.lease.attempt,totals.tokens,totals.cost_microunits,totals.known_tokens]).map_err(adapter)?;
@@ -286,15 +311,52 @@ impl SqliteStorage {
         tx.commit().map_err(adapter)?;
         // Import and projection are independently replayable. A crash between them
         // leaves source facts intact; retrying the same receipt repairs the projection.
-        self.reconcile_attempt_totals(&lease.job_id, now)
+        self.reconcile_attempt_totals(verified, now)
+    }
+
+    fn load_reconciliation_source(
+        &mut self,
+        job: &ExecutionJobId,
+    ) -> Result<Option<(String, String)>, StorageError> {
+        let mut terminal: Option<(String,String)> = self.connection()?.query_row("SELECT terminal_request_id,terminal_usage_json FROM execution_admission_reconciliation WHERE job_id=?1",[&job.0],|row|Ok((row.get(0)?,row.get(1)?))).optional().map_err(adapter)?;
+        if terminal.is_none() {
+            // Older Workers could mark only their final invocation as the full
+            // bill. Keep that settlement source immutable and append a separate
+            // financial reconciliation under the already imported signature.
+            let settled = self
+                .execution_admission()
+                .map_err(adapter)?
+                .load_settlement_source(job)
+                .map_err(adapter)?;
+            if let Some(source) = settled {
+                let fact = source.fact;
+                let request = fact.settlement_request_id.0.clone();
+                let original = ExecutionOutcomeUsage {
+                    runtime_millis: i64::try_from(fact.actual_runtime_millis).map_err(adapter)?,
+                    tokens: Some(i64::try_from(fact.actual_tokens).map_err(adapter)?),
+                    known_tokens: i64::try_from(fact.actual_tokens).map_err(adapter)?,
+                    cost_microunits: fact
+                        .actual_cost_microunits
+                        .map(i64::try_from)
+                        .transpose()
+                        .map_err(adapter)?,
+                    accounting_status: ExecutionOutcomeUsageAccountingStatus::Known,
+                };
+                let original = serde_json::to_string(&original).map_err(adapter)?;
+                self.connection()?.execute("INSERT OR IGNORE INTO execution_admission_reconciliation(job_id,terminal_request_id,terminal_usage_json,accounting_status) VALUES(?1,?2,?3,'pending')",params![job.0,request,original]).map_err(adapter)?;
+                terminal = Some((request, original));
+            }
+        }
+        Ok(terminal)
     }
 
     fn reconcile_attempt_totals(
         &mut self,
-        job: &ExecutionJobId,
+        verified: &winwincode_execution_port::accounting::VerifiedAccountingStatement,
         now: &Instant,
     ) -> Result<(), StorageError> {
-        let terminal: Option<(String,String)> = self.connection()?.query_row("SELECT terminal_request_id,terminal_usage_json FROM execution_admission_reconciliation WHERE job_id=?1",[&job.0],|row|Ok((row.get(0)?,row.get(1)?))).optional().map_err(adapter)?;
+        let job = &verified.statement().lease.job_id;
+        let terminal = self.load_reconciliation_source(job)?;
         let Some((terminal_id, original)) = terminal else {
             return Ok(());
         };
@@ -364,7 +426,13 @@ impl SqliteStorage {
         let observed = observed.map_or_else(|| now.clone(), Instant);
         self.execution_admission()
             .map_err(adapter)?
-            .settle_reconciliation(job, &RequestId(terminal_id), &request, &usage, &observed)
+            .settle_verified_provider_reconciliation(
+                &RequestId(terminal_id),
+                &request,
+                &usage,
+                &observed,
+                verified,
+            )
             .map_err(adapter)?;
         Ok(())
     }
@@ -432,16 +500,16 @@ fn merge_terminal_metrics(
         if totals
             .tokens
             .zip(terminal.tokens)
-            .is_some_and(|(a, b)| a != b)
+            .is_some_and(|(a, b)| a < b)
             || totals
                 .cost_microunits
                 .zip(terminal.cost_microunits)
-                .is_some_and(|(a, b)| a != b)
+                .is_some_and(|(a, b)| a < b)
         {
             return Err(invalid());
         }
-        totals.tokens = totals.tokens.or(terminal.tokens);
-        totals.cost_microunits = totals.cost_microunits.or(terminal.cost_microunits);
+        // Provider receipts cover all physical invocations. A logical terminal
+        // may contain only the final successful call and cannot fill their gaps.
         totals.known_tokens = totals.known_tokens.max(terminal.known_tokens);
         totals.accounting_status = if totals.tokens.is_some() {
             ExecutionOutcomeUsageAccountingStatus::Known
@@ -462,4 +530,69 @@ fn add_lower(usage: &mut ExecutionOutcomeUsage, lower: i64) -> Result<(), Storag
         .filter(|value| *value <= 9_007_199_254_740_991 && *value >= 0)
         .ok_or_else(invalid)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn physical_unknown_totals_do_not_inherit_known_logical_terminal_metrics() {
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../tests/fixtures/contracts/execution-port.valid.json"
+        ))
+        .unwrap();
+        let lease: ExecutionLeaseStamp = serde_json::from_value(
+            fixture["messages"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find_map(|message| message.get("lease"))
+                .unwrap()
+                .clone(),
+        )
+        .unwrap();
+        let statement = winwincode_execution_port::accounting::AttemptAccountingStatement {
+            lease,
+            manifest: vec!["primary:original".into()],
+            receipts: Vec::new(),
+            signature: winwincode_domain::Sha256Digest(String::new()),
+        };
+        let connection = rusqlite::Connection::open_in_memory().unwrap();
+        connection.execute_batch("CREATE TABLE execution_attempt_terminal_usage(job_id TEXT,attempt INTEGER,usage_json TEXT);").unwrap();
+        let terminal = ExecutionOutcomeUsage {
+            runtime_millis: 1000,
+            tokens: Some(5),
+            known_tokens: 5,
+            cost_microunits: Some(7),
+            accounting_status: ExecutionOutcomeUsageAccountingStatus::Known,
+        };
+        connection
+            .execute(
+                "INSERT INTO execution_attempt_terminal_usage VALUES(?1,?2,?3)",
+                params![
+                    statement.lease.job_id.0,
+                    statement.lease.attempt,
+                    serde_json::to_string(&terminal).unwrap()
+                ],
+            )
+            .unwrap();
+        for tokens in [None, Some(5)] {
+            let mut totals = ExecutionOutcomeUsage {
+                runtime_millis: 0,
+                tokens,
+                known_tokens: tokens.unwrap_or(0),
+                cost_microunits: None,
+                accounting_status: if tokens.is_some() {
+                    ExecutionOutcomeUsageAccountingStatus::Known
+                } else {
+                    ExecutionOutcomeUsageAccountingStatus::Unknown
+                },
+            };
+            merge_terminal_metrics(&connection, &statement, &mut totals).unwrap();
+            assert_eq!(totals.tokens, tokens);
+            assert_eq!(totals.cost_microunits, None);
+            assert_eq!(totals.known_tokens, 5);
+        }
+    }
 }

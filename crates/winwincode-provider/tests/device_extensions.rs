@@ -58,20 +58,14 @@ fn fixture() -> PathBuf {
 
 #[test]
 #[allow(clippy::too_many_lines)]
-fn extension_crypto_migration_discovery_refresh_and_failure() {
+fn extension_crypto_discovery_refresh_and_failure() {
     let root = std::env::temp_dir().join(format!("wwc-extensions-{}", std::process::id()));
     let _ = fs::remove_dir_all(&root);
     let directory = root.join("private");
-    let store = DeviceProviderStore::open(&directory).expect("store");
-    let key = store
-        .snapshot("device")
-        .expect("original key")
-        .encryption_public_key;
-    drop(store);
-    // An actual v1 database has only these Provider tables; migration must preserve identity/data.
-    let db = rusqlite::Connection::open(directory.join("providers.sqlite3")).expect("v1 fixture");
-    db.execute_batch("DROP TABLE model_invocation_attempts; DROP TABLE model_attempt_diagnostics; DROP TABLE jev_attempt_diagnostics; DROP TABLE accounting_closed_attempts; ALTER TABLE exchanges DROP COLUMN accounting_chunks; DROP TABLE jev_judge_exchanges; DROP TABLE jev_context_exchanges; DROP TABLE jev_settings; DROP TABLE provider_headers; DROP TABLE extensions; DROP TABLE extension_state; DROP TABLE extension_receipts; ALTER TABLE exchanges DROP COLUMN prepared_payload; ALTER TABLE exchanges DROP COLUMN request_open; PRAGMA user_version=1;").expect("v1 schema");
+    let store = DeviceProviderStore::open(&directory).expect("current schema");
+    let key = store.snapshot("device").unwrap().encryption_public_key;
     let config = json!({"providerId":"retained","displayName":"Retained","endpoint":"https://example.com/v1/messages","protocol":"anthropic_messages","modelIds":["model"],"enabled":true});
+    let db = rusqlite::Connection::open(directory.join("providers.sqlite3")).unwrap();
     db.execute(
         "INSERT INTO providers VALUES (?1,?2,?3)",
         rusqlite::params![
@@ -80,9 +74,10 @@ fn extension_crypto_migration_discovery_refresh_and_failure() {
             b"existing-secret".as_slice()
         ],
     )
-    .expect("v1 Provider");
+    .unwrap();
     drop(db);
-    let mut store = DeviceProviderStore::open(&directory).expect("migrate v1");
+    drop(store);
+    let mut store = DeviceProviderStore::open(&directory).expect("reopen current schema");
     assert_eq!(
         store
             .snapshot("device")

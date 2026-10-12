@@ -540,6 +540,7 @@ fn terminal(frame: &str) -> Result<Option<Terminal>, ModelPortFailure> {
                     .get("error")
                     .ok_or_else(|| ModelPortFailure::new("PROTOCOL", "model error is invalid"))?;
                 Some(ModelPortFailure {
+                    facts: None,
                     code: required_string(error, "code")?,
                     message: required_string(error, "message")?,
                     status: optional_u64(error, "status", "status")?

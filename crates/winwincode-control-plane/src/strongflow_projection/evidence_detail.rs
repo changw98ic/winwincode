@@ -1467,6 +1467,7 @@ mod tests {
             worker_id: binding.worker_id.clone().expect("worker"),
             worker_instance_id: binding.worker_instance_id.clone().expect("worker instance"),
             sequence_offset: 0,
+            indexed_sequence_offset: 0,
             highest_sequence: 1,
             events: vec![crate::runtime_event_transaction::RuntimeLedgerEvent {
                 event,

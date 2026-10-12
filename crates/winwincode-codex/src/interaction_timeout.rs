@@ -536,9 +536,6 @@ impl ProductionCodexAdapter {
             .authority()
             .update_now(now)
             .map_err(map_bridge_error)?;
-        self.action_gate
-            .update_now(now)
-            .map_err(|_| unavailable())?;
         let run = self.runs.get(run_key).ok_or_else(unknown_thread)?;
         if run.record.terminal.is_some() {
             return Ok(());

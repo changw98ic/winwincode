@@ -52,12 +52,13 @@ pub use adapter::{
     ProductionSubmissionFault,
 };
 pub use contract::{
-    ActionRequestTransport, ArtifactAckOutcome, CodexCoreAdapter, CodexPoll, CodexRunKey,
-    CodexRunKeyError, CodexThreadSession, CodexThreadStart, CodexTurnCompletion,
-    DelegatedLoopPhase, DelegatedLoopStopFact, DelegatedLoopTransition,
-    DelegatedLoopTransitionOutcome, DelegatedObserverPreflight, DelegatedObserverPreflightOutcome,
-    DelegatedObserverSettlement, DurableExecutionDelivery, ExecutionPortFailureKind,
-    LocalModelStartGuard, WorkerExecutionPort, delegated_loop_turn_id, secret_safe_runtime_summary,
+    ActionRequestTransport, ArtifactAckOutcome, CodexCoreAdapter, CodexExecutionOutcome,
+    CodexExecutionResult, CodexPoll, CodexRunKey, CodexRunKeyError, CodexThreadSession,
+    CodexThreadStart, CodexTurnCompletion, DelegatedLoopPhase, DelegatedLoopStopFact,
+    DelegatedLoopTransition, DelegatedLoopTransitionOutcome, DelegatedObserverPreflight,
+    DelegatedObserverPreflightOutcome, DelegatedObserverSettlement, DurableExecutionDelivery,
+    ExecutionPortFailureKind, LocalModelStartGuard, WorkerExecutionPort, delegated_loop_turn_id,
+    secret_safe_runtime_summary,
 };
 pub use diagnostic_artifact_outbox::{
     DiagnosticArtifactAckOutcome, DiagnosticArtifactAuthority, DiagnosticArtifactUpload,
@@ -66,7 +67,7 @@ pub use diagnostic_artifact_outbox::{
 pub use helper_release::{HelperReleaseManifest, HelperReleaseManifestError};
 pub use model_bridge::set_model_intake_log_path;
 pub use winwincode_execution_port::runtime_trace_outbox::{ExecutionMode, ObserverMode};
-pub use winwincode_kernel::RoleExecutionMode;
+pub use winwincode_kernel::{RoleExecutionMode, recover_interrupted_tool_calls};
 
 #[cfg(test)]
 mod audit_model_metrics;

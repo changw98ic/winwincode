@@ -61,7 +61,14 @@ mod device_execution_binding;
 mod device_scheduler;
 pub mod device_session_gate;
 mod durable_execution_port;
+mod execution_admission;
+pub use execution_admission::{
+    ExecutionAdmissionInputError, execution_admission_boundaries, execution_admission_deferred,
+    execution_admission_job, execution_reservation_request,
+};
+mod execution_cancellation_receipt;
 mod execution_lease_period;
+mod execution_outcome_commit;
 pub mod execution_port_service;
 pub mod fusion_adjudication_host;
 pub use winwincode_fusion::analysis as fusion_analysis;
@@ -525,6 +532,7 @@ pub mod test_support {
             facts,
             server_time,
             facts.authority().expires_at(),
+            false,
         )
     }
 
@@ -2159,6 +2167,7 @@ impl ControlPlane {
             facts,
             server_time,
             facts.authority().expires_at(),
+            false,
         )
     }
 
@@ -2171,7 +2180,10 @@ impl ControlPlane {
         facts: &winwincode_delivery::application::workrun_execution::DeliveryTerminalOutcomeFacts,
         server_time: &Instant,
         accepted_period: &Instant,
+        resume_manual_controller: bool,
     ) -> Result<DeliveryTerminalOutcomeCommitReceipt, DeliveryTerminalOutcomeCommitError> {
+        let controller_required =
+            self.delivery_authority.is_some() && self.delivery_dispatcher.is_some();
         let commit = {
             let storage = self
                 .storage_mut()
@@ -2183,34 +2195,16 @@ impl ControlPlane {
                 facts,
                 server_time,
                 accepted_period,
+                controller_required,
             )?
         };
-        if let Some(data_directory) = self.local_database_path.as_deref().and_then(Path::parent) {
-            let worker_terminal = DurableWorkerExecutionLifecycle::open(data_directory).and_then(
-                |mut lifecycle| match facts.status() {
-                    winwincode_delivery::application::workrun_execution::TerminalOutcomeStatus::Succeeded => {
-                        lifecycle.settle_terminal_outcome(message).map(|_| ())
-                    }
-                    winwincode_delivery::application::workrun_execution::TerminalOutcomeStatus::Failed
-                    | winwincode_delivery::application::workrun_execution::TerminalOutcomeStatus::Cancelled
-                    | winwincode_delivery::application::workrun_execution::TerminalOutcomeStatus::InfrastructureError => {
-                        lifecycle.release_terminal_outcome(message).map(|_| ())
-                    }
+        self.finish_accepted_execution_outcome(scope, message, resume_manual_controller)
+            .map_err(
+                |source| DeliveryTerminalOutcomeCommitError::CompletionPending {
+                    commit: Box::new(commit.clone()),
+                    source: Box::new(source),
                 },
-            );
-            if let Err(source) = worker_terminal {
-                return Err(DeliveryTerminalOutcomeCommitError::WorkerResourcesPending {
-                    commit: Box::new(commit),
-                    source,
-                });
-            }
-        }
-        self.flush_outbox().map_err(|source| {
-            DeliveryTerminalOutcomeCommitError::PublicationPending {
-                commit: Box::new(commit.clone()),
-                source,
-            }
-        })?;
+            )?;
         Ok(commit)
     }
 

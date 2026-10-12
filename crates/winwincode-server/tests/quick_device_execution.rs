@@ -168,6 +168,7 @@ fn production_accounting_consumes_signed_receipts_after_execution_authority_expi
         lease,
         manifest: vec!["primary:receipt".into()],
         receipts: vec![ProviderAccountingReceipt {
+            known_tokens: 0,
             slot: "primary:receipt".into(),
             model_exchange_id: winwincode_domain::ModelExchangeId(id("mdl", 1)),
             provider_id: "provider-fixture".into(),
@@ -997,4 +998,253 @@ fn an_ended_launch_refuses_the_dispatch_without_binding() {
 
     application.shutdown().expect("shutdown");
     let _ = std::fs::remove_dir_all(&root);
+}
+
+fn stage_replay_session(root: &Path, seed: u64) -> StandaloneControlPlaneApplication {
+    let application = compose_application(root);
+    let holder = id("usr", 1);
+    let mut storage = open_storage(root);
+    let node = stage_node(&mut storage, seed);
+    stage_client_grant(&mut storage, seed + 1, &node, &holder);
+    let binding = stage_visible_binding(&mut storage, seed + 2, &node, &holder);
+    let (lease_id, fencing_token) = stage_occupied_lease(&mut storage, seed + 3, &node, &holder);
+    drop(storage);
+    application
+        .command(
+            &principal(&holder),
+            CommandFamily::Session,
+            session_create_request(seed + 10, 1, &holder, &node),
+        )
+        .unwrap();
+    let mut storage = open_storage(root);
+    let anchor = stage_anchor(
+        &mut storage,
+        seed + 4,
+        &node,
+        &holder,
+        &lease_id,
+        fencing_token,
+        &binding,
+        &id("psn", 1),
+    );
+    settle_launch(&mut storage, &anchor, &lease_id, fencing_token);
+    application
+}
+
+#[test]
+#[allow(clippy::too_many_lines)]
+fn a_terminal_chat_receipt_replays_after_its_original_device_binding_is_released() {
+    let root = temporary_root("terminal-dispatch-replay");
+    let application = stage_replay_session(&root, 1_100);
+    let holder = id("usr", 1);
+    let request = chat_submit_request(1_111, 1, &holder, 1);
+    let first = completed(
+        application
+            .command(&principal(&holder), CommandFamily::Session, request.clone())
+            .unwrap(),
+    );
+    let mut storage = open_storage(&root);
+    let job_id = queued_job_id(&mut storage);
+    let facts = DeviceExecutionBindingService::new(&mut storage)
+        .facts(&job_id.0)
+        .unwrap()
+        .unwrap();
+    let mut terminal = storage.load_execution_job_record(&job_id).unwrap().unwrap();
+    // This focused storage seam uses legal CP queue transitions. The production
+    // Load scenario independently requires the actual Worker outcome and ACK.
+    for (index, to) in [
+        ExecutionJobState::Leased,
+        ExecutionJobState::Running,
+        ExecutionJobState::Completed,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        terminal = storage
+            .execution_queue()
+            .unwrap()
+            .transition(&winwincode_storage::ExecutionJobTransitionRequest {
+                scope: terminal.scope.clone(),
+                job_id: job_id.clone(),
+                request_id: RequestId(id("req", 1_120 + u64::try_from(index).unwrap())),
+                expected_revision: terminal.revision,
+                from: terminal.state,
+                to,
+                occurred_at: instant(&format!("2027-01-15T08:00:0{}.000Z", index + 1)),
+            })
+            .unwrap()
+            .job;
+    }
+    let binding = DeviceExecutionBindingService::new(&mut storage)
+        .snapshot(&facts.worker_session_id)
+        .unwrap()
+        .unwrap();
+    let released = DeviceExecutionBindingService::new(&mut storage)
+        .release(
+            &winwincode_storage::DeviceExecutionBindingRelease::try_new(
+                &facts.worker_session_id,
+                id("req", 1_124),
+                binding.revision,
+                instant("2027-01-15T08:00:04.000Z"),
+            )
+            .unwrap(),
+            &instant("2027-01-15T08:00:04.000Z"),
+        )
+        .unwrap()
+        .binding;
+    assert_eq!(released.state.as_str(), "released");
+    let replay = completed(
+        application
+            .command(&principal(&holder), CommandFamily::Session, request.clone())
+            .unwrap(),
+    );
+    assert_eq!(
+        replay, first,
+        "the exact original public response survives a released execution binding"
+    );
+    assert_eq!(
+        storage.load_execution_job_record(&job_id).unwrap().unwrap(),
+        terminal
+    );
+    assert_eq!(
+        DeviceExecutionBindingService::new(&mut storage)
+            .facts(&job_id.0)
+            .unwrap()
+            .unwrap(),
+        facts
+    );
+    assert_eq!(
+        DeviceExecutionBindingService::new(&mut storage)
+            .snapshot(&facts.worker_session_id)
+            .unwrap()
+            .unwrap(),
+        released
+    );
+    let CommandRequest::ChatSubmitCommand(mut changed) = request else {
+        panic!("chat command")
+    };
+    changed.payload.message = "changed replay input".into();
+    let denied = application
+        .command(
+            &principal(&holder),
+            CommandFamily::Session,
+            CommandRequest::ChatSubmitCommand(changed),
+        )
+        .unwrap_err();
+    assert_eq!(denied.code(), "IDEMPOTENCY_CONFLICT");
+    let anchor = storage
+        .worker_launch_grant_ledger()
+        .unwrap()
+        .snapshot(&facts.worker_launch_grant_id)
+        .unwrap()
+        .unwrap();
+    for delta in ["worker", "fence", "session", "grant"] {
+        let mut foreign = anchor.clone();
+        match delta {
+            "worker" => foreign.worker_instance_id = id("wki", 9_991),
+            "fence" => foreign.occupancy_fencing_token += 1,
+            "session" => foreign.product_session_id = Some(id("psn", 9_992)),
+            "grant" => foreign.worker_launch_grant_id = id("wlg", 9_993),
+            _ => unreachable!(),
+        }
+        assert!(
+            winwincode_control_plane::dispatch_chat_job_to_device_worker(
+                &mut storage,
+                &job_id,
+                &foreign,
+                &instant("2027-01-15T08:00:05.000Z")
+            )
+            .is_err(),
+            "changed terminal identity {delta} must fail"
+        );
+    }
+    application.shutdown().unwrap();
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn a_committed_chat_retry_restores_missing_device_dispatch_and_keeps_live_binding_guards() {
+    let root = temporary_root("committed-before-dispatch-replay");
+    let application = stage_replay_session(&root, 1_200);
+    let holder = id("usr", 1);
+    let request = chat_submit_request(1_211, 1, &holder, 1);
+    let mut storage = open_storage(&root);
+    storage.device_execution_binding_ledger().unwrap();
+    let connection = rusqlite::Connection::open(storage.database_path()).unwrap();
+    connection.execute_batch("CREATE TRIGGER fail_dispatch_facts BEFORE INSERT ON device_execution_reservation_facts BEGIN SELECT RAISE(ABORT, 'injected after Chat commit before dispatch facts'); END;").unwrap();
+    let failed = application
+        .command(&principal(&holder), CommandFamily::Session, request.clone())
+        .unwrap_err();
+    assert_eq!(failed.status(), 503);
+    let job_id = queued_job_id(&mut storage);
+    let original = storage.load_execution_job_record(&job_id).unwrap().unwrap();
+    assert!(
+        DeviceExecutionBindingService::new(&mut storage)
+            .facts(&job_id.0)
+            .unwrap()
+            .is_none()
+    );
+    connection
+        .execute_batch("DROP TRIGGER fail_dispatch_facts;")
+        .unwrap();
+    let recovered = completed(
+        application
+            .command(&principal(&holder), CommandFamily::Session, request.clone())
+            .unwrap(),
+    );
+    assert_eq!(recovered["previousRevision"], 1);
+    assert_eq!(recovered["currentRevision"], 2);
+    assert_eq!(
+        storage.load_execution_job_record(&job_id).unwrap().unwrap(),
+        original
+    );
+    let facts = DeviceExecutionBindingService::new(&mut storage)
+        .facts(&job_id.0)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        completed(
+            application
+                .command(&principal(&holder), CommandFamily::Session, request.clone())
+                .unwrap()
+        ),
+        recovered
+    );
+    let binding = DeviceExecutionBindingService::new(&mut storage)
+        .snapshot(&facts.worker_session_id)
+        .unwrap()
+        .unwrap();
+    DeviceExecutionBindingService::new(&mut storage)
+        .release(
+            &winwincode_storage::DeviceExecutionBindingRelease::try_new(
+                &facts.worker_session_id,
+                id("req", 1_224),
+                binding.revision,
+                instant("2027-01-15T08:00:04.000Z"),
+            )
+            .unwrap(),
+            &instant("2027-01-15T08:00:04.000Z"),
+        )
+        .unwrap();
+    assert_eq!(
+        application
+            .command(&principal(&holder), CommandFamily::Session, request)
+            .unwrap_err()
+            .code(),
+        "WRONG_STATE",
+        "an active Job cannot recover invocation rights from a released Worker binding"
+    );
+    assert_eq!(
+        storage.load_execution_job_record(&job_id).unwrap().unwrap(),
+        original
+    );
+    assert_eq!(
+        DeviceExecutionBindingService::new(&mut storage)
+            .facts(&job_id.0)
+            .unwrap()
+            .unwrap(),
+        facts
+    );
+    application.shutdown().unwrap();
+    let _ = std::fs::remove_dir_all(root);
 }

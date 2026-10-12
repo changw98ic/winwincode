@@ -303,9 +303,9 @@ where
                     .map_err(|_| codex_model_error())?;
             }
         }
-        if let Some(active) = self.active.get_mut(job_id) {
-            active.lifecycle = ActiveJobLifecycle::Cancelling;
-        }
+        // Quiescing a failed transport is not a user cancellation. Preserve
+        // the actual lifecycle so an existing user cancel still owns terminal
+        // status, while a delivery failure remains infrastructure failure.
         Box::pin(self.finish_job(
             job_id,
             ExecutionOutcomeStatus::InfrastructureError,

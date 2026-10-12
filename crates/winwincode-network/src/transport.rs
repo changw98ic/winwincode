@@ -76,6 +76,20 @@ impl ExchangeIo {
             .not_zero()
             .map_or(duration, |value| duration.min(*value)))
     }
+    fn socket_error(&self, error: std::io::Error) -> ureq::Error {
+        if self.is_cancelled() {
+            interrupted()
+        } else if matches!(
+            error.kind(),
+            std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+        ) {
+            // These sockets are blocking with a finite read/write timeout. Linux
+            // reports an expired socket timeout as EAGAIN rather than ETIMEDOUT.
+            timed_out()
+        } else {
+            error.into()
+        }
+    }
 }
 fn interrupted() -> ureq::Error {
     std::io::Error::new(
@@ -166,12 +180,17 @@ impl Transport for ExchangeTransport {
     fn transmit_output(&mut self, amount: usize, next: NextTimeout) -> Result<(), ureq::Error> {
         self.socket
             .set_write_timeout(Some(self.io.timeout(next)?))?;
-        self.socket.write_all(&self.buffers.output()[..amount])?;
+        self.socket
+            .write_all(&self.buffers.output()[..amount])
+            .map_err(|error| self.io.socket_error(error))?;
         Ok(())
     }
     fn await_input(&mut self, next: NextTimeout) -> Result<bool, ureq::Error> {
         self.socket.set_read_timeout(Some(self.io.timeout(next)?))?;
-        let count = self.socket.read(self.buffers.input_append_buf())?;
+        let count = self
+            .socket
+            .read(self.buffers.input_append_buf())
+            .map_err(|error| self.io.socket_error(error))?;
         if self.io.cancelled.load(Ordering::Acquire) {
             return Err(interrupted());
         }

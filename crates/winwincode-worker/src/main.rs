@@ -48,8 +48,25 @@ fn main() {
             }
             _ => usage_error(),
         },
+        Some("--recover-interrupted-calls") => match args.next() {
+            Some(config_path) if args.next().is_none() => {
+                run_worker_process(recover_interrupted_calls(&config_path));
+            }
+            _ => usage_error(),
+        },
         Some(_) => usage_error(),
     }
+}
+
+async fn recover_interrupted_calls(config_path: &str) -> Result<(), Box<dyn std::error::Error>> {
+    let config = ManagedSessionConfig::read(std::path::Path::new(config_path))?;
+    let store = winwincode_provider::DeviceProviderStore::open(&config.provider_directory)?;
+    store.fail_terminated_worker_calls(&config.worker_instance_id.0)?;
+    winwincode_codex::recover_interrupted_tool_calls(
+        &config.data_directory.join("codex-runtime/kernel-home"),
+    )
+    .await?;
+    Ok(())
 }
 
 fn usage_error() -> ! {

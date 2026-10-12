@@ -76,7 +76,7 @@ impl SubmitChatMessageCommand {
     }
 }
 
-/// Public terminal state accepted from the already gated model-stream adapter.
+/// Assistant text state retained for exact replay of historical stream receipts.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum AssistantMessageState {
     Streaming,
@@ -93,10 +93,6 @@ impl AssistantMessageState {
             Self::Cancelled => "cancelled",
             Self::Failed => "failed",
         }
-    }
-
-    const fn terminal(self) -> bool {
-        !matches!(self, Self::Streaming)
     }
 }
 
@@ -613,7 +609,7 @@ impl ProductSessionService<'_> {
             &command.attachments,
             &persisted.model_route,
         )?;
-        if persisted.messages.len() >= MAX_MESSAGES_PER_SESSION {
+        if persisted.messages.len() >= MAX_MESSAGES_PER_SESSION - 1 {
             return Err(service_error(
                 ProductSessionServiceErrorCode::MessageLimitExceeded,
                 "ProductSession message limit was reached",
@@ -643,6 +639,7 @@ impl ProductSessionService<'_> {
         );
         let message = ChatMessageProjection {
             artifact_refs: None,
+            output_preparation: None,
             attachments: Some(command.attachments.clone()),
             content: command.message.clone(),
             created_at: command.context.occurred_at.clone(),
@@ -679,6 +676,7 @@ impl ProductSessionService<'_> {
             &command.product_session_id,
             persisted,
             Some(&execution),
+            None,
         )?;
         chat_submit_receipt(mutation)
     }
@@ -793,6 +791,7 @@ impl ProductSessionService<'_> {
                 }
                 persisted.messages.push(PersistedChatMessage {
                     projection: ChatMessageProjection {
+                        output_preparation: None,
                         attachments: None,
                         artifact_refs: None,
                         content: command.public_text_delta.clone(),
@@ -842,9 +841,6 @@ impl ProductSessionService<'_> {
                 message.last_stream_sequence = command.stream_sequence;
             }
         }
-        if command.state.terminal() {
-            finish_turn(persisted, command)?;
-        }
         let persisted = persisted.clone();
         let mutation = self.commit(
             &command.context,
@@ -854,8 +850,102 @@ impl ProductSessionService<'_> {
             &command.product_session_id,
             persisted,
             None,
+            None,
         )?;
         assistant_receipt(mutation, &command.model_exchange_id)
+    }
+
+    pub(crate) fn record_output_preparation(
+        &mut self,
+        context: &ProductSessionCommandContext,
+        binding: &super::DurableSessionBinding,
+        artifact: &winwincode_execution_port::generated::ArtifactOpenMessage,
+    ) -> Result<AssistantMessageMutationReceipt, ProductSessionServiceError> {
+        let digest = command_digest("output_preparation", serde_json::json!(artifact))?;
+        if let Some(replay) = self.replay(context, &digest, MutationKind::AssistantUpdated)? {
+            return assistant_receipt(replay, binding.model_exchange_id());
+        }
+        let current = self
+            .storage
+            .load_worker_binding_source(
+                binding.execution_scope(),
+                binding.worker_pool_id(),
+                &binding.slot().authority.worker_session_id,
+            )
+            .map_err(|error| storage_error(&error))?
+            .ok_or_else(|| binding_mismatch("output preparation has no Worker authority"))?;
+        validate_runtime_authority(
+            &binding.slot().authority,
+            binding.execution_scope(),
+            binding.worker_pool_id(),
+            &current.0,
+            &current.1,
+        )?;
+        let mut catalog = self.load_catalog(context.receipt_identity.scope_key())?;
+        let session_id = binding.binding().identity().product_session_id();
+        let persisted = catalog
+            .sessions
+            .get_mut(&session_id.0)
+            .ok_or_else(not_found)?;
+        require_execution_revision(persisted, &artifact.lease.job_id, context.expected_revision)?;
+        if persisted.session.state() != ProductSessionState::Running
+            || !persisted.bindings.iter().any(|stored| {
+                stored.identity
+                    == PersistedBindingIdentity::from_domain(binding.binding().identity())
+                    && stored.slot.authority == binding.slot().authority
+                    && stored.model_exchange_id == *binding.model_exchange_id()
+            })
+        {
+            return Err(binding_mismatch(
+                "output preparation differs from the current Chat binding",
+            ));
+        }
+        let message_id =
+            deterministic_message_id("assistant", binding.model_exchange_id().0.as_bytes());
+        if let Some(message) = persisted
+            .messages
+            .iter_mut()
+            .find(|message| message.projection.id == message_id)
+        {
+            if message.projection.state != "streaming" {
+                return Err(stream_conflict());
+            }
+            message.projection.output_preparation = Some("preparing".to_owned());
+            message.projection.updated_at = context.occurred_at.clone();
+        } else {
+            if persisted.messages.len() >= MAX_MESSAGES_PER_SESSION {
+                return Err(message_limit());
+            }
+            persisted.messages.push(PersistedChatMessage {
+                projection: ChatMessageProjection {
+                    attachments: None,
+                    artifact_refs: None,
+                    output_preparation: Some("preparing".to_owned()),
+                    content: String::new(),
+                    created_at: context.occurred_at.clone(),
+                    updated_at: context.occurred_at.clone(),
+                    id: message_id,
+                    product_session_id: session_id.clone(),
+                    role: "assistant".to_owned(),
+                    sequence: next_message_sequence(&persisted.messages)?,
+                    state: "streaming".to_owned(),
+                },
+                model_exchange_id: Some(binding.model_exchange_id().clone()),
+                last_stream_sequence: 0,
+            });
+        }
+        let persisted = persisted.clone();
+        let mutation = self.commit(
+            context,
+            digest,
+            MutationKind::AssistantUpdated,
+            catalog,
+            session_id,
+            persisted,
+            None,
+            None,
+        )?;
+        assistant_receipt(mutation, binding.model_exchange_id())
     }
 
     /// Records immutable Worker terminal facts beside the one public assistant
@@ -866,11 +956,15 @@ impl ProductSessionService<'_> {
     /// Rejects stale runtime authority, changed replay, invalid Usage, or an
     /// outcome that differs from the exact bound Chat turn.
     #[allow(clippy::too_many_lines)]
-    pub fn record_assistant_terminal(
+    pub(crate) fn record_assistant_terminal(
         &mut self,
         command: &RecordAssistantTerminalCommand,
+        execution: &crate::execution_outcome_commit::ExecutionOutcomeCommit<'_>,
     ) -> Result<AssistantMessageMutationReceipt, ProductSessionServiceError> {
-        let digest = command_digest("assistant_terminal", terminal_digest_fields(command))?;
+        let digest = command_digest(
+            "assistant_terminal",
+            serde_json::json!({"command":terminal_digest_fields(command),"executionOutcome":execution.message}),
+        )?;
         if let Some(replay) =
             self.replay(&command.context, &digest, MutationKind::AssistantUpdated)?
         {
@@ -913,6 +1007,7 @@ impl ProductSessionService<'_> {
                             && message.projection.state == "cancelled")) =>
             {
                 public_state.clone_into(&mut message.projection.state);
+                message.projection.output_preparation = None;
                 message.projection.updated_at = command.context.occurred_at.clone();
                 message
                     .projection
@@ -926,6 +1021,7 @@ impl ProductSessionService<'_> {
                 }
                 persisted.messages.push(PersistedChatMessage {
                     projection: ChatMessageProjection {
+                        output_preparation: None,
                         attachments: None,
                         artifact_refs: command.terminal_outcome.artifact_refs.clone(),
                         content: String::new(),
@@ -952,11 +1048,12 @@ impl ProductSessionService<'_> {
             &command.product_session_id,
             persisted,
             None,
+            Some(execution),
         )?;
         assistant_receipt(mutation, &command.model_exchange_id)
     }
 
-    /// Records a failed/cancelled execution that never opened a model exchange.
+    /// Records an accepted failed/cancelled turn before its first public model reply.
     /// The ingress has already checked the staged Worker binding and dispatch.
     pub(crate) fn record_unstarted_terminal(
         &mut self,
@@ -964,12 +1061,13 @@ impl ProductSessionService<'_> {
         session_id: &ProductSessionId,
         job_id: &ExecutionJobId,
         outcome: &ProductSessionTurnTerminalOutcome,
+        execution: &crate::execution_outcome_commit::ExecutionOutcomeCommit<'_>,
     ) -> Result<ProductSessionMutationReceipt, ProductSessionServiceError> {
         let digest = command_digest(
             "unstarted_terminal",
             serde_json::json!({
                 "context": context_digest_fields(context), "session": session_id,
-                "job": job_id, "outcome": outcome,
+                "job": job_id, "outcome": outcome, "executionOutcome":execution.message,
             }),
         )?;
         if let Some(receipt) = self.replay(context, &digest, MutationKind::AssistantUpdated)? {
@@ -1002,6 +1100,14 @@ impl ProductSessionService<'_> {
                 "unstarted terminal differs from its Chat turn",
             ));
         }
+        if (turn.state == PersistedTurnState::Cancelled
+            || persisted.session.state() == ProductSessionState::Cancelled)
+            && outcome.status != ExecutionOutcomeStatus::Cancelled
+        {
+            return Err(binding_mismatch(
+                "cancelled Chat turn requires its cancellation outcome",
+            ));
+        }
         let cancelled = outcome.status == ExecutionOutcomeStatus::Cancelled;
         turn.state = if cancelled {
             PersistedTurnState::Cancelled
@@ -1009,6 +1115,34 @@ impl ProductSessionService<'_> {
             PersistedTurnState::Failed
         };
         turn.terminal_outcome = Some(outcome.clone());
+        let message_id = deterministic_message_id("assistant", job_id.0.as_bytes());
+        if persisted
+            .messages
+            .iter()
+            .any(|message| message.projection.id == message_id)
+        {
+            return Err(stream_conflict());
+        }
+        // Older accepted turns still settle when their ledger has no free message slot.
+        if persisted.messages.len() < MAX_MESSAGES_PER_SESSION {
+            persisted.messages.push(PersistedChatMessage {
+                projection: ChatMessageProjection {
+                    output_preparation: None,
+                    attachments: None,
+                    artifact_refs: None,
+                    content: String::new(),
+                    created_at: context.occurred_at.clone(),
+                    id: message_id,
+                    product_session_id: session_id.clone(),
+                    role: "assistant".to_owned(),
+                    sequence: next_message_sequence(&persisted.messages)?,
+                    state: terminal_public_state(&outcome.status).to_owned(),
+                    updated_at: context.occurred_at.clone(),
+                },
+                model_exchange_id: None,
+                last_stream_sequence: 0,
+            });
+        }
         if persisted.session.state() != ProductSessionState::Cancelled {
             if cancelled {
                 persisted.session.complete_turn(context.occurred_at.clone())
@@ -1028,14 +1162,19 @@ impl ProductSessionService<'_> {
             session_id,
             persisted,
             None,
+            Some(execution),
         )
     }
 
     pub(crate) fn replay_assistant_terminal(
         &self,
         command: &RecordAssistantTerminalCommand,
+        message: &winwincode_execution_port::generated::JobOutcomeMessage,
     ) -> Result<Option<AssistantMessageMutationReceipt>, ProductSessionServiceError> {
-        let digest = command_digest("assistant_terminal", terminal_digest_fields(command))?;
+        let digest = command_digest(
+            "assistant_terminal",
+            serde_json::json!({"command":terminal_digest_fields(command),"executionOutcome":message}),
+        )?;
         self.replay(&command.context, &digest, MutationKind::AssistantUpdated)?
             .map(|receipt| assistant_receipt(receipt, &command.model_exchange_id))
             .transpose()
@@ -1067,6 +1206,10 @@ impl ProductSessionService<'_> {
     ///
     /// Rejects actor/scope/revision/runtime mismatches and changed-body replays
     /// before changing the session or emitting any cancellation route.
+    #[allow(
+        clippy::too_many_lines,
+        reason = "The cancellation command durably retains its exact routes before publication"
+    )]
     pub fn cancel_session(
         &mut self,
         command: &CancelProductSessionCommand,
@@ -1139,6 +1282,7 @@ impl ProductSessionService<'_> {
         for message in &mut persisted.messages {
             if message.projection.role == "assistant" && message.projection.state == "streaming" {
                 "cancelled".clone_into(&mut message.projection.state);
+                message.projection.output_preparation = None;
                 message.projection.updated_at = command.context.occurred_at.clone();
             }
         }
@@ -1166,6 +1310,7 @@ impl ProductSessionService<'_> {
             catalog,
             &command.product_session_id,
             persisted,
+            None,
             None,
         )?;
         let receipt = cancellation_receipt(mutation, RouteWriteStatus::Applied)?;
@@ -1335,8 +1480,30 @@ impl ProductSessionService<'_> {
         persisted: &PersistedProductSession,
         public_scope: &PublicEventScope,
     ) -> Result<Vec<ExecutionRoute>, ProductSessionServiceError> {
-        let Some(binding) = persisted.bindings.last() else {
-            return self.queued_cancellation_route(persisted, public_scope);
+        let active_turn = persisted.turn_intents.iter().rev().find(|turn| {
+            matches!(
+                turn.state,
+                PersistedTurnState::Pending | PersistedTurnState::Bound
+            )
+        });
+        let binding = match active_turn {
+            Some(turn) if turn.state == PersistedTurnState::Pending => {
+                return self.queued_cancellation_route(persisted, public_scope);
+            }
+            Some(turn) => Some(
+                persisted
+                    .bindings
+                    .iter()
+                    .find(|binding| binding.slot.authority.job_id == turn.execution_job_id)
+                    .ok_or_else(|| {
+                        binding_mismatch("active Chat turn has no sealed Worker binding")
+                    })?,
+            ),
+            None if persisted.turn_intents.is_empty() => persisted.bindings.last(),
+            None => None,
+        };
+        let Some(binding) = binding else {
+            return Ok(Vec::new());
         };
         let current = self
             .storage
@@ -1466,12 +1633,20 @@ pub(super) fn validate_persisted_chat(
                 message.projection.state.as_str(),
                 "streaming" | "completed" | "cancelled" | "failed"
             )
+            || message
+                .projection
+                .output_preparation
+                .as_ref()
+                .is_some_and(|state| {
+                    state != "preparing"
+                        || message.projection.role != "assistant"
+                        || message.projection.state != "streaming"
+                })
             || (message.projection.role == "user"
                 && (message.projection.state != "completed"
                     || message.model_exchange_id.is_some()
                     || message.last_stream_sequence != 0))
-            || (message.projection.role == "assistant"
-                && (message.model_exchange_id.is_none() || message.last_stream_sequence == 0))
+            || assistant_message_is_inconsistent(session, message)
         {
             return Err(corrupt("ProductSession message ledger is inconsistent"));
         }
@@ -1537,6 +1712,48 @@ pub(super) fn validate_persisted_chat(
         ));
     }
     Ok(())
+}
+
+fn assistant_message_is_inconsistent(
+    session: &PersistedProductSession,
+    message: &PersistedChatMessage,
+) -> bool {
+    message.projection.role == "assistant"
+        && ((message.model_exchange_id.is_none()
+            && !session
+                .turn_intents
+                .iter()
+                .any(|turn| unstarted_terminal_message_matches(message, turn)))
+            || (message.last_stream_sequence == 0
+                && (!message.projection.content.is_empty()
+                    || (message.projection.state == "streaming"
+                        && message.projection.output_preparation.is_none()))))
+}
+
+fn unstarted_terminal_message_matches(
+    message: &PersistedChatMessage,
+    turn: &PersistedTurnIntent,
+) -> bool {
+    let Some(outcome) = turn.terminal_outcome.as_ref() else {
+        return false;
+    };
+    turn.model_exchange_id.is_none()
+        && matches!(
+            outcome.status,
+            ExecutionOutcomeStatus::Cancelled
+                | ExecutionOutcomeStatus::Failed
+                | ExecutionOutcomeStatus::InfrastructureError
+        )
+        && outcome.artifact_refs.is_none()
+        && message.projection.id
+            == deterministic_message_id("assistant", turn.execution_job_id.0.as_bytes())
+        && message.projection.state == terminal_public_state(&outcome.status)
+        && message.projection.content.is_empty()
+        && message.projection.attachments.is_none()
+        && message.projection.artifact_refs.is_none()
+        && message.projection.output_preparation.is_none()
+        && message.model_exchange_id.is_none()
+        && message.last_stream_sequence == 0
 }
 
 fn require_terminal_message(
@@ -1692,7 +1909,13 @@ fn validate_message_text(
 fn validate_assistant_command(
     command: &AppendAssistantMessageCommand,
 ) -> Result<(), ProductSessionServiceError> {
-    validate_message_text(&command.public_text_delta, command.state.terminal())?;
+    if command.state != AssistantMessageState::Streaming || command.terminal_outcome.is_some() {
+        return Err(service_error(
+            ProductSessionServiceErrorCode::InvalidState,
+            "assistant text updates cannot finish an execution",
+        ));
+    }
+    validate_message_text(&command.public_text_delta, false)?;
     if command.stream_sequence == 0
         || command.stream_sequence > 9_007_199_254_740_991
         || command.binding_identity.product_session_id() != &command.product_session_id
@@ -1702,32 +1925,6 @@ fn validate_assistant_command(
         return Err(binding_mismatch(
             "assistant update identities or stream sequence are invalid",
         ));
-    }
-    match (command.state, command.terminal_outcome.as_ref()) {
-        (AssistantMessageState::Streaming, None) => {}
-        (AssistantMessageState::Completed, Some(outcome))
-            if outcome.status == ExecutionOutcomeStatus::Succeeded && outcome.usage.is_some() =>
-        {
-            validate_terminal_usage(outcome)?;
-        }
-        (AssistantMessageState::Cancelled, Some(outcome))
-            if outcome.status == ExecutionOutcomeStatus::Cancelled =>
-        {
-            validate_terminal_usage(outcome)?;
-        }
-        (AssistantMessageState::Failed, Some(outcome))
-            if matches!(
-                outcome.status,
-                ExecutionOutcomeStatus::Failed | ExecutionOutcomeStatus::InfrastructureError
-            ) =>
-        {
-            validate_terminal_usage(outcome)?;
-        }
-        _ => {
-            return Err(binding_mismatch(
-                "assistant terminal state and immutable Worker outcome differ",
-            ));
-        }
     }
     Ok(())
 }
@@ -1785,8 +1982,13 @@ fn validate_terminal_runtime_authority(
         | ExecutionOutcomeStatus::Failed
         | ExecutionOutcomeStatus::InfrastructureError => slot.state == WorkerSlotState::Running,
     };
+    let reservation_state_matches = reservation.state == ExecutionReservationState::Running
+        || (command.terminal_outcome.status == ExecutionOutcomeStatus::Cancelled
+            && reservation.state == ExecutionReservationState::Released
+            && reservation.release_reason
+                == Some(winwincode_storage::ExecutionReservationReleaseReason::Cancelled));
     if !slot_state_matches
-        || reservation.state != ExecutionReservationState::Running
+        || !reservation_state_matches
         || slot.authority != command.runtime_authority
         || reservation.scope != command.execution_scope
         || reservation.worker_pool_id != command.worker_pool_id
@@ -1890,42 +2092,6 @@ fn validate_runtime_authority(
         ));
     }
     Ok(())
-}
-
-fn finish_turn(
-    persisted: &mut PersistedProductSession,
-    command: &AppendAssistantMessageCommand,
-) -> Result<(), ProductSessionServiceError> {
-    let turn = persisted
-        .turn_intents
-        .iter_mut()
-        .rev()
-        .find(|turn| {
-            turn.state == PersistedTurnState::Bound
-                && turn.execution_job_id == command.runtime_authority.job_id
-                && turn.model_exchange_id.as_ref() == Some(&command.model_exchange_id)
-        })
-        .ok_or_else(|| binding_mismatch("assistant terminal has no exact bound Chat turn"))?;
-    if turn.terminal_outcome.is_some() {
-        return Err(stream_conflict());
-    }
-    turn.state = match command.state {
-        AssistantMessageState::Completed => PersistedTurnState::Completed,
-        AssistantMessageState::Cancelled => PersistedTurnState::Cancelled,
-        AssistantMessageState::Failed => PersistedTurnState::Failed,
-        AssistantMessageState::Streaming => return Ok(()),
-    };
-    turn.terminal_outcome.clone_from(&command.terminal_outcome);
-    match command.state {
-        AssistantMessageState::Completed | AssistantMessageState::Cancelled => persisted
-            .session
-            .complete_turn(command.context.occurred_at.clone()),
-        AssistantMessageState::Failed => persisted
-            .session
-            .fail("model_stream_failed", command.context.occurred_at.clone()),
-        AssistantMessageState::Streaming => return Ok(()),
-    }
-    .map_err(|error| domain_error(&error))
 }
 
 fn finish_terminal_turn(

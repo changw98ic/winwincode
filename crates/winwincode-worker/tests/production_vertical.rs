@@ -215,6 +215,10 @@ impl TestDirectory {
 
 impl Drop for TestDirectory {
     fn drop(&mut self) {
+        if std::thread::panicking() {
+            eprintln!("PRODUCTION_FIXTURE_RETAINED {}", self.0.display());
+            return;
+        }
         let _ = fs::remove_dir_all(&self.0);
     }
 }
@@ -1837,13 +1841,11 @@ commandIds = ["check", "rust", "python"]
         assert!(
             worker
                 .workspace_runtime_for_test()
-                .execute_change_batch(&active, &batch, &now)
+                .poll_change_batch(&active, &batch, &now)
                 .await
-                .is_err()
+                .expect("start batch B validation without consuming its result")
+                .is_none()
         );
-        artifact_connection
-            .execute_batch("DROP TRIGGER fail_batch_b_artifact;")
-            .unwrap();
         let journal =
             winwincode_worker::change_batch_store::ChangeBatchStore::open(&root.0).unwrap();
         let workspace_id = journal
@@ -1915,7 +1917,7 @@ commandIds = ["check", "rust", "python"]
             )
             .await
             .unwrap();
-        worker.flush_durable_outbox_at(now).await.unwrap();
+        worker.flush_durable_outbox_at(now.clone()).await.unwrap();
         assert_eq!(
             ledger
                 .query_row("SELECT COUNT(*) FROM observer_settlement", [], |r| r
@@ -1936,6 +1938,31 @@ commandIds = ["check", "rust", "python"]
                 .unwrap(),
             "changed terminal bytes must remain rejected"
         );
+        assert_eq!(
+            journal.workspace_binding(&workspace_id).unwrap().unwrap(),
+            binding_b,
+            "a changed historical terminal cannot settle batch B either"
+        );
+        let failed = worker
+            .workspace_runtime_for_test()
+            .execute_change_batch(&active, &batch, &now)
+            .await
+            .expect("consume the original batch B validation failure");
+        assert_eq!(
+            failed.progress.last().unwrap().state,
+            winwincode_execution_port::generated::ChangeBatchProgressState::InfrastructureFailed
+        );
+        assert_eq!(
+            journal
+                .workspace_binding(&workspace_id)
+                .unwrap()
+                .unwrap()
+                .state,
+            winwincode_worker::change_batch_store::BatchState::Quarantined
+        );
+        artifact_connection
+            .execute_batch("DROP TRIGGER fail_batch_b_artifact;")
+            .unwrap();
     });
 }
 
@@ -4146,67 +4173,6 @@ fn unique_terminal_facts(messages: &[ExecutionPortMessage]) -> Vec<ExecutionPort
         })
 }
 
-fn simulate_terminal_persisted_before_stopped_trace(root: &TestDirectory) {
-    let database = root.worker().join("worker-codex.sqlite3");
-    let connection = rusqlite::Connection::open(database).expect("open adapter crash fixture DB");
-    let (run_key, run_json): (String, Vec<u8>) = connection
-        .query_row(
-            "SELECT run_key, record_json FROM codex_run LIMIT 1",
-            [],
-            |row| Ok((row.get(0)?, row.get(1)?)),
-        )
-        .expect("load durable terminal run");
-    let mut run: serde_json::Value =
-        serde_json::from_slice(&run_json).expect("decode durable terminal run");
-    let terminal_event_id = run["terminalTrace"]["eventId"]
-        .as_str()
-        .expect("durable terminal trace event identity")
-        .to_owned();
-    run["phase"] = serde_json::Value::String("terminal_trace_pending".to_owned());
-    run["terminalTrace"]["retained"] = serde_json::Value::Bool(false);
-    connection
-        .execute(
-            "UPDATE codex_run SET record_json = ?2 WHERE run_key = ?1",
-            rusqlite::params![
-                run_key,
-                serde_json::to_vec(&run).expect("encode crash phase")
-            ],
-        )
-        .expect("persist terminal-before-trace crash phase");
-
-    let (stream_key, replay_json): (String, Vec<u8>) = connection
-        .query_row(
-            "SELECT stream_key, snapshot_json FROM runtime_replay LIMIT 1",
-            [],
-            |row| Ok((row.get(0)?, row.get(1)?)),
-        )
-        .expect("load runtime replay snapshot");
-    let mut replay: serde_json::Value =
-        serde_json::from_slice(&replay_json).expect("decode runtime replay snapshot");
-    let events = replay["events"]
-        .as_array_mut()
-        .expect("runtime replay events");
-    let before = events.len();
-    events.retain(|event| event["eventId"].as_str() != Some(terminal_event_id.as_str()));
-    assert_eq!(events.len(), before.saturating_sub(1));
-    let highest_sequence = events
-        .iter()
-        .filter_map(|event| event["sequence"].as_u64())
-        .max()
-        .unwrap_or(0);
-    replay["highestSequence"] = serde_json::Value::from(highest_sequence);
-    replay["ackSequence"] = serde_json::Value::from(1_u64);
-    connection
-        .execute(
-            "UPDATE runtime_replay SET snapshot_json = ?2 WHERE stream_key = ?1",
-            rusqlite::params![
-                stream_key,
-                serde_json::to_vec(&replay).expect("encode crash replay")
-            ],
-        )
-        .expect("persist terminal-before-trace replay boundary");
-}
-
 fn stored_run_json(root: &TestDirectory) -> serde_json::Value {
     let connection = rusqlite::Connection::open(root.worker().join("worker-codex.sqlite3"))
         .expect("open durable adapter run database");
@@ -4681,193 +4647,237 @@ fn successful_result_survives_optional_statistics(all_statistics: bool) {
 
 #[test]
 fn production_worker_kernel_gateway_loopback_and_restart_replay_are_exact() {
-    run_on_large_stack(async {
-        let root = TestDirectory::new("production-restart");
-        let helper = helper_executable();
-        let output = Command::new(&helper)
-            .arg("--winwincode-helper-handshake")
-            .output()
-            .expect("execute project-owned winwincode-kernel-helper");
-        assert!(output.status.success());
-        assert!(output.stderr.is_empty());
-        assert_eq!(
-            String::from_utf8(output.stdout).expect("helper handshake is UTF-8"),
-            format!(
-                "{{\"protocol\":\"winwincode-kernel-helper\",\"version\":1,\"packageVersion\":\"{}\"}}\n",
-                env!("CARGO_PKG_VERSION")
-            )
-        );
-
-        let dispatch = dispatch(&root);
-        let first_port = RecordedPort::default();
-        let adapter = winwincode_codex::ProductionCodexAdapter::open(adapter_config(&root))
-            .expect("open production embedded adapter and Kernel RuntimePaths");
-        let mut first = winwincode_worker::WorkerMain::new(
-            worker_config(),
-            first_port.clone(),
-            adapter,
-            root.workspace_runtime(),
-        );
-        register(&mut first, &first_port).await;
-        first_port.failures_remaining.store(1, Ordering::SeqCst);
-        consume_without_dispatch(
-            &mut first,
-            &first_port,
-            &ExecutionPortMessage::JobDispatchMessage(dispatch.clone()),
-            at("2030-01-01T00:00:00.000Z"),
-        )
-        .await
-        .expect("accept exact production dispatch");
-        assert_eq!(first_port.failures_remaining.load(Ordering::SeqCst), 1);
-        let connection =
-            rusqlite::Connection::open(root.worker().join("worker-codex.sqlite3")).unwrap();
-        let pending_frames = |connection: &rusqlite::Connection| {
-            connection.prepare("SELECT frame_json FROM execution_outbox WHERE state = 'pending' ORDER BY position").unwrap()
-                .query_map([], |row| row.get::<_, Vec<u8>>(0)).unwrap()
-                .collect::<Result<Vec<_>, _>>().unwrap()
-        };
-        let effects = pending_frames(&connection);
-        assert!(
-            effects.len() >= 2,
-            "dispatch result and binding are durable before confirmation"
-        );
-        assert!(first.flush_durable_outbox().await.is_err());
-        assert_eq!(
-            pending_frames(&connection),
-            effects,
-            "an unaccepted batch retains all original intent bytes"
-        );
-        drop(connection);
-        let mut gateway = GatewayDriver::new(&root, dispatch.job.clone(), true);
-        run_until_outcome(&mut first, &first_port, &mut gateway).await;
-        gateway.drive(&first_port, &mut first).await;
-        assert_eq!(gateway.open_count, 2);
-        let first_messages = first_port.messages();
-        assert!(
-            first_messages
-                .iter()
-                .any(|message| { matches!(message, ExecutionPortMessage::ModelOpenMessage(_)) })
-        );
-        assert!(
-            first_messages
-                .iter()
-                .any(|message| { matches!(message, ExecutionPortMessage::ModelAckMessage(_)) })
-        );
-        let first_facts = replay_facts(&first_messages);
-        let first_terminal_facts = unique_terminal_facts(&first_facts);
-        assert_eq!(
-            first_terminal_facts
-                .iter()
-                .filter(
-                    |message| matches!(message, ExecutionPortMessage::RuntimeEventMessage(event)
-                    if event.event.payload.as_ref().is_none_or(|payload|
-                        payload.content_type != "application/vnd.winwincode.core-tool-fact+json"))
+    for fail_stopped_trace in [false, true] {
+        run_on_large_stack(async move {
+            let root = TestDirectory::new(if fail_stopped_trace {
+                "production-restart-stopped-fault"
+            } else {
+                "production-restart"
+            });
+            let helper = helper_executable();
+            let output = Command::new(&helper)
+                .arg("--winwincode-helper-handshake")
+                .output()
+                .expect("execute project-owned winwincode-kernel-helper");
+            assert!(output.status.success());
+            assert!(output.stderr.is_empty());
+            assert_eq!(
+                String::from_utf8(output.stdout).expect("helper handshake is UTF-8"),
+                format!(
+                    "{{\"protocol\":\"winwincode-kernel-helper\",\"version\":1,\"packageVersion\":\"{}\"}}\n",
+                    env!("CARGO_PKG_VERSION")
                 )
-                .count(),
-            3
-        );
-        let baseline = first_terminal_facts
-            .iter()
-            .find_map(|message| match message {
-                ExecutionPortMessage::RuntimeEventMessage(event)
-                    if event.event.category == ExecutionEventCategory::Usage =>
-                {
-                    runtime_payload(event)
-                }
-                _ => None,
-            })
-            .expect("terminal performance baseline Usage event");
-        assert_eq!(baseline["fact"]["kind"], "performance_baseline");
-        assert_eq!(baseline["fact"]["report"]["executionMode"], "react");
-        assert_eq!(baseline["fact"]["report"]["observerMode"], "off");
-        assert_eq!(baseline["fact"]["report"]["primaryModelCallCount"], 2);
-        assert_eq!(baseline["fact"]["report"]["primaryModelInputTokens"], 20);
-        assert_eq!(baseline["fact"]["report"]["primaryModelCachedTokens"], 0);
-        assert_eq!(baseline["fact"]["report"]["primaryModelOutputTokens"], 10);
-        assert_eq!(baseline["fact"]["report"]["turnCount"], 1);
-        let first_performance_evidence =
-            winwincode_codex::performance_evidence::export_performance_v0_evidence(&root.worker())
-                .expect("export production performance evidence");
-        assert_eq!(first_performance_evidence.runs.len(), 1);
-        assert_eq!(first_performance_evidence.model_calls.len(), 2);
-        let comparison = first_performance_evidence
-            .summarize()
-            .expect("summarize production performance evidence");
-        assert_eq!(comparison.react.sample_count, 1);
-        assert_eq!(comparison.react.strong_model_call_count, 2);
-        assert_eq!(comparison.react.total_tokens, 30);
-        let outcome = first_terminal_facts
-            .iter()
-            .find_map(|message| match message {
-                ExecutionPortMessage::JobOutcomeMessage(outcome) => Some(outcome),
-                _ => None,
-            })
-            .expect("successful Worker outcome");
-        assert_eq!(outcome.outcome.status, ExecutionOutcomeStatus::Succeeded);
-        assert_eq!(
-            outcome
-                .outcome
-                .usage
-                .as_ref()
-                .and_then(|usage| usage.cost_microunits),
-            None
-        );
-        assert_eq!(
-            outcome.outcome.usage.as_ref().map(|usage| usage.tokens),
-            Some(Some(30))
-        );
-        first
-            .shutdown(at("2030-01-01T00:00:03.000Z"))
-            .await
-            .expect("shutdown first embedded Worker");
-        drop(first);
-        simulate_terminal_persisted_before_stopped_trace(&root);
+            );
 
-        let replay_port = RecordedPort::default();
-        let adapter = winwincode_codex::ProductionCodexAdapter::open(adapter_config(&root))
-            .expect("reopen production adapter from durable run state");
-        let mut replay = winwincode_worker::WorkerMain::new(
-            worker_config(),
-            replay_port.clone(),
-            adapter,
-            root.workspace_runtime(),
-        );
-        register(&mut replay, &replay_port).await;
-        replay
-            .accept_control(
+            let dispatch = dispatch(&root);
+            let first_port = RecordedPort::default();
+            let adapter = winwincode_codex::ProductionCodexAdapter::open(adapter_config(&root))
+                .expect("open production embedded adapter and Kernel RuntimePaths");
+            let mut first = winwincode_worker::WorkerMain::new(
+                worker_config(),
+                first_port.clone(),
+                adapter,
+                root.workspace_runtime(),
+            );
+            register(&mut first, &first_port).await;
+            let trace_storage =
+                rusqlite::Connection::open(root.worker().join("worker-codex.sqlite3")).unwrap();
+            if fail_stopped_trace {
+                trace_storage.execute_batch("CREATE TRIGGER fail_stopped_trace BEFORE INSERT ON runtime_replay_frame
+                WHEN EXISTS (SELECT 1 FROM codex_run WHERE json_extract(record_json, '$.terminalTrace.eventId') = NEW.event_id
+                    AND json_extract(record_json, '$.terminalTrace.retained') = 0)
+                BEGIN SELECT RAISE(ABORT, 'fixture stopped trace storage failure'); END;").unwrap();
+            }
+
+            first_port.failures_remaining.store(1, Ordering::SeqCst);
+            consume_without_dispatch(
+                &mut first,
+                &first_port,
                 &ExecutionPortMessage::JobDispatchMessage(dispatch.clone()),
                 at("2030-01-01T00:00:00.000Z"),
             )
             .await
-            .expect("accept exact replay dispatch");
-        let mut replay_gateway = GatewayDriver::new(&root, dispatch.job, true);
-        run_until_outcome(&mut replay, &replay_port, &mut replay_gateway).await;
-        assert_eq!(
-            replay_gateway.open_count, 0,
-            "terminal replay must not reopen Provider"
-        );
-        let expected_replay = first_terminal_facts
-            .into_iter()
-            .filter(|message| match message {
-                ExecutionPortMessage::RuntimeEventMessage(event) => event.event.sequence.0 > 1,
-                ExecutionPortMessage::JobOutcomeMessage(_) => true,
-                _ => false,
-            })
-            .collect::<Vec<_>>();
-        assert_eq!(
-            unique_terminal_facts(&replay_port.messages()),
-            expected_replay
-        );
-        assert_eq!(
-            winwincode_codex::performance_evidence::export_performance_v0_evidence(&root.worker())
+            .expect("accept exact production dispatch");
+            assert_eq!(first_port.failures_remaining.load(Ordering::SeqCst), 1);
+            let connection =
+                rusqlite::Connection::open(root.worker().join("worker-codex.sqlite3")).unwrap();
+            let pending_frames = |connection: &rusqlite::Connection| {
+                connection.prepare("SELECT frame_json FROM execution_outbox WHERE state = 'pending' ORDER BY position").unwrap()
+                .query_map([], |row| row.get::<_, Vec<u8>>(0)).unwrap()
+                .collect::<Result<Vec<_>, _>>().unwrap()
+            };
+            let effects = pending_frames(&connection);
+            assert!(
+                effects.len() >= 2,
+                "dispatch result and binding are durable before confirmation"
+            );
+            assert!(first.flush_durable_outbox().await.is_err());
+            assert_eq!(
+                pending_frames(&connection),
+                effects,
+                "an unaccepted batch retains all original intent bytes"
+            );
+            drop(connection);
+            let mut gateway = GatewayDriver::new(&root, dispatch.job.clone(), true);
+            run_until_outcome(&mut first, &first_port, &mut gateway).await;
+            gateway.drive(&first_port, &mut first).await;
+            assert_eq!(gateway.open_count, 2);
+            let first_messages = first_port.messages();
+            assert!(
+                first_messages.iter().any(|message| {
+                    matches!(message, ExecutionPortMessage::ModelOpenMessage(_))
+                })
+            );
+            assert!(
+                first_messages
+                    .iter()
+                    .any(|message| { matches!(message, ExecutionPortMessage::ModelAckMessage(_)) })
+            );
+            let first_facts = replay_facts(&first_messages);
+            let first_terminal_facts = unique_terminal_facts(&first_facts);
+            assert_eq!(
+                first_terminal_facts
+                    .iter()
+                    .filter(
+                        |message| matches!(message, ExecutionPortMessage::RuntimeEventMessage(event)
+                    if event.event.payload.as_ref().is_none_or(|payload|
+                        payload.content_type != "application/vnd.winwincode.core-tool-fact+json"))
+                    )
+                    .count(),
+                if fail_stopped_trace { 2 } else { 3 }
+            );
+            let baseline = first_terminal_facts
+                .iter()
+                .find_map(|message| match message {
+                    ExecutionPortMessage::RuntimeEventMessage(event)
+                        if event.event.category == ExecutionEventCategory::Usage =>
+                    {
+                        runtime_payload(event)
+                    }
+                    _ => None,
+                })
+                .expect("terminal performance baseline Usage event");
+            assert_eq!(baseline["fact"]["kind"], "performance_baseline");
+            assert_eq!(baseline["fact"]["report"]["executionMode"], "react");
+            assert_eq!(baseline["fact"]["report"]["observerMode"], "off");
+            assert_eq!(baseline["fact"]["report"]["primaryModelCallCount"], 2);
+            assert_eq!(baseline["fact"]["report"]["primaryModelInputTokens"], 20);
+            assert_eq!(baseline["fact"]["report"]["primaryModelCachedTokens"], 0);
+            assert_eq!(baseline["fact"]["report"]["primaryModelOutputTokens"], 10);
+            assert_eq!(baseline["fact"]["report"]["turnCount"], 1);
+            let first_performance_evidence =
+                winwincode_codex::performance_evidence::export_performance_v0_evidence(
+                    &root.worker(),
+                )
+                .expect("export production performance evidence");
+            assert_eq!(first_performance_evidence.runs.len(), 1);
+            assert_eq!(first_performance_evidence.model_calls.len(), 2);
+            let comparison = first_performance_evidence
+                .summarize()
+                .expect("summarize production performance evidence");
+            assert_eq!(comparison.react.sample_count, 1);
+            assert_eq!(comparison.react.strong_model_call_count, 2);
+            assert_eq!(comparison.react.total_tokens, 30);
+            let outcome = first_terminal_facts
+                .iter()
+                .find_map(|message| match message {
+                    ExecutionPortMessage::JobOutcomeMessage(outcome) => Some(outcome),
+                    _ => None,
+                })
+                .expect("successful Worker outcome");
+            assert_eq!(outcome.outcome.status, ExecutionOutcomeStatus::Succeeded);
+            assert_eq!(
+                outcome
+                    .outcome
+                    .usage
+                    .as_ref()
+                    .and_then(|usage| usage.cost_microunits),
+                None
+            );
+            assert_eq!(
+                outcome.outcome.usage.as_ref().map(|usage| usage.tokens),
+                Some(Some(30))
+            );
+            let retained = stored_run_json(&root);
+            assert_eq!(retained["phase"], "outcome_retained");
+            assert_eq!(retained["terminalTrace"]["retained"], !fail_stopped_trace);
+            assert_eq!(
+                trace_storage
+                    .query_row(
+                        "SELECT COUNT(*) FROM runtime_replay_frame WHERE event_id = ?1",
+                        [retained["terminalTrace"]["eventId"].as_str().unwrap()],
+                        |row| row.get::<_, i64>(0),
+                    )
+                    .unwrap(),
+                i64::from(!fail_stopped_trace)
+            );
+            assert_eq!(
+                trace_storage
+                    .query_row(
+                        "SELECT COUNT(*) FROM execution_outbox WHERE family = 'outcome'",
+                        [],
+                        |row| row.get::<_, i64>(0),
+                    )
+                    .unwrap(),
+                0,
+                "the real terminal business ACK has compacted the transport row"
+            );
+            first
+                .shutdown(at("2030-01-01T00:00:03.000Z"))
+                .await
+                .expect("shutdown first embedded Worker");
+            drop(first);
+            if fail_stopped_trace {
+                trace_storage
+                    .execute_batch("DROP TRIGGER fail_stopped_trace;")
+                    .unwrap();
+            }
+            drop(trace_storage);
+
+            let replay_port = RecordedPort::default();
+            let adapter = winwincode_codex::ProductionCodexAdapter::open(adapter_config(&root))
+                .expect("reopen production adapter from durable run state");
+            let mut replay = winwincode_worker::WorkerMain::new(
+                worker_config(),
+                replay_port.clone(),
+                adapter,
+                root.workspace_runtime(),
+            );
+            register(&mut replay, &replay_port).await;
+            replay
+                .accept_control(
+                    &ExecutionPortMessage::JobDispatchMessage(dispatch.clone()),
+                    at("2030-01-01T00:00:00.000Z"),
+                )
+                .await
+                .expect("accept exact replay dispatch");
+            let mut replay_gateway = GatewayDriver::new(&root, dispatch.job, true);
+            run_until_outcome(&mut replay, &replay_port, &mut replay_gateway).await;
+            assert_eq!(
+                replay_gateway.open_count, 0,
+                "terminal replay must not reopen Provider"
+            );
+            let expected_replay = first_terminal_facts
+                .into_iter()
+                .filter(|message| matches!(message, ExecutionPortMessage::JobOutcomeMessage(_)))
+                .collect::<Vec<_>>();
+            assert_eq!(
+                unique_terminal_facts(&replay_port.messages()),
+                expected_replay
+            );
+            assert_eq!(
+                winwincode_codex::performance_evidence::export_performance_v0_evidence(
+                    &root.worker()
+                )
                 .expect("re-export production performance evidence after replay"),
-            first_performance_evidence
-        );
-        replay
-            .shutdown(at("2030-01-01T00:00:03.000Z"))
-            .await
-            .expect("shutdown replayed embedded Worker");
-    });
+                first_performance_evidence
+            );
+            replay
+                .shutdown(at("2030-01-01T00:00:03.000Z"))
+                .await
+                .expect("shutdown replayed embedded Worker");
+        });
+    }
 }
 
 #[cfg(feature = "test-support")]
@@ -5292,7 +5302,7 @@ fn sealed_delegated_stop_survives_cancellation_after_dispatch_recovery() {
             .await
             .expect("duplicate cancellation remains idempotent");
         let outcome = poll_until_candidate_outcome(&mut worker, &port, &now).await;
-        assert_eq!(outcome.outcome.status, ExecutionOutcomeStatus::Failed);
+        assert_eq!(outcome.outcome.status, ExecutionOutcomeStatus::Cancelled);
         let retained = stored_run_json(&root);
         assert_eq!(retained["delegatedStop"], original["delegatedStop"]);
         assert!(retained["terminal"].is_null());
@@ -5798,11 +5808,15 @@ fn submission_crash_reopens_the_exact_provider_exchange_and_finishes_once() {
         assert_eq!(gateway.open_count, 1);
         assert_eq!(gateway.idempotent_replays, 0);
         let crash_snapshot = DirectorySnapshot::capture(&root.worker());
+        let workspace_snapshot = DirectorySnapshot::capture(&root.workspaces());
+        let source_snapshot = DirectorySnapshot::capture(&root.sources());
         first
             .shutdown(at("2030-01-01T00:00:01.000Z"))
             .await
             .expect("quiesce the in-process pre-crash runtime");
         drop(first);
+        source_snapshot.restore(&root.sources());
+        workspace_snapshot.restore(&root.workspaces());
         crash_snapshot.restore(&root.worker());
 
         let replay_port = RecordedPort::default();
@@ -7077,8 +7091,8 @@ fn shell_approval_and_action_receipt_body(renew: bool) {
         assert_eq!(outcome.outcome.status, ExecutionOutcomeStatus::Succeeded);
         assert_eq!(outcome.outcome.artifacts, vec![artifact]);
         assert!(
-            !checkout.exists(),
-            "terminal candidate outcome consumes the detached checkout"
+            checkout.exists(),
+            "the original checkout stays available until its terminal business ACK"
         );
         assert!(
             messages.iter().any(|message| matches!(
@@ -7101,5 +7115,54 @@ fn shell_approval_and_action_receipt_body(renew: bool) {
             })
             .expect("action request delivery");
         assert!(approval_index < action_index);
+        let mut control_plane = ControlPlane::start_local(
+            ControlPlaneConfig::local(root.data()),
+            Box::new(DiscardingPublisher),
+        )
+        .unwrap();
+        let mut storage = SqliteStorage::open(root.data()).unwrap();
+        let mut accepted_terminal = false;
+        for message in &messages {
+            if !matches!(
+                message,
+                ExecutionPortMessage::JobDispatchResultMessage(_)
+                    | ExecutionPortMessage::SessionBindingMessage(_)
+                    | ExecutionPortMessage::RuntimeEventMessage(_)
+                    | ExecutionPortMessage::JobOutcomeMessage(_)
+            ) {
+                continue;
+            }
+            let responses = DurableExecutionPortIngress::new(
+                &mut control_plane,
+                &mut storage,
+                &repository_scope(),
+                decided_at.clone(),
+            )
+            .unwrap()
+            .handle(message)
+            .expect("accept original shell execution facts through Control Plane ingress");
+            for response in responses {
+                if let ExecutionPortMessage::JobOutcomeAckMessage(ack) = &response {
+                    assert_eq!(
+                        ack.status,
+                        winwincode_execution_port::generated::JobOutcomeAckMessageStatus::Accepted
+                    );
+                    assert_eq!(ack.lease, outcome.lease);
+                    assert_eq!(ack.session_identity, outcome.session_identity);
+                    assert_eq!(ack.worker_session_id, outcome.worker_session_id);
+                    assert!(ack.error.is_none());
+                    accepted_terminal = true;
+                }
+                consume_without_dispatch(&mut worker, &port, &response, decided_at.clone())
+                    .await
+                    .expect("consume the real Control Plane business ACK");
+            }
+        }
+        assert!(accepted_terminal);
+        assert!(
+            !checkout.exists(),
+            "the accepted terminal business ACK releases its exact checkout"
+        );
+        control_plane.shutdown().unwrap();
     });
 }

@@ -104,6 +104,17 @@ impl super::ExecutionFacts {
         } else {
             Ok(())
         };
+        let calls_result = match facts.store.get().or(session.services.state_db.as_ref()) {
+            Some(store) => match facts.owner_id.get() {
+                Some(owner) => store
+                    .fail_pending_tool_calls(&session.thread_id.to_string(), Some(owner))
+                    .await
+                    .map(|_| ())
+                    .map_err(|error| error.to_string()),
+                None => Ok(()),
+            },
+            None => Ok(()),
+        };
         // sqlx may finish a queued COMMIT after its Rust future was cancelled.
         // Every fact append is transactional: this write lock fences those commits,
         // including direct-only sessions which have no cells to close.
@@ -114,9 +125,12 @@ impl super::ExecutionFacts {
                 .map_err(|error| error.to_string()),
             None => Ok(()),
         };
-        facts
-            .owner
-            .finish(runtime_result.and(cells_result).and(fence_result));
+        facts.owner.finish(
+            runtime_result
+                .and(cells_result)
+                .and(calls_result)
+                .and(fence_result),
+        );
     }
 }
 impl super::ToolFactRecord {
@@ -147,9 +161,7 @@ impl super::ToolFactRecord {
 
 impl Drop for super::ToolFactRecord {
     fn drop(&mut self) {
-        if (self.shared.load(Ordering::Acquire) || self.completed.load(Ordering::Acquire))
-            && !self.settled.load(Ordering::Acquire)
-        {
+        if !self.settled.load(Ordering::Acquire) {
             self.persist_cancellation();
         }
         self.service

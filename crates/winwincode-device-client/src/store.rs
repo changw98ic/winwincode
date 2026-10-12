@@ -9,7 +9,7 @@
 //! table (plan section 8.2) is the durable one-session-one-worker process
 //! registry driven by the local supervisor ([`crate::supervisor`]).
 //!
-//! The open sequence, migration style, transaction discipline, and the
+//! The open sequence, transaction discipline, and the
 //! static-SQL-only rule deliberately mirror `crates/winwincode-storage`, the
 //! authoritative local-`SQLite` storage adapter in this repository.
 //!
@@ -39,27 +39,7 @@ use winwincode_client_port::messages::{
     CLIENT_CONTROL_PORT_SCHEMA_VERSION, ClientToServerEnvelope, ClientToServerMessage,
 };
 
-/// Current schema version of the local device-client database. Version 2
-/// added the server-issued `client_node_id` column to `device_identity`
-/// (plan 17.1 enrollment adoption). Version 3 added the two CLIENT-200.2
-/// tables (`connect_code_state`, `client_connection_policy`) holding the
-/// durable state of the dynamic connect code and the local lock/new-connection
-/// policy. Version 4 (CLIENT-300.3) reshaped `occupancy_mirror` into the
-/// singleton authoritative occupancy mirror (lease, fencing token, holder,
-/// mirror revision, acknowledgement stamp) and added the
-/// `occupancy_release_intents` table. Version 5 (WORKER-100.2) added the
-/// nullable `exit_code` column to `worker_process_registry` so a terminal
-/// observation (exited/crashed) keeps the exit status next to the state.
-/// Version 6 (GIT-100.2) extended `candidate_local_refs` into the full
-/// device-local candidate registry: the product-level `candidate_ref`, the
-/// frozen `candidate_commit`, and the `retained_at` stamp joined the row, and
-/// `local_state` froze onto the plan 15 `LocalCandidateState` vocabulary. No
-/// version-1 through version-5 database ever shipped, so older databases fail
-/// closed as unsupported. Version 7 (WORKER-100.3) adds the durable worker
-/// stop-intent/receipt table, including the stop reason in its command
-/// identity. Version 8 adds durable Server command results and credential
-/// rotation proposals for exchange recovery. Version 9 removes the unused
-/// rotation proposals while retaining the device identity and command results.
+/// Schema identity of the current local device-client database.
 pub const CLIENT_STORE_SCHEMA_VERSION: i64 = 9;
 
 const DATABASE_FILE_NAME: &str = "device-client.sqlite3";
@@ -505,12 +485,12 @@ impl DeviceStore {
             })
             .transpose()
     }
-    /// Opens the local database and applies all schema migrations before return.
+    /// Opens the local database and initializes or validates the current schema.
     ///
     /// # Errors
     ///
     /// Returns an adapter-neutral error when the directory, connection,
-    /// durability settings, or schema migration cannot be prepared.
+    /// durability settings, or current schema cannot be prepared.
     pub fn open(data_directory: impl AsRef<Path>) -> Result<Self, DeviceStoreError> {
         let open_deadline = StdInstant::now() + SQLITE_OPEN_TIMEOUT;
         let data_directory = data_directory.as_ref();
@@ -527,11 +507,16 @@ impl DeviceStore {
         // initialization window.
         let open_lock = sqlite_open_lock(&database_path, open_deadline)?;
         let _open_guard = acquire_mutex_before_open_deadline(&open_lock, open_deadline)?;
+        // The daemon and CLI are separate processes. Journal-mode changes and
+        // schema preparation must share the same initialization lock across them.
+        let _process_open_guard = acquire_sqlite_process_open_lock(&database_path, open_deadline)?;
         let flags = OpenFlags::SQLITE_OPEN_READ_WRITE
             | OpenFlags::SQLITE_OPEN_CREATE
             | OpenFlags::SQLITE_OPEN_FULL_MUTEX;
         let mut connection =
             Connection::open_with_flags(&database_path, flags).map_err(sql_error)?;
+        #[cfg(test)]
+        open_process_concurrency_tests::after_sqlite_connection_opened();
         set_open_busy_deadline(&connection, open_deadline)?;
         connection
             .pragma_update(None, "foreign_keys", true)
@@ -545,7 +530,10 @@ impl DeviceStore {
             .pragma_update(None, "synchronous", "FULL")
             .map_err(sql_error)?;
         set_open_busy_deadline(&connection, open_deadline)?;
-        apply_migrations(&mut connection)?;
+        #[cfg(test)]
+        worker_report_schema_tests::before_schema_prepare_for_test(open_deadline);
+        set_open_busy_deadline(&connection, open_deadline)?;
+        initialize_schema(&mut connection)?;
 
         let read_connection =
             Connection::open_with_flags(&database_path, flags).map_err(sql_error)?;
@@ -558,13 +546,6 @@ impl DeviceStore {
             .pragma_update(None, "synchronous", "FULL")
             .map_err(sql_error)?;
 
-        #[cfg(test)]
-        worker_report_pending_migration_tests::before_pending_report_prepare_for_test(
-            open_deadline,
-        );
-
-        set_open_busy_deadline(&connection, open_deadline)?;
-        prepare_worker_report_pending(&mut connection)?;
         connection
             .busy_timeout(SQLITE_BUSY_TIMEOUT)
             .map_err(sql_error)?;
@@ -3030,6 +3011,10 @@ fn row_to_worker_process(row: &rusqlite::Row<'_>) -> rusqlite::Result<WorkerProc
 }
 
 const STORE_SCHEMA: &str = r"
+CREATE TABLE server_command_results (
+    command_message_id TEXT PRIMARY KEY NOT NULL,
+    payload BLOB NOT NULL
+);
 CREATE TABLE device_identity (
     device_id TEXT PRIMARY KEY NOT NULL,
     client_node_id TEXT NOT NULL DEFAULT '',
@@ -3228,10 +3213,6 @@ CREATE TABLE client_connection_policy (
 );
 ";
 
-const WORKER_REPORT_PENDING_MARKER: &str = "worker-report-pending-v1";
-const WORKER_LAUNCH_REPORT_PENDING_MARKER: &str = "worker-launch-report-pending-v1";
-const WORKER_REPORT_MIGRATION_SCHEMA: &str =
-    "CREATE TABLE worker_report_migration (migration_key TEXT PRIMARY KEY NOT NULL)";
 type WorkerReportSchemaDefinition = (&'static str, &'static str, &'static str);
 const WORKER_REPORT_SCHEMA: &[WorkerReportSchemaDefinition] = &[
     ("index", "worker_process_registry_state_lease", "CREATE INDEX worker_process_registry_state_lease ON worker_process_registry(state,occupancy_lease_id)"),
@@ -3271,7 +3252,6 @@ fn normalized_worker_report_sql(sql: &str) -> String {
         .split_ascii_whitespace()
         .collect::<Vec<_>>()
         .join(" ")
-        .replace(" IF NOT EXISTS", "")
 }
 
 fn validate_worker_report_schema(
@@ -3292,155 +3272,38 @@ fn validate_worker_report_schema(
     Ok(())
 }
 
-fn install_worker_report_schema(
-    transaction: &rusqlite::Transaction<'_>,
-    definitions: &[WorkerReportSchemaDefinition],
-) -> Result<(), DeviceStoreError> {
-    for (kind, name, definition) in definitions {
-        if worker_report_schema_sql(transaction, kind, name)?.is_none() {
-            transaction.execute_batch(definition).map_err(sql_error)?;
-        }
-    }
-    validate_worker_report_schema(transaction, definitions)
-}
-
-fn worker_report_marker_present(
-    transaction: &rusqlite::Transaction<'_>,
-    marker: &str,
-) -> Result<bool, DeviceStoreError> {
-    transaction
-        .query_row(
-            "SELECT EXISTS(SELECT 1 FROM worker_report_migration WHERE migration_key=?1)",
-            [marker],
-            |row| row.get(0),
-        )
-        .map_err(sql_error)
-}
-
-/// Existing markers authorize validation of their exact layout, never rebuilding it.
-/// First-migration schema, pending backfill and markers commit in one writer transaction.
-fn prepare_worker_report_pending(connection: &mut Connection) -> Result<(), DeviceStoreError> {
-    let transaction = connection
-        .transaction_with_behavior(TransactionBehavior::Immediate)
-        .map_err(sql_error)?;
-    let marker_table =
-        worker_report_schema_sql(&transaction, "table", "worker_report_migration")?.is_some();
-    let (report_applied, launch_applied) = if marker_table {
-        validate_worker_report_schema(
-            &transaction,
-            &[(
-                "table",
-                "worker_report_migration",
-                WORKER_REPORT_MIGRATION_SCHEMA,
-            )],
-        )?;
-        (
-            worker_report_marker_present(&transaction, WORKER_REPORT_PENDING_MARKER)?,
-            worker_report_marker_present(&transaction, WORKER_LAUNCH_REPORT_PENDING_MARKER)?,
-        )
-    } else {
-        (false, false)
-    };
-    // Check every applied family before any migration DDL can hide a missing object.
-    if report_applied {
-        validate_worker_report_schema(&transaction, WORKER_REPORT_SCHEMA)?;
-    }
-    if launch_applied {
-        validate_worker_report_schema(&transaction, WORKER_LAUNCH_REPORT_SCHEMA)?;
-    }
-    if !marker_table {
-        transaction
-            .execute_batch(WORKER_REPORT_MIGRATION_SCHEMA)
-            .map_err(sql_error)?;
-    }
-    if !report_applied {
-        install_worker_report_schema(&transaction, WORKER_REPORT_SCHEMA)?;
-        transaction.execute_batch("INSERT OR IGNORE INTO worker_report_pending SELECT worker_session_id,'reconcile' FROM worker_process_registry;
-            INSERT OR IGNORE INTO worker_report_pending SELECT worker_session_id,'exit' FROM worker_process_registry WHERE state IN ('exited','crashed','missing');").map_err(sql_error)?;
-        transaction
-            .execute(
-                "INSERT INTO worker_report_migration(migration_key) VALUES (?1)",
-                [WORKER_REPORT_PENDING_MARKER],
-            )
-            .map_err(sql_error)?;
-    }
-    if !launch_applied {
-        install_worker_report_schema(&transaction, WORKER_LAUNCH_REPORT_SCHEMA)?;
-        transaction.execute_batch("INSERT OR IGNORE INTO worker_launch_report_pending SELECT launch_grant_id FROM worker_launch_receipts;").map_err(sql_error)?;
-        transaction
-            .execute(
-                "INSERT INTO worker_report_migration(migration_key) VALUES (?1)",
-                [WORKER_LAUNCH_REPORT_PENDING_MARKER],
-            )
-            .map_err(sql_error)?;
-    }
-    transaction.commit().map_err(sql_error)
-}
-
-fn apply_migrations(connection: &mut Connection) -> Result<(), DeviceStoreError> {
-    // Other processes may finish initialization while this connection waits.
-    // Read the version only after taking the same lock that protects schema writes.
+fn initialize_schema(connection: &mut Connection) -> Result<(), DeviceStoreError> {
+    // Read the schema identity under the same writer lock as initial creation.
     let transaction = connection
         .transaction_with_behavior(TransactionBehavior::Immediate)
         .map_err(sql_error)?;
     let version = transaction
         .pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))
         .map_err(sql_error)?;
-    if !matches!(version, 0 | 6 | 7 | 8 | CLIENT_STORE_SCHEMA_VERSION) {
-        return Err(DeviceStoreError::adapter(format!(
-            "unsupported schema version {version}"
-        )));
+    match version {
+        0 => {
+            transaction.execute_batch(STORE_SCHEMA).map_err(sql_error)?;
+            for (_, _, definition) in WORKER_REPORT_SCHEMA
+                .iter()
+                .chain(WORKER_LAUNCH_REPORT_SCHEMA)
+            {
+                transaction.execute_batch(definition).map_err(sql_error)?;
+            }
+            transaction
+                .pragma_update(None, "user_version", CLIENT_STORE_SCHEMA_VERSION)
+                .map_err(sql_error)?;
+        }
+        CLIENT_STORE_SCHEMA_VERSION => {}
+        _ => {
+            return Err(DeviceStoreError::adapter(format!(
+                "unsupported schema version {version}"
+            )));
+        }
     }
-    if version == 0 {
-        transaction.execute_batch(STORE_SCHEMA).map_err(sql_error)?;
-    } else if version == 6 {
-        transaction
-            .execute_batch(
-                "CREATE TABLE worker_stop_intents (\
-                    command_message_id TEXT PRIMARY KEY NOT NULL,\
-                    idempotency_key TEXT NOT NULL UNIQUE,\
-                    worker_session_id TEXT NOT NULL,\
-                    worker_id TEXT NOT NULL,\
-                    reason TEXT NOT NULL CHECK (reason IN \
-                        ('occupant_requested', 'draining_complete', 'lease_recovered',\
-                         'grant_revoked', 'superseded')),\
-                    occupancy_lease_id TEXT NOT NULL,\
-                    fencing_token INTEGER NOT NULL\
-                        CHECK (fencing_token > 0 AND fencing_token <= 9007199254740991),\
-                    expected_revision INTEGER NOT NULL\
-                        CHECK (expected_revision >= 0 AND expected_revision <= 9007199254740991),\
-                    receipt_payload BLOB,\
-                    recorded_at TEXT NOT NULL,\
-                    completed_at TEXT\
-                );\
-                CREATE INDEX worker_stop_intents_by_session\
-                    ON worker_stop_intents (worker_session_id, recorded_at);",
-            )
-            .map_err(sql_error)?;
-    }
-    transaction
-        .execute_batch(
-            "CREATE TABLE IF NOT EXISTS server_command_results (
-            command_message_id TEXT PRIMARY KEY NOT NULL, payload BLOB NOT NULL
-        );
-        DROP TABLE IF EXISTS device_credential_rotations;",
-        )
-        .map_err(sql_error)?;
     validate_store_schema(&transaction)?;
-    transaction
-        .pragma_update(None, "user_version", CLIENT_STORE_SCHEMA_VERSION)
-        .map_err(sql_error)?;
-    transaction.commit().map_err(sql_error)?;
-
-    let migrated_version = connection
-        .pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))
-        .map_err(sql_error)?;
-    if migrated_version != CLIENT_STORE_SCHEMA_VERSION {
-        return Err(DeviceStoreError::adapter(format!(
-            "unsupported schema version {migrated_version}"
-        )));
-    }
-    Ok(())
+    validate_worker_report_schema(&transaction, WORKER_REPORT_SCHEMA)?;
+    validate_worker_report_schema(&transaction, WORKER_LAUNCH_REPORT_SCHEMA)?;
+    transaction.commit().map_err(sql_error)
 }
 
 /// Canonical tables, their static `PRAGMA table_info` query, and their
@@ -3710,6 +3573,41 @@ fn acquire_mutex_before_open_deadline<T>(
     }
 }
 
+/// A canonical database has one initialization lock across daemon and CLI processes.
+/// The OS releases it when the returned file closes, including process termination.
+fn acquire_sqlite_process_open_lock(
+    database_path: &Path,
+    open_deadline: StdInstant,
+) -> Result<fs::File, DeviceStoreError> {
+    let lock_path = database_path.with_extension("sqlite3.open.lock");
+    let file = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(lock_path)
+        .map_err(|error| {
+            DeviceStoreError::adapter(format!("SQLite initialization lock cannot open: {error}"))
+        })?;
+    loop {
+        remaining_sqlite_open_time(open_deadline)?;
+        match file.try_lock() {
+            Ok(()) => return Ok(file),
+            Err(fs::TryLockError::WouldBlock) => {
+                #[cfg(test)]
+                open_process_concurrency_tests::on_process_open_lock_contention();
+                let remaining = remaining_sqlite_open_time(open_deadline)?;
+                thread::sleep(remaining.min(SQLITE_OPEN_RETRY_INTERVAL));
+            }
+            Err(fs::TryLockError::Error(error)) => {
+                return Err(DeviceStoreError::adapter(format!(
+                    "SQLite initialization lock cannot acquire: {error}"
+                )));
+            }
+        }
+    }
+}
+
 fn set_open_busy_deadline(
     connection: &Connection,
     open_deadline: StdInstant,
@@ -3830,8 +3728,11 @@ impl DeviceStore {
 }
 
 #[cfg(test)]
-mod migration_concurrency_tests {
-    use super::{CLIENT_STORE_SCHEMA_VERSION, STORE_SCHEMA, apply_migrations};
+mod schema_concurrency_tests {
+    use super::{
+        CLIENT_STORE_SCHEMA_VERSION, STORE_SCHEMA, WORKER_LAUNCH_REPORT_SCHEMA,
+        WORKER_REPORT_SCHEMA, initialize_schema,
+    };
     use rusqlite::{Connection, TransactionBehavior};
     use std::fs;
     use std::sync::atomic::{AtomicBool, Ordering};
@@ -3840,7 +3741,7 @@ mod migration_concurrency_tests {
     static WAITING_FOR_SCHEMA_LOCK: AtomicBool = AtomicBool::new(false);
 
     #[test]
-    fn migration_reads_version_after_acquiring_the_database_lock() {
+    fn initialization_reads_version_after_acquiring_the_database_lock() {
         let root =
             std::env::temp_dir().join(format!("wwc-device-schema-race-{}", std::process::id()));
         fs::create_dir_all(&root).expect("create fixture");
@@ -3862,7 +3763,7 @@ mod migration_concurrency_tests {
                     attempt < 2_000
                 }))
                 .expect("observe lock contention");
-            apply_migrations(&mut connection)
+            initialize_schema(&mut connection)
         });
         let deadline = StdInstant::now() + Duration::from_secs(2);
         while !WAITING_FOR_SCHEMA_LOCK.load(Ordering::SeqCst) && StdInstant::now() < deadline {
@@ -3875,6 +3776,14 @@ mod migration_concurrency_tests {
         transaction
             .execute_batch(STORE_SCHEMA)
             .expect("first initializer creates schema");
+        for (_, _, definition) in WORKER_REPORT_SCHEMA
+            .iter()
+            .chain(WORKER_LAUNCH_REPORT_SCHEMA)
+        {
+            transaction
+                .execute_batch(definition)
+                .expect("report schema");
+        }
         transaction
             .pragma_update(None, "user_version", CLIENT_STORE_SCHEMA_VERSION)
             .expect("version");
@@ -4124,5 +4033,9 @@ mod outbox_read_cut_tests {
 }
 
 #[cfg(test)]
-#[path = "worker_report_pending_migration_tests.rs"]
-mod worker_report_pending_migration_tests;
+#[path = "worker_report_schema_tests.rs"]
+mod worker_report_schema_tests;
+
+#[cfg(test)]
+#[path = "store_open_process_concurrency_tests.rs"]
+mod open_process_concurrency_tests;

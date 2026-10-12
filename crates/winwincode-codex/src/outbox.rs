@@ -689,6 +689,32 @@ impl ExecutionOutbox {
         })
     }
 
+    /// Reads an existing exact domain proof. This cannot accept a new response
+    /// or revive the original request's permission after authority replacement.
+    pub(crate) fn has_applied_response(
+        &self,
+        response: &ExecutionPortMessage,
+    ) -> Result<bool, AdapterStoreError> {
+        if !accepted_response(response) {
+            return Err(AdapterStoreError::Conflict);
+        }
+        let (family, key) = response_target(response)?.ok_or(AdapterStoreError::Conflict)?;
+        let expected = response_replay_digest(response)?;
+        self.store.transaction(|transaction| {
+            let source = interaction_response_source_key(transaction, response, family, &key)?;
+            let proof_key = response_proof_key(response, source.as_deref().unwrap_or(&key));
+            let previous: Option<String> = transaction.query_row(
+                "SELECT response_digest FROM execution_response_receipt WHERE family=?1 AND correlation_key=?2",
+                params![family.as_str(), proof_key], |row| row.get(0),
+            ).optional().map_err(|_| AdapterStoreError::Unavailable)?;
+            match previous {
+                Some(previous) if previous != expected => Err(AdapterStoreError::Conflict),
+                Some(_) => Ok(true),
+                None => Ok(false),
+            }
+        })
+    }
+
     /// Compacts accepted runtime rows or makes exact gap frames pending again.
     pub(crate) fn apply_runtime_ack(
         &self,

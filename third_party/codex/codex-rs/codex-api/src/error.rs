@@ -6,6 +6,16 @@ use thiserror::Error;
 
 #[derive(Debug, Error)]
 pub enum ApiError {
+    /// The host exhausted its physical attempt policy. Core must consume the
+    /// original semantic failure rather than start a second retry budget.
+    #[error(transparent)]
+    HostTerminal { source: Box<ApiError> },
+    /// The embedding host rejected work under the original expired execution lease.
+    #[error("execution lease expired")]
+    ExecutionLeaseExpired,
+    /// The host refused a model call because its original execution authority expired.
+    #[error("model call authority expired")]
+    ModelAuthorityExpired,
     #[error(transparent)]
     Transport(#[from] TransportError),
     #[error("api error {status}: {message}")]
@@ -38,5 +48,13 @@ pub enum ApiError {
 impl From<RateLimitError> for ApiError {
     fn from(err: RateLimitError) -> Self {
         Self::RateLimit(err.to_string())
+    }
+}
+
+impl ApiError {
+    pub fn without_retry(self) -> Self {
+        Self::HostTerminal {
+            source: Box::new(self),
+        }
     }
 }

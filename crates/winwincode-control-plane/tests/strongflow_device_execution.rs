@@ -260,6 +260,31 @@ fn work_run_role_job(
     winwincode_domain::WorkRunId,
     ProductSessionId,
 ) {
+    work_run_role_job_with_limits(
+        storage,
+        seed,
+        role,
+        write_mode,
+        ExecutionLimits {
+            deadline_at: Some(instant("2026-09-05T12:00:00.000Z")),
+            max_artifact_bytes: 10_000_000,
+            max_runtime_seconds: Some(3_600),
+        },
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn work_run_role_job_with_limits(
+    storage: &mut SqliteStorage,
+    seed: u64,
+    role: &str,
+    write_mode: ExecutionWorkspaceWriteMode,
+    limits: ExecutionLimits,
+) -> (
+    ExecutionJobId,
+    winwincode_domain::WorkRunId,
+    ProductSessionId,
+) {
     let work_run_id = winwincode_domain::WorkRunId(ulid_id("wrn", seed + 1));
     let product_session_id = ProductSessionId(ulid_id("psn", seed + 2));
     let job_id = ExecutionJobId(ulid_id("job", seed + 3));
@@ -270,11 +295,7 @@ fn work_run_role_job(
         execution_profile: role.to_owned(),
         goal: "Execute the exact sealed WorkRun goal.".to_owned(),
         job_id: job_id.clone(),
-        limits: ExecutionLimits {
-            deadline_at: Some(instant("2026-09-05T12:00:00.000Z")),
-            max_artifact_bytes: 10_000_000,
-            max_runtime_seconds: Some(3_600),
-        },
+        limits,
         payload_digest: Sha256Digest(format!("sha256:{seed:064}")),
         scope: ExecutionScope::WorkRunExecutionScope(WorkRunExecutionScope {
             attempt: 1,
@@ -949,4 +970,240 @@ fn the_role_column_migrates_a_preexisting_facts_table() {
     assert_eq!(dispatch.facts.worker_session_id, anchor.worker_session_id);
     assert_eq!(dispatch.facts.job_id, job_id.0);
     let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn shared_admission_preserves_strongflow_runtime_limits_pool_holder_and_scope() {
+    for (seconds, expected) in [
+        (None, None),
+        (Some(1), Some(1_000)),
+        (Some(604_800), Some(604_800_000)),
+    ] {
+        let mut storage = SqliteStorage::open(temporary_root("shared-runtime")).expect("storage");
+        let (node, instance, lease_id, fencing_token, binding) =
+            work_run_device_fixture(&mut storage, 1_700, HOLDER);
+        let (job_id, work_run_id, product_session_id) = work_run_role_job_with_limits(
+            &mut storage,
+            1_800,
+            "executor",
+            ExecutionWorkspaceWriteMode::Candidate,
+            ExecutionLimits {
+                deadline_at: seconds.map(|_| instant("2026-09-05T12:00:00.000Z")),
+                max_runtime_seconds: seconds,
+                max_artifact_bytes: 10_000_000,
+            },
+        );
+        let anchor = work_run_anchor(
+            &mut storage,
+            1_900,
+            &node,
+            &instance,
+            HOLDER,
+            &lease_id,
+            fencing_token,
+            &binding,
+            product_session_id.0.as_str(),
+            work_run_id.0.as_str(),
+        );
+        let now = instant("2026-09-04T12:05:00.000Z");
+        let dispatch =
+            dispatch_work_run_to_device_worker(&mut storage, Some(HOLDER), &work_run_id, &now)
+                .expect("valid shared admission")
+                .expect("device WorkRun");
+        let reservation = storage
+            .execution_admission()
+            .unwrap()
+            .load_reservation_by_job(&job_id)
+            .unwrap()
+            .expect("reservation");
+        assert_eq!(reservation.runtime_limit_millis, expected);
+        assert_eq!(reservation.user_id, UserId(HOLDER.to_owned()));
+        assert_eq!(
+            reservation.worker_pool_id.0,
+            winwincode_control_plane::STRONGFLOW_DEVICE_WORKER_POOL_ID
+        );
+        assert_eq!(reservation.scope.product_session_id, product_session_id);
+        assert!(reservation.scope.delivery_id.is_some());
+        assert_eq!(
+            reservation.repository_access,
+            ExecutionRepositoryAccess::IsolatedWrite {
+                worktree_key: format!("job-{}", job_id.0),
+            }
+        );
+        assert_eq!(dispatch.facts.role.as_deref(), Some("executor"));
+        assert_eq!(dispatch.facts.worker_session_id, anchor.worker_session_id);
+        assert_eq!(
+            dispatch_work_run_to_device_worker(&mut storage, Some(HOLDER), &work_run_id, &now)
+                .unwrap()
+                .unwrap(),
+            dispatch
+        );
+        assert_eq!(
+            storage
+                .execution_admission()
+                .unwrap()
+                .load_reservation_by_job(&job_id)
+                .unwrap()
+                .unwrap(),
+            reservation
+        );
+    }
+}
+
+#[test]
+fn shared_admission_rejects_invalid_strongflow_runtime_before_device_writes() {
+    for (deadline, seconds) in [
+        (true, None),
+        (false, Some(1)),
+        (true, Some(-1)),
+        (true, Some(0)),
+        (true, Some(604_801)),
+        (true, Some(i64::MAX)),
+    ] {
+        let mut storage =
+            SqliteStorage::open(temporary_root("shared-runtime-invalid")).expect("storage");
+        let (node, instance, lease_id, fencing_token, binding) =
+            work_run_device_fixture(&mut storage, 2_000, HOLDER);
+        let (job_id, work_run_id, product_session_id) = work_run_role_job_with_limits(
+            &mut storage,
+            2_100,
+            "executor",
+            ExecutionWorkspaceWriteMode::Candidate,
+            ExecutionLimits {
+                deadline_at: deadline.then(|| instant("2026-09-05T12:00:00.000Z")),
+                max_runtime_seconds: seconds,
+                max_artifact_bytes: 10_000_000,
+            },
+        );
+        let anchor = work_run_anchor(
+            &mut storage,
+            2_200,
+            &node,
+            &instance,
+            HOLDER,
+            &lease_id,
+            fencing_token,
+            &binding,
+            product_session_id.0.as_str(),
+            work_run_id.0.as_str(),
+        );
+        let error = dispatch_work_run_to_device_worker(
+            &mut storage,
+            Some(HOLDER),
+            &work_run_id,
+            &instant("2026-09-04T12:05:00.000Z"),
+        )
+        .expect_err("invalid runtime must fail closed");
+        assert_eq!(
+            error.kind(),
+            StrongflowDeviceDispatchErrorKind::CorruptState
+        );
+        assert!(
+            DeviceExecutionBindingService::new(&mut storage)
+                .snapshot(&anchor.worker_session_id)
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            DeviceExecutionBindingService::new(&mut storage)
+                .facts(&job_id.0)
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            storage
+                .execution_admission()
+                .unwrap()
+                .load_reservation_by_job(&job_id)
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(queued_jobs(&mut storage), vec![job_id]);
+    }
+}
+
+#[test]
+fn shared_admission_rejects_changed_strongflow_sealed_identity_before_device_writes() {
+    for field in ["job-id", "attempt", "payload-digest"] {
+        let root = temporary_root("shared-seal-invalid");
+        let mut storage = SqliteStorage::open(&root).expect("storage");
+        let (node, instance, lease_id, fencing_token, binding) =
+            work_run_device_fixture(&mut storage, 2_300, HOLDER);
+        let (job_id, work_run_id, product_session_id) = work_run_role_job(
+            &mut storage,
+            2_400,
+            "executor",
+            ExecutionWorkspaceWriteMode::Candidate,
+        );
+        let anchor = work_run_anchor(
+            &mut storage,
+            2_500,
+            &node,
+            &instance,
+            HOLDER,
+            &lease_id,
+            fencing_token,
+            &binding,
+            product_session_id.0.as_str(),
+            work_run_id.0.as_str(),
+        );
+        // Negative fault injection changes only the private serialized input;
+        // the authoritative queue identity remains the original submission.
+        let database = rusqlite::Connection::open(root.join("control-plane.sqlite3")).unwrap();
+        let bytes: Vec<u8> = database
+            .query_row(
+                "SELECT dispatch_payload FROM scheduler_execution_jobs WHERE job_id=?1",
+                [&job_id.0],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let mut job: ExecutionJob = serde_json::from_slice(&bytes).unwrap();
+        match field {
+            "job-id" => job.job_id = ExecutionJobId(ulid_id("job", 2_499)),
+            "attempt" => job.attempt = 2,
+            "payload-digest" => {
+                job.payload_digest = Sha256Digest(format!("sha256:{}", "f".repeat(64)));
+            }
+            _ => unreachable!(),
+        }
+        database
+            .execute(
+                "UPDATE scheduler_execution_jobs SET dispatch_payload=?1 WHERE job_id=?2",
+                rusqlite::params![serde_json::to_vec(&job).unwrap(), job_id.0],
+            )
+            .unwrap();
+        drop(database);
+        let error = dispatch_work_run_to_device_worker(
+            &mut storage,
+            Some(HOLDER),
+            &work_run_id,
+            &instant("2026-09-04T12:05:00.000Z"),
+        )
+        .expect_err("changed seal must fail closed");
+        assert_eq!(
+            error.kind(),
+            StrongflowDeviceDispatchErrorKind::CorruptState
+        );
+        assert!(
+            DeviceExecutionBindingService::new(&mut storage)
+                .snapshot(&anchor.worker_session_id)
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            DeviceExecutionBindingService::new(&mut storage)
+                .facts(&job_id.0)
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            storage
+                .execution_admission()
+                .unwrap()
+                .load_reservation_by_job(&job_id)
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(queued_jobs(&mut storage), vec![job_id]);
+    }
 }

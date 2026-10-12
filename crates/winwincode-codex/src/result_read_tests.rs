@@ -30,9 +30,10 @@ async fn stored_result_read_is_receipt_bound_and_current_lease_fenced() {
             digest: winwincode_domain::Sha256Digest(format!("sha256:{}", "c".repeat(64))),
         },
         signing_key(),
+        crate::model_bridge::SharedAuthoritySource::default(),
     )
     .unwrap();
-    gate.install_binding(binding(), None).unwrap();
+    gate.install_binding(&binding(), None).unwrap();
     gate.update_now(&Instant("2030-01-01T00:00:02.000Z".into()))
         .unwrap();
     let request = read_request();
@@ -68,16 +69,17 @@ async fn expired_unknown_and_delegated_result_reads_are_rejected() {
             digest: winwincode_domain::Sha256Digest(format!("sha256:{}", "c".repeat(64))),
         },
         signing_key(),
+        crate::model_bridge::SharedAuthoritySource::default(),
     )
     .unwrap();
     let request = read_request();
     assert!(gate.authorize_result_read(request.clone()).await.is_err());
-    gate.install_binding(binding(), Some(home.as_path()))
+    gate.install_binding(&binding(), Some(home.as_path()))
         .unwrap();
     gate.update_now(&Instant("2030-01-01T00:00:02.000Z".into()))
         .unwrap();
     assert!(gate.authorize_result_read(request.clone()).await.is_err());
-    gate.install_binding(binding(), None).unwrap();
+    gate.install_binding(&binding(), None).unwrap();
     gate.update_now(&Instant("2030-01-01T01:00:00.000Z".into()))
         .unwrap();
     assert!(gate.authorize_result_read(request).await.is_err());
@@ -97,11 +99,12 @@ async fn result_read_authority_expires_without_owner_clock_refresh() {
             digest: winwincode_domain::Sha256Digest(format!("sha256:{}", "c".repeat(64))),
         },
         signing_key(),
+        crate::model_bridge::SharedAuthoritySource::default(),
     )
     .unwrap();
     let mut authority = binding();
     authority.authority.lease.expires_at = Instant("2030-01-01T00:00:02.120Z".into());
-    gate.install_binding(authority.clone(), None).unwrap();
+    gate.install_binding(&authority, None).unwrap();
     let initial = Instant("2030-01-01T00:00:02.000Z".into());
     gate.update_now(&initial).unwrap();
     let request = read_request();

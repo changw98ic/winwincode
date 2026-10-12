@@ -3,7 +3,6 @@
 //! Durable candidate/runtime/Evidence join for production Delivery verdicts.
 
 use base64::{Engine as _, engine::general_purpose::STANDARD};
-use serde_json::from_slice;
 use sha2::{Digest, Sha256};
 use winwincode_delivery::{
     application::candidate_rejection::{
@@ -28,7 +27,10 @@ use winwincode_storage::{
     StorageError, ValidatedGitSourceArtifact,
 };
 
-use crate::runtime_event_transaction::{RuntimeLedgerState, runtime_stream_id_for_projection};
+use crate::runtime_event_transaction::{
+    RuntimeLedgerState, decode_runtime_ledger_state, hydrate_runtime_ledger,
+    runtime_stream_id_for_projection,
+};
 use crate::session_binding_transaction::instant_millis;
 use crate::{
     DeliveryAuthorityError, DeliveryVerdictAuthority, repository_scope_key,
@@ -558,20 +560,9 @@ fn runtime_events(
         .load_state(&stream_id)
         .map_err(|error| storage_error(&error))?
         .ok_or_else(|| DeliveryAuthorityError::new("verification runtime ledger is missing"))?;
-    let ledger: RuntimeLedgerState = from_slice(&stored.payload).map_err(|error| {
-        DeliveryAuthorityError::new(format!("runtime ledger is invalid: {error}"))
-    })?;
-    let canonical = serde_json::to_vec(&ledger).map_err(|error| {
-        DeliveryAuthorityError::new(format!("runtime ledger encode failed: {error}"))
-    })?;
-    if canonical != stored.payload
-        || stored.revision != ledger.highest_sequence
-        || ledger.events.len() as u64 != ledger.highest_sequence
-    {
-        return Err(DeliveryAuthorityError::new(
-            "verification runtime ledger is non-canonical or truncated",
-        ));
-    }
+    let mut ledger =
+        decode_runtime_ledger_state(&stored, &stream_id).map_err(|error| storage_error(&error))?;
+    hydrate_runtime_ledger(storage, &mut ledger).map_err(|error| storage_error(&error))?;
     validate_runtime_identity(&ledger, delivery, binding, terminal)?;
     ledger
         .events

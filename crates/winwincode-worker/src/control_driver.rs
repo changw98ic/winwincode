@@ -141,7 +141,9 @@ where
                     );
                     if matches!(
                         error.code,
-                        WorkerErrorCode::ExecutionPort | WorkerErrorCode::ExecutionBackpressure
+                        WorkerErrorCode::ExecutionPort
+                            | WorkerErrorCode::ExecutionBackpressure
+                            | WorkerErrorCode::CodexDurableState
                     ) || self.has_pending_durable_evidence()
                     {
                         return Ok(());

@@ -149,7 +149,11 @@
         "EXECUTION_FAILED",
         "INFRASTRUCTURE_ERROR",
         "CANDIDATE_UNCHANGED",
-        "CANDIDATE_PREPARATION_FAILED"
+        "CANDIDATE_PREPARATION_FAILED",
+        "DEVICE_PROVIDER_STATE_INVALID",
+        "DEVICE_PROVIDER_STORAGE_UNAVAILABLE",
+        "DEVICE_PROVIDER_FILESYSTEM_UNAVAILABLE",
+        "DEVICE_PROVIDER_ENCODING_INVALID"
       ]
     },
     "ExecutionPortError": {
@@ -10646,6 +10650,159 @@
         "sourceSequence",
         "factJson"
       ]
+    },
+    "ModelFailureCause": {
+      "type": "string",
+      "enum": [
+        "connection_unavailable",
+        "transport_interrupted",
+        "timeout",
+        "rate_limited",
+        "server_transient",
+        "authentication",
+        "authorization",
+        "request_invalid",
+        "protocol_invalid",
+        "integrity_invalid",
+        "tls_invalid",
+        "stream_incomplete",
+        "empty_response",
+        "cancelled",
+        "authority_expired",
+        "storage_unavailable"
+      ]
+    },
+    "ModelFailureAcceptance": {
+      "type": "string",
+      "enum": [
+        "not_sent",
+        "unknown",
+        "response_received"
+      ]
+    },
+    "ModelFailurePhase": {
+      "type": "string",
+      "enum": [
+        "connect",
+        "response_headers",
+        "response_body",
+        "stream",
+        "decode",
+        "persist"
+      ]
+    },
+    "ModelNetworkDiagnosticCode": {
+      "type": "string",
+      "enum": [
+        "http_status",
+        "dns",
+        "connect",
+        "io",
+        "timeout",
+        "tls",
+        "tls_certificate",
+        "http_protocol",
+        "request_uri",
+        "request_headers",
+        "proxy",
+        "redirect",
+        "response_headers_too_large",
+        "body_too_large",
+        "content_type",
+        "transport_other",
+        "json_syntax",
+        "json_schema",
+        "response_invariant",
+        "schema_version",
+        "sse_framing",
+        "sse_event",
+        "stream_conversion",
+        "stream_incomplete",
+        "empty_response",
+        "identity_conflict",
+        "credential_blocked",
+        "storage",
+        "configuration",
+        "authority_ended"
+      ]
+    },
+    "ProviderModelFailureDiagnostic": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "stage": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256,
+          "pattern": "^[^\\u0000-\\u001f\\u007f]+$"
+        },
+        "eventType": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256,
+          "pattern": "^[^\\u0000-\\u001f\\u007f]+$"
+        },
+        "fieldPath": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256,
+          "pattern": "^[^\\u0000-\\u001f\\u007f]+$"
+        }
+      },
+      "required": []
+    },
+    "ModelFailureStopReason": {
+      "type": "string",
+      "enum": [
+        "permanent_failure",
+        "recovery_disabled",
+        "reconcile_required",
+        "retry_budget_exhausted"
+      ]
+    },
+    "ModelFailureFacts": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "sourceCode",
+        "scope"
+      ],
+      "properties": {
+        "sourceCode": {
+          "$ref": "#/$defs/ExecutionPortErrorCode"
+        },
+        "scope": {
+          "type": "string",
+          "enum": [
+            "model_attempt"
+          ]
+        },
+        "cause": {
+          "$ref": "#/$defs/ModelFailureCause"
+        },
+        "acceptance": {
+          "$ref": "#/$defs/ModelFailureAcceptance"
+        },
+        "phase": {
+          "$ref": "#/$defs/ModelFailurePhase"
+        },
+        "networkDiagnosticCode": {
+          "$ref": "#/$defs/ModelNetworkDiagnosticCode"
+        },
+        "parserDiagnostic": {
+          "$ref": "#/$defs/ProviderModelFailureDiagnostic"
+        },
+        "attemptId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200,
+          "pattern": "^[a-zA-Z0-9_:-]+$"
+        },
+        "stopReason": {
+          "$ref": "#/$defs/ModelFailureStopReason"
+        }
+      },
+      "description": "Bounded source facts for a model-attempt failure. Missing acceptance stays unknown. Full private receipts remain in the original attempt ledger."
     }
   }
 }
