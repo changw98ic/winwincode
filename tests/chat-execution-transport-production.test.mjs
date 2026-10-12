@@ -2,6 +2,7 @@
 
 // Production acceptance replays original Worker bytes through real HTTPS.
 import assert from 'node:assert/strict'
+import { execFileSync } from 'node:child_process'
 import { globSync, mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -124,9 +125,25 @@ for (const variant of ['completed-replay', 'genuine-gap']) {
             }, 'at least two original Core runtime frames are retained without business ACK', 60_000)
             // Freeze the actual Worker, including its embedded Core, so its
             // automatic retry cannot race the deliberate transport order.
-            process.kill(probe.pid, 'SIGSTOP')
-            paused = probe.pid
-            const before = runtimeLedgerSnapshot(database, productSessionId)
+            const stopped = await waitFor(() => {
+              process.kill(probe.pid, 'SIGSTOP')
+              paused = probe.pid
+              const status = execFileSync('ps', ['-p', String(probe.pid), '-o', 'stat='], { encoding: 'utf8' }).trim()
+              const journal = new DatabaseSync(probe.networkJournalPath, { readOnly: true })
+              let inFlight
+              try {
+                journal.exec('PRAGMA busy_timeout=5000')
+                inFlight = journal.prepare('SELECT state_json FROM network_queue_state').all()
+                  .some(row => JSON.parse(row.state_json).in_flight)
+              } finally { journal.close() }
+              if (!status.startsWith('T') || inFlight) {
+                process.kill(probe.pid, 'SIGCONT')
+                paused = null
+                return false
+              }
+              return { ledger: runtimeLedgerSnapshot(database, productSessionId) }
+            }, 'the actual original Worker is stopped with no in-flight exchange before Gap injection', 30_000, 10)
+            const before = stopped.ledger
             const expected = before ? JSON.parse(before.bytes.toString('utf8')).highestSequence + 1 : 1
             const first = pending.find(row => row.message.event.sequence === expected)
             const later = pending.find(row => row.message.event.sequence === expected + 1)
