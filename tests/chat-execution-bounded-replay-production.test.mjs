@@ -228,8 +228,10 @@ test('Chat consumes its real Gap control and automatically replays only the fini
   const markerCodes = [...marker].map(character => character.charCodeAt(0)).join(',')
   let complete = false
   let paused = null
+  let stopObservation
   t.after(() => {
     if (paused !== null) { try { process.kill(paused, 'SIGCONT') } catch { /* fixture owns process cleanup */ } }
+    stopObservation?.()
     if (complete) rmSync(directory, { recursive: true, force: true })
     else t.diagnostic('Unverified real bounded Gap fixture retained at ' + directory)
   })
@@ -250,7 +252,6 @@ test('Chat consumes its real Gap control and automatically replays only the fini
       const database = new DatabaseSync(join(directory, 'server-data/control-plane.sqlite3'))
       database.exec('PRAGMA busy_timeout=5000')
       let probe
-      let stopObservation
       try {
         await api.command('session.create', 0, { productSessionId,
           projectId: 'prj_01J00000000000000000000000', repositoryId: 'rep_01J00000000000000000000000',
@@ -265,7 +266,31 @@ test('Chat consumes its real Gap control and automatically replays only the fini
           'the final original real HTTPS model request is held after its actual command loop', 60_000)
         const authority = database.prepare('SELECT * FROM execution_dispatch_authorities WHERE job_id=?').get(job.job_id)
         probe = readWorkerTransport(devicePath.deviceData, authority)
+        // Install observation DDL while the actual Worker is stopped and its
+        // journal has no held write transaction. Execution resumes immediately.
+        await waitFor(() => {
+          process.kill(probe.pid, 'SIGSTOP')
+          paused = probe.pid
+          const status = readFileSync(`/proc/${probe.pid}/status`, 'utf8')
+          if (!/^State:\s+T/mu.test(status)) {
+            process.kill(probe.pid, 'SIGCONT')
+            paused = null
+            return false
+          }
+          const checkpoint = new DatabaseSync(probe.networkJournalPath)
+          try {
+            checkpoint.exec('PRAGMA busy_timeout=0; BEGIN IMMEDIATE; COMMIT')
+          } catch (error) {
+            if (![5, 6].includes(error.errcode & 0xff)) throw error
+            process.kill(probe.pid, 'SIGCONT')
+            paused = null
+            return false
+          } finally { checkpoint.close() }
+          return true
+        }, 'the stopped original Worker has no held journal writer transaction before observation DDL', 3000, 10)
         stopObservation = observeCompletedEnvelopes(probe)
+        process.kill(probe.pid, 'SIGCONT')
+        paused = null
         await waitFor(() => {
           const rows = readRetainedRuntime(devicePath.deviceData, job.job_id)
           return rows.some(row => row.sequence <= row.ack_sequence) ? rows : false
@@ -426,7 +451,6 @@ test('Chat consumes its real Gap control and automatically replays only the fini
           unchangedOriginalModelIdentities: true, physicalAccounting: accounting,
           batchObservation: 'HTTPS journal has no flush batch ID; count/bytes/time flush budgets require production source and load evidence' }
       } finally {
-        stopObservation?.()
         database.exec('DROP TRIGGER IF EXISTS pause_bounded_gap_insert')
         database.exec('DROP TRIGGER IF EXISTS pause_bounded_gap_update')
         devicePath.modelServer.releaseResponseGate(marker)

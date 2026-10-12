@@ -13,6 +13,7 @@ import { deterministicDeviceProvider, waitFor } from '../scripts/device-producti
 import {
   assertSuccessfulRetainedCommands, readRetainedCoreCommandResults,
   readRetainedOutcomes, readRetainedRuntime, readWorkerTransport, runtimeLedgerSnapshot,
+  signalIfPresent,
 } from './fixtures/chat-execution-transport-probe.mjs'
 
 function sealedBinaries() {
@@ -150,8 +151,8 @@ for (const variant of ['completed-replay', 'genuine-gap']) {
             paused = null
           } else devicePath.modelServer.releaseResponseGate(marker)
           await waitCompleted(database, job.job_id, devicePath.deviceData)
-          process.kill(probe.pid, 'SIGSTOP')
-          paused = probe.pid
+          // Acknowledged managed Workers may already have drained and exited.
+          if (signalIfPresent(probe.pid, 'SIGSTOP')) paused = probe.pid
           const before = { terminal: terminalSnapshot(database, job.job_id),
             runtime: runtimeLedgerSnapshot(database, productSessionId), core: coreSnapshot(devicePath.deviceData, job.job_id) }
           const runtime = readRetainedRuntime(devicePath.deviceData, job.job_id)
@@ -184,7 +185,7 @@ for (const variant of ['completed-replay', 'genuine-gap']) {
           assert.equal(devicePath.modelServer.requests.length, count)
           const heartbeat = database.prepare('SELECT heartbeat_sequence FROM execution_workers WHERE worker_id=?')
             .get(probe.workerId)
-          process.kill(probe.pid, 'SIGCONT')
+          signalIfPresent(probe.pid, 'SIGCONT')
           paused = null
           const workerPostProbe = await waitFor(() => {
             const current = database.prepare('SELECT worker_instance_id,heartbeat_sequence FROM execution_workers WHERE worker_id=?')
@@ -221,7 +222,7 @@ for (const variant of ['completed-replay', 'genuine-gap']) {
           database.exec('DROP TRIGGER IF EXISTS pause_chat_runtime_insert')
           database.exec('DROP TRIGGER IF EXISTS pause_chat_runtime_update')
           devicePath.modelServer.releaseResponseGate(marker)
-          if (paused !== null) { process.kill(paused, 'SIGCONT'); paused = null }
+          if (paused !== null) { signalIfPresent(paused, 'SIGCONT'); paused = null }
           database.close()
         }
       } },

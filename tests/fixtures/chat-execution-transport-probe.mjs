@@ -10,6 +10,16 @@ import { request } from 'node:https'
 import { dirname, join, relative } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 
+export function signalIfPresent(pid, signal) {
+  try {
+    process.kill(pid, signal)
+    return true
+  } catch (error) {
+    if (error.code === 'ESRCH') return false
+    throw error
+  }
+}
+
 function inside(root, path) {
   const resolved = realpathSync(path)
   const suffix = relative(realpathSync(root), resolved)
