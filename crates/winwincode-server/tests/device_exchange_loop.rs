@@ -81,6 +81,7 @@ fn heartbeat_message() -> ClientToServerMessage {
 }
 
 fn daemon_config(endpoint: &str) -> DaemonConfig {
+    let defaults = DaemonConfig::default();
     DaemonConfig {
         server_profile_id: "loop-server".to_owned(),
         base_url: endpoint.to_owned(),
@@ -92,8 +93,8 @@ fn daemon_config(endpoint: &str) -> DaemonConfig {
         heartbeat_interval: QUIET_HEARTBEAT,
         enroll_poll_interval: Duration::from_millis(5),
         max_frames_per_exchange: 8,
-        initial_backoff: Duration::from_millis(5),
-        max_backoff: Duration::from_millis(200),
+        initial_backoff: defaults.initial_backoff,
+        max_backoff: defaults.max_backoff,
         capacity: capacity(),
     }
 }
@@ -451,8 +452,29 @@ async fn enrollment_response_survives_restart_before_the_first_downlink_command(
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[allow(clippy::too_many_lines)]
 async fn the_device_daemon_runs_the_full_exchange_lifecycle_over_http() {
+    run_exchange_lifecycle_over_http(
+        DaemonConfig::default().max_backoff,
+        [
+            Duration::from_secs(5),
+            Duration::from_secs(10),
+            Duration::from_secs(20),
+        ],
+    )
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_device_daemon_caps_durable_network_backoff_over_http() {
+    let cap = Duration::from_millis(200);
+    run_exchange_lifecycle_over_http(cap, [cap; 3]).await;
+}
+
+#[allow(clippy::too_many_lines)]
+async fn run_exchange_lifecycle_over_http(
+    max_backoff: Duration,
+    expected_retry_delays: [Duration; 3],
+) {
     let mut driver = ExchangeDriver::new();
     let data_directory = test_directory("device-loop-server");
     let device_root = test_directory("device-loop-device");
@@ -471,7 +493,9 @@ async fn the_device_daemon_runs_the_full_exchange_lifecycle_over_http() {
 
     let endpoint = exchange_endpoint(address);
     let transport = LoopTransport::new(address);
-    let config = daemon_config(&endpoint);
+    let mut config = daemon_config(&endpoint);
+    config.initial_backoff = config.initial_backoff.min(max_backoff);
+    config.max_backoff = max_backoff;
     let mut daemon = DeviceDaemon::start(
         config.clone(),
         store,
@@ -564,14 +588,7 @@ async fn the_device_daemon_runs_the_full_exchange_lifecycle_over_http() {
     driver.drive_until(&mut daemon, "the outage to recover", |daemon| {
         settled(daemon) && daemon.status().consecutive_failures == 0
     });
-    assert_eq!(
-        &driver.retry_delays[retry_start..],
-        &[
-            Duration::from_secs(5),
-            Duration::from_secs(10),
-            Duration::from_secs(20),
-        ]
-    );
+    assert_eq!(&driver.retry_delays[retry_start..], &expected_retry_delays);
     assert_eq!(transport.outage_remaining.load(Ordering::SeqCst), 0);
     assert_eq!(daemon.status().exchanges_started - exchange_start, 4);
     let status = daemon.status().clone();
