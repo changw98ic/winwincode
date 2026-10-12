@@ -697,11 +697,24 @@ enum WorkspaceRecoveryEntry {
 
 struct ReservedWorkspacePlan {
     plan: WorkspacePlan,
-    owner_lock: File,
+    owner_lock: WorkspaceOwnerLock,
+}
+
+#[derive(Debug)]
+struct WorkspaceOwnerLock {
+    file: File,
+}
+
+impl Drop for WorkspaceOwnerLock {
+    fn drop(&mut self) {
+        // A concurrently spawned child can retain a descriptor until exec.
+        // Release this ownership before closing our descriptor.
+        let _ = self.file.unlock();
+    }
 }
 
 impl WorkspacePlan {
-    fn into_workspace(self, owner_lock: File) -> WorkerWorkspace {
+    fn into_workspace(self, owner_lock: WorkspaceOwnerLock) -> WorkerWorkspace {
         WorkerWorkspace {
             workspace_id: self.workspace_id,
             source_repository: self.source_repository,
@@ -1396,7 +1409,7 @@ pub struct WorkerWorkspace {
     current_provenance: WorkspaceProvenance,
     max_artifact_bytes: u64,
     layout: WorkspaceLayout,
-    _owner_lock: File,
+    _owner_lock: WorkspaceOwnerLock,
 }
 
 impl WorkerWorkspace {
@@ -2165,7 +2178,9 @@ fn owner_lock_path(layout: &WorkspaceLayout) -> Result<PathBuf, WorkspaceError> 
     )))
 }
 
-fn acquire_workspace_owner_lock(layout: &WorkspaceLayout) -> Result<File, WorkspaceError> {
+fn acquire_workspace_owner_lock(
+    layout: &WorkspaceLayout,
+) -> Result<WorkspaceOwnerLock, WorkspaceError> {
     let path = owner_lock_path(layout)?;
     if path.exists()
         && fs::symlink_metadata(&path)
@@ -2193,7 +2208,7 @@ fn acquire_workspace_owner_lock(layout: &WorkspaceLayout) -> Result<File, Worksp
             WorkspaceError::io("workspace owner lock cannot be acquired", error)
         }
     })?;
-    Ok(file)
+    Ok(WorkspaceOwnerLock { file })
 }
 
 fn write_creation_intent(
@@ -3190,4 +3205,27 @@ fn checked_existing_output(output: Output, context: &str) -> Result<Output, Work
         WorkspaceErrorCode::Git,
         format!("{context}: {}", stderr.trim()),
     ))
+}
+
+#[cfg(test)]
+mod owner_lock_tests {
+    use super::*;
+
+    #[test]
+    fn owner_release_is_independent_of_inherited_descriptor_lifetime() {
+        let root = tempfile::tempdir().unwrap();
+        let layout = layout(root.path().join("workspace"));
+        let owner = acquire_workspace_owner_lock(&layout).unwrap();
+        let inherited = owner.file.try_clone().unwrap();
+        assert!(acquire_workspace_owner_lock(&layout).is_err());
+
+        drop(owner);
+        let successor = acquire_workspace_owner_lock(&layout)
+            .expect("a released owner must not wait for an inherited descriptor to close");
+        drop(inherited);
+        assert!(acquire_workspace_owner_lock(&layout).is_err());
+
+        drop(successor);
+        assert!(acquire_workspace_owner_lock(&layout).is_ok());
+    }
 }
