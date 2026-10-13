@@ -2,7 +2,30 @@ name: Native Code Mode acceptance
 
 on:
   workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - '.cargo/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'crates/helper/**'
+      - 'crates/kernel/**'
+      - 'third_party/codex/codex-rs/**'
+      - 'third_party/codex/justfile'
+      - 'third_party/codex/scripts/just-shell.py'
+      - 'tests/code_mode_kernel.rs'
+      - 'tests/code_mode_sharing.rs'
+      - 'tests/code_mode_recovery.rs'
+      - 'tests/code_mode_agent_wait.rs'
+      - 'tests/fixtures/code-mode-mcp.mjs'
+      - 'tests/workspace-smoke.test.mjs'
+      - 'scripts/code-mode-ninja.mjs'
+      - 'scripts/run-native-kernel-acceptance.mjs'
+      - 'tests/native-kernel-acceptance-runner.test.mjs'
+      - 'scripts/install-code-mode-linux-build-deps.sh'
+      - '.github/workflows/native-code-mode.yml'
   pull_request:
+    types: [opened, synchronize, reopened, labeled]
     paths:
       - '.cargo/**'
       - 'Cargo.toml'
@@ -34,6 +57,7 @@ concurrency:
 jobs:
   native-code-mode:
     name: ${{ matrix.target }}
+    if: ${{ github.event_name != 'pull_request' || !matrix.linux || contains(github.event.pull_request.labels.*.name, 'native-full') }}
     runs-on: ${{ matrix.runner }}
     timeout-minutes: ${{ matrix.timeout_minutes }}
     strategy:
@@ -49,9 +73,11 @@ jobs:
           - target: aarch64-unknown-linux-gnu
             runner: ubuntu-24.04-arm
             timeout_minutes: 360
+            linux: true
           - target: x86_64-unknown-linux-gnu
             runner: ubuntu-24.04
             timeout_minutes: 360
+            linux: true
     env:
       CARGO_INCREMENTAL: "0"
       CARGO_PROFILE_DEV_DEBUG: "0"
