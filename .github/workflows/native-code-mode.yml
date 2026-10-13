@@ -105,6 +105,15 @@ jobs:
           sudo bash scripts/install-code-mode-linux-build-deps.sh
           printf 'LIBCLANG_PATH=/usr/lib/llvm-23/lib\nCLANG_BASE_PATH=/usr/lib/llvm-23\n' >> "${GITHUB_ENV}"
           printf 'CLANG_PATH=/usr/lib/llvm-23/bin/clang\n' >> "${GITHUB_ENV}"
+          printf 'RUSTFLAGS=-C link-arg=-fuse-ld=lld\n' >> "${GITHUB_ENV}"
+          printf '/usr/lib/llvm-23/bin\n' >> "${GITHUB_PATH}"
+          if [[ ! -e /usr/local/bin/ld.lld ]]; then
+            if [[ -x /usr/lib/llvm-23/bin/ld.lld ]]; then
+              sudo ln -sf /usr/lib/llvm-23/bin/ld.lld /usr/local/bin/ld.lld
+            else
+              sudo ln -sf "$(command -v ld.lld-23)" /usr/local/bin/ld.lld
+            fi
+          fi
           if [[ -e /proc/sys/kernel/apparmor_restrict_unprivileged_userns ]]; then
             sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
           fi
@@ -130,13 +139,32 @@ jobs:
         with:
           version: v0.17.0
 
+      - name: Wire C/C++ compiler cache
+        shell: bash
+        run: |
+          set -euo pipefail
+          sccache_bin=$(command -v sccache)
+          printf 'SCCACHE=%s\n' "${sccache_bin}" >> "${GITHUB_ENV}"
+          printf 'CC_WRAPPER=%s\n' "${sccache_bin}" >> "${GITHUB_ENV}"
+          printf 'CC=%s\n' "${CLANG_PATH}" >> "${GITHUB_ENV}"
+          printf 'CXX=%s++\n' "${CLANG_PATH}" >> "${GITHUB_ENV}"
+
+      - name: Materialize V8 cache identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          {
+            printf 'GN_ARGS=%s\n' 'is_debug=false icu_use_data_file=true icu_copy_icudata_to_root_build_dir=false v8_enable_temporal_support=false'
+            "${CLANG_PATH}" --version
+          } > .github/v8-cache-identity.txt
+
       - name: Cache pinned V8 source builds
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
         with:
           path: |
             target/**/gn_out
             third_party/codex/codex-rs/target/**/gn_out
-          key: v8-gn-${{ matrix.target }}-native-${{ hashFiles('Cargo.lock', 'third_party/codex/codex-rs/Cargo.lock', '.cargo/config.toml', 'third_party/codex/codex-rs/.cargo/config.toml', 'rust-toolchain.toml', 'scripts/code-mode-ninja.mjs', 'scripts/install-code-mode-linux-build-deps.sh') }}
+          key: v8-gn-${{ matrix.target }}-native-${{ hashFiles('Cargo.lock', 'third_party/codex/codex-rs/Cargo.lock', '.cargo/config.toml', 'third_party/codex/codex-rs/.cargo/config.toml', 'rust-toolchain.toml', 'scripts/code-mode-ninja.mjs', 'scripts/install-code-mode-linux-build-deps.sh', '.github/v8-cache-identity.txt') }}
 
       - name: Build product host and exercise the real Kernel
         shell: bash

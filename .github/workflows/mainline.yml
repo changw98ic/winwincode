@@ -82,6 +82,7 @@ jobs:
         lane:
           - lint
           - test
+          - e2e
           - runtime
     env:
       CARGO_INCREMENTAL: "0"
@@ -90,7 +91,9 @@ jobs:
       CI: "1"
       COREPACK_ENABLE_DOWNLOAD_PROMPT: "0"
       RUSTC_WRAPPER: "sccache"
+      RUSTFLAGS: "-C link-arg=-fuse-ld=lld"
       SCCACHE_GHA_ENABLED: "true"
+      SCCACHE_IDLE_TIMEOUT: "0"
     steps:
       - name: Check out source
         uses: actions/checkout@v7
@@ -110,6 +113,14 @@ jobs:
           printf 'LIBCLANG_PATH=/usr/lib/llvm-23/lib\n' >> "${GITHUB_ENV}"
           printf 'CLANG_BASE_PATH=/usr/lib/llvm-23\n' >> "${GITHUB_ENV}"
           printf 'CLANG_PATH=/usr/lib/llvm-23/bin/clang\n' >> "${GITHUB_ENV}"
+          printf '/usr/lib/llvm-23/bin\n' >> "${GITHUB_PATH}"
+          if [[ ! -e /usr/local/bin/ld.lld ]]; then
+            if [[ -x /usr/lib/llvm-23/bin/ld.lld ]]; then
+              sudo ln -sf /usr/lib/llvm-23/bin/ld.lld /usr/local/bin/ld.lld
+            else
+              sudo ln -sf "$(command -v ld.lld-23)" /usr/local/bin/ld.lld
+            fi
+          fi
           if [[ -e /proc/sys/kernel/apparmor_restrict_unprivileged_userns ]]; then
             sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
           fi
@@ -128,11 +139,47 @@ jobs:
         with:
           version: "v0.17.0"
 
+      - name: Wire C/C++ compiler cache
+        shell: bash
+        run: |
+          set -euo pipefail
+          sccache_bin=$(command -v sccache)
+          printf 'SCCACHE=%s\n' "${sccache_bin}" >> "${GITHUB_ENV}"
+          printf 'CC_WRAPPER=%s\n' "${sccache_bin}" >> "${GITHUB_ENV}"
+          printf 'CC=%s\n' "${CLANG_PATH}" >> "${GITHUB_ENV}"
+          printf 'CXX=%s++\n' "${CLANG_PATH}" >> "${GITHUB_ENV}"
+
+      - name: Install cargo-nextest
+        if: ${{ matrix.lane == 'test' || matrix.lane == 'e2e' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          tools="${RUNNER_TEMP}/cargo-nextest"
+          mkdir -p "${tools}"
+          archive="${tools}/cargo-nextest.tar.gz"
+          curl --fail --location --silent --show-error --output "${archive}" \
+            https://github.com/nextest-rs/nextest/releases/download/cargo-nextest-0.9.143/cargo-nextest-0.9.143-x86_64-unknown-linux-gnu.tar.gz
+          printf '%s  %s\n' '66786b9abe23920d022a182d1416b1bbc8130dd4872a9553d76985a1708dcd1e' "${archive}" | sha256sum -c -
+          tar -xzf "${archive}" -C "${tools}" cargo-nextest
+          printf '%s\n' "${tools}" >> "${GITHUB_PATH}"
+          "${tools}/cargo-nextest" --version
+
+      - name: Materialize V8 cache identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          {
+            printf 'GN_ARGS=%s\n' 'is_debug=false icu_use_data_file=true icu_copy_icudata_to_root_build_dir=false v8_enable_temporal_support=false'
+            "${CLANG_PATH}" --version
+          } > .github/v8-cache-identity.txt
+
       - name: Cache pinned V8 source build
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
         with:
-          path: target/debug/gn_out
-          key: v8-gn-${{ runner.os }}-${{ runner.arch }}-debug-${{ hashFiles('Cargo.lock', '.cargo/config.toml', 'rust-toolchain.toml', 'scripts/code-mode-ninja.mjs', 'scripts/install-code-mode-linux-build-deps.sh') }}
+          path: |
+            target/debug/gn_out
+            target/**/gn_out
+          key: v8-gn-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.lock', '.cargo/config.toml', 'rust-toolchain.toml', 'scripts/code-mode-ninja.mjs', 'scripts/install-code-mode-linux-build-deps.sh', '.github/v8-cache-identity.txt') }}
 
       - name: Lint Rust workspace
         if: ${{ matrix.lane == 'lint' }}
@@ -145,6 +192,16 @@ jobs:
         if: ${{ matrix.lane == 'test' }}
         shell: bash
         env:
+          WWC_WORKER_HELPER_EXECUTABLE: ${{ github.workspace }}/target/debug/winwincode-kernel-helper
+        run: |
+          corepack enable
+          corepack pnpm test:rust
+
+      - name: Test Rust heavy e2e
+        if: ${{ matrix.lane == 'e2e' }}
+        shell: bash
+        env:
+          WWC_RUST_E2E: "1"
           WWC_WORKER_HELPER_EXECUTABLE: ${{ github.workspace }}/target/debug/winwincode-kernel-helper
         run: |
           corepack enable
