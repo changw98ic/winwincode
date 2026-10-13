@@ -1703,6 +1703,16 @@
         "codex-rs/core/tests/suite/remote_env.rs",
         "codex-rs/http-client/src/route_aware_client_pool_tests.rs"
       ]
+    },
+    {
+      "id": "codex-native-fixture-network-isolation",
+      "file": "upstream/patches/codex/0120-native-fixture-network-isolation.patch",
+      "planned": false,
+      "patchSha256": "48517f07c8601e1dd349533e3280f8fde1b88c988579d5abd69e8457e8eacd29",
+      "targets": [
+        "codex-rs/exec-server/src/process_sandbox_tests.rs",
+        "codex-rs/external-agent-migration/src/service_tests/plugins/marketplaces.rs"
+      ]
     }
   ],
   "licenseObligations": {
