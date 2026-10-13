@@ -373,6 +373,55 @@ async fn tls_fallback_pool_reselects_routes_for_each_redirect_hop() {
     );
 }
 
+fn accept_redirect_stream(listener: &TcpListener) -> std::net::TcpStream {
+    let deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+        match listener.accept() {
+            Ok((stream, _)) => {
+                stream
+                    .set_nonblocking(false)
+                    .expect("redirect request socket should be blocking");
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(2)))
+                    .expect("redirect request should have a read deadline");
+                stream
+                    .set_write_timeout(Some(Duration::from_secs(2)))
+                    .expect("redirect response should have a write deadline");
+                return stream;
+            }
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                assert!(
+                    Instant::now() < deadline,
+                    "redirect server should receive the next request"
+                );
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            Err(error) => panic!("redirect server should accept: {error}"),
+        }
+    }
+}
+
+#[test]
+fn redirect_server_waits_for_delayed_request_bytes() {
+    let listener = TcpListener::bind(("127.0.0.1", 0)).expect("redirect listener should bind");
+    let address = listener.local_addr().expect("redirect listener address");
+    listener.set_nonblocking(true).expect("nonblocking accept");
+    let (accepted_tx, accepted_rx) = std::sync::mpsc::channel();
+    let client = std::thread::spawn(move || {
+        let mut stream = std::net::TcpStream::connect(address).expect("connect redirect client");
+        accepted_rx.recv().expect("accepted redirect connection");
+        std::thread::sleep(Duration::from_millis(20));
+        stream.write_all(b"GET ").expect("write delayed request");
+    });
+    let mut stream = accept_redirect_stream(&listener);
+    accepted_tx.send(()).expect("release redirect client");
+    let mut bytes = [0_u8; 4];
+    let read = stream.read_exact(&mut bytes);
+    client.join().expect("redirect client should finish");
+    read.expect("accepted redirect socket should wait for request bytes");
+    assert_eq!(&bytes, b"GET ");
+}
+
 #[tokio::test]
 async fn reqwest_default_route_preserves_transport_redirects() {
     let listener = TcpListener::bind(("127.0.0.1", 0)).expect("redirect listener should bind");
@@ -388,20 +437,7 @@ async fn reqwest_default_route_preserves_transport_redirects() {
             "HTTP/1.1 302 Found\r\nLocation: /final\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
             "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok",
         ] {
-            let deadline = Instant::now() + Duration::from_secs(2);
-            let (mut stream, _) = loop {
-                match listener.accept() {
-                    Ok(connection) => break connection,
-                    Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
-                        assert!(
-                            Instant::now() < deadline,
-                            "redirect server should receive the next request"
-                        );
-                        std::thread::sleep(Duration::from_millis(10));
-                    }
-                    Err(error) => panic!("redirect server should accept: {error}"),
-                }
-            };
+            let mut stream = accept_redirect_stream(&listener);
             let mut buffer = [0_u8; 1024];
             let size = stream
                 .read(&mut buffer)

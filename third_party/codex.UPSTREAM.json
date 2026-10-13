@@ -124,6 +124,7 @@
     "upstream/patches/codex/0115-app-server-internal-error-schema.patch",
     "upstream/patches/codex/0116-tool-review-output-result-reference.patch",
     "upstream/patches/codex/0117-shared-tool-fatal-storage.patch",
-    "upstream/patches/codex/0118-guardian-transcript-test-registration.patch"
+    "upstream/patches/codex/0118-guardian-transcript-test-registration.patch",
+    "upstream/patches/codex/0119-native-fixture-transport-lifecycle.patch"
   ]
 }

@@ -1693,6 +1693,16 @@
       "targets": [
         "codex-rs/core/tests/suite/code_mode.rs"
       ]
+    },
+    {
+      "id": "codex-native-fixture-transport-lifecycle",
+      "file": "upstream/patches/codex/0119-native-fixture-transport-lifecycle.patch",
+      "planned": false,
+      "patchSha256": "40dd3e53735f8e4b06311c58036f3bdd57102eef76c7560af5fb1dcd23d4398b",
+      "targets": [
+        "codex-rs/core/tests/suite/remote_env.rs",
+        "codex-rs/http-client/src/route_aware_client_pool_tests.rs"
+      ]
     }
   ],
   "licenseObligations": {

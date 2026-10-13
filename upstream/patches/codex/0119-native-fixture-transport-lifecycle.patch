@@ -1,0 +1,180 @@
+diff --git a/codex-rs/core/tests/suite/remote_env.rs b/codex-rs/core/tests/suite/remote_env.rs
+index 5fb77ccb..dffddc2f 100644
+--- a/codex-rs/core/tests/suite/remote_env.rs
++++ b/codex-rs/core/tests/suite/remote_env.rs
+@@ -1023,10 +1023,16 @@ async fn deferred_executor_promotes_primary_environment_when_startup_completes()
+ }
+ 
+ async fn read_exec_server_json(websocket: &mut WebSocketStream<TcpStream>) -> Value {
++    timeout(Duration::from_secs(5), next_exec_server_json(websocket))
++        .await
++        .expect("websocket read should not time out")
++}
++
++async fn next_exec_server_json(websocket: &mut WebSocketStream<TcpStream>) -> Value {
+     loop {
+-        match timeout(Duration::from_secs(5), websocket.next())
++        match websocket
++            .next()
+             .await
+-            .expect("websocket read should not time out")
+             .expect("websocket should stay open")
+             .expect("websocket frame should read")
+         {
+@@ -1099,7 +1105,7 @@ async fn serve_environment_with_agents_md(
+     let mut agents_md_reads = 0;
+     loop {
+         let request = tokio::select! {
+-            request = read_exec_server_json(&mut websocket) => request,
++            request = next_exec_server_json(&mut websocket) => request,
+             _ = &mut shutdown => return agents_md_reads,
+         };
+         let is_agents_md = request["params"]["path"]
+@@ -1151,6 +1157,65 @@ async fn serve_environment_with_agents_md(
+     }
+ }
+ 
++#[tokio::test]
++async fn ready_environment_server_remains_available_while_idle() {
++    let listener = TcpListener::bind("127.0.0.1:0")
++        .await
++        .expect("remote listener");
++    let address = listener.local_addr().expect("remote listener address");
++    let (attach_tx, attach_rx) = tokio::sync::oneshot::channel();
++    let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
++    let exec_server = tokio::spawn(serve_environment_with_agents_md(
++        listener,
++        "",
++        attach_rx,
++        shutdown_rx,
++    ));
++    let socket = TcpStream::connect(address)
++        .await
++        .expect("connect remote fixture");
++    let (mut client, _) = tokio_tungstenite::client_async(format!("ws://{address}"), socket)
++        .await
++        .expect("remote fixture handshake");
++    client
++        .send(Message::Text(
++            json!({"id": 1, "method": "initialize"}).to_string().into(),
++        ))
++        .await
++        .expect("initialize remote fixture");
++    let initialized = read_exec_server_json(&mut client).await;
++    assert_eq!(initialized["id"], json!(1));
++    client
++        .send(Message::Text(
++            json!({"method": "initialized"}).to_string().into(),
++        ))
++        .await
++        .expect("confirm remote initialization");
++    attach_tx.send(()).expect("attach remote fixture");
++    client
++        .send(Message::Text(
++            json!({"id": 2, "method": "environment/info"})
++                .to_string()
++                .into(),
++        ))
++        .await
++        .expect("query remote environment");
++    let info = read_exec_server_json(&mut client).await;
++    assert_eq!(info["result"]["shell"]["name"], json!("zsh"));
++    tokio::task::yield_now().await;
++    tokio::time::pause();
++    tokio::time::advance(Duration::from_secs(6)).await;
++    tokio::task::yield_now().await;
++    assert!(
++        !exec_server.is_finished(),
++        "ready remote fixture must survive idle time"
++    );
++    shutdown_tx
++        .send(())
++        .expect("stop idle remote environment server");
++    assert_eq!(exec_server.await.expect("remote server should finish"), 0);
++}
++
+ fn tool_names(body: &Value) -> Vec<String> {
+     body["tools"]
+         .as_array()
+diff --git a/codex-rs/http-client/src/route_aware_client_pool_tests.rs b/codex-rs/http-client/src/route_aware_client_pool_tests.rs
+index e3848397..7ca8371c 100644
+--- a/codex-rs/http-client/src/route_aware_client_pool_tests.rs
++++ b/codex-rs/http-client/src/route_aware_client_pool_tests.rs
+@@ -373,6 +373,55 @@ async fn tls_fallback_pool_reselects_routes_for_each_redirect_hop() {
+     );
+ }
+ 
++fn accept_redirect_stream(listener: &TcpListener) -> std::net::TcpStream {
++    let deadline = Instant::now() + Duration::from_secs(2);
++    loop {
++        match listener.accept() {
++            Ok((stream, _)) => {
++                stream
++                    .set_nonblocking(false)
++                    .expect("redirect request socket should be blocking");
++                stream
++                    .set_read_timeout(Some(Duration::from_secs(2)))
++                    .expect("redirect request should have a read deadline");
++                stream
++                    .set_write_timeout(Some(Duration::from_secs(2)))
++                    .expect("redirect response should have a write deadline");
++                return stream;
++            }
++            Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
++                assert!(
++                    Instant::now() < deadline,
++                    "redirect server should receive the next request"
++                );
++                std::thread::sleep(Duration::from_millis(10));
++            }
++            Err(error) => panic!("redirect server should accept: {error}"),
++        }
++    }
++}
++
++#[test]
++fn redirect_server_waits_for_delayed_request_bytes() {
++    let listener = TcpListener::bind(("127.0.0.1", 0)).expect("redirect listener should bind");
++    let address = listener.local_addr().expect("redirect listener address");
++    listener.set_nonblocking(true).expect("nonblocking accept");
++    let (accepted_tx, accepted_rx) = std::sync::mpsc::channel();
++    let client = std::thread::spawn(move || {
++        let mut stream = std::net::TcpStream::connect(address).expect("connect redirect client");
++        accepted_rx.recv().expect("accepted redirect connection");
++        std::thread::sleep(Duration::from_millis(20));
++        stream.write_all(b"GET ").expect("write delayed request");
++    });
++    let mut stream = accept_redirect_stream(&listener);
++    accepted_tx.send(()).expect("release redirect client");
++    let mut bytes = [0_u8; 4];
++    let read = stream.read_exact(&mut bytes);
++    client.join().expect("redirect client should finish");
++    read.expect("accepted redirect socket should wait for request bytes");
++    assert_eq!(&bytes, b"GET ");
++}
++
+ #[tokio::test]
+ async fn reqwest_default_route_preserves_transport_redirects() {
+     let listener = TcpListener::bind(("127.0.0.1", 0)).expect("redirect listener should bind");
+@@ -388,20 +437,7 @@ async fn reqwest_default_route_preserves_transport_redirects() {
+             "HTTP/1.1 302 Found\r\nLocation: /final\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+             "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok",
+         ] {
+-            let deadline = Instant::now() + Duration::from_secs(2);
+-            let (mut stream, _) = loop {
+-                match listener.accept() {
+-                    Ok(connection) => break connection,
+-                    Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+-                        assert!(
+-                            Instant::now() < deadline,
+-                            "redirect server should receive the next request"
+-                        );
+-                        std::thread::sleep(Duration::from_millis(10));
+-                    }
+-                    Err(error) => panic!("redirect server should accept: {error}"),
+-                }
+-            };
++            let mut stream = accept_redirect_stream(&listener);
+             let mut buffer = [0_u8; 1024];
+             let size = stream
+                 .read(&mut buffer)
