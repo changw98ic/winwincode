@@ -3859,7 +3859,7 @@ mod tests {
                 "attempt" => binding.authority.lease.attempt += 1,
                 "fence" => binding.authority.lease.fencing_token = FencingToken("2".into()),
                 "worker-instance" => {
-                    binding.authority.lease.worker_instance_id = WorkerInstanceId(id("wki", 'B'))
+                    binding.authority.lease.worker_instance_id = WorkerInstanceId(id("wki", 'B'));
                 }
                 "cancel" => bridge.fence_binding(&binding).unwrap(),
                 "durable-fence" => store
