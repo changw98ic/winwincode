@@ -258,7 +258,21 @@ pub(crate) fn load_execution_scope_replacement(
     connection: &Connection,
     job_id: &ExecutionJobId,
 ) -> Result<Option<ExecutionScopeReplacementAuthority>, StorageError> {
+    load_execution_scope_replacement_at_attempt(connection, job_id, None)
+}
+
+pub(crate) fn load_execution_scope_replacement_at_attempt(
+    connection: &Connection,
+    job_id: &ExecutionJobId,
+    attempt: Option<u64>,
+) -> Result<Option<ExecutionScopeReplacementAuthority>, StorageError> {
     ensure_execution_scope_replacement_schema(connection)?;
+    let attempt = attempt
+        .map(|attempt| {
+            i64::try_from(attempt)
+                .map_err(|_| StorageError::invalid_input("replacement attempt is invalid"))
+        })
+        .transpose()?;
     connection
         .query_row(
             "SELECT receipt_id, receipt_digest, logical_job_digest, scope_json,
@@ -267,8 +281,9 @@ pub(crate) fn load_execution_scope_replacement(
                     predecessor_slot_json,
                     successor_lease_json, created_at, applied_at
              FROM execution_scope_replacements WHERE job_id = ?1
+               AND (?2 IS NULL OR successor_attempt = ?2)
              ORDER BY successor_attempt DESC LIMIT 1",
-            [&job_id.0],
+            params![job_id.0, attempt],
             |row| {
                 Ok((
                     row.get::<_, String>(0)?,

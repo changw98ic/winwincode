@@ -1010,13 +1010,23 @@ impl ProductSessionService<'_> {
                 .to_domain()
                 .is_ok_and(|identity| identity.execution_job_id() == job_id)
         });
+        let reaches_predecessor = match (replacement.as_ref(), predecessor) {
+            (Some(seal), Some(binding)) => super::replacement_reaches_binding(
+                self.storage,
+                seal,
+                &binding.reservation.scope,
+                &binding.slot.authority,
+            )
+            .map_err(|error| storage_error(&error))?,
+            _ => false,
+        };
         Ok(replacement
             .as_ref()
             .zip(predecessor)
             .filter(|(seal, binding)| {
                 let lease = seal.replacement_lease();
                 let authority = execution.authority;
-                seal.predecessor_slot() == Some(&binding.slot.authority)
+                reaches_predecessor
                     && seal.scope() == execution.scope
                     && &binding.reservation.worker_pool_id == execution.worker_pool_id
                     && seal.replacement_attempt() == authority.attempt
@@ -1444,11 +1454,15 @@ impl ProductSessionService<'_> {
             .storage
             .load_execution_scope_replacement_authority(&binding.slot.authority.job_id)
             .map_err(|error| storage_error(&error))?;
-        if replacement.as_ref().is_some_and(|seal| {
-            seal.predecessor_slot() == Some(&binding.slot.authority)
-                && seal.scope() == &binding.reservation.scope
-                && seal.replacement_attempt() > binding.slot.authority.attempt
-        }) {
+        if let Some(seal) = replacement.as_ref()
+            && super::replacement_reaches_binding(
+                self.storage,
+                seal,
+                &binding.reservation.scope,
+                &binding.slot.authority,
+            )
+            .map_err(|error| storage_error(&error))?
+        {
             // The successor has not produced its first model binding. Cancel
             // the canonical queued Job so the scheduler routes to its current
             // attempt, without borrowing the predecessor's runtime or model.

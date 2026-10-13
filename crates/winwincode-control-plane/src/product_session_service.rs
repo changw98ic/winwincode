@@ -986,7 +986,17 @@ impl<'storage> ProductSessionService<'storage> {
             command.context.expected_revision,
         )?;
         let binding_index = replacement_binding_index(persisted, command)?;
-        validate_replacement_predecessor(&persisted.bindings[binding_index], command)?;
+        validate_replacement_predecessor(
+            self.storage,
+            &persisted.bindings[binding_index],
+            command,
+        )?;
+        let execution_guard = runtime_commit_guard(
+            self.storage,
+            &command.execution_scope,
+            &command.runtime_authority,
+        )
+        .map_err(|error| storage_error(&error))?;
         let predecessor_exchange = persisted.bindings[binding_index].model_exchange_id.clone();
         fail_replaced_assistant_output(
             persisted,
@@ -1003,7 +1013,7 @@ impl<'storage> ProductSessionService<'storage> {
         };
         replace_bound_turn_exchange(persisted, command)?;
         let persisted = persisted.clone();
-        self.commit(
+        self.commit_with_authority(
             &command.context,
             digest,
             MutationKind::ExecutionBindingReplaced,
@@ -1012,6 +1022,7 @@ impl<'storage> ProductSessionService<'storage> {
             persisted,
             None,
             None,
+            Some(&execution_guard),
         )
     }
 
@@ -1320,11 +1331,37 @@ impl<'storage> ProductSessionService<'storage> {
         context: &ProductSessionCommandContext,
         digest: Sha256Digest,
         kind: MutationKind,
+        catalog: PersistedProductSessionCatalog,
+        product_session_id: &ProductSessionId,
+        persisted: PersistedProductSession,
+        execution_job: Option<&PreparedProductSessionExecution>,
+        execution_terminal: Option<&crate::execution_outcome_commit::ExecutionOutcomeCommit<'_>>,
+    ) -> Result<ProductSessionMutationReceipt, ProductSessionServiceError> {
+        self.commit_with_authority(
+            context,
+            digest,
+            kind,
+            catalog,
+            product_session_id,
+            persisted,
+            execution_job,
+            execution_terminal,
+            None,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn commit_with_authority(
+        &mut self,
+        context: &ProductSessionCommandContext,
+        digest: Sha256Digest,
+        kind: MutationKind,
         mut catalog: PersistedProductSessionCatalog,
         product_session_id: &ProductSessionId,
         persisted: PersistedProductSession,
         execution_job: Option<&PreparedProductSessionExecution>,
         execution_terminal: Option<&crate::execution_outcome_commit::ExecutionOutcomeCommit<'_>>,
+        execution_guard: Option<&winwincode_storage::ExecutionAuthorityCommitGuard>,
     ) -> Result<ProductSessionMutationReceipt, ProductSessionServiceError> {
         let expected_catalog_revision = catalog.revision;
         catalog.revision = catalog
@@ -1378,7 +1415,12 @@ impl<'storage> ProductSessionService<'storage> {
                     .storage
                     .commit_with_execution_job(&commit, &execution_job.submission)
                     .map(|receipt| receipt.state),
-                None => self.storage.commit(&commit),
+                None => match execution_guard {
+                    Some(guard) => self
+                        .storage
+                        .commit_with_execution_authority_guard(&commit, guard),
+                    None => self.storage.commit(&commit),
+                },
             }
         }
         .map_err(|error| storage_error(&error))?;
@@ -1819,26 +1861,105 @@ fn replacement_binding_index(
 }
 
 fn validate_replacement_predecessor(
+    storage: &dyn ProductStateStorage,
     persisted: &PersistedSessionBinding,
     command: &ReplaceProductSessionExecutionBindingCommand,
 ) -> Result<(), ProductSessionServiceError> {
-    let predecessor = command
-        .replacement
-        .predecessor_slot()
-        .ok_or_else(|| binding_mismatch("ProductSession replacement predecessor is missing"))?;
     let identity = persisted.identity.to_domain()?;
     if identity != command.binding_identity
-        || &persisted.slot.authority != predecessor
         || persisted.reservation.scope != command.execution_scope
         || persisted.reservation.worker_pool_id != command.worker_pool_id
-        || command.replacement.previous_worker_session_id()
-            != Some(&persisted.slot.authority.worker_session_id)
+        || !replacement_reaches_binding(
+            storage,
+            &command.replacement,
+            &command.execution_scope,
+            &persisted.slot.authority,
+        )
+        .map_err(|error| storage_error(&error))?
     {
         return Err(binding_mismatch(
             "ProductSession replacement predecessor differs from the durable binding",
         ));
     }
     Ok(())
+}
+
+/// Walks only sealed, consecutive attempts back to the complete public runtime.
+/// An attempt may have staged its binding without producing a model exchange.
+pub(super) fn replacement_reaches_binding(
+    storage: &dyn ProductStateStorage,
+    latest: &ExecutionScopeReplacementAuthority,
+    scope: &ExecutionQueueScope,
+    ancestor: &WorkerSlotAuthority,
+) -> Result<bool, StorageError> {
+    if latest.job_id() != &ancestor.job_id || ancestor.attempt >= latest.replacement_attempt() {
+        return Ok(false);
+    }
+    let mut seal = latest.clone();
+    loop {
+        if seal.scope() != scope
+            || seal.logical_job_digest() != latest.logical_job_digest()
+            || seal.work_run_id().is_some()
+            || seal.predecessor_work_run_id().is_some()
+        {
+            return Ok(false);
+        }
+        let Some(predecessor) = seal.predecessor_slot() else {
+            return Ok(false);
+        };
+        if predecessor == ancestor {
+            return Ok(true);
+        }
+        if predecessor.attempt <= ancestor.attempt {
+            return Ok(false);
+        }
+        let Some(previous) = storage.load_execution_scope_replacement_authority_at_attempt(
+            &ancestor.job_id,
+            predecessor.attempt,
+        )?
+        else {
+            return Ok(false);
+        };
+        let lease = previous.replacement_lease();
+        if predecessor.job_id != lease.job_id
+            || predecessor.lease_id != lease.lease_id
+            || predecessor.worker_id != lease.worker_id
+            || predecessor.worker_instance_id != lease.worker_instance_id
+            || predecessor.attempt != lease.attempt
+            || predecessor.fencing_token != lease.fencing_token
+        {
+            return Ok(false);
+        }
+        seal = previous;
+    }
+}
+
+pub(super) fn runtime_commit_guard(
+    storage: &dyn ProductStateStorage,
+    scope: &ExecutionQueueScope,
+    authority: &WorkerSlotAuthority,
+) -> Result<winwincode_storage::ExecutionAuthorityCommitGuard, StorageError> {
+    let job = storage
+        .load_execution_job_record(&authority.job_id)?
+        .ok_or_else(|| StorageError::invalid_input("Chat queue authority is missing"))?;
+    let dispatch = storage
+        .load_execution_dispatch_authority(&authority.job_id)?
+        .ok_or_else(|| StorageError::invalid_input("Chat dispatch authority is missing"))?;
+    let lease = dispatch.lease();
+    if &job.scope != scope
+        || authority.job_id != lease.job_id
+        || authority.lease_id != lease.lease_id
+        || authority.worker_id != lease.worker_id
+        || authority.worker_instance_id != lease.worker_instance_id
+        || authority.attempt != lease.attempt
+        || authority.fencing_token != lease.fencing_token
+        || &authority.worker_session_id != dispatch.worker_session_id()
+    {
+        return Err(StorageError::invalid_input(
+            "Chat runtime is no longer the current dispatch",
+        ));
+    }
+    winwincode_storage::ExecutionAuthorityCommitGuard::terminal_round(job, dispatch)
 }
 
 fn replace_bound_turn_exchange(

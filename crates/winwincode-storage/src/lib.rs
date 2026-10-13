@@ -2065,6 +2065,16 @@ pub trait ProductStateStorage: Send {
         Ok(None)
     }
 
+    fn load_execution_scope_replacement_authority_at_attempt(
+        &self,
+        job_id: &ExecutionJobId,
+        attempt: u64,
+    ) -> Result<Option<ExecutionScopeReplacementAuthority>, StorageError> {
+        Ok(self
+            .load_execution_scope_replacement_authority(job_id)?
+            .filter(|authority| authority.replacement_attempt() == attempt))
+    }
+
     #[doc(hidden)]
     fn commit_adapter(&mut self, _commit: &StateCommit) -> Result<CommitReceipt, StorageError> {
         Err(StorageError::adapter("state commit storage is unavailable"))
@@ -2689,6 +2699,18 @@ impl ProductStateStorage for SqliteStorage {
         job_id: &ExecutionJobId,
     ) -> Result<Option<ExecutionScopeReplacementAuthority>, StorageError> {
         execution_scope_replacement::load_execution_scope_replacement(self.connection()?, job_id)
+    }
+
+    fn load_execution_scope_replacement_authority_at_attempt(
+        &self,
+        job_id: &ExecutionJobId,
+        attempt: u64,
+    ) -> Result<Option<ExecutionScopeReplacementAuthority>, StorageError> {
+        execution_scope_replacement::load_execution_scope_replacement_at_attempt(
+            self.connection()?,
+            job_id,
+            Some(attempt),
+        )
     }
 
     fn load_receipt(

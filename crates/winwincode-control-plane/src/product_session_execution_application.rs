@@ -1170,23 +1170,38 @@ fn accept_worker_binding(
             .load_execution_scope_replacement_authority(&job.job_id)
             .map_err(DurableExecutionPortError::Storage)?
             .ok_or_else(|| storage_ingress("Chat binding replacement authority is missing"))?;
-        require_staged_replacement(&previous, &staged, dispatch, &replacement)?;
+        require_staged_replacement(
+            context.storage(),
+            &previous,
+            &staged,
+            dispatch,
+            &replacement,
+        )?;
         current.revision
     } else {
         0
     };
     let bytes =
         serde_json::to_vec(&staged).map_err(|_| storage_ingress("binding encode failed"))?;
+    let guard = crate::product_session_service::runtime_commit_guard(
+        context.storage(),
+        &staged.execution_scope,
+        &staged.runtime_authority,
+    )
+    .map_err(DurableExecutionPortError::Storage)?;
     context
         .storage()
-        .commit(&StateCommit::new(
-            identity,
-            digest,
-            stream_id,
-            expected_revision,
-            bytes,
-            vec![internal_execution_event(&request_id)],
-        ))
+        .commit_with_execution_authority_guard(
+            &StateCommit::new(
+                identity,
+                digest,
+                stream_id,
+                expected_revision,
+                bytes,
+                vec![internal_execution_event(&request_id)],
+            ),
+            &guard,
+        )
         .map_err(DurableExecutionPortError::Storage)?;
     Ok(())
 }
@@ -1214,7 +1229,7 @@ fn prepare_public_model_frame(
         ));
     }
     public_text_delta(message).map_err(application_ingress)?;
-    retain_chat_model_frame_authority(context, dispatch, message)?;
+    retain_chat_model_frame_authority(context, dispatch, message, &staged)?;
     let record = ProductSessionService::new(context.storage())
         .get(&scope_key, &staged.product_session_id)
         .map_err(|error| product_session_ingress(&error))?
@@ -1258,20 +1273,33 @@ fn prepare_public_model_frame(
     {
         return Ok(true);
     }
-    let replacement = context
+    let mut replacement = context
         .storage()
         .load_execution_scope_replacement_authority(&message.lease.job_id)
         .map_err(DurableExecutionPortError::Storage)?
         .filter(|authority| {
             i64::try_from(authority.replacement_attempt()).ok() == Some(message.lease.attempt)
-        })
-        .filter(|authority| {
-            successor_binding.is_none()
-                && record.bindings().iter().any(|binding| {
-                    binding.binding().identity() == &binding_identity
-                        && authority.predecessor_slot() == Some(&binding.slot().authority)
-                })
         });
+    let predecessor = record.bindings().iter().find(|binding| {
+        binding.binding().identity() == &binding_identity
+            && binding.execution_scope() == &staged.execution_scope
+            && binding.worker_pool_id() == &staged.worker_pool_id
+    });
+    let reaches_predecessor = match (replacement.as_ref(), predecessor) {
+        (Some(authority), Some(binding)) if successor_binding.is_none() => {
+            crate::product_session_service::replacement_reaches_binding(
+                context.storage(),
+                authority,
+                &staged.execution_scope,
+                &binding.slot().authority,
+            )
+            .map_err(DurableExecutionPortError::Storage)?
+        }
+        _ => false,
+    };
+    if !reaches_predecessor {
+        replacement = None;
+    }
     if let Some(replacement) = replacement {
         let command = ReplaceProductSessionExecutionBindingCommand {
             context: command_context,
@@ -1325,6 +1353,7 @@ fn retain_chat_model_frame_authority(
     context: &mut DurableExecutionPortContext<'_>,
     dispatch: &ExecutionDispatchAuthority,
     message: &ModelChunkMessage,
+    staged: &StagedWorkerBinding,
 ) -> Result<(), DurableExecutionPortError> {
     let request_id = chat_model_frame_request_id(message)?;
     let identity = internal_receipt_identity(context.repository_scope(), &request_id)?;
@@ -1351,16 +1380,25 @@ fn retain_chat_model_frame_authority(
         "frame":message,
     }))
     .map_err(|_| storage_ingress("Chat model frame cannot encode"))?;
+    let guard = crate::product_session_service::runtime_commit_guard(
+        context.storage(),
+        &staged.execution_scope,
+        &staged.runtime_authority,
+    )
+    .map_err(DurableExecutionPortError::Storage)?;
     context
         .storage()
-        .commit(&StateCommit::new(
-            identity,
-            digest,
-            stream_id,
-            0,
-            bytes,
-            vec![internal_execution_event(&request_id)],
-        ))
+        .commit_with_execution_authority_guard(
+            &StateCommit::new(
+                identity,
+                digest,
+                stream_id,
+                0,
+                bytes,
+                vec![internal_execution_event(&request_id)],
+            ),
+            &guard,
+        )
         .map_err(DurableExecutionPortError::Storage)?;
     Ok(())
 }
@@ -2000,23 +2038,26 @@ fn execution_scope(
 }
 
 fn require_staged_replacement(
+    storage: &dyn ProductStateStorage,
     previous: &StagedWorkerBinding,
     successor: &StagedWorkerBinding,
     dispatch: &ExecutionDispatchAuthority,
     replacement: &ExecutionScopeReplacementAuthority,
 ) -> Result<(), DurableExecutionPortError> {
-    let predecessor = replacement.predecessor_slot().ok_or_else(|| {
-        storage_ingress("running Chat binding replacement has no predecessor slot")
-    })?;
     if !replacement.authorizes_successor(dispatch)
         || replacement.scope() != &successor.execution_scope
         || replacement.work_run_id().is_some()
         || previous.product_session_id != successor.product_session_id
         || previous.execution_scope != successor.execution_scope
+        || previous.worker_pool_id != successor.worker_pool_id
         || previous.execution_job_id != successor.execution_job_id
-        || previous.runtime_authority != *predecessor
-        || replacement.previous_worker_session_id()
-            != Some(&previous.runtime_authority.worker_session_id)
+        || !crate::product_session_service::replacement_reaches_binding(
+            storage,
+            replacement,
+            &successor.execution_scope,
+            &previous.runtime_authority,
+        )
+        .map_err(DurableExecutionPortError::Storage)?
         || successor.runtime_authority.attempt != replacement.replacement_attempt()
     {
         return Err(storage_ingress(

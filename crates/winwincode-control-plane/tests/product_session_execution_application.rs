@@ -1054,8 +1054,13 @@ fn assert_rejected_without_authority_write(
     message: &ExecutionPortMessage,
 ) {
     let before = product_authority_bytes(fixture, job, sessions);
+    let database_before = terminal_database_snapshot(fixture);
     let result = fixture.accept(message, at(29));
     if let Ok(output) = result {
+        assert!(
+            !output.is_empty(),
+            "stale predecessor ingress was accepted without rejection"
+        );
         assert!(
             output.iter().all(|message| match message {
                 ExecutionPortMessage::JobOutcomeAckMessage(ack) => !matches!(
@@ -1063,6 +1068,10 @@ fn assert_rejected_without_authority_write(
                     JobOutcomeAckMessageStatus::Accepted | JobOutcomeAckMessageStatus::Duplicate
                 ),
                 ExecutionPortMessage::RuntimeAckMessage(ack) => !matches!(
+                    ack.status,
+                    LeaseWriteStatus::Accepted | LeaseWriteStatus::Duplicate
+                ),
+                ExecutionPortMessage::ModelAckMessage(ack) => !matches!(
                     ack.status,
                     LeaseWriteStatus::Accepted | LeaseWriteStatus::Duplicate
                 ),
@@ -1075,6 +1084,11 @@ fn assert_rejected_without_authority_write(
         product_authority_bytes(fixture, job, sessions),
         before,
         "rejected predecessor ingress changed ProductSession, queue, Registry, or slot bytes"
+    );
+    assert_eq!(
+        terminal_database_snapshot(fixture),
+        database_before,
+        "rejected predecessor ingress changed a business table, receipt, stream, or outbox"
     );
 }
 
@@ -1517,23 +1531,49 @@ fn review_successor_cancellation_before_model_preserves_cancellation_authority()
     replacement_continues_react_model_exchanges(ReplacementStart::CancelledBeforeModel);
 }
 
+#[test]
+fn review_consecutive_replacement_after_output_preparation_continues_model_exchanges() {
+    replacement_continues_react_model_exchanges_chain(ReplacementStart::OutputPreparing, true);
+}
+
+#[test]
+fn review_consecutive_replacement_failure_before_model_uses_current_authority() {
+    replacement_continues_react_model_exchanges_chain(ReplacementStart::TerminalBeforeModel, true);
+}
+
+#[test]
+fn review_consecutive_replacement_failed_before_model_uses_current_authority() {
+    replacement_continues_react_model_exchanges_chain(ReplacementStart::FailedBeforeModel, true);
+}
+
+#[test]
+fn review_consecutive_replacement_cancellation_before_model_routes_to_current_attempt() {
+    replacement_continues_react_model_exchanges_chain(ReplacementStart::CancelledBeforeModel, true);
+}
+
 #[derive(Clone, Copy)]
 enum ReplacementStart {
     ModelBound,
     Unbound,
     OutputPreparing,
     TerminalBeforeModel,
+    FailedBeforeModel,
     CancelledBeforeModel,
 }
 
-#[allow(clippy::too_many_lines)]
 fn replacement_continues_react_model_exchanges(start: ReplacementStart) {
+    replacement_continues_react_model_exchanges_chain(start, false);
+}
+
+#[allow(clippy::too_many_lines)]
+fn replacement_continues_react_model_exchanges_chain(start: ReplacementStart, skip_model: bool) {
     let original_model_bound = !matches!(start, ReplacementStart::Unbound);
     let seed = match start {
         ReplacementStart::ModelBound => 61,
         ReplacementStart::Unbound => 62,
         ReplacementStart::OutputPreparing => 161,
         ReplacementStart::TerminalBeforeModel => 162,
+        ReplacementStart::FailedBeforeModel => 164,
         ReplacementStart::CancelledBeforeModel => 163,
     };
     let mut fixture = Fixture::open(seed);
@@ -1555,6 +1595,9 @@ fn replacement_continues_react_model_exchanges(start: ReplacementStart) {
     let original_runtime =
         open_scheduler_runtime(&mut fixture, &original_dispatch, 6_102, 6_104, 6_105, 8);
     let original_binding = binding_message(&fixture, &original_runtime, 6_106);
+    let mut predecessor_frames = vec![ExecutionPortMessage::SessionBindingMessage(
+        original_binding.clone(),
+    )];
     fixture
         .accept(
             &ExecutionPortMessage::SessionBindingMessage(original_binding.clone()),
@@ -1563,6 +1606,7 @@ fn replacement_continues_react_model_exchanges(start: ReplacementStart) {
         .expect("original ProductSession binding");
     if original_model_bound {
         let original_open = model_open_message(&fixture, &original_runtime, 6_107);
+        predecessor_frames.push(model_binding_message(original_open.clone()));
         fixture
             .accept(&model_binding_message(original_open), at(10))
             .expect("original ProductSession ModelOpen");
@@ -1583,9 +1627,55 @@ fn replacement_continues_react_model_exchanges(start: ReplacementStart) {
     }
 
     register_worker_process(&mut fixture.storage, seed, seed + 1, 6_108, 14);
-    let replacement_dispatch = scheduler_claim(&mut fixture, seed, seed + 1, 6_110, "boot-new", 25);
+    let intermediate_runtime = skip_model.then(|| {
+        let scheduler_scope = scheduler_scope(&fixture);
+        let dispatch = RepositoryExecutionScheduler::new(&mut fixture.storage)
+            .claim_next(&RepositorySchedulerClaimRequest {
+                scope: scheduler_scope,
+                request_id: RequestId(id("req", 6_120)),
+                scheduler_generation: "boot-intermediate".to_owned(),
+                worker_id: WorkerId(id("wrk", seed)),
+                worker_instance_id: WorkerInstanceId(id("wki", seed + 1)),
+                issued_at: at(25),
+                expires_at: at(26),
+            })
+            .expect("intermediate scheduler claim")
+            .expect("intermediate scheduler dispatch");
+        assert_eq!(dispatch.job.attempt, 2);
+        accept_scheduler_dispatch(
+            &mut fixture,
+            &dispatch,
+            &WorkerSessionId(id("wsn", 6_121)),
+            6_122,
+            25,
+        );
+        let runtime = open_scheduler_runtime(&mut fixture, &dispatch, 6_121, 6_123, 6_124, 25);
+        let mut binding = binding_message(&fixture, &runtime, 6_125);
+        binding.bound_at = at(25);
+        binding.sent_at = at(25);
+        predecessor_frames.push(ExecutionPortMessage::SessionBindingMessage(binding.clone()));
+        fixture
+            .accept(
+                &ExecutionPortMessage::SessionBindingMessage(binding),
+                at(25),
+            )
+            .expect("intermediate binding before any model frame");
+        register_worker_process(&mut fixture.storage, seed, seed + 2, 6_126, 26);
+        runtime
+    });
+    let replacement_dispatch = scheduler_claim(
+        &mut fixture,
+        seed,
+        seed + if skip_model { 2 } else { 1 },
+        6_110,
+        "boot-new",
+        if skip_model { 26 } else { 25 },
+    );
     assert_eq!(replacement_dispatch.job.job_id, job.job_id);
-    assert_eq!(replacement_dispatch.job.attempt, 2);
+    assert_eq!(
+        replacement_dispatch.job.attempt,
+        if skip_model { 3 } else { 2 }
+    );
     assert!(replacement_dispatch.replacement_authority.is_some());
     let replacement_session = WorkerSessionId(id("wsn", 6_111));
     accept_scheduler_dispatch(
@@ -1606,9 +1696,24 @@ fn replacement_continues_react_model_exchanges(start: ReplacementStart) {
             at(27),
         )
         .expect("replacement ProductSession binding");
+    if skip_model {
+        for message in &predecessor_frames {
+            assert_rejected_without_authority_write(
+                &mut fixture,
+                &job,
+                &[
+                    &original_runtime.slot.worker_session_id,
+                    &replacement_runtime.slot.worker_session_id,
+                ],
+                message,
+            );
+        }
+    }
     if matches!(
         start,
-        ReplacementStart::TerminalBeforeModel | ReplacementStart::CancelledBeforeModel
+        ReplacementStart::TerminalBeforeModel
+            | ReplacementStart::FailedBeforeModel
+            | ReplacementStart::CancelledBeforeModel
     ) {
         assert_product_predecessor_is_fenced(
             &mut fixture,
@@ -1617,6 +1722,15 @@ fn replacement_continues_react_model_exchanges(start: ReplacementStart) {
             &replacement_runtime,
             6_117,
         );
+        if let Some(intermediate) = &intermediate_runtime {
+            assert_product_predecessor_is_fenced(
+                &mut fixture,
+                &job,
+                intermediate,
+                &replacement_runtime,
+                6_127,
+            );
+        }
         let cancelled = matches!(start, ReplacementStart::CancelledBeforeModel);
         if cancelled {
             cancel_bound_chat_at(&mut fixture, 27);
@@ -1628,6 +1742,9 @@ fn replacement_continues_react_model_exchanges(start: ReplacementStart) {
             message: "successor could not start Core".into(),
             retryable: true,
         });
+        if matches!(start, ReplacementStart::FailedBeforeModel) {
+            outcome.outcome.status = ExecutionOutcomeStatus::Failed;
+        }
         if cancelled {
             outcome.outcome.status = ExecutionOutcomeStatus::Cancelled;
             outcome.outcome.error = None;
@@ -1646,6 +1763,28 @@ fn replacement_continues_react_model_exchanges(start: ReplacementStart) {
             ],
             &ExecutionPortMessage::JobOutcomeMessage(foreign),
         );
+        if skip_model && matches!(start, ReplacementStart::TerminalBeforeModel) {
+            let connection = rusqlite::Connection::open(fixture.storage.database_path()).unwrap();
+            connection.execute_batch("CREATE TRIGGER fail_consecutive_outcome BEFORE INSERT ON product_state WHEN NEW.stream_id LIKE 'execution-outcome:%' BEGIN SELECT RAISE(ABORT, 'injected consecutive outcome commit failure'); END;").unwrap();
+            let before = terminal_database_snapshot(&fixture);
+            assert!(
+                fixture
+                    .accept(
+                        &ExecutionPortMessage::JobOutcomeMessage(outcome.clone()),
+                        at(28)
+                    )
+                    .is_err()
+            );
+            assert_eq!(
+                terminal_database_snapshot(&fixture),
+                before,
+                "failed atomic acceptance changed product or execution state"
+            );
+            connection
+                .execute_batch("DROP TRIGGER fail_consecutive_outcome")
+                .unwrap();
+            fixture = fixture.restart();
+        }
         let accepted = fixture
             .accept(
                 &ExecutionPortMessage::JobOutcomeMessage(outcome.clone()),
@@ -1674,6 +1813,8 @@ fn replacement_continues_react_model_exchanges(start: ReplacementStart) {
                 .status,
             if cancelled {
                 ExecutionOutcomeStatus::Cancelled
+            } else if matches!(start, ReplacementStart::FailedBeforeModel) {
+                ExecutionOutcomeStatus::Failed
             } else {
                 ExecutionOutcomeStatus::InfrastructureError
             }
@@ -1750,6 +1891,15 @@ fn replacement_continues_react_model_exchanges(start: ReplacementStart) {
         &replacement_runtime,
         6_117,
     );
+    if let Some(intermediate) = &intermediate_runtime {
+        assert_product_predecessor_is_fenced(
+            &mut fixture,
+            &job,
+            intermediate,
+            &replacement_runtime,
+            6_127,
+        );
+    }
     assert_product_replacement_replays_after_expiry(
         fixture,
         replacement_binding,
