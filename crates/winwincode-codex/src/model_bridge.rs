@@ -1781,38 +1781,7 @@ impl ExecutionPortModelBridge {
                     model_call_id: exchange.model_call_id.clone(),
                 },
             );
-        let opened = match command {
-            Ok(command) => client
-                .open(command)
-                .await
-                .map_err(|error| match error.code() {
-                    ModelPortClientErrorCode::ExpiredLease => ModelPortFailure::new(
-                        "MODEL_AUTHORITY_EXPIRED",
-                        "model call authority has expired",
-                    ),
-                    ModelPortClientErrorCode::StaleAuthority => {
-                        model_failure(BridgeError::StaleAuthority)
-                    }
-                    ModelPortClientErrorCode::InvalidInput
-                    | ModelPortClientErrorCode::CanonicalMapping => {
-                        model_failure(BridgeError::InvalidPayload)
-                    }
-                    ModelPortClientErrorCode::UnknownExchange => {
-                        model_failure(BridgeError::UnknownExchange)
-                    }
-                    ModelPortClientErrorCode::AlreadyTerminal
-                    | ModelPortClientErrorCode::ExchangeConflict
-                    | ModelPortClientErrorCode::CursorCorrupt => {
-                        model_failure(BridgeError::Conflict)
-                    }
-                    ModelPortClientErrorCode::CursorStore
-                    | ModelPortClientErrorCode::CodexSink
-                    | ModelPortClientErrorCode::ExecutionPort => {
-                        model_failure(BridgeError::Unavailable)
-                    }
-                }),
-            Err(error) => Err(error),
-        };
+        let opened = self.admit_model_open(&mut client, &exchange, command).await;
         drop(client);
         if let Err(error) = opened {
             let closed_at = self
@@ -1836,6 +1805,60 @@ impl ExecutionPortModelBridge {
             receiver.recv().await.map(|item| (item, receiver))
         });
         Ok(Box::pin(stream))
+    }
+
+    async fn admit_model_open(
+        &self,
+        client: &mut ModelClient,
+        exchange: &OpenStreamExchange,
+        command: Result<OpenModelExchangeCommand, ModelPortFailure>,
+    ) -> Result<(), ModelPortFailure> {
+        let mut command = command?;
+        loop {
+            self.live_open_binding(exchange)?;
+            let captured = command.authority.clone();
+            let opened = client.open(command).await;
+            if opened
+                .as_ref()
+                .is_err_and(|error| error.code() == ModelPortClientErrorCode::StaleAuthority)
+            {
+                // A renewal can arrive after open_command reads the binding,
+                // including between the client's authority reads. No ModelOpen
+                // is sent before this rejection. Refresh only a strictly newer
+                // lease for this same exchange and owner, then validate again.
+                let refreshed = self.open_command(exchange)?;
+                if same_binding_with_extended_lease(&captured, &refreshed.authority)
+                    && refreshed.authority.lease.expires_at.0 > captured.lease.expires_at.0
+                {
+                    command = refreshed;
+                    continue;
+                }
+            }
+            return opened.map(|_| ()).map_err(|error| match error.code() {
+                ModelPortClientErrorCode::ExpiredLease => ModelPortFailure::new(
+                    "MODEL_AUTHORITY_EXPIRED",
+                    "model call authority has expired",
+                ),
+                ModelPortClientErrorCode::StaleAuthority => {
+                    model_failure(BridgeError::StaleAuthority)
+                }
+                ModelPortClientErrorCode::InvalidInput
+                | ModelPortClientErrorCode::CanonicalMapping => {
+                    model_failure(BridgeError::InvalidPayload)
+                }
+                ModelPortClientErrorCode::UnknownExchange => {
+                    model_failure(BridgeError::UnknownExchange)
+                }
+                ModelPortClientErrorCode::AlreadyTerminal
+                | ModelPortClientErrorCode::ExchangeConflict
+                | ModelPortClientErrorCode::CursorCorrupt => model_failure(BridgeError::Conflict),
+                ModelPortClientErrorCode::CursorStore
+                | ModelPortClientErrorCode::CodexSink
+                | ModelPortClientErrorCode::ExecutionPort => {
+                    model_failure(BridgeError::Unavailable)
+                }
+            });
+        }
     }
 
     #[cfg(test)]
@@ -2008,6 +2031,29 @@ impl ExecutionPortModelBridge {
             .map_err(model_store_failure)
     }
 
+    fn live_open_binding(
+        &self,
+        exchange: &OpenStreamExchange,
+    ) -> Result<ModelRunBinding, ModelPortFailure> {
+        let binding = self
+            .authority
+            .binding_for_alias(&exchange.binding.kernel_session_id)
+            .map_err(model_failure)?
+            .ok_or_else(|| model_failure(BridgeError::StaleAuthority))?;
+        let mut extended = exchange.binding.clone();
+        extended.authority.lease.expires_at = binding.authority.lease.expires_at.clone();
+        if !same_binding(&extended, &binding)
+            || !same_binding_with_extended_lease(&exchange.binding.authority, &binding.authority)
+            || self
+                .authority
+                .durably_fenced(&binding.run_key)
+                .map_err(model_failure)?
+        {
+            return Err(model_failure(BridgeError::StaleAuthority));
+        }
+        Ok(binding)
+    }
+
     fn open_command(
         &self,
         exchange: &OpenStreamExchange,
@@ -2045,25 +2091,7 @@ impl ExecutionPortModelBridge {
                 request: open.request,
             }
         } else {
-            let binding = self
-                .authority
-                .binding_for_alias(&exchange.binding.kernel_session_id)
-                .map_err(model_failure)?
-                .ok_or_else(|| model_failure(BridgeError::StaleAuthority))?;
-            let mut extended = exchange.binding.clone();
-            extended.authority.lease.expires_at = binding.authority.lease.expires_at.clone();
-            if !same_binding(&extended, &binding)
-                || !same_binding_with_extended_lease(
-                    &exchange.binding.authority,
-                    &binding.authority,
-                )
-                || self
-                    .authority
-                    .durably_fenced(&binding.run_key)
-                    .map_err(model_failure)?
-            {
-                return Err(model_failure(BridgeError::StaleAuthority));
-            }
+            let binding = self.live_open_binding(exchange)?;
             OpenModelExchangeCommand {
                 metadata: ModelMessageMetadata {
                     message_id: execution_message_id(b"model-open", &exchange.exchange_identity),
@@ -3715,6 +3743,168 @@ mod tests {
             })
             .unwrap_or_else(|error| panic!("install {outbox_label} binding: {error:?}"));
         bridge
+    }
+
+    #[tokio::test]
+    async fn model_open_refreshes_renewal_after_command_capture_without_a_second_call() {
+        let root =
+            std::env::temp_dir().join(format!("wwc-captured-renewal-{}", uuid::Uuid::now_v7()));
+        let store = AdapterStore::open(&root).unwrap();
+        let original = authority(&id("cdx", 'A'));
+        let bridge = installed_loopback_bridge(
+            &store,
+            SharedAuthoritySource::default(),
+            "captured renewal",
+            "run",
+            &original,
+            "kernel",
+        );
+        let request = ModelPortRequest {
+            request_id: "captured-call".into(),
+            payload_json:
+                json!({"requestId":"captured-call", "provider":"loopback", "sessionId":"kernel",
+                "threadId":original.session_identity.codex_thread_id.0,
+                "request":{"model":"loopback", "input":[]}})
+                .to_string(),
+        };
+        let super::OpenStreamPreparation::Open(exchange) =
+            bridge.prepare_open_stream(&request).unwrap()
+        else {
+            panic!("the original pending request must prepare one exchange");
+        };
+        let command = bridge.open_command(&exchange).unwrap();
+        let message_id = command.metadata.message_id.clone();
+        let request_id = command.request_id.clone();
+        let request_body = command.request.clone();
+        let mut renewed = original.clone();
+        renewed.lease.expires_at = Instant("2030-01-01T02:00:00.000Z".into());
+        bridge
+            .install_binding(ModelRunBinding {
+                run_key: "run".into(),
+                canonical_thread_id: renewed.session_identity.codex_thread_id.clone(),
+                kernel_session_id: "kernel".into(),
+                authority: renewed.clone(),
+                opened_at: renewed.lease.issued_at.clone(),
+            })
+            .unwrap();
+        bridge
+            .authority
+            .update_now(&Instant("2030-01-01T00:30:00.000Z".into()))
+            .unwrap();
+        let mut client = bridge.client.lock().await;
+        bridge
+            .admit_model_open(&mut client, &exchange, Ok(command))
+            .await
+            .expect("a captured command refreshes only the same owner's legitimate renewed period");
+        drop(client);
+        let messages = bridge.take_messages().unwrap();
+        assert_eq!(messages.len(), 1, "refresh admits exactly one model call");
+        let ExecutionPortMessage::ModelOpenMessage(open) = &messages[0] else {
+            panic!("the one message must be the original model exchange");
+        };
+        assert_eq!(open.lease, renewed.lease);
+        assert_eq!(open.model_exchange_id, exchange.exchange);
+        assert_eq!(open.message_id, message_id);
+        assert_eq!(open.request_id, request_id);
+        assert_eq!(
+            open.request, request_body,
+            "the original model request body stays byte exact"
+        );
+        assert_eq!(
+            store.model_call_phase("run", "captured-call").unwrap(),
+            Some(ModelCallPhase::InFlight)
+        );
+        drop(bridge);
+        drop(store);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn captured_model_open_rejects_replacement_fences_and_expiry() {
+        for change in [
+            "attempt",
+            "fence",
+            "worker-instance",
+            "cancel",
+            "durable-fence",
+            "expired",
+        ] {
+            let root =
+                std::env::temp_dir().join(format!("wwc-captured-owner-{}", uuid::Uuid::now_v7()));
+            let store = AdapterStore::open(&root).unwrap();
+            let original = authority(&id("cdx", 'A'));
+            let bridge = installed_loopback_bridge(
+                &store,
+                SharedAuthoritySource::default(),
+                "captured owner",
+                "run",
+                &original,
+                "kernel",
+            );
+            let request = ModelPortRequest {
+                request_id: "captured-owner-call".into(),
+                payload_json: json!({"requestId":"captured-owner-call", "provider":"loopback",
+                    "sessionId":"kernel", "threadId":original.session_identity.codex_thread_id.0,
+                    "request":{"model":"loopback", "input":[]}})
+                .to_string(),
+            };
+            let super::OpenStreamPreparation::Open(exchange) =
+                bridge.prepare_open_stream(&request).unwrap()
+            else {
+                panic!("one pending request must prepare one exchange");
+            };
+            let command = bridge.open_command(&exchange).unwrap();
+            let mut binding = exchange.binding.clone();
+            match change {
+                "attempt" => binding.authority.lease.attempt += 1,
+                "fence" => binding.authority.lease.fencing_token = FencingToken("2".into()),
+                "worker-instance" => {
+                    binding.authority.lease.worker_instance_id = WorkerInstanceId(id("wki", 'B'))
+                }
+                "cancel" => bridge.fence_binding(&binding).unwrap(),
+                "durable-fence" => store
+                    .save_run(
+                        "run",
+                        &json!({"operationFencedAt":original.lease.issued_at}),
+                    )
+                    .unwrap(),
+                "expired" => {
+                    binding.authority.lease.expires_at = Instant("2030-01-01T02:00:00.000Z".into());
+                    bridge.install_binding(binding.clone()).unwrap();
+                    bridge
+                        .authority
+                        .update_now(&binding.authority.lease.expires_at)
+                        .unwrap();
+                }
+                _ => unreachable!(),
+            }
+            if ["attempt", "fence", "worker-instance"].contains(&change) {
+                binding.run_key = "replacement-run".into();
+                bridge.install_binding(binding).unwrap();
+            }
+            let mut client = bridge.client.lock().await;
+            let failure = bridge
+                .admit_model_open(&mut client, &exchange, Ok(command))
+                .await
+                .err()
+                .unwrap_or_else(|| {
+                    panic!("captured request restored closed or expired authority: {change}")
+                });
+            assert_eq!(
+                failure.code,
+                if change == "expired" {
+                    "MODEL_AUTHORITY_EXPIRED"
+                } else {
+                    "MODEL_AUTHORITY_STALE"
+                },
+                "{change}"
+            );
+            assert!(bridge.take_messages().unwrap().is_empty(), "{change}");
+            drop(client);
+            drop(bridge);
+            drop(store);
+            std::fs::remove_dir_all(root).unwrap();
+        }
     }
 
     #[tokio::test]

@@ -310,30 +310,72 @@ function terminalAccountingReady(cp, jobId, reservation, usage, reconciledUsage 
 async function waitAcknowledgedTerminal(cp, api, deviceData, productSessionId, jobId, authority,
   expectedStatus = 'succeeded', { reconciliationEvidence = null } = {}) {
   const expectedOutcome = expectedStatus === 'succeeded' ? 'completed' : 'failed'
-  const settled = await waitFor(async () => {
-    const job = cp.prepare('SELECT * FROM scheduler_execution_jobs WHERE job_id=?').get(jobId)
-    const terminal = cp.prepare('SELECT * FROM execution_lease_terminals WHERE job_id=?').get(jobId)
-    const slot = cp.prepare('SELECT * FROM worker_session_slots WHERE worker_session_id=?')
-      .get(authority.worker_session_id)
-    const reservation = cp.prepare('SELECT * FROM execution_admission_reservations WHERE job_id=?').get(jobId)
-    const accepted = cp.prepare('SELECT revision,payload FROM product_state WHERE stream_id=?')
-      .get(`execution-outcome:${jobId}:${authority.attempt}`)
-    const raw = accepted && jsonBytes(accepted.payload)
-    const outcomes = readRetainedOutcomes(deviceData, jobId).filter(row => row.message.lease.attempt === authority.attempt)
-    const messages = (await api.query('session.messages.list', { productSessionId })).result.items
-    const runs = retainedRuns(deviceData, jobId, authority.attempt)
-    const run = runs.length === 1 ? runs[0].run : null
-    const accountingEvidence = reconciliationEvidence?.(outcomes[0]?.message.outcome.usage)
-    return job?.state === expectedOutcome && job.attempt === authority.attempt
-      && terminal?.outcome === expectedOutcome && slot?.state === expectedOutcome
-      && (!reconciliationEvidence || accountingEvidence)
-      && terminalAccountingReady(cp, jobId, reservation, outcomes[0]?.message.outcome.usage,
-        accountingEvidence?.usage ?? outcomes[0]?.message.outcome.usage)
-      && accepted?.revision === 2 && raw?.acknowledgementReady
-      && outcomes.length === 1 && outcomes[0].workerAcknowledged && run?.terminal
-      && messages.filter(message => message.role === 'assistant' && message.state === expectedOutcome).length === 1
-      ? { job, terminal, slot, reservation, raw, worker: outcomes[0], run, accountingEvidence } : false
-  }, `the original immutable raw ${expectedStatus} terminal receives its real normalized business ACK and resource settlement`, 120_000)
+  let settled
+  try {
+    settled = await waitFor(async () => {
+      const job = cp.prepare('SELECT * FROM scheduler_execution_jobs WHERE job_id=?').get(jobId)
+      const terminal = cp.prepare('SELECT * FROM execution_lease_terminals WHERE job_id=?').get(jobId)
+      const slot = cp.prepare('SELECT * FROM worker_session_slots WHERE worker_session_id=?')
+        .get(authority.worker_session_id)
+      const reservation = cp.prepare('SELECT * FROM execution_admission_reservations WHERE job_id=?').get(jobId)
+      const accepted = cp.prepare('SELECT revision,payload FROM product_state WHERE stream_id=?')
+        .get(`execution-outcome:${jobId}:${authority.attempt}`)
+      const raw = accepted && jsonBytes(accepted.payload)
+      const outcomes = readRetainedOutcomes(deviceData, jobId).filter(row => row.message.lease.attempt === authority.attempt)
+      const messages = (await api.query('session.messages.list', { productSessionId })).result.items
+      const runs = retainedRuns(deviceData, jobId, authority.attempt)
+      const run = runs.length === 1 ? runs[0].run : null
+      const accountingEvidence = reconciliationEvidence?.(outcomes[0]?.message.outcome.usage)
+      return job?.state === expectedOutcome && job.attempt === authority.attempt
+        && terminal?.outcome === expectedOutcome && slot?.state === expectedOutcome
+        && (!reconciliationEvidence || accountingEvidence)
+        && terminalAccountingReady(cp, jobId, reservation, outcomes[0]?.message.outcome.usage,
+          accountingEvidence?.usage ?? outcomes[0]?.message.outcome.usage)
+        && accepted?.revision === 2 && raw?.acknowledgementReady
+        && outcomes.length === 1 && outcomes[0].workerAcknowledged && run?.terminal
+        && messages.filter(message => message.role === 'assistant' && message.state === expectedOutcome).length === 1
+        ? { job, terminal, slot, reservation, raw, worker: outcomes[0], run, accountingEvidence } : false
+    }, `the original immutable raw ${expectedStatus} terminal receives its real normalized business ACK and resource settlement`, 120_000)
+  } catch (cause) {
+    let observation
+    try {
+      const accepted = cp.prepare('SELECT revision,payload FROM product_state WHERE stream_id=?')
+        .get(`execution-outcome:${jobId}:${authority.attempt}`)
+      const raw = accepted && jsonBytes(accepted.payload)
+      const messages = (await api.query('session.messages.list', { productSessionId })).result.items
+      observation = {
+        job: cp.prepare('SELECT state,attempt FROM scheduler_execution_jobs WHERE job_id=?').get(jobId),
+        terminal: cp.prepare('SELECT outcome FROM execution_lease_terminals WHERE job_id=?').get(jobId),
+        slot: cp.prepare('SELECT state,codex_thread_id FROM worker_session_slots WHERE worker_session_id=?')
+          .get(authority.worker_session_id),
+        reservation: cp.prepare(`SELECT state,release_reason,actual_tokens,actual_cost_microunits,
+          actual_runtime_millis FROM execution_admission_reservations WHERE job_id=?`).get(jobId),
+        reconciliation: cp.prepare(`SELECT accounting_status,terminal_usage_json,settlement_usage_json
+          FROM execution_admission_reconciliation WHERE job_id=?`).get(jobId),
+        latestReconciliationUsage: cp.prepare(`SELECT usage_json FROM execution_admission_reconciliation_facts
+          WHERE job_id=? ORDER BY sequence DESC LIMIT 1`).get(jobId),
+        acceptedRevision: accepted?.revision, acknowledgementReady: raw?.acknowledgementReady,
+        outcomes: readRetainedOutcomes(deviceData, jobId).map(value => ({
+          attempt: value.message.lease.attempt, status: value.message.outcome.status,
+          usage: value.message.outcome.usage, workerAcknowledged: value.workerAcknowledged,
+          delivery: value.delivery,
+        })),
+        runs: retainedRuns(deviceData, jobId, authority.attempt).map(({ run }) => ({
+          terminal: Boolean(run.terminal), terminalStatus: run.terminal?.status,
+          canonicalThreadId: run.canonicalThreadId,
+          phase: run.phase, failureDiagnostic: run.failureDiagnostic,
+          infrastructureFailureCode: run.infrastructureFailureCode,
+          interactionTimeouts: run.interactionTimeouts?.map(value => ({
+            causeCode: value.causeCode, appliedKernelSessionId: value.appliedKernelSessionId,
+          })),
+        })),
+        pendingDeliveries: storeRows(deviceData, 'worker-codex.sqlite3', store => store.prepare(
+          'SELECT family,state,COUNT(*) AS count FROM execution_outbox GROUP BY family,state').all()),
+        messages: messages.map(value => ({ role: value.role, state: value.state })),
+      }
+    } catch (error) { observation = { diagnosticError: error.name } }
+    throw new Error(`${cause.message}; terminal observation=${JSON.stringify(observation)}`, { cause })
+  }
   assert.deepEqual(settled.raw.message, settled.worker.message)
   assert.equal(settled.worker.message.outcome.status, expectedStatus)
   assert.equal(settled.slot.codex_thread_id, settled.run.canonicalThreadId)

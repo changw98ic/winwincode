@@ -278,8 +278,33 @@ test('Chat honors live heartbeat and cancellation deadlines after real acknowled
         assert.equal(Date.parse(claimed.expires_at) - Date.parse(claimed.issued_at), LEASE_SECONDS * 1000,
           'the real first accepted lease uses the unchanged thirty second production configuration')
         assert.deepEqual(claimed, leaseRecord(originalAuthority))
-        const heldRequest = await waitFor(() => devicePath.modelServer.requests.find(request => request.gateMarker === holdMarker && request.active),
-          'the same execution has its next actual HTTPS response held after the real command cell', 300_000)
+        let heldRequest
+        try {
+          heldRequest = await waitFor(() => devicePath.modelServer.requests.find(request => request.gateMarker === holdMarker && request.active),
+            'the same execution has its next actual HTTPS response held after the real command cell', 300_000)
+        } catch (cause) {
+          const history = acknowledgedCoreHistory(worker, live.job_id)
+          const outcome = retainedOutcome(devicePath.deviceData, live.job_id, live.attempt)
+          const observation = {
+            job: database.prepare('SELECT state,attempt FROM scheduler_execution_jobs WHERE job_id=?').get(live.job_id),
+            completedCommands: history.completedCommands.length,
+            completedInputs: history.completedInputs.length, acknowledgedFrames: history.retained.length,
+            outcomeStatus: outcome?.outcome.status,
+            runs: worker.prepare('SELECT record_json FROM codex_run').all()
+              .map(row => JSON.parse(Buffer.from(row.record_json).toString('utf8')))
+              .filter(run => run.job.jobId === live.job_id).map(run => ({
+                phase: run.phase, terminal: Boolean(run.terminal),
+                failureDiagnostic: run.failureDiagnostic,
+                infrastructureFailureCode: run.infrastructureFailureCode,
+              })),
+            pendingDeliveries: worker.prepare(
+              'SELECT family,state,COUNT(*) AS count FROM execution_outbox GROUP BY family,state').all(),
+            requests: devicePath.modelServer.requests.map(value => ({
+              active: value.active, gateMarker: value.gateMarker, hasToolOutput: value.hasToolOutput,
+            })),
+          }
+          throw new Error(`${cause.message}; history observation=${JSON.stringify(observation)}`, { cause })
+        }
         assert.equal(devicePath.modelServer.requests[0].gateMarker, null,
           'the first real Provider request is not held before the command history starts')
         assert.equal(devicePath.modelServer.requests.filter(request => request.gateMarker === holdMarker).length, 1)
