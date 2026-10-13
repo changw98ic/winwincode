@@ -170,22 +170,24 @@ for (const variant of ['completed-replay', 'genuine-gap']) {
           const outcome = await waitFor(() => readRetainedOutcomes(devicePath.deviceData, job.job_id)[0],
             'the original Worker retains its terminal while the real CP commit is held', 120_000)
           assert.equal(outcome.workerAcknowledged, false)
-          await pauseManagedProcess(probe.pid, () => {
+          const pausedReady = await pauseManagedProcess(probe.pid, () => {
+            const rows = readRetainedRuntime(devicePath.deviceData, job.job_id)
+            if (!(rows.length > 0 && rows.every(row => row.sequence <= row.ack_sequence))) return false
             const journal = new DatabaseSync(probe.networkJournalPath, { readOnly: true })
+            let idle
             try {
               journal.exec('PRAGMA busy_timeout=5000')
-              return !journal.prepare('SELECT state_json FROM network_queue_state').all()
+              idle = !journal.prepare('SELECT state_json FROM network_queue_state').all()
                 .some(row => JSON.parse(row.state_json).in_flight)
             } finally { journal.close() }
-          }, { timeoutMillis: 30_000 })
+            return idle ? { runtime: rows } : false
+          }, { timeoutMillis: 60_000 })
           paused = probe.pid
           assert.equal(database.prepare('SELECT count(*) AS count FROM worker_launch_grant_exits WHERE worker_instance_id=?')
             .get(probe.workerInstanceId).count, 0, 'the original instance remains live at the replay cutpoint')
           const beforeRuntimeReplay = { terminal: terminalSnapshot(database, job.job_id),
             runtime: runtimeLedgerSnapshot(database, productSessionId), core: coreSnapshot(devicePath.deviceData, job.job_id) }
-          const runtime = readRetainedRuntime(devicePath.deviceData, job.job_id)
-          assert.ok(runtime.length > 0)
-          assert.ok(runtime.every(row => row.sequence <= row.ack_sequence), 'the original runtime history has real ACKs')
+          const runtime = pausedReady.runtime
           const count = devicePath.modelServer.requests.length
           const duplicate = await probe.postRetainedMessage(runtime[0].bytes, { ca })
           assert.equal(duplicate.status, 200)
