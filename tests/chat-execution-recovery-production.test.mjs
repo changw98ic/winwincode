@@ -716,6 +716,13 @@ for (const [point, suffix] of [['terminal-retained', '61'], ['cp-commit-before-a
         try {
           // Triggers reject the real boundary write. They never create execution
           // state, replace Worker frames, manufacture ACKs, or change usage.
+          // The launched Worker may still be opening its admission storage.
+          // Observe its real schema before arming the selected Job's cut.
+          await waitFor(() => database.prepare(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='execution_admission_settlement_sources'").get(),
+          'the real Worker lifecycle prepares the settlement schema before fault injection', 30_000)
+          assert.equal(database.prepare('SELECT COUNT(*) AS n FROM scheduler_execution_jobs WHERE product_session_id=?')
+            .get(productSessionId).n, 0, 'the selected Chat Job still starts only after the real crash cut is armed')
           installCutPoint(database, point, productSessionId)
           const payload = { productSessionId, message: 'native-cell-A' }
           const submitted = await api.command('chat.submit', 1, payload, requestId)
