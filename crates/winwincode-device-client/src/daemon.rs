@@ -1077,6 +1077,13 @@ impl DeviceDaemon {
             let retained =
                 crate::candidate_registry::retain_worker_candidates(self, &worker).is_ok();
             let closure = self.process_closure_for_record(&worker);
+            if closure.is_some()
+                && let Some(supervisor) = &self.worker_supervisor
+            {
+                supervisor
+                    .recover_terminated_calls(&worker)
+                    .map_err(|error| DaemonError::Protocol(error.to_string()))?;
+            }
             let report_record = worker.clone();
             self.enqueue(ClientToServerMessage::WorkerState(
                 winwincode_client_port::messages::ClientWorkerStatePayload {

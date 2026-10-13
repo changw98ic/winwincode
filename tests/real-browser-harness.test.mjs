@@ -1,9 +1,15 @@
 import assert from 'node:assert/strict'
+import childProcess, { spawn } from 'node:child_process'
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { syncBuiltinESMExports } from 'node:module'
 import test from 'node:test'
 
 import {
   BoundedEventBuffer,
   DevTools,
+  freePort,
 } from './fixtures/real-browser-harness.mjs'
 import { boundedRemoteObjectText } from './fixtures/bounded-browser-diagnostics.mjs'
 
@@ -24,6 +30,47 @@ class FakeSocket extends EventTarget {
     this.dispatchEvent(new Event('close'))
   }
 }
+
+test('failed browser startup releases the owned child before returning', async t => {
+  const directory = mkdtempSync(join(tmpdir(), 'winwincode-browser-startup-failure-'))
+  t.after(() => rmSync(directory, { recursive: true, force: true }))
+  const chromePath = join(directory, 'chrome-fixture')
+  writeFileSync(chromePath, '#!/bin/sh\nexec sleep 600\n', { mode: 0o700 })
+  let pid
+  const originalSpawn = childProcess.spawn
+  t.mock.method(childProcess, 'spawn', (file, ...args) => {
+    const child = originalSpawn(file, ...args)
+    if (file === chromePath) pid = child.pid
+    return child
+  })
+  syncBuiltinESMExports()
+  t.after(() => { t.mock.restoreAll(); syncBuiltinESMExports() })
+  await assert.rejects(DevTools.launch({
+    chromePath,
+    directory,
+    debugPort: await freePort(),
+    startupTimeoutMillis: 1_000,
+  }), /Chrome DevTools endpoint did not start/u)
+  assert.ok(Number.isInteger(pid), 'the real OS spawn identifies its owned child before the timeout')
+  assert.throws(() => process.kill(pid, 0), { code: 'ESRCH' })
+})
+
+test('browser startup retains bounded diagnostics when the executable exits', async t => {
+  const directory = mkdtempSync(join(tmpdir(), 'winwincode-browser-startup-exit-'))
+  t.after(() => rmSync(directory, { recursive: true, force: true }))
+  const chromePath = join(directory, 'chrome-fixture')
+  writeFileSync(chromePath, `#!/bin/sh\nprintf '${'x'.repeat(9_000)}\nfixture browser startup failed\n' >&2\nexit 7\n`, { mode: 0o700 })
+  await assert.rejects(DevTools.launch({
+    chromePath,
+    directory,
+    debugPort: await freePort(),
+  }), error => {
+    assert.match(error.message, /Chrome exited before its DevTools endpoint started/u)
+    assert.match(error.message, /fixture browser startup failed/u)
+    assert.ok(error.message.length <= 8_300)
+    return true
+  })
+})
 
 test('bounded event buffers retain only the newest samples', () => {
   const events = new BoundedEventBuffer(3)
@@ -98,4 +145,47 @@ test('DevTools rejects every pending command when the socket closes', async () =
   await assert.rejects(first, /Chrome DevTools connection closed/u)
   await assert.rejects(second, /Chrome DevTools connection closed/u)
   assert.equal(devtools.pending.size, 0)
+})
+
+
+test('browser startup failure releases stderr inherited by an owned descendant', async t => {
+  const directory = mkdtempSync(join(tmpdir(), 'winwincode-browser-descendant-'))
+  const pidPath = join(directory, 'descendant.pid')
+  const chromePath = join(directory, 'chrome-fixture')
+  writeFileSync(chromePath, `#!${process.execPath}
+const { spawn } = require('node:child_process')
+const { writeFileSync } = require('node:fs')
+const descendant = spawn('/bin/sleep', ['600'], { stdio: ['ignore', 'ignore', 'inherit'] })
+descendant.once('spawn', () => {
+  writeFileSync(${JSON.stringify(pidPath)}, String(descendant.pid))
+  process.exit(7)
+})
+`, { mode: 0o700 })
+  const child = spawn(process.execPath, ['--input-type=module', '-e', `
+    import { DevTools } from ${JSON.stringify(new URL('./fixtures/real-browser-harness.mjs', import.meta.url).href)}
+    try {
+      await DevTools.launch(${JSON.stringify({ chromePath, directory, debugPort: await freePort(), startupTimeoutMillis: 1000 })})
+      throw new Error('expected startup failure')
+    } catch (error) {
+      if (!error.message.includes('Chrome exited before')) throw error
+    }
+  `], { stdio: ['ignore', 'ignore', 'pipe'] })
+  let diagnostics = ''
+  child.stderr.on('data', bytes => { diagnostics += bytes.toString('utf8') })
+  t.after(() => {
+    child.kill('SIGKILL')
+    if (existsSync(pidPath)) {
+      try { process.kill(Number(readFileSync(pidPath, 'utf8')), 'SIGKILL') } catch (error) {
+        if (error.code !== 'ESRCH') throw error
+      }
+    }
+    rmSync(directory, { recursive: true, force: true })
+  })
+  let timer
+  const exited = await Promise.race([
+    new Promise(resolvePromise => child.once('exit', code => resolvePromise({ code }))),
+    new Promise(resolvePromise => { timer = setTimeout(() => resolvePromise(null), 3000) }),
+  ])
+  clearTimeout(timer)
+  assert.deepEqual(exited, { code: 0 }, diagnostics || 'diagnostic pipe keeps the subprocess alive')
 })

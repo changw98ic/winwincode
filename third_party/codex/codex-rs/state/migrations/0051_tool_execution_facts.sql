@@ -6,6 +6,13 @@ CREATE TABLE tool_requests (
     binding TEXT NOT NULL,
     resolution TEXT NOT NULL DEFAULT 'observed' CHECK(resolution IN ('observed', 'denied')),
     request_json TEXT NOT NULL,
+    request_owner TEXT NOT NULL,
+    original_input TEXT,
+    call_status TEXT NOT NULL DEFAULT 'pending' CHECK(call_status IN ('pending','succeeded','failed','cancelled','forgotten')),
+    call_result TEXT,
+    CHECK((call_status='pending' AND original_input IS NOT NULL AND call_result IS NULL) OR
+          (call_status IN ('succeeded','failed','cancelled') AND original_input IS NOT NULL AND call_result IS NOT NULL) OR
+          (call_status='forgotten' AND original_input IS NULL AND call_result IS NULL)),
     UNIQUE(thread_id, logical_id)
 );
 CREATE TABLE tool_attempts (
@@ -30,8 +37,12 @@ CREATE TABLE tool_fact_events (
 );
 CREATE INDEX tool_fact_events_thread_sequence ON tool_fact_events(thread_id, sequence);
 
--- Older binaries ignore newer migration versions. Their thread deletes must
--- still remove private execution data created by a newer binary.
+-- Thread cleanup removes private execution data and its receipts together.
 CREATE TRIGGER threads_delete_tool_facts AFTER DELETE ON threads BEGIN
     DELETE FROM tool_requests WHERE thread_id = OLD.id;
 END;
+
+CREATE TRIGGER tool_call_terminal_immutable BEFORE UPDATE ON tool_requests
+WHEN OLD.call_status IN ('succeeded','failed','cancelled') AND NEW.call_status!='forgotten' AND
+    (NEW.original_input IS NOT OLD.original_input OR NEW.call_result IS NOT OLD.call_result OR NEW.call_status!=OLD.call_status)
+BEGIN SELECT RAISE(ABORT,'tool call is already closed'); END;

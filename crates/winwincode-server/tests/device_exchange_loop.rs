@@ -81,6 +81,7 @@ fn heartbeat_message() -> ClientToServerMessage {
 }
 
 fn daemon_config(endpoint: &str) -> DaemonConfig {
+    let defaults = DaemonConfig::default();
     DaemonConfig {
         server_profile_id: "loop-server".to_owned(),
         base_url: endpoint.to_owned(),
@@ -92,8 +93,8 @@ fn daemon_config(endpoint: &str) -> DaemonConfig {
         heartbeat_interval: QUIET_HEARTBEAT,
         enroll_poll_interval: Duration::from_millis(5),
         max_frames_per_exchange: 8,
-        initial_backoff: Duration::from_millis(5),
-        max_backoff: Duration::from_millis(200),
+        initial_backoff: defaults.initial_backoff,
+        max_backoff: defaults.max_backoff,
         capacity: capacity(),
     }
 }
@@ -185,8 +186,13 @@ fn auth_sessions() -> Arc<SqliteAuthSessionManager> {
 }
 
 async fn start_with_client_exchange(data_directory: &Path) -> winwincode_server::RunningServer {
+    let exchange_config = ClientExchangeConfig {
+        heartbeat_interval_ms: u32::try_from(QUIET_HEARTBEAT.as_millis())
+            .expect("quiet heartbeat fits the wire contract"),
+        ..ClientExchangeConfig::default()
+    };
     let exchange: Arc<dyn ClientExchangePort> = Arc::new(
-        ClientExchangeApplication::open(data_directory, &ClientExchangeConfig::default())
+        ClientExchangeApplication::open(data_directory, &exchange_config)
             .expect("valid client exchange application"),
     );
     let sessions = auth_sessions();
@@ -255,30 +261,69 @@ impl ExchangeTransport for LoopTransport {
     }
 }
 
-fn drive_until(
-    daemon: &mut DeviceDaemon,
-    what: &str,
-    mut predicate: impl FnMut(&mut DeviceDaemon) -> bool,
-) {
-    let deadline = Instant::now() + DRIVE_DEADLINE;
-    while Instant::now() < deadline {
-        if predicate(daemon) {
-            return;
-        }
-        match daemon.tick(Instant::now()) {
-            Ok(
-                TickOutcome::Waiting { ready_in }
-                | TickOutcome::Retrying {
-                    after: ready_in, ..
-                },
-            ) => {
-                std::thread::sleep(ready_in.min(Duration::from_millis(20)));
-            }
-            Ok(TickOutcome::Exchanged { .. }) => std::thread::sleep(Duration::from_millis(2)),
-            Err(error) => panic!("the daemon failed during {what}: {error:?}"),
+/// Real HTTP exchanges use the daemon's explicit scheduling clock. The wall
+/// deadline remains finite while complete production retry delays are observed.
+struct ExchangeDriver {
+    now: Instant,
+    retry_delays: Vec<Duration>,
+}
+
+impl ExchangeDriver {
+    fn new() -> Self {
+        Self {
+            now: Instant::now(),
+            retry_delays: Vec::new(),
         }
     }
-    panic!("timed out waiting for {what}");
+
+    fn drive_until(
+        &mut self,
+        daemon: &mut DeviceDaemon,
+        what: &str,
+        mut predicate: impl FnMut(&mut DeviceDaemon) -> bool,
+    ) {
+        let deadline = Instant::now() + DRIVE_DEADLINE;
+        while Instant::now() < deadline {
+            if predicate(daemon) {
+                return;
+            }
+            self.now = self.now.max(Instant::now());
+            let failures = daemon.status().consecutive_failures;
+            match daemon.tick(self.now) {
+                Ok(TickOutcome::Waiting { ready_in }) => self.now += ready_in,
+                Ok(TickOutcome::Retrying { after, .. }) => {
+                    if daemon.status().consecutive_failures > failures {
+                        self.retry_delays.push(retained_retry_delay(daemon));
+                    }
+                    self.now += after;
+                }
+                Ok(TickOutcome::Exchanged { .. }) => std::thread::sleep(Duration::from_millis(2)),
+                Err(error) => panic!("the daemon failed during {what}: {error:?}"),
+            }
+        }
+        panic!("timed out waiting for {what}");
+    }
+}
+
+fn retained_retry_delay(daemon: &mut DeviceDaemon) -> Duration {
+    let path = daemon
+        .store_mut()
+        .database_path()
+        .with_file_name("network-requests.sqlite3");
+    let database =
+        rusqlite::Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .expect("read actual retry schedule");
+    let delay: i64 = database
+        .query_row(
+            "SELECT json_extract(q.state_json,'$.ready_at')-a.finished_ms
+         FROM network_queue_state q JOIN network_request_attempts a
+         ON a.operation_hash=q.operation_hash AND a.sequence=json_extract(q.state_json,'$.sequence')
+         WHERE a.outcome='failed'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("one retained failed exchange owns its retry schedule");
+    Duration::from_millis(u64::try_from(delay).expect("retry delay cannot be negative"))
 }
 
 fn settled(daemon: &mut DeviceDaemon) -> bool {
@@ -310,6 +355,7 @@ async fn enrollment_response_survives_restart_before_the_first_downlink_command(
     use winwincode_client_port::messages::{
         CommandContext, ServerClientLockPayload, ServerToClientEnvelope, ServerToClientMessage,
     };
+    let mut driver = ExchangeDriver::new();
     let data_directory = test_directory("enrollment-only-server");
     let device_root = test_directory("enrollment-only-device");
     let running = start_with_client_exchange(&data_directory).await;
@@ -382,7 +428,7 @@ async fn enrollment_response_survives_restart_before_the_first_downlink_command(
         )
         .unwrap();
     drop(storage);
-    drive_until(
+    driver.drive_until(
         &mut daemon,
         "the first command after restart to be acknowledged",
         |daemon| {
@@ -406,8 +452,30 @@ async fn enrollment_response_survives_restart_before_the_first_downlink_command(
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[allow(clippy::too_many_lines)]
 async fn the_device_daemon_runs_the_full_exchange_lifecycle_over_http() {
+    run_exchange_lifecycle_over_http(
+        DaemonConfig::default().max_backoff,
+        [
+            Duration::from_secs(5),
+            Duration::from_secs(10),
+            Duration::from_secs(20),
+        ],
+    )
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_device_daemon_caps_durable_network_backoff_over_http() {
+    let cap = Duration::from_millis(200);
+    run_exchange_lifecycle_over_http(cap, [cap; 3]).await;
+}
+
+#[allow(clippy::too_many_lines)]
+async fn run_exchange_lifecycle_over_http(
+    max_backoff: Duration,
+    expected_retry_delays: [Duration; 3],
+) {
+    let mut driver = ExchangeDriver::new();
     let data_directory = test_directory("device-loop-server");
     let device_root = test_directory("device-loop-device");
     let running = start_with_client_exchange(&data_directory).await;
@@ -425,7 +493,9 @@ async fn the_device_daemon_runs_the_full_exchange_lifecycle_over_http() {
 
     let endpoint = exchange_endpoint(address);
     let transport = LoopTransport::new(address);
-    let config = daemon_config(&endpoint);
+    let mut config = daemon_config(&endpoint);
+    config.initial_backoff = config.initial_backoff.min(max_backoff);
+    config.max_backoff = max_backoff;
     let mut daemon = DeviceDaemon::start(
         config.clone(),
         store,
@@ -434,7 +504,7 @@ async fn the_device_daemon_runs_the_full_exchange_lifecycle_over_http() {
     )
     .expect("daemon start");
 
-    drive_until(&mut daemon, "the enrollment adoption", |daemon| {
+    driver.drive_until(&mut daemon, "the enrollment adoption", |daemon| {
         daemon.is_enrolled()
     });
     let node_id = daemon.client_node_id().to_owned();
@@ -474,7 +544,7 @@ async fn the_device_daemon_runs_the_full_exchange_lifecycle_over_http() {
         "the assigned stream starts credited with the enroll sequence"
     );
 
-    drive_until(&mut daemon, "the announcement hello to settle", |daemon| {
+    driver.drive_until(&mut daemon, "the announcement hello to settle", |daemon| {
         daemon.is_enrolled() && daemon.status().frames_sent >= 2
     });
     daemon
@@ -483,7 +553,7 @@ async fn the_device_daemon_runs_the_full_exchange_lifecycle_over_http() {
     daemon
         .enqueue(heartbeat_message())
         .expect("enqueue heartbeat");
-    drive_until(&mut daemon, "the heartbeats to settle", |daemon| {
+    driver.drive_until(&mut daemon, "the heartbeats to settle", |daemon| {
         daemon.status().acked_through >= 6
     });
     let record = node_snapshot(&data_directory, &node_id);
@@ -506,6 +576,8 @@ async fn the_device_daemon_runs_the_full_exchange_lifecycle_over_http() {
     drop(storage);
     assert!(settled(&mut daemon), "the stream must be fully exchanged");
 
+    let retry_start = driver.retry_delays.len();
+    let exchange_start = daemon.status().exchanges_started;
     transport.outage_remaining.store(3, Ordering::SeqCst);
     daemon
         .enqueue(heartbeat_message())
@@ -513,9 +585,12 @@ async fn the_device_daemon_runs_the_full_exchange_lifecycle_over_http() {
     daemon
         .enqueue(heartbeat_message())
         .expect("enqueue heartbeat");
-    drive_until(&mut daemon, "the outage to recover", |daemon| {
+    driver.drive_until(&mut daemon, "the outage to recover", |daemon| {
         settled(daemon) && daemon.status().consecutive_failures == 0
     });
+    assert_eq!(&driver.retry_delays[retry_start..], &expected_retry_delays);
+    assert_eq!(transport.outage_remaining.load(Ordering::SeqCst), 0);
+    assert_eq!(daemon.status().exchanges_started - exchange_start, 4);
     let status = daemon.status().clone();
     assert!(
         status.last_error.is_some(),
@@ -541,10 +616,10 @@ async fn the_device_daemon_runs_the_full_exchange_lifecycle_over_http() {
         .collect::<Vec<_>>();
     assert_eq!(staged_sequences, [9, 10, 11]);
     transport.drop_sequence.store(10, Ordering::SeqCst);
-    drive_until(&mut daemon, "the manufactured gap", |daemon| {
+    driver.drive_until(&mut daemon, "the manufactured gap", |daemon| {
         daemon.status().replays >= 1
     });
-    drive_until(&mut daemon, "the gap replay to settle", |daemon| {
+    driver.drive_until(&mut daemon, "the gap replay to settle", |daemon| {
         settled(daemon) && daemon.status().acked_through >= 11
     });
     let status = daemon.status().clone();
@@ -621,7 +696,7 @@ async fn the_device_daemon_runs_the_full_exchange_lifecycle_over_http() {
         node_id,
         "the restarted daemon exchanges under the assigned node id"
     );
-    drive_until(&mut daemon, "the restarted daemon to settle", |daemon| {
+    driver.drive_until(&mut daemon, "the restarted daemon to settle", |daemon| {
         settled(daemon) && daemon.status().acked_through >= 17
     });
     assert_eq!(daemon.status().acked_through, 17);
@@ -648,7 +723,7 @@ async fn the_device_daemon_runs_the_full_exchange_lifecycle_over_http() {
     daemon
         .enqueue(heartbeat_message())
         .expect("enqueue heartbeat");
-    drive_until(
+    driver.drive_until(
         &mut daemon,
         "the exchanges after the server restart to settle",
         |daemon| settled(daemon) && daemon.status().acked_through >= 19,

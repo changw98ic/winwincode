@@ -1703,6 +1703,7 @@ mod tests {
             worker_id: lease.worker_id.clone(),
             worker_instance_id: lease.worker_instance_id.clone(),
             sequence_offset: 0,
+            indexed_sequence_offset: 0,
             highest_sequence: 1,
             events: vec![RuntimeLedgerEvent {
                 event,
@@ -1900,6 +1901,7 @@ mod tests {
             worker_id,
             worker_instance_id,
             sequence_offset: 0,
+            indexed_sequence_offset: 0,
             highest_sequence: 1,
             events: vec![RuntimeLedgerEvent {
                 event,

@@ -102,5 +102,5 @@ pub struct ToolStoredResults {
     pub rejection: Option<String>,
 }
 
-/// Receipt retention is independent of the optional result body retention.
+/// Bound for the separate control-input recovery envelope. Tool call bodies are retained in full.
 pub const MAX_TOOL_RESULT_BYTES: usize = 4 * 1024 * 1024;

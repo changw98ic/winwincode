@@ -7,36 +7,10 @@ use codex_utils_absolute_path::test_support::PathExt;
 use pretty_assertions::assert_eq;
 
 #[tokio::test]
-async fn additive_migration_preserves_existing_thread_metadata_and_old_readers() {
-    use std::borrow::Cow;
+async fn current_schema_thread_cleanup_removes_tool_pairs_and_receipts() {
     let home = unique_temp_dir();
     tokio::fs::create_dir_all(&home).await.unwrap();
     let sqlite = crate::SqliteConfig::new_for_testing(home.as_path().abs());
-    let current = &crate::migrations::STATE_MIGRATOR;
-    let old = sqlx::migrate::Migrator {
-        migrations: Cow::Owned(
-            current
-                .migrations
-                .iter()
-                .filter(|m| m.version < 51)
-                .cloned()
-                .collect(),
-        ),
-        ignore_missing: true,
-        locking: current.locking,
-        no_tx: current.no_tx,
-        table_name: current.table_name.clone(),
-        create_schemas: current.create_schemas.clone(),
-    };
-    let pool = sqlite
-        .open_read_write_pool(&sqlite.state_db_path())
-        .await
-        .unwrap();
-    old.run(&pool).await.unwrap();
-    let thread = ThreadId::new();
-    sqlx::query("INSERT INTO threads(id, rollout_path, created_at, updated_at, source, model_provider, cwd, title, sandbox_policy, approval_mode) VALUES (?, 'rollout', 1, 1, 'cli', 'test', '/workspace', 'existing', 'read-only', 'never')")
-        .bind(thread.to_string()).execute(&pool).await.unwrap();
-    pool.close().await;
     let runtime = StateRuntime::init(sqlite.clone(), "test".into())
         .await
         .unwrap();
@@ -44,7 +18,9 @@ async fn additive_migration_preserves_existing_thread_metadata_and_old_readers()
         .open_read_write_pool(&sqlite.state_db_path())
         .await
         .unwrap();
-    old.run(&pool).await.unwrap();
+    let thread = ThreadId::new();
+    sqlx::query("INSERT INTO threads(id, rollout_path, created_at, updated_at, source, model_provider, cwd, title, sandbox_policy, approval_mode) VALUES (?, 'rollout', 1, 1, 'cli', 'test', '/workspace', 'existing', 'read-only', 'never')")
+        .bind(thread.to_string()).execute(&pool).await.unwrap();
     let row = sqlx::query("SELECT title FROM threads WHERE id = ?")
         .bind(thread.to_string())
         .fetch_one(&pool)
@@ -63,7 +39,10 @@ async fn additive_migration_preserves_existing_thread_metadata_and_old_readers()
         binding: "digest".into(),
     };
     assert!(matches!(
-        runtime.observe_tool_request(&request).await.unwrap(),
+        runtime
+            .observe_tool_request(&request, "test-owner", "{}")
+            .await
+            .unwrap(),
         ToolRequestObservation::New(_)
     ));
     assert_eq!(

@@ -193,7 +193,8 @@ impl crate::tools::registry::CoreToolRuntime for DiagnosticHandoffTool {
 
 fn latched_handoff(handoffs: &TerminalHandoffs, cell: &CellId) -> ChangeBatchHandoff {
     let cells = handoffs.cells.lock().unwrap();
-    let Some(ToolContinuation::YieldToHost(handoff)) = cells.get(cell).unwrap().borrow().clone()
+    let Some(super::HostBoundary::Handoff(ToolContinuation::YieldToHost(handoff))) =
+        cells.get(cell).unwrap().borrow().clone()
     else {
         panic!("original typed handoff must remain latched");
     };
@@ -202,6 +203,15 @@ fn latched_handoff(handoffs: &TerminalHandoffs, cell: &CellId) -> ChangeBatchHan
 
 #[tokio::test]
 async fn diagnostic_offer_rollback_preserves_typed_handoff_without_republishing_on_replay() {
+    handoff_offer_fixture(false).await;
+}
+
+#[tokio::test]
+async fn required_offer_failure_keeps_the_accepted_handoff_unpublished() {
+    handoff_offer_fixture(true).await;
+}
+
+async fn handoff_offer_fixture(fail_required_offer: bool) {
     use crate::tools::context::ToolCallSource;
     use crate::tools::context::ToolInvocation;
     use crate::tools::context::ToolPayload;
@@ -270,6 +280,17 @@ async fn diagnostic_offer_rollback_preserves_typed_handoff_without_republishing_
     .execute(&pool)
     .await
     .unwrap();
+    if fail_required_offer {
+        sqlx::query(
+            "CREATE TRIGGER fail_required_handoff_offer BEFORE INSERT ON tool_fact_events
+            WHEN json_extract(NEW.fact_json,'$.kind')='request'
+                AND json_extract(NEW.fact_json,'$.fact.attempt.delivery')='offered'
+            BEGIN SELECT RAISE(ROLLBACK,'required handoff offer fixture'); END",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+    }
     let tool = Arc::new(DiagnosticHandoffTool {
         effects: AtomicUsize::new(0),
         accepted: AtomicUsize::new(0),
@@ -280,8 +301,49 @@ async fn diagnostic_offer_rollback_preserves_typed_handoff_without_republishing_
             invocation.clone(),
             /*terminal_outcome_reached*/ None,
         )
-        .await
-        .unwrap();
+        .await;
+    if fail_required_offer {
+        assert!(matches!(
+            first,
+            Err(crate::function_tool::FunctionCallError::Fatal(_))
+        ));
+        assert!(
+            !session
+                .services
+                .code_mode_service
+                .terminal_handoffs
+                .is_pending(&cell),
+            "a handoff cannot be observed before its required offered receipt commits"
+        );
+        let events = store
+            .list_tool_fact_events(&session.thread_id.to_string(), 0, 200)
+            .await
+            .unwrap();
+        let fact = &events.last().unwrap().fact;
+        let attempt = fact.attempt.as_ref().unwrap();
+        assert_eq!(
+            attempt.execution,
+            codex_state::ToolExecutionStatus::Completed
+        );
+        assert_eq!(
+            attempt.disposition,
+            codex_state::ToolOutputDisposition::Accepted
+        );
+        assert_eq!(attempt.delivery, codex_state::ToolOutputDelivery::Pending);
+        assert!(
+            store
+                .read_tool_results(fact.request_sequence)
+                .await
+                .unwrap()
+                .accepted
+                .is_some()
+        );
+        assert_eq!(tool.effects.load(Ordering::SeqCst), 1);
+        assert_eq!(tool.accepted.load(Ordering::SeqCst), 1);
+        pool.close().await;
+        return;
+    }
+    let first = first.unwrap();
     let Some(ToolContinuation::YieldToHost(handoff)) = &first.continuation else {
         panic!("the first accepted output must retain its typed continuation");
     };
@@ -416,4 +478,105 @@ async fn diagnostic_offer_rollback_preserves_typed_handoff_without_republishing_
     .unwrap();
     assert_eq!((required_count, diagnostic_count), (1, 1));
     pool.close().await;
+}
+
+#[test]
+fn a_fatal_is_latched_only_for_its_original_live_cell_and_outranks_handoff() {
+    let handoffs = TerminalHandoffs::default();
+    let original = CellId::new("fatal-original-cell".into());
+    let other = CellId::new("independent-cell".into());
+    handoffs.register(&original);
+    handoffs.register(&other);
+    handoffs
+        .publish(
+            original.clone(),
+            ToolContinuation::YieldToHost(ChangeBatchHandoff {
+                call_id: "original-proposal".into(),
+                proposal: "original proposal".into(),
+            }),
+        )
+        .unwrap();
+    handoffs.publish_fatal(&original, "original safe fatal".into());
+    handoffs.publish_fatal(&original, "later safe fatal".into());
+    let cells = handoffs.cells.lock().unwrap();
+    assert!(matches!(
+        cells.get(&original).unwrap().borrow().as_ref(),
+        Some(super::HostBoundary::Fatal(message)) if message == "original safe fatal"
+    ));
+    drop(cells);
+    assert!(handoffs.is_pending(&original));
+    assert!(!handoffs.is_pending(&other));
+    handoffs.close_cell(&original);
+    assert!(handoffs.is_pending(&original));
+    handoffs.close_cell(&other);
+    handoffs.publish_fatal(&other, "closed cell fatal".into());
+    assert!(!handoffs.is_pending(&other));
+}
+
+#[tokio::test]
+async fn a_caught_native_exception_cannot_clear_fatal_at_execute_or_later_wait_boundary() {
+    use crate::function_tool::FunctionCallError;
+    use codex_code_mode::RuntimeResponse;
+    use codex_code_mode::WaitOutcome;
+    use std::sync::Arc;
+
+    for yielded_first in [false, true] {
+        let service = super::CodeModeService::new(
+            Arc::new(codex_code_mode::DisabledCodeModeSessionProvider),
+            &crate::config::CodeModeConfig::default(),
+        );
+        let cell = CellId::new(format!("caught-fatal-cell-{yielded_first}"));
+        let other = CellId::new(format!("unaffected-cell-{yielded_first}"));
+        service.terminal_handoffs.register(&cell);
+        service.terminal_handoffs.register(&other);
+        if yielded_first {
+            let (response, continuation) = service
+                .await_boundary(&cell, async {
+                    Ok(WaitOutcome::LiveCell(RuntimeResponse::Yielded {
+                        cell_id: cell.clone(),
+                        content_items: vec![],
+                    }))
+                })
+                .await
+                .unwrap();
+            assert!(matches!(
+                response,
+                WaitOutcome::LiveCell(RuntimeResponse::Yielded { .. })
+            ));
+            assert!(continuation.is_none());
+        }
+        service.terminal_handoffs.publish_fatal(
+            &cell,
+            "tool_fact_store_unavailable: execution and recovery require durable Core facts".into(),
+        );
+        let response = service
+            .await_boundary(&cell, async {
+                // A script may catch its nested tool exception and return
+                // normally. The host-owned fatal still owns this boundary.
+                Ok(WaitOutcome::LiveCell(RuntimeResponse::Result {
+                    cell_id: cell.clone(),
+                    content_items: vec![],
+                    error_text: None,
+                }))
+            })
+            .await;
+        assert!(matches!(
+            response,
+            Err(FunctionCallError::Fatal(message))
+                if message == "tool_fact_store_unavailable: execution and recovery require durable Core facts"
+        ));
+        assert!(service.terminal_handoffs.is_pending(&cell));
+        let independent = service
+            .await_boundary(&other, async {
+                Ok(WaitOutcome::LiveCell(RuntimeResponse::Result {
+                    cell_id: other.clone(),
+                    content_items: vec![],
+                    error_text: None,
+                }))
+            })
+            .await;
+        assert!(independent.is_ok());
+        service.terminal_handoffs.discard_all();
+        assert!(!service.terminal_handoffs.is_pending(&cell));
+    }
 }

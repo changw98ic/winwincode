@@ -1,5 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
 
+use winwincode_control_plane::{
+    execution_admission_boundaries as admission_boundaries,
+    execution_admission_deferred as deferred_admission_error, execution_admission_job,
+    execution_reservation_request,
+};
+
 use std::fmt;
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::Duration;
@@ -21,8 +27,8 @@ use winwincode_control_plane::{
 };
 use winwincode_domain::{ExecutionJobId, Instant, RequestId, UserId, WorkerId, WorkerInstanceId};
 use winwincode_execution_port::generated::{
-    ExecutionJob, ExecutionLeaseStamp, ExecutionPortMessage, ExecutionWorkspaceWriteMode,
-    JobDispatchMessage, LeaseRenewMessage, LeaseRenewMessageKind, WorkerHeartbeatAckMessageStatus,
+    ExecutionJob, ExecutionLeaseStamp, ExecutionPortMessage, JobDispatchMessage, LeaseRenewMessage,
+    LeaseRenewMessageKind, WorkerHeartbeatAckMessageStatus,
 };
 use winwincode_execution_port::{
     execution_identity::canonical_dispatch_session_identity, transport::ExecutionPortCore,
@@ -31,15 +37,17 @@ use winwincode_execution_port::{
 use winwincode_local::{
     LocalExecutionPortHandle, LocalLauncher, LocalLauncherConfig, SharedControlPlaneHandle,
 };
-use winwincode_storage::{
-    ExecutionAdmissionBoundary, ExecutionAdmissionErrorCode, ExecutionJobRecord, ExecutionJobState,
-    ExecutionLeaseClaim, ExecutionRepositoryAccess, ExecutionReservationRequest,
-    ExecutionReservationStart, ExecutionReservationState, RepositorySchedulerClaimRequest,
-    RepositorySchedulerScope, WorkerOutboundAuthority, WorkerPoolId, WorkerSlotAuthority,
-    WorkerSlotOpenRequest, WorkerSlotResourceLimits, WorkerSlotResources,
-};
 #[cfg(test)]
-use winwincode_storage::{ExecutionAdmissionLimits, ExecutionAdmissionPolicy};
+use winwincode_storage::{
+    ExecutionAdmissionBoundary, ExecutionAdmissionLimits, ExecutionAdmissionPolicy,
+    ExecutionRepositoryAccess, ExecutionReservationRequest,
+};
+use winwincode_storage::{
+    ExecutionJobRecord, ExecutionJobState, ExecutionLeaseClaim, ExecutionReservationStart,
+    ExecutionReservationState, RepositorySchedulerClaimRequest, RepositorySchedulerScope,
+    WorkerOutboundAuthority, WorkerPoolId, WorkerSlotAuthority, WorkerSlotOpenRequest,
+    WorkerSlotResourceLimits, WorkerSlotResources,
+};
 #[cfg(feature = "local-worker")]
 use winwincode_worker::{CodexCoreAdapter, WorkerConfig};
 
@@ -72,18 +80,6 @@ const LOCAL_SLOT_RESOURCES: WorkerSlotResources = WorkerSlotResources {
     disk_bytes: 1,
     process_slots: 1,
 };
-
-const fn deferred_admission_error(code: ExecutionAdmissionErrorCode) -> bool {
-    matches!(
-        code,
-        ExecutionAdmissionErrorCode::RevisionConflict
-            | ExecutionAdmissionErrorCode::QueueCapacityExhausted
-            | ExecutionAdmissionErrorCode::ConcurrencyExhausted
-            | ExecutionAdmissionErrorCode::TokenBudgetExhausted
-            | ExecutionAdmissionErrorCode::CostBudgetExhausted
-            | ExecutionAdmissionErrorCode::RepositoryWriteConflict
-    )
-}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RuntimeSupervisorErrorKind {
@@ -358,17 +354,8 @@ impl RepositoryRuntimeScheduler {
         record: &ExecutionJobRecord,
         now: &Instant,
     ) -> Result<bool, RuntimeSupervisorError> {
-        let (job, runtime_seconds) = validate_admission_job(record)?;
-        let runtime_limit_millis = runtime_seconds
-            .map(|seconds| {
-                seconds.checked_mul(1_000).ok_or_else(|| {
-                    RuntimeSupervisorError::new(
-                        RuntimeSupervisorErrorKind::Driver,
-                        "repository runtime scheduler execution deadline overflowed",
-                    )
-                })
-            })
-            .transpose()?;
+        let (job, runtime_limit_millis) =
+            execution_admission_job(record).map_err(|_| scheduler_failure())?;
         if !admission_user_is_active(storage, &self.user_id)? {
             return Ok(false);
         }
@@ -393,9 +380,7 @@ impl RepositoryRuntimeScheduler {
         let reservation = if let Some(reservation) = reservation {
             reservation
         } else {
-            let Some(reservation) =
-                self.reserve_admission(&mut admission, record, &job, runtime_limit_millis)?
-            else {
+            let Some(reservation) = self.reserve_admission(&mut admission, record, &job)? else {
                 return Ok(false);
             };
             reservation
@@ -473,27 +458,16 @@ impl RepositoryRuntimeScheduler {
         admission: &mut winwincode_storage::ExecutionAdmission<'_>,
         record: &ExecutionJobRecord,
         job: &ExecutionJob,
-        runtime_limit_millis: Option<u64>,
     ) -> Result<Option<winwincode_storage::ExecutionReservationRecord>, RuntimeSupervisorError>
     {
-        let repository_access = match job.workspace.write_mode {
-            ExecutionWorkspaceWriteMode::ReadOnly => ExecutionRepositoryAccess::ReadOnly,
-            ExecutionWorkspaceWriteMode::Candidate => ExecutionRepositoryAccess::IsolatedWrite {
-                worktree_key: format!("job-{}", record.job_id.0),
-            },
-        };
-        let request = ExecutionReservationRequest {
-            scope: record.scope.clone(),
-            user_id: self.user_id.clone(),
-            worker_pool_id: self.worker_pool_id.clone(),
-            job_id: record.job_id.clone(),
-            request_id: self.job_request_id(b"admission-reserve", &record.job_id),
-            repository_access,
-            reserved_tokens: None,
-            reserved_cost_microunits: None,
-            runtime_limit_millis,
-            submitted_at: record.submitted_at.clone(),
-        };
+        let request = execution_reservation_request(
+            record,
+            job,
+            self.user_id.clone(),
+            self.worker_pool_id.clone(),
+            self.job_request_id(b"admission-reserve", &record.job_id),
+        )
+        .map_err(|_| scheduler_failure())?;
         match admission.reserve(&request) {
             Ok(receipt) => Ok(Some(receipt.reservation)),
             Err(error) if deferred_admission_error(error.code()) => {
@@ -1089,23 +1063,26 @@ impl RepositoryRuntimeScheduler {
         {
             execution_port.enqueue_control(command)?;
         }
-        if !admission_ready {
-            return Ok(());
-        }
-        if !self.ensure_worker_capacity(&mut state.storage)? {
-            return Ok(());
-        }
+        // New claims need admission and a free durable slot. A Server restart
+        // must still reoffer an original same-instance dispatch whose slot was
+        // already reserved before the Worker accepted it. Storage distinguishes
+        // that receipt recovery from a new claim or replacement attempt.
+        let new_claim_allowed =
+            admission_ready && self.ensure_worker_capacity(&mut state.storage)?;
         let mut scheduler = RepositoryExecutionScheduler::new(&mut state.storage);
         let dispatch = scheduler
-            .claim_next(&RepositorySchedulerClaimRequest {
-                scope: self.scope.clone(),
-                request_id,
-                scheduler_generation: self.scheduler_generation.clone(),
-                worker_id: self.worker_id.clone(),
-                worker_instance_id: self.worker_instance_id.clone(),
-                issued_at: now.clone(),
-                expires_at,
-            })
+            .claim_next_with_capacity(
+                &RepositorySchedulerClaimRequest {
+                    scope: self.scope.clone(),
+                    request_id,
+                    scheduler_generation: self.scheduler_generation.clone(),
+                    worker_id: self.worker_id.clone(),
+                    worker_instance_id: self.worker_instance_id.clone(),
+                    issued_at: now.clone(),
+                    expires_at,
+                },
+                new_claim_allowed,
+            )
             .map_err(|error| {
                 debug_scheduler_error("claim next job", &error);
                 scheduler_failure()
@@ -1156,6 +1133,18 @@ impl RepositoryRuntimeScheduler {
 }
 
 impl RepositoryRuntimeScheduler {
+    pub fn recover_accepted_outcomes(&mut self) -> Result<usize, RuntimeSupervisorError> {
+        let mut guard = self.state.lock().map_err(|_| scheduler_failure())?;
+        let state = guard.as_mut().ok_or_else(scheduler_failure)?;
+        state
+            .control_plane
+            .recover_accepted_execution_outcomes()
+            .map_err(|error| {
+                debug_scheduler_error("recover accepted outcome cleanup", &error);
+                scheduler_failure()
+            })
+    }
+
     pub fn drive_remote(
         &mut self,
         now: &Instant,
@@ -1254,6 +1243,15 @@ impl RepositoryRuntimeScheduler {
                 "repository runtime scheduler application has stopped",
             )
         })?;
+        if !authenticated_remote {
+            state
+                .control_plane
+                .recover_accepted_execution_outcomes()
+                .map_err(|error| {
+                    debug_scheduler_error("recover accepted outcome cleanup", &error);
+                    scheduler_failure()
+                })?;
+        }
         self.retry_confirmed_interactions(
             state,
             &self.worker_id.clone(),
@@ -1294,77 +1292,6 @@ fn admission_user_is_active(
             scheduler_failure()
         })?;
     Ok(owner.is_some())
-}
-
-fn validate_admission_job(
-    record: &ExecutionJobRecord,
-) -> Result<(ExecutionJob, Option<u64>), RuntimeSupervisorError> {
-    let job: ExecutionJob = serde_json::from_slice(&record.dispatch_payload).map_err(|_| {
-        RuntimeSupervisorError::new(
-            RuntimeSupervisorErrorKind::Driver,
-            "repository runtime scheduler found an invalid ExecutionJob payload",
-        )
-    })?;
-    let attempt = u64::try_from(job.attempt).map_err(|_| scheduler_failure())?;
-    if job.job_id != record.job_id
-        || job.payload_digest != record.payload_digest
-        || attempt != record.attempt
-    {
-        return Err(RuntimeSupervisorError::new(
-            RuntimeSupervisorErrorKind::Driver,
-            "repository runtime scheduler found mismatched ExecutionJob authority",
-        ));
-    }
-    if job.limits.deadline_at.is_some() != job.limits.max_runtime_seconds.is_some() {
-        return Err(scheduler_failure());
-    }
-    let runtime_seconds = job
-        .limits
-        .max_runtime_seconds
-        .map(|seconds| {
-            u64::try_from(seconds)
-                .ok()
-                .filter(|seconds| (1..=604_800).contains(seconds))
-                .ok_or_else(scheduler_failure)
-        })
-        .transpose()?;
-    Ok((job, runtime_seconds))
-}
-
-fn admission_boundaries(
-    scope: &winwincode_storage::ExecutionQueueScope,
-    worker_pool_id: &WorkerPoolId,
-) -> Vec<ExecutionAdmissionBoundary> {
-    let mut boundaries = vec![
-        ExecutionAdmissionBoundary::Organization {
-            organization_id: scope.organization_id.clone(),
-        },
-        ExecutionAdmissionBoundary::Project {
-            organization_id: scope.organization_id.clone(),
-            project_id: scope.project_id.clone(),
-        },
-        ExecutionAdmissionBoundary::Repository {
-            organization_id: scope.organization_id.clone(),
-            project_id: scope.project_id.clone(),
-            repository_id: scope.repository_id.clone(),
-        },
-        ExecutionAdmissionBoundary::ProductSession {
-            organization_id: scope.organization_id.clone(),
-            project_id: scope.project_id.clone(),
-            product_session_id: scope.product_session_id.clone(),
-        },
-        ExecutionAdmissionBoundary::WorkerPool {
-            organization_id: scope.organization_id.clone(),
-            worker_pool_id: worker_pool_id.clone(),
-        },
-    ];
-    if let Some(delivery_id) = &scope.delivery_id {
-        boundaries.push(ExecutionAdmissionBoundary::Delivery {
-            organization_id: scope.organization_id.clone(),
-            delivery_id: delivery_id.clone(),
-        });
-    }
-    boundaries
 }
 
 #[cfg(feature = "local-worker")]
@@ -1534,7 +1461,10 @@ fn renew_heartbeat_leases(
     }) {
         return Ok(());
     }
-    let renewal_lead_millis = (lease_duration_millis / 2).min(120_000);
+    // A default 15-minute lease renews after 13 minutes. Short leases renew
+    // after one quarter of their duration so a heartbeat near half-TTL still
+    // leaves room for transport latency and consumption of the renewal.
+    let renewal_lead_millis = (lease_duration_millis - lease_duration_millis / 4).min(120_000);
     let renew_before = add_millis(now, renewal_lead_millis).ok_or_else(lease_renewal_failure)?;
     let expires_at = add_millis(now, lease_duration_millis).ok_or_else(lease_renewal_failure)?;
     for summary in &heartbeat.active_leases {
@@ -2369,8 +2299,52 @@ mod tests {
     }
 
     #[test]
-    #[allow(clippy::too_many_lines)]
     fn default_lease_renews_at_thirteen_minutes_on_accepted_heartbeat() {
+        let cases = (5..=1_560)
+            .step_by(5)
+            .map(|second| {
+                let prior_expiry = if second <= 780 { 900 } else { 1_680 };
+                let expected_expiry = match second {
+                    0..780 => 900,
+                    780..1_560 => 1_680,
+                    _ => 2_460,
+                };
+                (
+                    second * 1_000,
+                    prior_expiry * 1_000,
+                    expected_expiry * 1_000,
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_heartbeat_renewal_window("default-renewal-window", 900_000, &cases, 2);
+    }
+
+    #[test]
+    fn short_lease_renews_when_heartbeat_latency_decreases() {
+        // The first accepted heartbeat has 145 ms more transport latency.
+        // The following heartbeat arrives just before the old half-TTL window.
+        // Waiting another five seconds would lose an otherwise healthy lease.
+        assert_heartbeat_renewal_window(
+            "short-renewal-window",
+            10_000,
+            &[
+                (5_145, 10_000, 15_145),
+                (10_020, 15_145, 20_020),
+                (15_030, 20_020, 25_030),
+                // A heartbeat received at expiry cannot revive the lease.
+                (25_030, 25_030, 25_030),
+            ],
+            3,
+        );
+    }
+
+    #[allow(clippy::too_many_lines)]
+    fn assert_heartbeat_renewal_window(
+        label: &str,
+        duration_millis: u64,
+        cases: &[(u64, u64, u64)],
+        expected_renewals: usize,
+    ) {
         use winwincode_domain::{
             CodexThreadId, ExecutionMessageId, FencingToken, LeaseId, WorkerSessionId,
         };
@@ -2383,10 +2357,10 @@ mod tests {
             WorkerRegistrationRequest,
         };
 
-        let root = unique_directory("default-renewal-window");
+        let root = unique_directory(label);
         let mut storage = SqliteStorage::open(&root).expect("storage");
         let start = fixed_instant("2027-01-15T08:00:00.000Z");
-        let at = |seconds: u64| add_millis(&start, seconds * 1_000).expect("timestamp");
+        let at = |millis: u64| add_millis(&start, millis).expect("timestamp");
         let message_id = |number| ExecutionMessageId(format!("xmsg_{number:026}"));
         let request_id = |number| RequestId(format!("req_{number:026}"));
         let lease = ExecutionLeaseClaim {
@@ -2398,7 +2372,7 @@ mod tests {
             attempt: 1,
             fencing_token: FencingToken("7".to_owned()),
             issued_at: start.clone(),
-            expires_at: at(900),
+            expires_at: at(duration_millis),
             message_id: message_id(1),
             request_id: request_id(1),
         };
@@ -2496,13 +2470,7 @@ mod tests {
             winwincode_storage::WorkerOutboundQueueConfig::default(),
         )
         .expect("outbound");
-        for second in (5..=1_560).step_by(5) {
-            let prior_expiry = if second <= 780 { 900 } else { 1_680 };
-            let expected_expiry = match second {
-                0..780 => 900,
-                780..1_560 => 1_680,
-                _ => 2_460,
-            };
+        for (index, &(millis, prior_expiry, expected_expiry)) in cases.iter().enumerate() {
             let heartbeat = WorkerHeartbeatMessage {
                 active_leases: vec![ActiveLeaseSummary {
                     attempt: 1,
@@ -2517,17 +2485,17 @@ mod tests {
                     running_jobs: 1,
                 },
                 heartbeat_sequence: winwincode_domain::ExecutionSequence(
-                    i64::try_from(second / 5).expect("heartbeat sequence"),
+                    i64::try_from(index + 1).expect("heartbeat sequence"),
                 ),
                 kind: WorkerHeartbeatMessageKind::WorkerHeartbeat,
-                message_id: message_id(100 + second),
-                observed_at: at(second),
-                sent_at: at(second),
+                message_id: message_id(100 + index),
+                observed_at: at(millis),
+                sent_at: at(millis),
                 schema_version: winwincode_domain::SchemaVersion::WinwincodeV1,
                 worker_id: lease.worker_id.clone(),
                 worker_instance_id: lease.worker_instance_id.clone(),
             };
-            let ack = winwincode_control_plane::ExecutionPortService::new(&mut storage, at(second))
+            let ack = winwincode_control_plane::ExecutionPortService::new(&mut storage, at(millis))
                 .record_heartbeat(&heartbeat)
                 .expect("durable heartbeat");
             assert_eq!(ack.status, WorkerHeartbeatAckMessageStatus::Accepted);
@@ -2536,8 +2504,8 @@ mod tests {
                 &mut outbound,
                 &ExecutionPortMessage::WorkerHeartbeatMessage(heartbeat),
                 &[ExecutionPortMessage::WorkerHeartbeatAckMessage(ack)],
-                &at(second),
-                900_000,
+                &at(millis),
+                duration_millis,
             )
             .expect("renew due lease");
             assert_eq!(
@@ -2550,20 +2518,21 @@ mod tests {
                     .lease()
                     .expires_at,
                 at(expected_expiry),
-                "renewal boundary at elapsed {second}s"
+                "renewal boundary at elapsed {millis}ms"
             );
         }
+        let &(last_observed, _, final_expiry) = cases.last().expect("heartbeat cases");
         let authority = WorkerOutboundAuthority {
             slot,
             lease_issued_at: lease.issued_at,
-            lease_expires_at: at(2_460),
+            lease_expires_at: at(final_expiry),
         };
         assert_eq!(
             outbound
-                .claim_pending(&authority, &at(1_560))
+                .claim_pending(&authority, &at(last_observed.min(final_expiry - 1)),)
                 .expect("renewals")
                 .len(),
-            2
+            expected_renewals
         );
         outbound.close().expect("close outbound");
         Box::new(storage).close().expect("close storage");
@@ -2807,13 +2776,13 @@ mod tests {
             );
         };
         run_heartbeat(
-            heartbeat(1, 6, 9),
-            6,
+            heartbeat(1, 5, 9),
+            5,
             WorkerHeartbeatAckMessageStatus::Accepted,
             9,
         );
         run_heartbeat(
-            heartbeat(1, 6, 9),
+            heartbeat(1, 5, 9),
             7,
             WorkerHeartbeatAckMessageStatus::Duplicate,
             9,

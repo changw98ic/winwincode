@@ -448,7 +448,10 @@ async fn time_provider_failure_stops_before_inference() -> Result<()> {
         error.message,
         "Fatal error: failed to read current time: test clock unavailable"
     );
-    assert_eq!(error.codex_error_info, Some(CodexErrorInfo::Other));
+    assert_eq!(
+        error.codex_error_info,
+        Some(CodexErrorInfo::InternalServerError)
+    );
 
     wait_for_event(&test.codex, |event| {
         matches!(event, EventMsg::TurnComplete(_))

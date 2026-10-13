@@ -50,9 +50,18 @@ fn validation_start_marker_count(root: &Path) -> usize {
     let mut directories = vec![root.to_path_buf()];
     let mut count = 0;
     while let Some(directory) = directories.pop() {
-        for entry in std::fs::read_dir(directory).unwrap() {
+        let entries = match std::fs::read_dir(&directory) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => panic!("validation marker directory scan failed: {error}"),
+        };
+        for entry in entries {
             let entry = entry.unwrap();
-            let kind = entry.file_type().unwrap();
+            let kind = match entry.file_type() {
+                Ok(kind) => kind,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(error) => panic!("validation marker entry scan failed: {error}"),
+            };
             if kind.is_dir() {
                 directories.push(entry.path());
             } else if kind.is_file() && entry.file_name() == "validation-started" {
@@ -62,6 +71,20 @@ fn validation_start_marker_count(root: &Path) -> usize {
     }
     count
 }
+
+#[test]
+fn validation_marker_scan_observes_directory_creation_and_cleanup() {
+    let fixture = tempfile::tempdir().unwrap();
+    let output = fixture.path().join("validation-output");
+    assert_eq!(validation_start_marker_count(&output), 0);
+    std::fs::create_dir_all(&output).unwrap();
+    assert_eq!(validation_start_marker_count(&output), 0);
+    std::fs::write(output.join("validation-started"), b"started").unwrap();
+    assert_eq!(validation_start_marker_count(&output), 1);
+    std::fs::remove_dir_all(&output).unwrap();
+    assert_eq!(validation_start_marker_count(&output), 0);
+}
+
 async fn validation_case_control(seconds: f64, cancel: bool) -> serde_json::Value {
     validation_case_control_with_cleanup_fault(seconds, cancel, false).await
 }
@@ -222,13 +245,26 @@ async fn validation_case_control_with_store_fault(
         )
     };
     let queued_controls = Arc::clone(&controls.queued);
+    let validation_marker_root = workspaces_root.clone();
+    let wait_for_validation = seconds > 0.0 && !pending_fault;
     let enqueue = std::thread::spawn(move || {
+        if wait_for_validation {
+            let start_deadline = std::time::Instant::now() + std::time::Duration::from_secs(1);
+            while validation_start_marker_count(&validation_marker_root) == 0 {
+                assert!(
+                    std::time::Instant::now() < start_deadline,
+                    "validation must start before control intake"
+                );
+                std::thread::sleep(std::time::Duration::from_millis(2));
+            }
+        }
         std::thread::sleep(std::time::Duration::from_millis(100));
+        let queued_ms = origin.elapsed().as_millis();
         queued_controls
             .lock()
             .unwrap()
             .push_back((ExecutionMessageId(id("xmsg", 'N')), message));
-        origin.elapsed().as_millis()
+        queued_ms
     });
     let mut max_drive_millis = 0;
     let fixture_deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(8);
@@ -435,8 +471,10 @@ async fn mechanism_m11_actual_long_validation_preserves_renewal_and_heartbeat() 
 #[tokio::test]
 async fn mechanism_m11_driver_renewal_service_bound_red() {
     let slow = Box::pin(validation_case(2.0)).await;
+    let queued = slow["queuedRenewalAtMillis"].as_u64().unwrap();
+    let confirmed = slow["controlReceipts"][0][1].as_u64().unwrap();
     assert!(
-        slow["controlReceipts"][0][1].as_u64().unwrap() < 300,
+        confirmed.checked_sub(queued).unwrap() < 300,
         "renewal must be serviced during long validation; actual receipt={slow}"
     );
 }
@@ -448,8 +486,10 @@ async fn validation_case(seconds: f64) -> serde_json::Value {
 #[tokio::test]
 async fn mechanism_m11_actual_long_validation_services_remote_cancel() {
     let slow = validation_case_control(2.0, true).await;
+    let queued = slow["queuedRenewalAtMillis"].as_u64().unwrap();
+    let confirmed = slow["controlReceipts"][0][1].as_u64().unwrap();
     assert!(
-        slow["controlReceipts"][0][1].as_u64().unwrap() < 300,
+        confirmed.checked_sub(queued).unwrap() < 300,
         "remote cancellation must be durably consumed before validation completes: {slow}"
     );
     assert_eq!(slow["remainingValidation"], false);

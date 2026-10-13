@@ -209,6 +209,9 @@ impl Boundary {
 }
 
 impl RemoteWorkerExchangePort for Boundary {
+    fn recover_accepted_outcomes(&self) -> Result<usize, RemoteWorkerTransportError> {
+        Ok(0)
+    }
     fn exchange(
         &self,
         credential: Vec<u8>,

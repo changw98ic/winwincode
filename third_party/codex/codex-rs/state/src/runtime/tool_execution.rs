@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use super::StateRuntime;
-use crate::MAX_TOOL_RESULT_BYTES;
 use crate::ToolAttemptClaim;
 use crate::ToolAttemptReceipt;
 use crate::ToolExecutionFact;
@@ -50,6 +49,8 @@ impl StateRuntime {
     pub async fn observe_tool_request(
         &self,
         request: &ToolRequestIdentity,
+        owner_id: &str,
+        original_input: &str,
     ) -> anyhow::Result<ToolRequestObservation> {
         ensure!(
             !request.thread_id.is_empty() && !request.logical_id.is_empty(),
@@ -62,13 +63,15 @@ impl StateRuntime {
         );
         let mut tx = self.pool.begin().await?;
         let inserted = sqlx::query(
-            "INSERT INTO tool_requests(thread_id, logical_id, binding, request_json)
-            VALUES (?, ?, ?, ?) ON CONFLICT(thread_id, logical_id) DO NOTHING",
+            "INSERT INTO tool_requests(thread_id, logical_id, binding, request_json,request_owner,original_input,call_status)
+            VALUES (?, ?, ?, ?, ?, ?, 'pending') ON CONFLICT(thread_id, logical_id) DO NOTHING",
         )
         .bind(&request.thread_id)
         .bind(&request.logical_id)
         .bind(&request.binding)
         .bind(encoded)
+        .bind(owner_id)
+        .bind(original_input)
         .execute(&mut *tx)
         .await?
         .rows_affected()
@@ -149,10 +152,14 @@ impl StateRuntime {
     }
 
     /// A pre-dispatch rejection remains distinct from an executed handler.
-    pub async fn deny_tool_request(&self, request_sequence: i64) -> anyhow::Result<()> {
+    pub async fn deny_tool_request(
+        &self,
+        request_sequence: i64,
+        result: &str,
+    ) -> anyhow::Result<()> {
         let mut tx = self.pool.begin().await?;
-        let changed = sqlx::query("UPDATE tool_requests SET resolution = 'denied' WHERE sequence = ? AND resolution = 'observed' AND NOT EXISTS(SELECT 1 FROM tool_attempts WHERE request_sequence = ?)")
-            .bind(request_sequence).bind(request_sequence).execute(&mut *tx).await?.rows_affected();
+        let changed = sqlx::query("UPDATE tool_requests SET resolution = 'denied',call_status='failed',call_result=? WHERE sequence = ? AND resolution = 'observed' AND call_status='pending' AND NOT EXISTS(SELECT 1 FROM tool_attempts WHERE request_sequence = ?)")
+            .bind(result).bind(request_sequence).bind(request_sequence).execute(&mut *tx).await?.rows_affected();
         ensure!(
             changed == 1,
             "tool request has already been dispatched or denied"
@@ -172,13 +179,9 @@ impl StateRuntime {
         operation_digest: &str,
         effective_input: &str,
     ) -> anyhow::Result<ToolAttemptClaim> {
-        ensure!(
-            effective_input.len() <= MAX_TOOL_RESULT_BYTES,
-            "effective tool input exceeds retention limit"
-        );
         let mut tx = self.pool.begin().await?;
         let inserted = sqlx::query("INSERT INTO tool_attempts(request_sequence, attempt_id, owner_id, operation_digest, effective_input, execution)
-            SELECT ?, ?, ?, ?, ?, 'running' WHERE EXISTS(SELECT 1 FROM tool_requests WHERE sequence = ? AND resolution = 'observed' AND NOT EXISTS(SELECT 1 FROM tool_sharing s WHERE s.request_sequence=tool_requests.sequence)) ON CONFLICT(request_sequence) DO NOTHING")
+            SELECT ?, ?, ?, ?, ?, 'running' WHERE EXISTS(SELECT 1 FROM tool_requests WHERE sequence = ? AND resolution = 'observed' AND call_status='pending' AND NOT EXISTS(SELECT 1 FROM tool_sharing s WHERE s.request_sequence=tool_requests.sequence)) ON CONFLICT(request_sequence) DO NOTHING")
             .bind(request_sequence).bind(attempt_id).bind(owner_id).bind(operation_digest).bind(effective_input).bind(request_sequence)
             .execute(&mut *tx).await?.rows_affected() == 1;
         let fact = load_fact(&mut tx, request_sequence).await?;
@@ -192,7 +195,7 @@ impl StateRuntime {
         Ok(outcome)
     }
 
-    /// Commit actual execution before running output hooks. Oversize bodies are not retained.
+    /// Commit every actual execution body before running output hooks.
     pub async fn complete_tool_attempt(
         &self,
         request_sequence: i64,
@@ -210,7 +213,8 @@ impl StateRuntime {
             ToolExecutionStatus::Uncertain => "uncertain",
             ToolExecutionStatus::Running => unreachable!(),
         };
-        let body = result.filter(|body| body.len() <= MAX_TOOL_RESULT_BYTES);
+        let unknown = serde_json::json!({"status":"failed","code":"execution_outcome_unknown","effects":"unknown"}).to_string();
+        let body = Some(result.unwrap_or(&unknown));
         let mut tx = self.pool.begin().await?;
         let changed = sqlx::query("UPDATE tool_attempts SET execution = ?, execution_result = ?, revision = revision + 1
             WHERE request_sequence = ? AND attempt_id = ? AND owner_id = ? AND execution = 'running'")
@@ -241,18 +245,22 @@ impl StateRuntime {
             ToolOutputDisposition::Rejected => "rejected",
             ToolOutputDisposition::Pending => unreachable!(),
         };
-        let body = result.filter(|body| body.len() <= MAX_TOOL_RESULT_BYTES);
+        let body = result.ok_or_else(|| anyhow::anyhow!("missing tool output result"))?;
         let mut tx = self.pool.begin().await?;
         let changed = sqlx::query("UPDATE tool_attempts SET disposition = ?, accepted_result = ?, rejection = ?, revision = revision + 1
             WHERE request_sequence = ? AND attempt_id = ? AND owner_id = ? AND (execution = 'completed' OR ? = 'rejected') AND execution != 'running' AND disposition = 'pending'")
-            .bind(state).bind(if disposition == ToolOutputDisposition::Accepted { body } else { None })
-            .bind(if disposition == ToolOutputDisposition::Rejected { body } else { None })
+            .bind(state).bind(if disposition == ToolOutputDisposition::Accepted { Some(body) } else { None })
+            .bind(if disposition == ToolOutputDisposition::Rejected { Some(body) } else { None })
             .bind(request_sequence).bind(attempt_id).bind(owner_id).bind(state)
             .execute(&mut *tx).await?.rows_affected();
         ensure!(
             changed == 1,
             "tool output decision conflicts with its receipt"
         );
+        let status = logical_output_status(disposition, body);
+        let changed = sqlx::query("UPDATE tool_requests SET call_status=?,call_result=? WHERE sequence=? AND call_status='pending'")
+            .bind(status).bind(body).bind(request_sequence).execute(&mut *tx).await?.rows_affected();
+        ensure!(changed == 1, "tool call is already closed");
         let fact = load_fact(&mut tx, request_sequence).await?;
         append_event(&mut tx, &fact).await?;
         tx.commit().await?;
@@ -308,8 +316,16 @@ impl StateRuntime {
     /// Result cleanup preserves execution receipts and projection history.
     pub async fn forget_tool_results(&self, request_sequence: i64) -> anyhow::Result<()> {
         let mut tx = self.pool.begin().await?;
-        sqlx::query("UPDATE tool_attempts SET execution_result = NULL, accepted_result = NULL, rejection = NULL, revision = revision + 1 WHERE request_sequence = ?")
+        sqlx::query("UPDATE tool_attempts SET effective_input='',execution_result = NULL, accepted_result = NULL, rejection = NULL, revision = revision + 1 WHERE request_sequence = ?")
             .bind(request_sequence).execute(&mut *tx).await?;
+        sqlx::query("UPDATE tool_requests SET original_input=NULL,call_result=NULL,call_status='forgotten' WHERE sequence=?")
+            .bind(request_sequence).execute(&mut *tx).await?;
+        sqlx::query(
+            "UPDATE tool_sharing SET accepted_result=NULL,rejection=NULL WHERE request_sequence=?",
+        )
+        .bind(request_sequence)
+        .execute(&mut *tx)
+        .await?;
         let fact = load_fact(&mut tx, request_sequence).await?;
         append_event(&mut tx, &fact).await?;
         tx.commit().await?;
@@ -336,6 +352,26 @@ impl StateRuntime {
     }
 }
 
+pub(super) fn logical_output_status(
+    disposition: ToolOutputDisposition,
+    body: &str,
+) -> &'static str {
+    let failed = serde_json::from_str::<serde_json::Value>(body)
+        .ok()
+        .is_some_and(|value| {
+            value.get("success").and_then(serde_json::Value::as_bool) == Some(false)
+                || value
+                    .get("response_success")
+                    .and_then(serde_json::Value::as_bool)
+                    == Some(false)
+        });
+    if disposition == ToolOutputDisposition::Accepted && !failed {
+        "succeeded"
+    } else {
+        "failed"
+    }
+}
+
 pub(super) async fn load_fact(
     connection: &mut SqliteConnection,
     sequence: i64,
@@ -345,7 +381,7 @@ pub(super) async fn load_fact(
     decode_fact(&query.build().fetch_one(connection).await?)
 }
 
-async fn append_event(
+pub(super) async fn append_event(
     connection: &mut SqliteConnection,
     fact: &ToolExecutionFact,
 ) -> anyhow::Result<()> {
@@ -403,3 +439,6 @@ mod migration_tests;
 #[cfg(test)]
 #[path = "tool_receipts_tests.rs"]
 mod receipt_tests;
+
+#[path = "tool_call_records.rs"]
+mod call_records;

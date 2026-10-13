@@ -34,7 +34,7 @@ fn maximum_diagnostic_combination_keeps_bounded_valid_wire_json_and_sse_referenc
             .unwrap();
         let mut chunk = model_failure(&open, "DEVICE_PROVIDER_SSE_EVENT_INVALID");
         chunk.error.as_mut().unwrap().message = "界".repeat(500);
-        append_network_failure(&mut chunk, original);
+        append_network_failure(&mut chunk, original).unwrap();
         let message = &chunk.error.as_ref().unwrap().message;
         assert!(message.chars().count() <= 500);
         let (_, retained_json) = message.split_once(";network=").unwrap();

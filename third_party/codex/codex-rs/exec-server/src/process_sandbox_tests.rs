@@ -323,8 +323,10 @@ async fn native_request_handles_remote_proxy_config_for_platform() {
     let mut stream = tokio::net::TcpStream::connect(proxy_addr)
         .await
         .expect("connect to executor proxy");
+    // A public IP literal exercises the allowlist denial without making the response deadline
+    // race the system resolver's separate two-second private-network check.
     stream
-        .write_all(b"CONNECT blocked.example:443 HTTP/1.1\r\nHost: blocked.example:443\r\n\r\n")
+        .write_all(b"CONNECT 8.8.8.8:443 HTTP/1.1\r\nHost: 8.8.8.8:443\r\n\r\n")
         .await
         .expect("write CONNECT request");
     let mut response = [0_u8; 256];

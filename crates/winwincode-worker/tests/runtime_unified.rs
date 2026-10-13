@@ -644,7 +644,26 @@ fn second_repair_provider_failure_stops_coordination_and_releases_terminal_lease
             .await
             .unwrap();
         let outcome = wait_for_outcome(&mut worker, &port).await;
-        assert_eq!(outcome.outcome.status, wire::ExecutionOutcomeStatus::Failed);
+        assert_eq!(
+            outcome.outcome.status,
+            wire::ExecutionOutcomeStatus::InfrastructureError
+        );
+        assert_eq!(outcome.lease, open.lease);
+        assert_eq!(outcome.session_identity, open.session_identity);
+        assert_eq!(outcome.worker_session_id, open.worker_session_id);
+        assert_eq!(outcome.outcome.error, Some(wire::ExecutionPortError {
+            code: wire::ExecutionPortErrorCode::InfrastructureError,
+            message: "embedded Codex infrastructure failed [stage=core_event; cause=CORE_RESPONSE_STREAM_DISCONNECTED]".into(),
+            retryable: true,
+        }));
+        let usage = outcome.outcome.usage.as_ref().unwrap();
+        assert_eq!(
+            usage.accounting_status,
+            wire::ExecutionOutcomeUsageAccountingStatus::Unknown
+        );
+        assert_eq!(usage.known_tokens, 30);
+        assert_eq!(usage.tokens, None);
+        assert_eq!(usage.cost_microunits, None);
         acknowledge_outcome(&mut worker, &outcome).await;
         assert_eq!(
             port.messages()

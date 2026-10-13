@@ -67,8 +67,9 @@ fn model_open(provider: &str, identity: usize) -> ModelOpenMessage {
 
 fn permit(store: &DeviceProviderStore, open: &ModelOpenMessage) -> DeviceModelPermit {
     match store.try_model_permit(open).unwrap() {
-        DeviceModelAdmission::Ready(permit) => permit,
+        DeviceModelAdmission::InvokeAttempt(permit) => permit,
         DeviceModelAdmission::Deferred => panic!("expected an available Provider slot"),
+        _ => panic!("expected physical invocation admission"),
     }
 }
 
@@ -165,15 +166,24 @@ fn replay_cancellation_and_invalid_payload_do_not_wait_for_another_provider_slot
         .map(|index| permit(&store, &model_open("provider-a", index)))
         .collect::<Vec<_>>();
     assert_full(&store, &model_open("provider-a", 4));
-    let _replay_permit = permit(&store, &retained);
+    assert!(matches!(
+        store.try_model_permit(&retained).unwrap(),
+        DeviceModelAdmission::ReplayStoredResult
+    ));
     assert_eq!(store.execute_model(&retained).unwrap(), previous);
     let cancelled = model_open("provider-a", 11);
     store.cancel_model(&cancelled.model_exchange_id.0).unwrap();
-    let _cancelled_permit = permit(&store, &cancelled);
+    assert!(matches!(
+        store.try_model_permit(&cancelled).unwrap(),
+        DeviceModelAdmission::RecoverExchange
+    ));
     assert!(store.execute_model(&cancelled).unwrap().is_empty());
     let mut invalid = model_open("provider-a", 12);
     invalid.request.data_base64 = "invalid-base64".into();
-    let _invalid_permit = permit(&store, &invalid);
+    assert!(matches!(
+        store.try_model_permit(&invalid).unwrap(),
+        DeviceModelAdmission::RejectRequest
+    ));
     assert!(store.execute_model(&invalid).unwrap()[0].error.is_some());
     drop(permits);
 }
@@ -187,7 +197,10 @@ fn an_actual_retry_requires_a_provider_slot_while_receipt_replay_does_not() {
     let mut held = (0..3)
         .map(|index| permit(&store, &model_open("provider-a", index)))
         .collect::<Vec<_>>();
-    let _replay = permit(&store, &retained);
+    assert!(matches!(
+        store.try_model_permit(&retained).unwrap(),
+        DeviceModelAdmission::ReplayStoredResult
+    ));
     assert_eq!(store.execute_model(&retained).unwrap(), previous);
     assert!(matches!(
         store.try_model_attempt_permit(&retained).unwrap(),
@@ -195,8 +208,9 @@ fn an_actual_retry_requires_a_provider_slot_while_receipt_replay_does_not() {
     ));
     drop(held.pop());
     let retry = match store.try_model_attempt_permit(&retained).unwrap() {
-        DeviceModelAdmission::Ready(acquired) => acquired,
+        DeviceModelAdmission::InvokeAttempt(acquired) => acquired,
         DeviceModelAdmission::Deferred => panic!("the released invocation slot is available"),
+        _ => panic!("expected physical invocation admission"),
     };
     assert!(matches!(
         store
@@ -208,7 +222,7 @@ fn an_actual_retry_requires_a_provider_slot_while_receipt_replay_does_not() {
     drop(retry);
     assert!(matches!(
         store.try_model_attempt_permit(&retained).unwrap(),
-        DeviceModelAdmission::Ready(_)
+        DeviceModelAdmission::InvokeAttempt(_)
     ));
 }
 
@@ -280,16 +294,11 @@ fn invocation_slot_drop_releases_a_lock_with_a_duplicated_descriptor() {
     let mut held = (0..3)
         .map(|index| permit(&store, &model_open("provider-a", index)))
         .collect::<Vec<_>>();
-    let duplicate = held
-        .last()
-        .unwrap()
-        .slot
-        .as_ref()
-        .unwrap()
-        .try_clone()
-        .unwrap();
-    let replay = permit(&store, &retained);
-    assert!(replay.slot.is_none());
+    let duplicate = held.last().unwrap().slot.try_clone().unwrap();
+    assert!(matches!(
+        store.try_model_permit(&retained).unwrap(),
+        DeviceModelAdmission::ReplayStoredResult
+    ));
     assert_eq!(store.execute_model(&retained).unwrap(), previous);
     assert!(matches!(
         store.try_model_attempt_permit(&retained).unwrap(),
@@ -297,10 +306,11 @@ fn invocation_slot_drop_releases_a_lock_with_a_duplicated_descriptor() {
     ));
     drop(held.pop());
     let retry = match store.try_model_attempt_permit(&retained).unwrap() {
-        DeviceModelAdmission::Ready(acquired) => acquired,
+        DeviceModelAdmission::InvokeAttempt(acquired) => acquired,
         DeviceModelAdmission::Deferred => {
             panic!("the invocation owner returns its slot while an alias remains open")
         }
+        _ => panic!("expected physical invocation admission"),
     };
     assert!(matches!(
         store.try_model_attempt_permit(&retained).unwrap(),
@@ -317,7 +327,7 @@ fn invocation_slot_drop_releases_a_lock_with_a_duplicated_descriptor() {
     drop(retry);
     assert!(matches!(
         store.try_model_attempt_permit(&retained).unwrap(),
-        DeviceModelAdmission::Ready(_)
+        DeviceModelAdmission::InvokeAttempt(_)
     ));
 }
 
@@ -366,14 +376,7 @@ fn invocation_slot_drop_releases_a_lock_still_inherited_by_a_live_child() {
     let mut held = (0..3)
         .map(|index| permit(&store, &model_open("provider-a", index)))
         .collect::<Vec<_>>();
-    let inherited = held
-        .last()
-        .unwrap()
-        .slot
-        .as_ref()
-        .unwrap()
-        .try_clone()
-        .unwrap();
+    let inherited = held.last().unwrap().slot.try_clone().unwrap();
     let release = directory.0.join("release-child");
     let mut child = SlotAliasChild {
         child: Command::new(std::env::current_exe().unwrap())
@@ -415,8 +418,10 @@ fn invocation_slot_drop_releases_a_lock_still_inherited_by_a_live_child() {
         .recv_timeout(std::time::Duration::from_secs(5))
         .expect("descriptor child must become ready before the handshake deadline")
         .expect("descriptor child must hold the inherited descriptor");
-    let replay = permit(&store, &retained);
-    assert!(replay.slot.is_none());
+    assert!(matches!(
+        store.try_model_permit(&retained).unwrap(),
+        DeviceModelAdmission::ReplayStoredResult
+    ));
     assert_eq!(store.execute_model(&retained).unwrap(), previous);
     assert!(matches!(
         store.try_model_attempt_permit(&retained).unwrap(),
@@ -431,7 +436,7 @@ fn invocation_slot_drop_releases_a_lock_still_inherited_by_a_live_child() {
     fs::write(&child.release, b"release").unwrap();
     assert!(child.child.wait().unwrap().success());
     child.reader.take().unwrap().join().unwrap();
-    let DeviceModelAdmission::Ready(retry) = admission else {
+    let DeviceModelAdmission::InvokeAttempt(retry) = admission else {
         panic!(
             "the invocation owner returns its slot before the inherited child descriptor closes"
         );
@@ -443,6 +448,6 @@ fn invocation_slot_drop_releases_a_lock_still_inherited_by_a_live_child() {
     drop(retry);
     assert!(matches!(
         store.try_model_attempt_permit(&retained).unwrap(),
-        DeviceModelAdmission::Ready(_)
+        DeviceModelAdmission::InvokeAttempt(_)
     ));
 }

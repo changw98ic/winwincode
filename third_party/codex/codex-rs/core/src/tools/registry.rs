@@ -586,11 +586,12 @@ impl ToolRegistry {
             }
         };
         if direct_surface_rejected {
-            facts.deny().await?;
-            return Err(FunctionCallError::RespondToModel(format!(
+            let message = format!(
                 "tool {} must be invoked through Code Mode exec",
                 invocation.tool_name
-            )));
+            );
+            facts.deny(&message).await?;
+            return Err(FunctionCallError::RespondToModel(message));
         }
         let tool_name = invocation.tool_name.clone();
         let tool_name_flat = flat_tool_name(&tool_name);
@@ -642,7 +643,7 @@ impl ToolRegistry {
                 );
                 let err = FunctionCallError::RespondToModel(message);
                 dispatch_trace.record_failed(&err);
-                facts.deny().await?;
+                facts.deny(&err.to_string()).await?;
                 return Err(err);
             }
         };
@@ -675,7 +676,7 @@ impl ToolRegistry {
             );
             let err = FunctionCallError::RespondToModel(message);
             dispatch_trace.record_failed(&err);
-            facts.deny().await?;
+            facts.deny(&err.to_string()).await?;
             return Err(err);
         }
 
@@ -702,7 +703,7 @@ impl ToolRegistry {
                         ToolCallOutcome::Blocked,
                     )
                     .await;
-                    facts.deny().await?;
+                    facts.deny(&err.to_string()).await?;
                     return Err(err);
                 }
                 PreToolUseHookResult::Continue {
@@ -725,7 +726,7 @@ impl ToolRegistry {
                             },
                         )
                         .await;
-                        facts.deny().await?;
+                        facts.deny(&err.to_string()).await?;
                         return Err(err);
                     }
                 },
@@ -747,7 +748,7 @@ impl ToolRegistry {
                 ToolCallOutcome::Blocked,
             )
             .await;
-            facts.deny().await?;
+            facts.deny(&err.to_string()).await?;
             return Err(err);
         }
 
@@ -935,6 +936,8 @@ impl ToolRegistry {
                         "failed to record optional tool diagnostic progress");
                 }
                 tool.on_tool_result_accepted(&invocation, result.result.as_ref());
+                // Publishing the handoff lets the outer cell render its receipt immediately.
+                facts.offered().await?;
                 if let Some(continuation) = &result.continuation
                     && let super::context::ToolCallSource::CodeMode { cell_id, .. } =
                         &invocation.source
@@ -955,11 +958,10 @@ impl ToolRegistry {
                     &result.payload,
                     result.result.as_ref(),
                 );
-                facts.offered().await?;
                 Ok(result)
             }
             Err(err) => {
-                facts.rejected("handler_result_unknown").await?;
+                facts.rejected(&err.to_string()).await?;
                 dispatch_trace.record_failed(&err);
                 Err(err)
             }

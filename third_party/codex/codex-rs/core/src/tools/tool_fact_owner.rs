@@ -57,15 +57,24 @@ impl ToolFactOwner {
         }
     }
 
-    pub(super) fn finish(&self, result: Result<(), String>) {
+    pub(super) fn finish(&self, result: Result<(), String>, owner_lock: Option<&std::fs::File>) {
         let mut state = self
             .state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        state.result = Some(result.and_then(|()| match &state.failure {
-            Some(error) => Err(error.clone()),
-            None => Ok(()),
-        }));
+        state.result = Some(
+            result
+                .and_then(|()| match &state.failure {
+                    Some(error) => Err(error.clone()),
+                    None => Ok(()),
+                })
+                .and_then(|()| match owner_lock {
+                    // Retained Session Arcs may outlive a successfully closed Core.
+                    // Seal, drain and the SQLite fence make releasing its lock safe.
+                    Some(lock) => lock.unlock().map_err(|error| error.to_string()),
+                    None => Ok(()),
+                }),
+        );
     }
 
     pub(super) fn result(&self) -> Result<(), String> {
@@ -104,6 +113,17 @@ impl super::ExecutionFacts {
         } else {
             Ok(())
         };
+        let calls_result = match facts.store.get().or(session.services.state_db.as_ref()) {
+            Some(store) => match facts.owner_id.get() {
+                Some(owner) => store
+                    .fail_pending_tool_calls(&session.thread_id.to_string(), Some(owner))
+                    .await
+                    .map(|_| ())
+                    .map_err(|error| error.to_string()),
+                None => Ok(()),
+            },
+            None => Ok(()),
+        };
         // sqlx may finish a queued COMMIT after its Rust future was cancelled.
         // Every fact append is transactional: this write lock fences those commits,
         // including direct-only sessions which have no cells to close.
@@ -114,9 +134,13 @@ impl super::ExecutionFacts {
                 .map_err(|error| error.to_string()),
             None => Ok(()),
         };
-        facts
-            .owner
-            .finish(runtime_result.and(cells_result).and(fence_result));
+        facts.owner.finish(
+            runtime_result
+                .and(cells_result)
+                .and(calls_result)
+                .and(fence_result),
+            facts.owner_lock.get(),
+        );
     }
 }
 impl super::ToolFactRecord {
@@ -147,9 +171,7 @@ impl super::ToolFactRecord {
 
 impl Drop for super::ToolFactRecord {
     fn drop(&mut self) {
-        if (self.shared.load(Ordering::Acquire) || self.completed.load(Ordering::Acquire))
-            && !self.settled.load(Ordering::Acquire)
-        {
+        if !self.settled.load(Ordering::Acquire) {
             self.persist_cancellation();
         }
         self.service

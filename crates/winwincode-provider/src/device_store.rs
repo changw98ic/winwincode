@@ -36,29 +36,54 @@ mod concurrency_tests;
 #[path = "device_provider_refresh_tests.rs"]
 mod refresh_tests;
 
-#[derive(Debug, Clone, Copy)]
-pub struct DeviceProviderError;
+#[cfg(test)]
+#[path = "device_jev_tls_tests.rs"]
+mod jev_tls_tests;
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub enum DeviceProviderError {
+    StateInvalid,
+    StorageUnavailable,
+    FilesystemUnavailable,
+    EncodingInvalid,
+    AuthorityEnded,
+    Cancelled,
+}
+
+impl DeviceProviderError {
+    #[must_use]
+    pub const fn code(self) -> &'static str {
+        match self {
+            Self::StateInvalid => "DEVICE_PROVIDER_STATE_INVALID",
+            Self::StorageUnavailable => "DEVICE_PROVIDER_STORAGE_UNAVAILABLE",
+            Self::FilesystemUnavailable => "DEVICE_PROVIDER_FILESYSTEM_UNAVAILABLE",
+            Self::EncodingInvalid => "DEVICE_PROVIDER_ENCODING_INVALID",
+            Self::AuthorityEnded => "LEASE_EXPIRED",
+            Self::Cancelled => "CANCELLED",
+        }
+    }
+}
 
 impl fmt::Display for DeviceProviderError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str("device Provider operation failed")
+        f.write_str(self.code())
     }
 }
 impl std::error::Error for DeviceProviderError {}
 
 impl From<rusqlite::Error> for DeviceProviderError {
     fn from(_: rusqlite::Error) -> Self {
-        Self
+        Self::StorageUnavailable
     }
 }
 impl From<std::io::Error> for DeviceProviderError {
     fn from(_: std::io::Error) -> Self {
-        Self
+        Self::FilesystemUnavailable
     }
 }
 impl From<serde_json::Error> for DeviceProviderError {
     fn from(_: serde_json::Error) -> Self {
-        Self
+        Self::EncodingInvalid
     }
 }
 
@@ -80,13 +105,15 @@ impl DeviceProviderStore {
     pub(crate) fn sse_failure_log_directory(
         &self,
     ) -> Result<std::path::PathBuf, DeviceProviderError> {
-        Ok(
-            Path::new(self.connection.path().ok_or(DeviceProviderError)?)
-                .parent()
-                .ok_or(DeviceProviderError)?
-                .join("logs")
-                .join("sse-failures"),
+        Ok(Path::new(
+            self.connection
+                .path()
+                .ok_or(DeviceProviderError::StateInvalid)?,
         )
+        .parent()
+        .ok_or(DeviceProviderError::StateInvalid)?
+        .join("logs")
+        .join("sse-failures"))
     }
 
     pub fn open(directory: &Path) -> Result<Self, DeviceProviderError> {
@@ -96,7 +123,7 @@ impl DeviceProviderStore {
             .create(directory)?;
         let meta = fs::symlink_metadata(directory)?;
         if !meta.is_dir() || meta.permissions().mode() & 0o077 != 0 {
-            return Err(DeviceProviderError);
+            return Err(DeviceProviderError::StateInvalid);
         }
         let path = fs::canonicalize(directory)?.join("providers.sqlite3");
         match fs::OpenOptions::new()
@@ -111,23 +138,32 @@ impl DeviceProviderStore {
         }
         let meta = fs::symlink_metadata(&path)?;
         if !meta.is_file() || meta.permissions().mode() & 0o077 != 0 {
-            return Err(DeviceProviderError);
+            return Err(DeviceProviderError::StateInvalid);
         }
         let mut connection = Connection::open(path)?;
         connection.busy_timeout(Duration::from_secs(5))?;
-        connection.execute_batch(
-            "PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA secure_delete=ON;",
-        )?;
+        enable_device_wal(&connection)?;
+        connection.execute_batch("PRAGMA synchronous=FULL; PRAGMA secure_delete=ON;")?;
         let version: i64 = connection.query_row("PRAGMA user_version", [], |row| row.get(0))?;
-        let key = if version == 14 {
+        let key = if version == 16 {
             load_device_key(&connection)?
-        } else {
+        } else if version == 0 {
+            // Only initialization needs the writer lock. Current-schema readers
+            // must not contend with an accounting transaction.
             let transaction =
                 connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-            migrate_device_store(&transaction)?;
+            let locked_version: i64 =
+                transaction.query_row("PRAGMA user_version", [], |row| row.get(0))?;
+            match locked_version {
+                0 => initialize_device_store(&transaction)?,
+                16 => {}
+                _ => return Err(DeviceProviderError::StateInvalid),
+            }
             let key = load_device_key(&transaction)?;
             transaction.commit()?;
             key
+        } else {
+            return Err(DeviceProviderError::StateInvalid);
         };
         Ok(Self { connection, key })
     }
@@ -148,7 +184,7 @@ impl DeviceProviderStore {
             let (config, credential_configured) = row?;
             let config = serde_json::from_str(&config)?;
             if !valid_device_provider_config(&config) {
-                return Err(DeviceProviderError);
+                return Err(DeviceProviderError::StateInvalid);
             }
             providers.push(DeviceProviderProjection {
                 config,
@@ -181,7 +217,7 @@ impl DeviceProviderStore {
             || envelope.request_id.len() < 8
             || envelope.client_node_id != device
         {
-            return Err(DeviceProviderError);
+            return Err(DeviceProviderError::StateInvalid);
         }
         let digest = format!("{:x}", Sha256::digest(serde_json::to_vec(envelope)?));
         self.connection.execute_batch("BEGIN IMMEDIATE")?;
@@ -228,7 +264,7 @@ impl DeviceProviderStore {
             .optional()?;
         if let Some((original, receipt)) = previous {
             if original != digest {
-                return Err(DeviceProviderError);
+                return Err(DeviceProviderError::StateInvalid);
             }
             return Ok((serde_json::from_str(&receipt)?, true));
         }
@@ -273,14 +309,14 @@ impl DeviceProviderStore {
             || envelope.public_key.len() > 128
             || envelope.nonce.len() > 24
         {
-            return Err(DeviceProviderError);
+            return Err(DeviceProviderError::StateInvalid);
         }
         let public = PublicKey::from_sec1_bytes(
             &STANDARD
                 .decode(&envelope.public_key)
-                .map_err(|_| DeviceProviderError)?,
+                .map_err(|_| DeviceProviderError::EncodingInvalid)?,
         )
-        .map_err(|_| DeviceProviderError)?;
+        .map_err(|_| DeviceProviderError::StateInvalid)?;
         let shared = diffie_hellman(self.key.to_nonzero_scalar(), public.as_affine());
         let aad = format!(
             "{context}\n{}\n{}\n{}",
@@ -289,14 +325,15 @@ impl DeviceProviderStore {
         let mut key = [0u8; 32];
         Hkdf::<Sha256>::new(Some(context.as_bytes()), shared.raw_secret_bytes())
             .expand(aad.as_bytes(), &mut key)
-            .map_err(|_| DeviceProviderError)?;
-        let cipher = Aes256Gcm::new_from_slice(&key).map_err(|_| DeviceProviderError)?;
+            .map_err(|_| DeviceProviderError::StateInvalid)?;
+        let cipher =
+            Aes256Gcm::new_from_slice(&key).map_err(|_| DeviceProviderError::StateInvalid)?;
         key.fill(0);
         let nonce = STANDARD
             .decode(&envelope.nonce)
-            .map_err(|_| DeviceProviderError)?;
+            .map_err(|_| DeviceProviderError::EncodingInvalid)?;
         if nonce.len() != 12 {
-            return Err(DeviceProviderError);
+            return Err(DeviceProviderError::StateInvalid);
         }
         let mut plaintext = cipher
             .decrypt(
@@ -304,13 +341,13 @@ impl DeviceProviderStore {
                 Payload {
                     msg: &STANDARD
                         .decode(&envelope.ciphertext)
-                        .map_err(|_| DeviceProviderError)?,
+                        .map_err(|_| DeviceProviderError::EncodingInvalid)?,
                     aad: aad.as_bytes(),
                 },
             )
-            .map_err(|_| DeviceProviderError)?;
+            .map_err(|_| DeviceProviderError::StateInvalid)?;
         let mutation = if context == CONTEXT && !valid_provider_structured_output_json(&plaintext) {
-            Err(DeviceProviderError)
+            Err(DeviceProviderError::StateInvalid)
         } else {
             serde_json::from_slice(&plaintext).map_err(DeviceProviderError::from)
         };
@@ -380,7 +417,7 @@ impl DeviceProviderStore {
                 return Ok(DeviceProviderOutcome::ProviderUnavailable);
             }
             ResolvedSecret::from_bytes(serde_json::to_vec(&binding)?)
-                .map_err(|_| DeviceProviderError)?
+                .map_err(|_| DeviceProviderError::StateInvalid)?
         } else if mutation.config.protocol == DeviceProviderProtocol::ChatgptPlan {
             let Ok(secret) = self.saved_secret_for_config(&mutation.config) else {
                 return Ok(DeviceProviderOutcome::InvalidRequest);
@@ -394,7 +431,7 @@ impl DeviceProviderStore {
                         && !value.chars().any(char::is_control) =>
                 {
                     ResolvedSecret::from_bytes(value.into_bytes())
-                        .map_err(|_| DeviceProviderError)?
+                        .map_err(|_| DeviceProviderError::StateInvalid)?
                 }
                 None => {
                     let Ok(secret) = self.saved_secret_for_config(&mutation.config) else {
@@ -446,12 +483,13 @@ impl DeviceProviderStore {
             [&config.provider_id],
             |row| Ok((row.get(0)?, row.get(1)?)),
         )?;
-        let secret = ResolvedSecret::from_bytes(bytes).map_err(|_| DeviceProviderError)?;
+        let secret =
+            ResolvedSecret::from_bytes(bytes).map_err(|_| DeviceProviderError::StateInvalid)?;
         let stored_config: DeviceProviderConfig = serde_json::from_str(&stored_config)?;
         if !valid_device_provider_config(&stored_config)
             || stored_config.protocol != config.protocol
         {
-            return Err(DeviceProviderError);
+            return Err(DeviceProviderError::StateInvalid);
         }
         if config.protocol == DeviceProviderProtocol::ChatgptPlan {
             let _: crate::chatgpt_oauth::Credentials = serde_json::from_slice(secret.expose())?;
@@ -466,7 +504,7 @@ impl DeviceProviderStore {
         let (secret, codex_account) =
             if mutation.config.protocol == DeviceProviderProtocol::CodexChatgpt {
                 if mutation.api_key.is_some() {
-                    return Err(DeviceProviderError);
+                    return Err(DeviceProviderError::StateInvalid);
                 }
                 let (secret, account) = self
                     .codex_binding(&mutation.config.provider_id)?
@@ -474,11 +512,11 @@ impl DeviceProviderStore {
                 (secret, Some(account))
             } else if mutation.config.protocol == DeviceProviderProtocol::ChatgptPlan {
                 if mutation.api_key.is_some() {
-                    return Err(DeviceProviderError);
+                    return Err(DeviceProviderError::StateInvalid);
                 }
                 let (config, secret, _) = self.resolve_connection(&mutation.config.provider_id)?;
                 if config.protocol != DeviceProviderProtocol::ChatgptPlan {
-                    return Err(DeviceProviderError);
+                    return Err(DeviceProviderError::StateInvalid);
                 }
                 (secret, None)
             } else {
@@ -490,16 +528,16 @@ impl DeviceProviderStore {
                                 && !key.chars().any(char::is_control) =>
                         {
                             ResolvedSecret::from_bytes(key.into_bytes())
-                                .map_err(|_| DeviceProviderError)?
+                                .map_err(|_| DeviceProviderError::StateInvalid)?
                         }
                         None => {
                             let (config, secret) = self.resolve(&mutation.config.provider_id)?;
                             if config.protocol != mutation.config.protocol {
-                                return Err(DeviceProviderError);
+                                return Err(DeviceProviderError::StateInvalid);
                             }
                             secret
                         }
-                        _ => return Err(DeviceProviderError),
+                        _ => return Err(DeviceProviderError::StateInvalid),
                     },
                     None,
                 )
@@ -519,14 +557,14 @@ impl DeviceProviderStore {
         use winwincode_api::generated::ModelRoute;
         use winwincode_domain::{CredentialReferenceId, ModelExchangeId, RequestId};
         if !valid_device_provider_config(&mutation.config) {
-            return Err(DeviceProviderError);
+            return Err(DeviceProviderError::StateInvalid);
         }
         let (secret, codex_account) = self.test_credentials(&mut mutation)?;
         let model = mutation
             .config
             .model_ids
             .first()
-            .ok_or(DeviceProviderError)?
+            .ok_or(DeviceProviderError::StateInvalid)?
             .clone();
         let id = format!(
             "0{}",
@@ -542,14 +580,18 @@ impl DeviceProviderStore {
             Some(headers) => headers,
             None => self.custom_headers(&mutation.config.provider_id)?,
         };
-        let database = Path::new(self.connection.path().ok_or(DeviceProviderError)?);
+        let database = Path::new(
+            self.connection
+                .path()
+                .ok_or(DeviceProviderError::StateInvalid)?,
+        );
         let journal = winwincode_network::journal::RequestJournal::open(
             &database
                 .parent()
-                .ok_or(DeviceProviderError)?
+                .ok_or(DeviceProviderError::StateInvalid)?
                 .join("provider-probe-network.sqlite3"),
         )
-        .map_err(|_| DeviceProviderError)?;
+        .map_err(|_| DeviceProviderError::StateInvalid)?;
         let adapter = adapter(&mutation.config, headers, codex_account)?
             .with_journal(journal)
             .with_sse_failure_log(self.sse_failure_log_directory()?);
@@ -581,20 +623,20 @@ impl DeviceProviderStore {
                 &receipt,
                 &|| true,
                 || match self.try_provider_model_permit(&mutation.config.provider_id) {
-                    Ok(crate::DeviceModelAdmission::Ready(permit)) => Ok(permit),
+                    Ok(crate::DeviceModelAdmission::InvokeAttempt(permit)) => Ok(permit),
                     Ok(crate::DeviceModelAdmission::Deferred) => {
                         Err(crate::ProviderAdapterError::rate_limited())
                     }
-                    Err(_) => Err(crate::ProviderAdapterError::unavailable()),
+                    Ok(_) | Err(_) => Err(crate::ProviderAdapterError::unavailable()),
                 },
             )
-            .map_err(|_| DeviceProviderError)?;
+            .map_err(|_| DeviceProviderError::StateInvalid)?;
         drop(secret);
         let result = adapter.drain_canonical(&receipt);
         let _ = adapter.control(&exchange, &adapter_id, ProviderStreamControlAction::Release);
-        let completion = result.map_err(|_| DeviceProviderError)?;
+        let completion = result.map_err(|_| DeviceProviderError::StateInvalid)?;
         if completion.terminal.outcome() != crate::ProviderGatewayTerminalOutcome::Succeeded {
-            return Err(DeviceProviderError);
+            return Err(DeviceProviderError::StateInvalid);
         }
         Ok(())
     }
@@ -637,7 +679,7 @@ impl DeviceProviderStore {
         let mut secret = secret;
         let config: DeviceProviderConfig = serde_json::from_str(&config)?;
         if !valid_device_provider_config(&config) {
-            return Err(DeviceProviderError);
+            return Err(DeviceProviderError::StateInvalid);
         }
         if config.protocol == DeviceProviderProtocol::CodexChatgpt {
             let binding = serde_json::from_slice::<crate::codex_login::CodexLoginBinding>(&secret);
@@ -648,7 +690,8 @@ impl DeviceProviderStore {
             secret.fill(0);
             self.resolve_chatgpt_connection(provider_id, crate::chatgpt_oauth::Credentials::refresh)
         } else {
-            let secret = ResolvedSecret::from_bytes(secret).map_err(|_| DeviceProviderError)?;
+            let secret = ResolvedSecret::from_bytes(secret)
+                .map_err(|_| DeviceProviderError::StateInvalid)?;
             Ok((config, secret, None))
         }
     }
@@ -660,10 +703,14 @@ impl DeviceProviderStore {
     ) -> Result<(DeviceProviderConfig, ResolvedSecret, Option<String>), DeviceProviderError> {
         use crate::device_model_concurrency::{private_directory, private_slot_file};
         use sha2::{Digest as _, Sha256};
-        let database = Path::new(self.connection.path().ok_or(DeviceProviderError)?);
+        let database = Path::new(
+            self.connection
+                .path()
+                .ok_or(DeviceProviderError::StateInvalid)?,
+        );
         let locks = database
             .parent()
-            .ok_or(DeviceProviderError)?
+            .ok_or(DeviceProviderError::StateInvalid)?
             .join("provider-credential-locks");
         private_directory(&locks)?;
         let owner = private_slot_file(
@@ -680,7 +727,7 @@ impl DeviceProviderStore {
             if !valid_device_provider_config(&config)
                 || config.protocol != DeviceProviderProtocol::ChatgptPlan
             {
-                return Err(DeviceProviderError);
+                return Err(DeviceProviderError::StateInvalid);
             }
             let mut record: crate::chatgpt_oauth::Credentials = serde_json::from_slice(&previous)?;
             if record.needs_refresh()? {
@@ -694,14 +741,14 @@ impl DeviceProviderStore {
                     [provider_id],
                     |row| Ok((row.get(0)?, row.get(1)?)),
                 )?;
-                let latest_secret =
-                    ResolvedSecret::from_bytes(latest_secret).map_err(|_| DeviceProviderError)?;
+                let latest_secret = ResolvedSecret::from_bytes(latest_secret)
+                    .map_err(|_| DeviceProviderError::StateInvalid)?;
                 let latest_config: DeviceProviderConfig = serde_json::from_str(&latest_config)?;
                 if latest_secret.expose() != previous
                     || !valid_device_provider_config(&latest_config)
                     || latest_config.protocol != DeviceProviderProtocol::ChatgptPlan
                 {
-                    return Err(DeviceProviderError);
+                    return Err(DeviceProviderError::StateInvalid);
                 }
                 let mut bytes = serde_json::to_vec(&record)?;
                 let saved = transaction.execute(
@@ -710,7 +757,7 @@ impl DeviceProviderStore {
                 );
                 bytes.fill(0);
                 if saved? != 1 {
-                    return Err(DeviceProviderError);
+                    return Err(DeviceProviderError::StateInvalid);
                 }
                 transaction.commit()?;
                 config = latest_config;
@@ -756,9 +803,9 @@ impl DeviceProviderStore {
         )?;
         let config: DeviceProviderConfig = serde_json::from_str(&config)?;
         let result = if config.protocol == DeviceProviderProtocol::ChatgptPlan {
-            serde_json::from_slice(&bytes).map_err(|_| DeviceProviderError)
+            serde_json::from_slice(&bytes).map_err(DeviceProviderError::from)
         } else {
-            Err(DeviceProviderError)
+            Err(DeviceProviderError::StateInvalid)
         };
         bytes.fill(0);
         result
@@ -787,7 +834,7 @@ impl DeviceProviderStore {
             _ => None,
         };
         let public = self.key.public_key().to_encoded_point(false);
-        let thumbprint = serde_json::json!({"crv":"P-256", "kty":"EC", "x":base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(public.x().ok_or(DeviceProviderError)?), "y":base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(public.y().ok_or(DeviceProviderError)?)});
+        let thumbprint = serde_json::json!({"crv":"P-256", "kty":"EC", "x":base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(public.x().ok_or(DeviceProviderError::StateInvalid)?), "y":base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(public.y().ok_or(DeviceProviderError::StateInvalid)?)});
         let host = format!(
             "urn:ietf:params:oauth:jwk-thumbprint:sha-256:{}",
             base64::engine::general_purpose::URL_SAFE_NO_PAD
@@ -811,7 +858,7 @@ impl DeviceProviderStore {
                 receipt.outcome = DeviceProviderOutcome::RevisionConflict;
             } else if let Ok((record, models)) = result {
                 if models.is_empty() {
-                    return Err(DeviceProviderError);
+                    return Err(DeviceProviderError::StateInvalid);
                 }
                 let count: i64 = self.connection.query_row(
                     "SELECT count(*) FROM providers WHERE provider_id != ?1",
@@ -865,10 +912,27 @@ impl DeviceProviderStore {
     }
 }
 
+fn enable_device_wal(connection: &Connection) -> Result<(), DeviceProviderError> {
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        match connection.execute_batch("PRAGMA journal_mode=WAL;") {
+            // Concurrent first opens can contend during SQLite's journal-mode
+            // lock upgrade even when the connection has a busy timeout.
+            Err(rusqlite::Error::SqliteFailure(error, _))
+                if error.code == rusqlite::ErrorCode::DatabaseBusy
+                    && std::time::Instant::now() < deadline =>
+            {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            result => return result.map_err(Into::into),
+        }
+    }
+}
+
 fn new_secret_key() -> Result<SecretKey, DeviceProviderError> {
     loop {
         let mut bytes = [0u8; 32];
-        getrandom::fill(&mut bytes).map_err(|_| DeviceProviderError)?;
+        getrandom::fill(&mut bytes).map_err(|_| DeviceProviderError::StateInvalid)?;
         let key = SecretKey::from_slice(&bytes);
         bytes.fill(0);
         if let Ok(key) = key {
@@ -920,6 +984,27 @@ pub fn valid_device_provider_config(config: &DeviceProviderConfig) -> bool {
             || config.endpoint == crate::chatgpt_oauth::ENDPOINT)
 }
 
+pub(crate) fn device_provider_tls_roots() -> Result<crate::ProviderTlsRoots, DeviceProviderError> {
+    let roots = match std::env::var_os(DEVICE_PROVIDER_TLS_ROOT_DER_ENVIRONMENT) {
+        Some(path) => crate::ProviderTlsRoots::Specific(vec![fs::read(path)?]),
+        None => crate::ProviderTlsRoots::WebPki,
+    };
+    roots
+        .validate()
+        .map_err(|_| DeviceProviderError::StateInvalid)?;
+    Ok(roots)
+}
+
+pub(crate) fn device_jev_transport(
+    config: &crate::OpenJevRemoteConfig,
+) -> Result<crate::HttpsJevRemoteTransport, DeviceProviderError> {
+    crate::HttpsJevRemoteTransport::try_new_system_one_with_tls_roots(
+        config,
+        &device_provider_tls_roots()?,
+    )
+    .map_err(|_| DeviceProviderError::StateInvalid)
+}
+
 pub(crate) fn adapter(
     config: &DeviceProviderConfig,
     headers: BTreeMap<String, String>,
@@ -940,46 +1025,49 @@ pub(crate) fn adapter(
             events: 65536,
         },
     )
-    .map_err(|_| DeviceProviderError)?;
+    .map_err(|_| DeviceProviderError::StateInvalid)?;
     transport = transport.without_deadlines();
     if let Some(proxy_url) = std::env::var_os(DEVICE_PROVIDER_HTTPS_PROXY_ENVIRONMENT) {
         transport = transport
-            .with_http_connect_proxy(&proxy_url.into_string().map_err(|_| DeviceProviderError)?)
-            .map_err(|_| DeviceProviderError)?;
+            .with_http_connect_proxy(
+                &proxy_url
+                    .into_string()
+                    .map_err(|_| DeviceProviderError::StateInvalid)?,
+            )
+            .map_err(|_| DeviceProviderError::StateInvalid)?;
     }
-    if let Some(path) = std::env::var_os(DEVICE_PROVIDER_TLS_ROOT_DER_ENVIRONMENT) {
+    if let crate::ProviderTlsRoots::Specific(roots) = device_provider_tls_roots()? {
         transport = transport
-            .with_specific_tls_roots(vec![fs::read(path)?])
-            .map_err(|_| DeviceProviderError)?;
+            .with_specific_tls_roots(roots)
+            .map_err(|_| DeviceProviderError::StateInvalid)?;
     }
     transport = transport
         .with_custom_headers(headers)
-        .map_err(|_| DeviceProviderError)?;
-    transport = match config.protocol {
-        DeviceProviderProtocol::AnthropicMessages => {
-            transport.with_anthropic_messages(MAX_OUTPUT_TOKENS, ProviderTokenPricing::default())
+        .map_err(|_| DeviceProviderError::StateInvalid)?;
+    transport =
+        match config.protocol {
+            DeviceProviderProtocol::AnthropicMessages => transport
+                .with_anthropic_messages(MAX_OUTPUT_TOKENS, ProviderTokenPricing::default()),
+            DeviceProviderProtocol::OpenaiChatCompletions => transport
+                .with_openai_chat_completions(MAX_OUTPUT_TOKENS, ProviderTokenPricing::default()),
+            DeviceProviderProtocol::OpenaiResponses => match config.responses_structured_output {
+                Some(DeviceResponsesStructuredOutput::JsonObject) => {
+                    transport.with_openai_responses_json_object(MAX_OUTPUT_TOKENS)
+                }
+                Some(DeviceResponsesStructuredOutput::Text) => {
+                    transport.with_openai_responses_text(MAX_OUTPUT_TOKENS)
+                }
+                None | Some(DeviceResponsesStructuredOutput::JsonSchema) => {
+                    transport.with_openai_responses(MAX_OUTPUT_TOKENS)
+                }
+            },
+            DeviceProviderProtocol::CodexChatgpt => transport
+                .with_codex_chatgpt(codex_account.ok_or(DeviceProviderError::StateInvalid)?),
+            DeviceProviderProtocol::ChatgptPlan => transport.with_chatgpt_plan(),
+            DeviceProviderProtocol::Canonical => Ok(transport),
         }
-        DeviceProviderProtocol::OpenaiChatCompletions => transport
-            .with_openai_chat_completions(MAX_OUTPUT_TOKENS, ProviderTokenPricing::default()),
-        DeviceProviderProtocol::OpenaiResponses => match config.responses_structured_output {
-            Some(DeviceResponsesStructuredOutput::JsonObject) => {
-                transport.with_openai_responses_json_object(MAX_OUTPUT_TOKENS)
-            }
-            Some(DeviceResponsesStructuredOutput::Text) => {
-                transport.with_openai_responses_text(MAX_OUTPUT_TOKENS)
-            }
-            None | Some(DeviceResponsesStructuredOutput::JsonSchema) => {
-                transport.with_openai_responses(MAX_OUTPUT_TOKENS)
-            }
-        },
-        DeviceProviderProtocol::CodexChatgpt => {
-            transport.with_codex_chatgpt(codex_account.ok_or(DeviceProviderError)?)
-        }
-        DeviceProviderProtocol::ChatgptPlan => transport.with_chatgpt_plan(),
-        DeviceProviderProtocol::Canonical => Ok(transport),
-    }
-    .map_err(|_| DeviceProviderError)?;
-    HttpsSseProviderAdapter::try_new(transport).map_err(|_| DeviceProviderError)
+        .map_err(|_| DeviceProviderError::StateInvalid)?;
+    HttpsSseProviderAdapter::try_new(transport).map_err(|_| DeviceProviderError::StateInvalid)
 }
 
 fn load_device_key(connection: &Connection) -> Result<SecretKey, DeviceProviderError> {
@@ -988,130 +1076,71 @@ fn load_device_key(connection: &Connection) -> Result<SecretKey, DeviceProviderE
         [],
         |row| row.get(0),
     )?;
-    let key = SecretKey::from_slice(&bytes).map_err(|_| DeviceProviderError);
+    let key = SecretKey::from_slice(&bytes).map_err(|_| DeviceProviderError::StateInvalid);
     bytes.fill(0);
     key
 }
 
-fn migrate_device_store(
+fn initialize_device_store(
     transaction: &rusqlite::Transaction<'_>,
 ) -> Result<(), DeviceProviderError> {
-    let version: i64 = transaction.query_row("PRAGMA user_version", [], |row| row.get(0))?;
-    if version == 0 {
-        transaction.execute_batch(
-                "CREATE TABLE identity (singleton INTEGER PRIMARY KEY CHECK(singleton=1), private_key BLOB NOT NULL, revision INTEGER NOT NULL CHECK(revision>=0));
-                 CREATE TABLE providers (provider_id TEXT PRIMARY KEY, config TEXT NOT NULL, secret BLOB NOT NULL);
-                 CREATE TABLE receipts (request_id TEXT PRIMARY KEY, digest TEXT NOT NULL, receipt TEXT NOT NULL);
-                 CREATE TABLE exchanges (exchange_id TEXT PRIMARY KEY, digest TEXT NOT NULL, chunks TEXT, cancelled INTEGER NOT NULL DEFAULT 0);
-                 PRAGMA user_version=1;"
-            )?;
-        let key = new_secret_key()?;
-        transaction.execute(
-            "INSERT INTO identity VALUES (1, ?1, 0)",
-            [key.to_bytes().as_slice()],
-        )?;
-    } else if ![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14].contains(&version) {
-        return Err(DeviceProviderError);
-    }
-    if version < 2 {
-        transaction.execute_batch(
-                "CREATE TABLE extension_state (singleton INTEGER PRIMARY KEY CHECK(singleton=1), revision INTEGER NOT NULL CHECK(revision>=0));
-                 INSERT INTO extension_state VALUES (1, 0);
-                 CREATE TABLE extensions (kind TEXT NOT NULL, id TEXT NOT NULL, data TEXT NOT NULL, projection TEXT NOT NULL, PRIMARY KEY(kind,id));
-                 CREATE TABLE extension_receipts (request_id TEXT PRIMARY KEY, digest TEXT NOT NULL, receipt TEXT NOT NULL);
-                 PRAGMA user_version=2;",
-            )?;
-    }
-    if version < 3 {
-        transaction.execute_batch(
-            "CREATE TABLE provider_headers (provider_id TEXT PRIMARY KEY, headers TEXT NOT NULL);
-                 PRAGMA user_version=3;",
-        )?;
-    }
-    if version < 4 {
-        transaction.execute_batch(
-                "CREATE TABLE jev_context_exchanges (operation_id TEXT PRIMARY KEY, digest TEXT NOT NULL, result TEXT);
-                 PRAGMA user_version=4;",
-            )?;
-    }
-    if version < 5 {
-        transaction.execute_batch(
-            "CREATE TABLE jev_settings (provider_id TEXT PRIMARY KEY, settings TEXT NOT NULL);
-                 PRAGMA user_version=5;",
-        )?;
-    }
-    if version < 6 {
-        transaction.execute_batch(
-            "ALTER TABLE exchanges ADD COLUMN request_open TEXT;
-                 ALTER TABLE exchanges ADD COLUMN prepared_payload BLOB;
-                 PRAGMA user_version=6;",
-        )?;
-    }
-    if version < 7 {
-        transaction.execute_batch(
-            "ALTER TABLE jev_context_exchanges ADD COLUMN request_json TEXT;
-                 PRAGMA user_version=7;",
-        )?;
-    }
-    if version < 8 {
-        transaction.execute_batch(
-                "CREATE TABLE jev_judge_exchanges (operation_id TEXT PRIMARY KEY, request_json TEXT NOT NULL, result TEXT);
-                 PRAGMA user_version=8;",
-            )?;
-    }
-    if version < 9 {
-        transaction.execute_batch("ALTER TABLE exchanges ADD COLUMN accounting_chunks TEXT;
-            CREATE TABLE accounting_closed_attempts (job_id TEXT NOT NULL,attempt INTEGER NOT NULL,lease_id TEXT NOT NULL,PRIMARY KEY(job_id,attempt));
-            PRAGMA user_version=9;")?;
-    }
-    if version < 13 {
-        transaction.execute_batch(
-            "CREATE TABLE IF NOT EXISTS model_invocation_attempts (
+    transaction.execute_batch(
+        "CREATE TABLE identity (singleton INTEGER PRIMARY KEY CHECK(singleton=1), private_key BLOB NOT NULL, revision INTEGER NOT NULL CHECK(revision>=0));
+         CREATE TABLE providers (provider_id TEXT PRIMARY KEY, config TEXT NOT NULL, secret BLOB NOT NULL);
+         CREATE TABLE receipts (request_id TEXT PRIMARY KEY, digest TEXT NOT NULL, receipt TEXT NOT NULL);
+         CREATE TABLE exchanges (
+            exchange_id TEXT PRIMARY KEY, digest TEXT NOT NULL, chunks TEXT,
+            cancelled INTEGER NOT NULL DEFAULT 0, request_open TEXT, prepared_payload BLOB,
+            prepared_payload_digest TEXT, accounting_chunks TEXT,
+            call_status TEXT GENERATED ALWAYS AS (CASE WHEN request_open IS NULL THEN NULL WHEN chunks IS NULL THEN 'pending' WHEN NOT json_valid(chunks) THEN 'failed' WHEN json_extract(chunks,'$[#-1].error.message')='DEVICE_MODEL_CANCELLED' THEN 'cancelled' WHEN json_extract(chunks,'$[#-1].error') IS NOT NULL THEN 'failed' ELSE 'succeeded' END) VIRTUAL);
+         CREATE TABLE extension_state (singleton INTEGER PRIMARY KEY CHECK(singleton=1), revision INTEGER NOT NULL CHECK(revision>=0));
+         INSERT INTO extension_state VALUES (1, 0);
+         CREATE TABLE extensions (kind TEXT NOT NULL, id TEXT NOT NULL, data TEXT NOT NULL, projection TEXT NOT NULL, PRIMARY KEY(kind,id));
+         CREATE TABLE extension_receipts (request_id TEXT PRIMARY KEY, digest TEXT NOT NULL, receipt TEXT NOT NULL);
+         CREATE TABLE provider_headers (provider_id TEXT PRIMARY KEY, headers TEXT NOT NULL);
+         CREATE TABLE jev_context_exchanges (operation_id TEXT PRIMARY KEY, digest TEXT NOT NULL, request_json TEXT NOT NULL, result TEXT,
+            call_status TEXT NOT NULL DEFAULT 'pending' CHECK(call_status IN ('pending','succeeded','failed','cancelled')),
+            CHECK((call_status='pending' AND result IS NULL) OR (call_status!='pending' AND result IS NOT NULL)));
+         CREATE TABLE jev_settings (provider_id TEXT PRIMARY KEY, settings TEXT NOT NULL);
+         CREATE TABLE jev_judge_exchanges (operation_id TEXT PRIMARY KEY, request_json TEXT NOT NULL, result TEXT,
+            call_status TEXT NOT NULL DEFAULT 'pending' CHECK(call_status IN ('pending','succeeded','failed','cancelled')),
+            CHECK((call_status='pending' AND result IS NULL) OR (call_status!='pending' AND result IS NOT NULL)));
+         CREATE TABLE accounting_closed_attempts (job_id TEXT NOT NULL,attempt INTEGER NOT NULL,lease_id TEXT NOT NULL,PRIMARY KEY(job_id,attempt));
+         CREATE TABLE model_invocation_attempts (
             exchange_id TEXT NOT NULL, attempt_number INTEGER NOT NULL CHECK(attempt_number>0),
             adapter_request_id TEXT NOT NULL UNIQUE, state TEXT NOT NULL,
-            failure_chunks TEXT, accounting_chunks TEXT, response_bytes BLOB,
-            PRIMARY KEY(exchange_id,attempt_number));
-            PRAGMA user_version=10;",
-        )?;
-    }
-    if version < 13 {
-        transaction.execute_batch(
-            "CREATE TABLE IF NOT EXISTS model_attempt_diagnostics (
+            request_json TEXT NOT NULL, request_payload BLOB NOT NULL,
+            failure_chunks TEXT, accounting_chunks TEXT, response_bytes BLOB, response_bytes_received INTEGER,
+            call_status TEXT GENERATED ALWAYS AS (CASE WHEN state IN ('prepared','invoking') THEN 'pending' WHEN state='completed' THEN 'succeeded' WHEN json_valid(failure_chunks) AND json_extract(failure_chunks,'$[#-1].error.message')='DEVICE_MODEL_CANCELLED' THEN 'cancelled' ELSE 'failed' END) VIRTUAL,
+            PRIMARY KEY(exchange_id,attempt_number),
+            CHECK(state IN ('prepared','invoking') OR failure_chunks IS NOT NULL OR accounting_chunks IS NOT NULL));
+         CREATE TABLE model_attempt_diagnostics (
             exchange_id TEXT NOT NULL REFERENCES exchanges(exchange_id),
-            sequence INTEGER NOT NULL CHECK(sequence>0),
-            policy_attempt INTEGER NOT NULL CHECK(policy_attempt BETWEEN 1 AND 4),
+            sequence INTEGER NOT NULL CHECK(sequence>0), policy_attempt INTEGER NOT NULL CHECK(policy_attempt BETWEEN 1 AND 4),
             started_ms INTEGER NOT NULL, finished_ms INTEGER,
             outcome TEXT NOT NULL CHECK(outcome IN ('in_flight','accepted','failed')),
-            failure_json TEXT, stop_reason TEXT,
-            PRIMARY KEY(exchange_id,sequence));
-        CREATE TABLE IF NOT EXISTS jev_attempt_diagnostics (
+            failure_json TEXT, stop_reason TEXT, PRIMARY KEY(exchange_id,sequence));
+         CREATE TABLE jev_attempt_diagnostics (
             operation_id TEXT NOT NULL, sequence INTEGER NOT NULL CHECK(sequence>0),
-            role TEXT NOT NULL CHECK(role IN ('context','judge')),
-            recorded_ms INTEGER NOT NULL, failure_json TEXT NOT NULL,
-            PRIMARY KEY(operation_id,sequence)); PRAGMA user_version=13;",
-        )?;
-    }
-    migrate_device_response_state(transaction, version)?;
-    Ok(())
-}
-
-fn migrate_device_response_state(
-    transaction: &rusqlite::Transaction<'_>,
-    version: i64,
-) -> Result<(), DeviceProviderError> {
-    if version < 14 {
-        let response_count: bool = transaction.query_row("SELECT EXISTS(SELECT 1 FROM pragma_table_info('model_invocation_attempts') WHERE name='response_bytes_received')",[],|row|row.get(0))?;
-        if !response_count {
-            transaction.execute_batch(
-                "ALTER TABLE model_invocation_attempts ADD COLUMN response_bytes_received INTEGER;",
-            )?;
-        }
-        crate::model_response_store::migrate_model_response_index(transaction)?;
-        transaction.execute_batch("CREATE TABLE IF NOT EXISTS model_retry_state (exchange_id TEXT PRIMARY KEY REFERENCES exchanges(exchange_id),
+            role TEXT NOT NULL CHECK(role IN ('context','judge')), recorded_ms INTEGER NOT NULL, failure_json TEXT NOT NULL,
+            PRIMARY KEY(operation_id,sequence));
+         CREATE TABLE model_retry_state (exchange_id TEXT PRIMARY KEY REFERENCES exchanges(exchange_id),
             policy_attempt INTEGER NOT NULL CHECK(policy_attempt BETWEEN 1 AND 4),
+            connection_attempt INTEGER NOT NULL DEFAULT 0 CHECK(connection_attempt>=0),
             wake_ms INTEGER NOT NULL, decision TEXT NOT NULL CHECK(decision IN ('retry_after','deferred_until')));
-            PRAGMA user_version=14;")?;
-    }
+         CREATE TABLE jev_invocation_attempts (
+            operation_id TEXT NOT NULL, sequence INTEGER NOT NULL, request_json TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','succeeded','failed','cancelled')),
+            result_json TEXT, PRIMARY KEY(operation_id,sequence),
+            CHECK((status='pending' AND result_json IS NULL) OR (status!='pending' AND result_json IS NOT NULL)));
+         PRAGMA user_version=16;",
+    )?;
+    let key = new_secret_key()?;
+    transaction.execute(
+        "INSERT INTO identity VALUES (1, ?1, 0)",
+        [key.to_bytes().as_slice()],
+    )?;
+    crate::model_response_store::create_model_response_index(transaction)?;
     Ok(())
 }
 
@@ -1486,7 +1515,7 @@ mod codex_tests {
                     custom_headers: None,
                 },
                 &mut receipt,
-                Err(DeviceProviderError),
+                Err(DeviceProviderError::StateInvalid),
             )
             .unwrap();
         assert_eq!(receipt.outcome, DeviceProviderOutcome::ProviderUnavailable);
@@ -1504,7 +1533,7 @@ mod codex_tests {
                     custom_headers: None,
                 },
                 &mut receipt,
-                Err(DeviceProviderError),
+                Err(DeviceProviderError::StateInvalid),
             )
             .unwrap();
         assert_eq!(receipt.outcome, DeviceProviderOutcome::RevisionConflict);
@@ -1590,5 +1619,26 @@ mod codex_tests {
                 "chatgpt-saved-connection-probe",
             )
             .expect("saved authorization must complete one native Provider inference");
+    }
+}
+
+#[cfg(test)]
+mod error_cause_tests {
+    use super::DeviceProviderError;
+    #[test]
+    fn durable_failures_preserve_safe_source_categories() {
+        let database: DeviceProviderError = rusqlite::Error::InvalidQuery.into();
+        let filesystem: DeviceProviderError = std::io::Error::other("private/path/secret").into();
+        let encoding: DeviceProviderError =
+            serde_json::from_str::<serde_json::Value>("private secret")
+                .unwrap_err()
+                .into();
+        assert_eq!(database, DeviceProviderError::StorageUnavailable);
+        assert_eq!(filesystem, DeviceProviderError::FilesystemUnavailable);
+        assert_eq!(encoding, DeviceProviderError::EncodingInvalid);
+        for error in [database, filesystem, encoding] {
+            assert!(!error.to_string().contains("private"));
+            assert!(!error.to_string().contains("secret"));
+        }
     }
 }

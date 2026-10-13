@@ -752,6 +752,7 @@ fn independent_processes_reclaim_once_and_recover_after_lock_holder_dies() {
                 "temporary_root_process_probe",
                 "--ignored",
                 "--nocapture",
+                "--quiet",
             ])
             .env("WWC_TEST_LIFECYCLE_PARENT", &directory.0)
             .env("WWC_TEST_LIFECYCLE_GATE", &gate)
@@ -787,6 +788,7 @@ fn independent_processes_reclaim_once_and_recover_after_lock_holder_dies() {
             "temporary_root_process_probe",
             "--ignored",
             "--nocapture",
+            "--quiet",
         ])
         .env("WWC_TEST_LIFECYCLE_PARENT", &directory.0)
         .env("WWC_TEST_LIFECYCLE_HOLD", "1")

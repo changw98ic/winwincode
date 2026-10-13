@@ -944,6 +944,132 @@ impl<'storage> ExecutionAdmission<'storage> {
         })
     }
 
+    /// Reads the original terminal accounting fact, before later reconciliation facts.
+    /// Rejects invalid identifiers, a foreign terminal identity, corrupt usage, or storage failure.
+    pub fn load_retained_terminal_usage(
+        &self,
+        job_id: &ExecutionJobId,
+        terminal_request_id: &RequestId,
+    ) -> Result<
+        Option<winwincode_execution_port::generated::ExecutionOutcomeUsage>,
+        ExecutionAdmissionError,
+    > {
+        validate_id(&job_id.0, "job_", "jobId")?;
+        validate_id(&terminal_request_id.0, "req_", "terminalRequestId")?;
+        let retained: Option<(String, String)> = self
+            .storage
+            .connection()
+            .map_err(storage_error)?
+            .query_row(
+                "SELECT terminal_request_id,terminal_usage_json FROM execution_admission_reconciliation WHERE job_id=?1",
+                [&job_id.0],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()
+            .map_err(sql_error)?;
+        let Some((identity, value)) = retained else {
+            return Ok(None);
+        };
+        if identity != terminal_request_id.0 {
+            return Err(ExecutionAdmissionError::invalid(
+                "foreign terminal identity",
+            ));
+        }
+        let usage = serde_json::from_str(&value)
+            .map_err(|_| ExecutionAdmissionError::invalid("corrupt terminal accounting"))?;
+        if !winwincode_execution_port::usage::valid_usage(&usage) {
+            return Err(ExecutionAdmissionError::invalid(
+                "inconsistent terminal accounting",
+            ));
+        }
+        Ok(Some(usage))
+    }
+
+    /// Retains a terminal usage fact after cancellation already released its reservation.
+    /// The original release receipt and reservation remain unchanged. The new request
+    /// identifies the terminal fact for subsequent accounting reconciliation.
+    /// Rejects changed replays, foreign/stale cancellation authority, inconsistent usage,
+    /// unresolved predecessor totals, an existing terminal fact, or storage failure.
+    pub fn retain_released_terminal_usage(
+        &mut self,
+        request: &ExecutionReservationRelease,
+        usage: &winwincode_execution_port::generated::ExecutionOutcomeUsage,
+    ) -> Result<ExecutionAdmissionReceipt, ExecutionAdmissionError> {
+        validate_release(request)?;
+        if request.reason != ExecutionReservationReleaseReason::Cancelled
+            || !winwincode_execution_port::usage::valid_usage(usage)
+        {
+            return Err(ExecutionAdmissionError::invalid(
+                "released terminal accounting is inconsistent",
+            ));
+        }
+        let scope_key = reservation_scope_key(&request.scope, &request.worker_pool_id)?;
+        let request_digest = digest(&("released-terminal-usage", request, usage))?;
+        let transaction = self
+            .storage
+            .connection_mut()
+            .map_err(storage_error)?
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(sql_error)?;
+        if let Some(receipt) = replay_receipt(
+            &transaction,
+            &scope_key,
+            &request.request_id,
+            &request_digest,
+        )? {
+            transaction.commit().map_err(sql_error)?;
+            return Ok(receipt);
+        }
+        let current = load_scoped_reservation(
+            &transaction,
+            &request.scope,
+            &request.worker_pool_id,
+            &request.job_id,
+        )?
+        .ok_or_else(|| ExecutionAdmissionError::invalid("execution reservation does not exist"))?;
+        validate_revision_state_time(
+            &current,
+            request.expected_revision,
+            ExecutionReservationState::Released,
+            &request.released_at,
+        )?;
+        if current.release_reason != Some(ExecutionReservationReleaseReason::Cancelled) {
+            return Err(ExecutionAdmissionError::invalid(
+                "released terminal accounting has no cancellation authority",
+            ));
+        }
+        validate_reconciliation_predecessors(&transaction, &request.job_id, usage)?;
+        let exists: bool = transaction
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM execution_admission_reconciliation WHERE job_id=?1)",
+                [&request.job_id.0],
+                |row| row.get(0),
+            )
+            .map_err(sql_error)?;
+        if exists {
+            return Err(ExecutionAdmissionError::invalid(
+                "released execution already has a terminal accounting identity",
+            ));
+        }
+        let value = serde_json::to_string(usage)
+            .map_err(|_| ExecutionAdmissionError::invalid("terminal accounting encoding failed"))?;
+        transaction.execute(
+            "INSERT INTO execution_admission_reconciliation (job_id,terminal_request_id,terminal_usage_json,accounting_status) VALUES (?1,?2,?3,'pending')",
+            params![request.job_id.0,request.request_id.0,value],
+        ).map_err(sql_error)?;
+        let receipt = finish_mutation(
+            &transaction,
+            &scope_key,
+            &request.scope,
+            &request.worker_pool_id,
+            &request.job_id,
+            &request.request_id,
+            &request_digest,
+        )?;
+        transaction.commit().map_err(sql_error)?;
+        Ok(receipt)
+    }
+
     pub fn settle_reconciliation(
         &mut self,
         job_id: &ExecutionJobId,
@@ -952,6 +1078,62 @@ impl<'storage> ExecutionAdmission<'storage> {
         usage: &winwincode_execution_port::generated::ExecutionOutcomeUsage,
         observed_at: &Instant,
     ) -> Result<bool, ExecutionAdmissionError> {
+        self.settle_reconciliation_with_authority(
+            job_id,
+            terminal_request_id,
+            settlement_request_id,
+            usage,
+            observed_at,
+            false,
+        )
+    }
+
+    pub(crate) fn settle_verified_provider_reconciliation(
+        &mut self,
+        terminal_request_id: &RequestId,
+        settlement_request_id: &RequestId,
+        usage: &winwincode_execution_port::generated::ExecutionOutcomeUsage,
+        observed_at: &Instant,
+        verified: &winwincode_execution_port::accounting::VerifiedAccountingStatement,
+    ) -> Result<bool, ExecutionAdmissionError> {
+        let statement = verified.statement();
+        let digest = format!(
+            "sha256:{:x}",
+            Sha256::digest(
+                statement
+                    .encode()
+                    .map_err(ExecutionAdmissionError::invalid)?
+            )
+        );
+        let imported:bool=self.storage.connection().map_err(storage_error)?.query_row("SELECT EXISTS(SELECT 1 FROM execution_attempt_accounting_facts WHERE statement_digest=?1 AND job_id=?2 AND attempt=?3)",params![digest,statement.lease.job_id.0,statement.lease.attempt],|row|row.get(0)).map_err(sql_error)?;
+        if !imported {
+            return Err(ExecutionAdmissionError::invalid(
+                "Provider authority was not imported",
+            ));
+        }
+        self.settle_reconciliation_with_authority(
+            &statement.lease.job_id,
+            terminal_request_id,
+            settlement_request_id,
+            usage,
+            observed_at,
+            true,
+        )
+    }
+
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "the private boundary keeps exact terminal identity separate from imported financial authority"
+    )]
+    fn settle_reconciliation_with_authority(
+        &mut self,
+        job_id: &ExecutionJobId,
+        terminal_request_id: &RequestId,
+        settlement_request_id: &RequestId,
+        usage: &winwincode_execution_port::generated::ExecutionOutcomeUsage,
+        observed_at: &Instant,
+        provider_authority: bool,
+    ) -> Result<bool, ExecutionAdmissionError> {
         validate_id(&job_id.0, "job_", "jobId")?;
         validate_id(&terminal_request_id.0, "req_", "terminalRequestId")?;
         validate_id(&settlement_request_id.0, "req_", "settlementRequestId")?;
@@ -959,24 +1141,6 @@ impl<'storage> ExecutionAdmission<'storage> {
         if !winwincode_execution_port::usage::valid_usage(usage) {
             return Err(ExecutionAdmissionError::invalid(
                 "settlement usage is inconsistent",
-            ));
-        }
-        let unresolved: bool = self
-            .storage
-            .connection()
-            .map_err(storage_error)?
-            .query_row(
-                "SELECT EXISTS(SELECT 1 FROM execution_attempt_accounting_pending p LEFT JOIN execution_attempt_accounting_totals t ON t.job_id=p.job_id AND t.attempt=p.attempt WHERE p.job_id=?1 AND t.cost IS NULL)",
-                [&job_id.0],
-                |r| r.get(0),
-            )
-            .map_err(sql_error)?;
-        let missing_tokens: bool = self.storage.connection().map_err(storage_error)?.query_row("SELECT EXISTS(SELECT 1 FROM execution_attempt_accounting_pending p LEFT JOIN execution_attempt_accounting_totals t ON t.job_id=p.job_id AND t.attempt=p.attempt WHERE p.job_id=?1 AND t.tokens IS NULL)",[&job_id.0],|row|row.get(0)).map_err(sql_error)?;
-        if (missing_tokens && usage.tokens.is_some())
-            || (unresolved && usage.cost_microunits.is_some())
-        {
-            return Err(ExecutionAdmissionError::invalid(
-                "predecessor attempt accounting remains unresolved",
             ));
         }
         let value = serde_json::to_string(usage)
@@ -1002,6 +1166,9 @@ impl<'storage> ExecutionAdmission<'storage> {
             }
             return Ok(false);
         }
+        // Serialize the physical completeness check with its new financial fact.
+        // Exact receipts remain replayable after later Provider facts arrive.
+        validate_reconciliation_predecessors(&tx, job_id, usage)?;
         let row:(String,String)=tx.query_row(
             "SELECT terminal_request_id,COALESCE((SELECT usage_json FROM execution_admission_reconciliation_facts f WHERE f.job_id=r.job_id ORDER BY sequence DESC LIMIT 1),terminal_usage_json) FROM execution_admission_reconciliation r WHERE job_id=?1",
             [&job_id.0], |r| Ok((r.get(0)?,r.get(1)?))).map_err(sql_error)?;
@@ -1011,12 +1178,20 @@ impl<'storage> ExecutionAdmission<'storage> {
         if row.0 != terminal_request_id.0
             || usage.known_tokens < original.known_tokens
             || usage.runtime_millis != original.runtime_millis
-            || original
-                .tokens
-                .is_some_and(|tokens| usage.tokens != Some(tokens))
-            || original
-                .cost_microunits
-                .is_some_and(|cost| usage.cost_microunits != Some(cost))
+            || original.tokens.is_some_and(|tokens| {
+                if provider_authority {
+                    usage.tokens.is_some_and(|amount| amount < tokens)
+                } else {
+                    usage.tokens != Some(tokens)
+                }
+            })
+            || original.cost_microunits.is_some_and(|cost| {
+                if provider_authority {
+                    usage.cost_microunits.is_some_and(|amount| amount < cost)
+                } else {
+                    usage.cost_microunits != Some(cost)
+                }
+            })
         {
             return Err(ExecutionAdmissionError::invalid(
                 "settlement changed known accounting or authority",
@@ -1175,25 +1350,10 @@ impl<'storage> ExecutionAdmission<'storage> {
         &self,
         job_id: &ExecutionJobId,
     ) -> Result<Option<ExecutionReservationRecord>, ExecutionAdmissionError> {
-        validate_id(&job_id.0, "job_", "jobId")?;
-        let stored = self
-            .storage
-            .connection()
-            .map_err(storage_error)?
-            .query_row(
-                "SELECT job_id, organization_id, workspace_id, project_id, repository_id,
-                        delivery_id, product_session_id, user_id, worker_pool_id, access_kind,
-                        worktree_key, state, reserved_tokens, reserved_cost_microunits,
-                        runtime_limit_millis, actual_tokens, actual_cost_microunits,
-                        actual_runtime_millis, revision, submitted_at, updated_at,
-                        started_at, terminal_at, release_reason
-                 FROM execution_admission_reservations WHERE job_id = ?1",
-                [&job_id.0],
-                stored_reservation_row,
-            )
-            .optional()
-            .map_err(sql_error)?;
-        stored.map(complete_reservation).transpose()
+        load_reservation_by_job_in_transaction(
+            self.storage.connection().map_err(storage_error)?,
+            job_id,
+        )
     }
 
     pub fn load_settlement_source(
@@ -1716,6 +1876,31 @@ fn transition_reservation(
     Ok(())
 }
 
+fn validate_reconciliation_predecessors(
+    connection: &Connection,
+    job_id: &ExecutionJobId,
+    usage: &winwincode_execution_port::generated::ExecutionOutcomeUsage,
+) -> Result<(), ExecutionAdmissionError> {
+    let (missing_tokens, missing_cost): (bool, bool) = connection
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM execution_attempt_accounting_pending p LEFT JOIN execution_attempt_accounting_totals t ON t.job_id=p.job_id AND t.attempt=p.attempt WHERE p.job_id=?1 AND t.tokens IS NULL)
+                       OR EXISTS(SELECT 1 FROM execution_attempt_accounting_totals t WHERE t.job_id=?1 AND t.tokens IS NULL),
+                    EXISTS(SELECT 1 FROM execution_attempt_accounting_pending p LEFT JOIN execution_attempt_accounting_totals t ON t.job_id=p.job_id AND t.attempt=p.attempt WHERE p.job_id=?1 AND t.cost IS NULL)
+                       OR EXISTS(SELECT 1 FROM execution_attempt_accounting_totals t WHERE t.job_id=?1 AND t.cost IS NULL)",
+            [&job_id.0],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .map_err(sql_error)?;
+    if (missing_tokens && usage.tokens.is_some())
+        || (missing_cost && usage.cost_microunits.is_some())
+    {
+        return Err(ExecutionAdmissionError::invalid(
+            "physical invocation accounting remains unresolved",
+        ));
+    }
+    Ok(())
+}
+
 fn finish_mutation(
     connection: &Connection,
     scope_key: &str,
@@ -2155,6 +2340,28 @@ fn stored_reservation_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<StoredRes
         terminal_at: row.get(22)?,
         release_reason: row.get(23)?,
     })
+}
+
+pub(crate) fn load_reservation_by_job_in_transaction(
+    connection: &Connection,
+    job_id: &ExecutionJobId,
+) -> Result<Option<ExecutionReservationRecord>, ExecutionAdmissionError> {
+    validate_id(&job_id.0, "job_", "jobId")?;
+    let stored = connection
+        .query_row(
+            "SELECT job_id, organization_id, workspace_id, project_id, repository_id,
+                    delivery_id, product_session_id, user_id, worker_pool_id, access_kind,
+                    worktree_key, state, reserved_tokens, reserved_cost_microunits,
+                    runtime_limit_millis, actual_tokens, actual_cost_microunits,
+                    actual_runtime_millis, revision, submitted_at, updated_at,
+                    started_at, terminal_at, release_reason
+             FROM execution_admission_reservations WHERE job_id = ?1",
+            [&job_id.0],
+            stored_reservation_row,
+        )
+        .optional()
+        .map_err(sql_error)?;
+    stored.map(complete_reservation).transpose()
 }
 
 fn load_scoped_reservation(

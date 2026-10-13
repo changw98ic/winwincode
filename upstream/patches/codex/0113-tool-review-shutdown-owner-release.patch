@@ -1,0 +1,125 @@
+diff --git a/codex-rs/core/src/tools/result_recovery_tests.rs b/codex-rs/core/src/tools/result_recovery_tests.rs
+index 828783b9..109bc7be 100644
+--- a/codex-rs/core/src/tools/result_recovery_tests.rs
++++ b/codex-rs/core/src/tools/result_recovery_tests.rs
+@@ -7,6 +7,7 @@ use crate::ToolCallGateRequest;
+ use crate::session::step_context::StepContext;
+ use crate::tools::context::FunctionToolOutput;
+ use crate::tools::context::ToolCallSource;
++use crate::tools::execution_facts::ExecutionFacts;
+ use crate::tools::registry::ToolExecutor;
+ use crate::tools::registry::ToolRegistry;
+ use codex_tools::ResponsesApiTool;
+@@ -218,6 +219,11 @@ async fn restarted_core_recovers_accepted_receipt_under_current_read_authority()
+         .await
+         .unwrap()
+         .into_response();
++    // Keep the old session allocated, as residency callers may retain its Arc.
++    let old_session = Arc::clone(&first.session);
++    ExecutionFacts::seal(&old_session);
++    ExecutionFacts::finish_shutdown(&old_session, Ok(())).await;
++    ExecutionFacts::shutdown_result(&old_session).unwrap();
+     let (mut session, _) = crate::session::tests::make_session_and_context().await;
+     session.thread_id = first.session.thread_id;
+     let gate = Arc::new(ReadGate {
+@@ -468,3 +474,38 @@ async fn optional_diagnostic_rollback_keeps_registry_output_and_replay_without_d
+     assert_eq!(offered[0].diagnostic.evidence_version, boundary);
+     pool.close().await;
+ }
++
++#[tokio::test]
++async fn failed_core_shutdown_keeps_exclusive_ownership_and_rejects_replacement() {
++    let (first, _, tool) = setup().await;
++    let registry = ToolRegistry::with_handler_for_test(tool.clone());
++    registry
++        .dispatch_any_with_terminal_outcome(first.clone(), None)
++        .await
++        .unwrap();
++    let old_session = Arc::clone(&first.session);
++    ExecutionFacts::seal(&old_session);
++    ExecutionFacts::finish_shutdown(&old_session, Err("runtime drain failed".into())).await;
++    assert!(
++        ExecutionFacts::shutdown_result(&old_session)
++            .unwrap_err()
++            .to_string()
++            .contains("runtime drain failed")
++    );
++    let (mut session, _) = crate::session::tests::make_session_and_context().await;
++    session.thread_id = first.session.thread_id;
++    let error = registry
++        .dispatch_any_with_terminal_outcome(
++            ToolInvocation {
++                session: Arc::new(session),
++                ..first
++            },
++            None,
++        )
++        .await
++        .err()
++        .unwrap()
++        .to_string();
++    assert!(error.contains("execution_owner_unverified"));
++    assert_eq!(tool.effects.load(Ordering::SeqCst), 1);
++}
+diff --git a/codex-rs/core/src/tools/tool_fact_owner.rs b/codex-rs/core/src/tools/tool_fact_owner.rs
+index 3ca008fb..c2b93599 100644
+--- a/codex-rs/core/src/tools/tool_fact_owner.rs
++++ b/codex-rs/core/src/tools/tool_fact_owner.rs
+@@ -57,15 +57,24 @@ impl ToolFactOwner {
+         }
+     }
+ 
+-    pub(super) fn finish(&self, result: Result<(), String>) {
++    pub(super) fn finish(&self, result: Result<(), String>, owner_lock: Option<&std::fs::File>) {
+         let mut state = self
+             .state
+             .lock()
+             .unwrap_or_else(std::sync::PoisonError::into_inner);
+-        state.result = Some(result.and_then(|()| match &state.failure {
+-            Some(error) => Err(error.clone()),
+-            None => Ok(()),
+-        }));
++        state.result = Some(
++            result
++                .and_then(|()| match &state.failure {
++                    Some(error) => Err(error.clone()),
++                    None => Ok(()),
++                })
++                .and_then(|()| match owner_lock {
++                    // Retained Session Arcs may outlive a successfully closed Core.
++                    // Seal, drain and the SQLite fence make releasing its lock safe.
++                    Some(lock) => lock.unlock().map_err(|error| error.to_string()),
++                    None => Ok(()),
++                }),
++        );
+     }
+ 
+     pub(super) fn result(&self) -> Result<(), String> {
+@@ -130,6 +139,7 @@ impl super::ExecutionFacts {
+                 .and(cells_result)
+                 .and(calls_result)
+                 .and(fence_result),
++            facts.owner_lock.get(),
+         );
+     }
+ }
+diff --git a/codex-rs/core/tests/suite/agent_execution.rs b/codex-rs/core/tests/suite/agent_execution.rs
+index 6a8978fc..6689fd88 100644
+--- a/codex-rs/core/tests/suite/agent_execution.rs
++++ b/codex-rs/core/tests/suite/agent_execution.rs
+@@ -386,11 +386,10 @@ async fn v2_residency_reload_preserves_inherited_environment_and_tools() -> Resu
+         })
+         .expect("reloaded worker request");
+     let output = request.custom_tool_call_output("catalog-followup-call");
+-    let tools: Vec<String> = serde_json::from_str(
+-        output["output"][1]["text"]
+-            .as_str()
+-            .expect("nested catalog"),
+-    )?;
++    let tools: Vec<String> =
++        serde_json::from_str(output["output"][1]["text"].as_str().unwrap_or_else(|| {
++            panic!("nested catalog missing from real worker output: {output}")
++        }))?;
+     assert!(tools.iter().any(|name| name == "exec_command"));
+     assert!(tools.iter().any(|name| name == "write_stdin"));
+ 

@@ -22,6 +22,10 @@ pub struct ProviderAccountingReceipt {
     pub provider_receipt_id: String,
     pub source_digest: Sha256Digest,
     pub tokens: Option<u64>,
+    /// Measured lower bound when some physical invocation charges are unknown.
+    /// Omitting zero preserves the unsigned bytes of existing signed receipts.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub known_tokens: u64,
     pub cost_microunits: Option<u64>,
 }
 
@@ -124,6 +128,10 @@ impl AttemptAccountingStatement {
                 || receipt
                     .tokens
                     .is_some_and(|value| value > 9_007_199_254_740_991)
+                || receipt.known_tokens > 9_007_199_254_740_991
+                || receipt
+                    .tokens
+                    .is_some_and(|tokens| tokens < receipt.known_tokens)
                 || receipt
                     .cost_microunits
                     .is_some_and(|value| value > 9_007_199_254_740_991)
@@ -133,6 +141,14 @@ impl AttemptAccountingStatement {
         }
         Ok(())
     }
+}
+
+#[allow(
+    clippy::trivially_copy_pass_by_ref,
+    reason = "serde skip_serializing_if predicates receive a borrowed field"
+)]
+const fn is_zero(value: &u64) -> bool {
+    *value == 0
 }
 
 fn token(value: &str, bound: usize) -> bool {
@@ -147,6 +163,72 @@ fn digest(value: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn old_signed_receipts_verify_unchanged_and_new_lower_bounds_are_signed() {
+        #[derive(Serialize)]
+        #[serde(rename_all = "camelCase")]
+        struct LegacyReceipt {
+            slot: String,
+            model_exchange_id: ModelExchangeId,
+            provider_id: String,
+            provider_receipt_id: String,
+            source_digest: Sha256Digest,
+            tokens: Option<u64>,
+            cost_microunits: Option<u64>,
+        }
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../tests/fixtures/contracts/execution-port.valid.json"
+        ))
+        .unwrap();
+        let lease: ExecutionLeaseStamp = serde_json::from_value(
+            fixture["messages"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find_map(|message| message.get("lease"))
+                .unwrap()
+                .clone(),
+        )
+        .unwrap();
+        let manifest = vec!["primary:mdl_00000000000000000000000001".to_owned()];
+        let old = vec![LegacyReceipt {
+            slot: manifest[0].clone(),
+            model_exchange_id: ModelExchangeId("mdl_00000000000000000000000001".to_owned()),
+            provider_id: "provider".to_owned(),
+            provider_receipt_id: "old-provider-receipt".to_owned(),
+            source_digest: Sha256Digest(format!("sha256:{}", "b".repeat(64))),
+            tokens: None,
+            cost_microunits: None,
+        }];
+        let original_bytes = serde_json::to_vec(&(&lease, &manifest, &old)).unwrap();
+        let key = ActionEnforcementSigningKey::from_bytes([7; 32]).unwrap();
+        let signature = key.accounting_signature(&original_bytes);
+        let mut statement = AttemptAccountingStatement {
+            lease,
+            manifest,
+            receipts: serde_json::from_value(serde_json::to_value(old).unwrap()).unwrap(),
+            signature,
+        };
+        assert_eq!(statement.receipts[0].known_tokens, 0);
+        assert_eq!(statement.unsigned_bytes().unwrap(), original_bytes);
+        statement.verify(&key).unwrap();
+        statement.receipts[0].known_tokens = 5;
+        assert!(
+            statement.verify(&key).is_err(),
+            "a lower bound is financial authority covered by the signature"
+        );
+        statement.sign(&key).unwrap();
+        statement.verify(&key).unwrap();
+        statement.receipts[0].tokens = Some(4);
+        assert!(
+            statement.sign(&key).is_err(),
+            "a complete amount cannot be smaller than its measured lower bound"
+        );
+        statement.receipts[0].tokens = None;
+        statement.receipts[0].known_tokens = 9_007_199_254_740_992;
+        assert!(statement.sign(&key).is_err());
+    }
+
     #[test]
     fn signatures_bind_every_fact_and_reject_another_key() {
         let fixture: serde_json::Value = serde_json::from_str(include_str!(

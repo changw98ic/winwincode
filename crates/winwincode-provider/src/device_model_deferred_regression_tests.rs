@@ -179,7 +179,7 @@ fn exercise_deferred(crash_resume: bool) {
         .unwrap()
         .with_specific_tls_roots(vec![certificate.to_vec()])
         .unwrap();
-        HttpsSseProviderAdapter::try_new(config).map_err(|_| DeviceProviderError)
+        HttpsSseProviderAdapter::try_new(config).map_err(|_| DeviceProviderError::StateInvalid)
     };
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         store.execute_model_using(
@@ -215,7 +215,7 @@ fn exercise_deferred(crash_resume: bool) {
         let store = DeviceProviderStore::open(&root).unwrap();
         assert_eq!(
             store.model_retry_state(&open).unwrap(),
-            Some((next_attempt, wake_ms))
+            Some((next_attempt, wake_ms, 0))
         );
         store
             .connection
@@ -333,5 +333,100 @@ fn exercise_deferred(crash_resume: bool) {
         .unwrap();
     assert_eq!(replay, chunks);
     drop(store);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn review_not_sent_backoff_survives_deferred_store_reopen() {
+    let root = std::env::temp_dir().join(format!(
+        "wwc-refused-reopen-{}-{}",
+        std::process::id(),
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let endpoint = format!(
+        "https://127.0.0.1:{}/v1/responses",
+        listener.local_addr().unwrap().port()
+    );
+    drop(listener);
+    let store = DeviceProviderStore::open(&root).unwrap();
+    let fixture: serde_json::Value = serde_json::from_str(include_str!(
+        "../../../tests/fixtures/contracts/execution-port.valid.json"
+    ))
+    .unwrap();
+    let mut open: ModelOpenMessage = serde_json::from_value(
+        fixture["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|message| message["kind"] == "model.open")
+            .unwrap()
+            .clone(),
+    )
+    .unwrap();
+    let payload = serde_json::to_vec(&serde_json::json!({"provider":"refused-fixture",
+        "request":{"model":"fixture-model","stream":true,"input":"refused connection"}}))
+    .unwrap();
+    open.request.content_type = "application/json".into();
+    open.request.data_base64 = STANDARD.encode(&payload);
+    open.request.payload_digest.0 = format!("sha256:{:x}", Sha256::digest(&payload));
+    let provider = serde_json::json!({"providerId":"refused-fixture","displayName":"fixture",
+        "endpoint":endpoint,"protocol":"canonical","modelIds":["fixture-model"],"enabled":true});
+    store
+        .connection
+        .execute(
+            "INSERT INTO providers VALUES(?1,?2,?3)",
+            params![
+                "refused-fixture",
+                provider.to_string(),
+                b"synthetic-refused-credential".as_slice()
+            ],
+        )
+        .unwrap();
+    let mut initial = Some(store);
+    for (index, expected_delay) in [5000_i64, 10000].into_iter().enumerate() {
+        let store = initial
+            .take()
+            .unwrap_or_else(|| DeviceProviderStore::open(&root).unwrap());
+        let can_start = || true;
+        let outcome = store
+            .execute_model_recovering_step_authorized(
+                &open,
+                can_start,
+                || store.wait_model_attempt_permit(&open, &can_start),
+                || {},
+            )
+            .unwrap();
+        let DeviceModelStepOutcome::DeferredRetry { wake_millis } = outcome else {
+            panic!("a real refused TCP connection must yield a durable retry");
+        };
+        let (policy_attempt, finished): (i64, i64) = store.connection.query_row(
+            "SELECT policy_attempt,finished_ms FROM model_attempt_diagnostics WHERE exchange_id=?1
+             ORDER BY sequence DESC LIMIT 1", [&open.model_exchange_id.0],
+            |row| Ok((row.get(0)?,row.get(1)?))).unwrap();
+        assert_eq!(
+            policy_attempt, 1,
+            "NotSent never consumes a paid policy attempt"
+        );
+        let delay = i64::try_from(wake_millis).unwrap() - finished;
+        assert!(
+            (expected_delay..expected_delay + 1000).contains(&delay),
+            "observed delay={delay}"
+        );
+        let physical: Vec<(i64, String)> = store.connection.prepare(
+            "SELECT attempt_number,state FROM model_invocation_attempts ORDER BY attempt_number")
+            .unwrap().query_map([], |row| Ok((row.get(0)?,row.get(1)?))).unwrap()
+            .collect::<Result<_, _>>().unwrap();
+        assert_eq!(
+            physical,
+            (1..=i64::try_from(index + 1).unwrap())
+                .map(|attempt| (attempt, "not_sent".into()))
+                .collect::<Vec<_>>()
+        );
+        drop(store);
+    }
     std::fs::remove_dir_all(root).unwrap();
 }

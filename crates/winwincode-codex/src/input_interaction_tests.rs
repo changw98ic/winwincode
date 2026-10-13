@@ -165,6 +165,363 @@ async fn closed_input_prompt_rejects_unknown_typed_worker_value_before_durable_a
     std::fs::remove_dir_all(root).unwrap();
 }
 
+fn closed_prompt_answer(
+    prompt: &winwincode_execution_port::generated::InputRequestMessage,
+    index: usize,
+) -> InputResponseMessage {
+    let responded_at = Instant("2026-08-28T00:01:00.000Z".into());
+    InputResponseMessage {
+        input_request_id: prompt.input_request_id.clone(),
+        kind: winwincode_execution_port::generated::InputResponseMessageKind::InputResponse,
+        lease: prompt.lease.clone(),
+        message_id: winwincode_domain::ExecutionMessageId(format!("xmsg_{:026}", 100 + index)),
+        responded_at: responded_at.clone(),
+        schema_version: prompt.schema_version.clone(),
+        sent_at: responded_at,
+        session_identity: prompt.session_identity.clone(),
+        status: winwincode_execution_port::generated::InputResponseMessageStatus::Provided,
+        value: Some(winwincode_domain::InteractiveInputValue {
+            mode: prompt.mode.clone(),
+            value: prompt.choices.as_ref().unwrap()[0].value.clone(),
+        }),
+        worker_session_id: prompt.worker_session_id.clone(),
+    }
+}
+
+fn renewed_deadline_fixture(
+    root: &std::path::Path,
+) -> (
+    ProductionCodexAdapter,
+    String,
+    Vec<winwincode_execution_port::generated::InputRequestMessage>,
+) {
+    let mut adapter = ProductionCodexAdapter::open(diagnostic_adapter_config(root)).unwrap();
+    let (key, _) = retain_closed_input_prompt_fixture(&mut adapter, root);
+    let thread = adapter.runs[&key].binding.canonical_thread_id.clone();
+    let prior = adapter.runs[&key].binding.authority.lease.clone();
+    let mut renewed = prior.clone();
+    renewed.expires_at = Instant("2026-08-28T00:30:00.000Z".into());
+    let sent_at = Instant("2026-08-28T00:02:00.000Z".into());
+    let renewal = winwincode_execution_port::generated::LeaseRenewMessage {
+        kind: winwincode_execution_port::generated::LeaseRenewMessageKind::LeaseRenew,
+        lease: renewed,
+        prior_expires_at: prior.expires_at,
+        message_id: winwincode_domain::ExecutionMessageId("xmsg_00000000000000000000000001".into()),
+        request_id: winwincode_domain::RequestId("req_00000000000000000000000001".into()),
+        schema_version: winwincode_domain::SchemaVersion::WinwincodeV1,
+        sent_at: sent_at.clone(),
+    };
+    assert!(adapter.renew_lease(&thread, &renewal, &sent_at).unwrap());
+    let prompts = adapter
+        .outbox
+        .pending()
+        .unwrap()
+        .into_iter()
+        .filter_map(|delivery| match delivery.message {
+            ExecutionPortMessage::InputRequestMessage(prompt) => Some(prompt),
+            _ => None,
+        })
+        .collect();
+    (adapter, key, prompts)
+}
+
+#[tokio::test]
+async fn original_deadline_timeout_reaches_core_submission_after_live_lease_renewal() {
+    let root =
+        std::env::temp_dir().join(format!("wwc-input-timeout-submit-{}", uuid::Uuid::new_v4()));
+    let (mut adapter, key, prompts) = renewed_deadline_fixture(&root);
+    let now = Instant("2026-08-28T00:16:00.000Z".into());
+    assert!(adapter.runs[&key].binding.authority.lease.expires_at.0 > now.0);
+    assert!(prompts.iter().all(|prompt| prompt.expires_at.0 < now.0));
+    let operation = adapter
+        .store
+        .load_input_operation(&prompts[0].input_request_id.0)
+        .unwrap()
+        .unwrap();
+    // This fixture has no registered Core session. Reaching the real Kernel
+    // submission must fail, rather than falsely marking an expired call applied.
+    let error = adapter
+        .settle_interaction_deadlines(&key, &now)
+        .await
+        .unwrap_err();
+    assert_eq!(error, kernel_error());
+    let call: InputCallIntent = adapter
+        .store
+        .load_input_call(&key, &operation.request_digest)
+        .unwrap()
+        .unwrap();
+    assert_eq!(call.expires_at, prompts[0].expires_at);
+    assert_eq!(call.answers.len(), prompts.len());
+    assert!(call.applied_incarnation_id.is_none());
+    let timeouts = &adapter.runs[&key].record.interaction_timeouts;
+    assert_eq!(timeouts.len(), prompts.len());
+    for prompt in &prompts {
+        let timeout = timeouts.iter().find(|timeout| matches!(&timeout.request,
+            ExecutionPortMessage::InputRequestMessage(request) if request.input_request_id == prompt.input_request_id)).unwrap();
+        let resolution = private_payload_digest(
+            b"winwincode.interaction-deadline-expired.v1",
+            &timeout.request,
+        )
+        .unwrap();
+        let answer = &call.answers[&prompt.input_request_id.0];
+        assert_eq!(answer.resolution_digest, resolution);
+        assert!(answer.values.is_empty());
+        assert_eq!(
+            adapter
+                .store
+                .load_input_operation(&prompt.input_request_id.0)
+                .unwrap()
+                .unwrap()
+                .state,
+            StoredInputOperationState::Resolved
+        );
+    }
+    drop(adapter);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[tokio::test]
+async fn original_deadline_timeout_keeps_lease_fence_and_exact_waiter_guards() {
+    for boundary in ["fenced", "closed", "different_waiter", "expired_lease"] {
+        let root =
+            std::env::temp_dir().join(format!("wwc-input-timeout-guard-{}", uuid::Uuid::new_v4()));
+        let (mut adapter, key, prompts) = renewed_deadline_fixture(&root);
+        let now = Instant(
+            if boundary == "expired_lease" {
+                "2026-08-28T00:30:00.000Z"
+            } else {
+                "2026-08-28T00:16:00.000Z"
+            }
+            .into(),
+        );
+        let run = adapter.runs.get_mut(&key).unwrap();
+        match boundary {
+            "fenced" => run.record.operation_fenced_at = Some(now.clone()),
+            "closed" => run.kernel_live = false,
+            "different_waiter" => run.input_waiter_incarnation = uuid::Uuid::new_v4().to_string(),
+            "expired_lease" => {}
+            _ => unreachable!(),
+        }
+        adapter
+            .settle_interaction_deadlines(&key, &now)
+            .await
+            .unwrap();
+        let operation = adapter
+            .store
+            .load_input_operation(&prompts[0].input_request_id.0)
+            .unwrap()
+            .unwrap();
+        let call: InputCallIntent = adapter
+            .store
+            .load_input_call(&key, &operation.request_digest)
+            .unwrap()
+            .unwrap();
+        assert!(
+            call.applied_incarnation_id.is_none(),
+            "{boundary} cannot submit to any Core waiter"
+        );
+        assert_eq!(call.expires_at, prompts[0].expires_at);
+        assert_eq!(call.answers.len(), prompts.len());
+        assert!(call.answers.values().all(|answer| answer.values.is_empty()));
+        drop(adapter);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+}
+
+#[tokio::test]
+#[allow(
+    clippy::too_many_lines,
+    reason = "one original input answer verifies three closed authority boundaries and foreign answer denial"
+)]
+async fn accepted_input_replay_after_fence_close_or_reopen_only_cleans_transport() {
+    for state in ["fenced", "removed", "reopened"] {
+        let root =
+            std::env::temp_dir().join(format!("wwc-input-historical-{}", uuid::Uuid::new_v4()));
+        let mut adapter = ProductionCodexAdapter::open(diagnostic_adapter_config(&root)).unwrap();
+        let (key, first) = retain_closed_input_prompt_fixture(&mut adapter, &root);
+        let second = adapter
+            .outbox
+            .pending()
+            .unwrap()
+            .into_iter()
+            .find_map(|delivery| match delivery.message {
+                ExecutionPortMessage::InputRequestMessage(prompt)
+                    if prompt.input_request_id != first.input_request_id =>
+                {
+                    Some(prompt)
+                }
+                _ => None,
+            })
+            .unwrap();
+        let response = closed_prompt_answer(&first, 0);
+        adapter
+            .accept_input_response_exact(&response, &response.responded_at)
+            .await
+            .unwrap();
+        let message = ExecutionPortMessage::InputResponseMessage(response.clone());
+        adapter.outbox.acknowledge_response(&message).unwrap();
+        let operation = adapter
+            .store
+            .load_input_operation(&first.input_request_id.0)
+            .unwrap()
+            .unwrap();
+        let before: InputCallIntent = adapter
+            .store
+            .load_input_call(&key, &operation.request_digest)
+            .unwrap()
+            .unwrap();
+        let received_at = Instant("2026-08-28T00:16:00.000Z".into());
+        match state {
+            "fenced" => {
+                let thread = adapter.runs[&key].binding.canonical_thread_id.clone();
+                adapter.fence_thread(&thread, &received_at).unwrap();
+            }
+            "removed" => {
+                let job = adapter.runs[&key].binding.authority.lease.job_id.clone();
+                adapter.bridge.authority().remove(&job.0, &key).unwrap();
+                adapter.runs.remove(&key);
+            }
+            "reopened" => {
+                drop(adapter);
+                adapter = ProductionCodexAdapter::open(diagnostic_adapter_config(&root)).unwrap();
+            }
+            _ => unreachable!(),
+        }
+        adapter
+            .accept_input_response_exact(&response, &received_at)
+            .await
+            .unwrap();
+        adapter.outbox.acknowledge_response(&message).unwrap();
+        let after: InputCallIntent = adapter
+            .store
+            .load_input_call(&key, &operation.request_digest)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            before, after,
+            "accepted history cannot consume a new Core waiter"
+        );
+        assert_eq!(after.answers.len(), 1);
+        assert!(after.applied_incarnation_id.is_none());
+        let mut changed = response.clone();
+        changed.value.as_mut().unwrap().value = first.choices.as_ref().unwrap()[1].value.clone();
+        assert!(
+            adapter
+                .accept_input_response_exact(&changed, &received_at)
+                .await
+                .is_err()
+        );
+        let unaccepted = closed_prompt_answer(&second, 1);
+        assert!(
+            adapter
+                .accept_input_response_exact(&unaccepted, &received_at)
+                .await
+                .is_err(),
+            "first question proof cannot accept a different question"
+        );
+        drop(adapter);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+}
+
+#[tokio::test]
+#[allow(
+    clippy::too_many_lines,
+    reason = "complete retained answers, live lease renewal and the original input deadline share one fixture"
+)]
+async fn review_accepted_complete_input_replay_delivers_after_acceptance_deadline() {
+    let root = std::env::temp_dir().join(format!(
+        "wwc-input-expired-history-{}",
+        uuid::Uuid::new_v4()
+    ));
+    let mut adapter = ProductionCodexAdapter::open(diagnostic_adapter_config(&root)).unwrap();
+    let (key, first) = retain_closed_input_prompt_fixture(&mut adapter, &root);
+    let thread = adapter.runs[&key].binding.canonical_thread_id.clone();
+    let prior = adapter.runs[&key].binding.authority.lease.clone();
+    let mut extended = prior.clone();
+    extended.expires_at = Instant("2026-08-28T00:30:00.000Z".into());
+    let renewal_at = Instant("2026-08-28T00:02:00.000Z".into());
+    let renewal = winwincode_execution_port::generated::LeaseRenewMessage {
+        kind: winwincode_execution_port::generated::LeaseRenewMessageKind::LeaseRenew,
+        lease: extended,
+        prior_expires_at: prior.expires_at,
+        message_id: winwincode_domain::ExecutionMessageId("xmsg_00000000000000000000000001".into()),
+        request_id: winwincode_domain::RequestId("req_00000000000000000000000001".into()),
+        schema_version: winwincode_domain::SchemaVersion::WinwincodeV1,
+        sent_at: renewal_at.clone(),
+    };
+    assert!(adapter.renew_lease(&thread, &renewal, &renewal_at).unwrap());
+    let prompts = adapter
+        .outbox
+        .pending()
+        .unwrap()
+        .into_iter()
+        .filter_map(|delivery| match delivery.message {
+            ExecutionPortMessage::InputRequestMessage(prompt) => Some(prompt),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    // The exact complete answer set can be retained while Core is unavailable.
+    adapter.runs.get_mut(&key).unwrap().kernel_live = false;
+    for (index, prompt) in prompts.iter().enumerate() {
+        let response = closed_prompt_answer(prompt, index);
+        adapter
+            .accept_input_response_exact(&response, &response.responded_at)
+            .await
+            .unwrap();
+    }
+    adapter.runs.get_mut(&key).unwrap().kernel_live = true;
+    let operation = adapter
+        .store
+        .load_input_operation(&first.input_request_id.0)
+        .unwrap()
+        .unwrap();
+    let before: InputCallIntent = adapter
+        .store
+        .load_input_call(&key, &operation.request_digest)
+        .unwrap()
+        .unwrap();
+    assert_eq!(before.answers.len(), 2);
+    assert!(before.applied_incarnation_id.is_none());
+    let index = prompts
+        .iter()
+        .position(|prompt| prompt.input_request_id == first.input_request_id)
+        .unwrap();
+    let response = closed_prompt_answer(&first, index);
+    let received_at = Instant("2026-08-28T00:16:00.000Z".into());
+    assert!(adapter.runs[&key].binding.authority.lease.expires_at.0 > received_at.0);
+    let error = adapter
+        .accept_input_response_exact(&response, &received_at)
+        .await
+        .expect_err("the accepted settlement must reach the original Core waiter");
+    assert_eq!(
+        error,
+        kernel_error(),
+        "this fixture deliberately has no Core session"
+    );
+    assert!(
+        adapter
+            .bridge
+            .authority()
+            .observed_now()
+            .unwrap()
+            .unwrap()
+            .0
+            >= received_at.0
+    );
+    let after: InputCallIntent = adapter
+        .store
+        .load_input_call(&key, &operation.request_digest)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        before, after,
+        "failed Core delivery keeps the exact accepted settlement retryable"
+    );
+    drop(adapter);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
 #[test]
 fn legacy_closed_input_projection_preserves_serialized_contract() {
     let root =

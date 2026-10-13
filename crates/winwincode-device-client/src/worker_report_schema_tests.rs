@@ -18,7 +18,7 @@ fn retained_launch_receipt() -> Vec<u8> {
         occupancy: OccupancyCommandContext {
             command: CommandContext {
                 expected_revision: 1,
-                idempotency_key: "pending-marker-launch-ack".to_owned(),
+                idempotency_key: "pending-schema-launch-ack".to_owned(),
             },
             occupancy_lease_id: "ocl_00000000000000000000000001".to_owned(),
             occupancy_fencing_token: 1,
@@ -88,13 +88,6 @@ fn source_rows(connection: &Connection) -> RetainedReportRows {
     )
 }
 
-fn marker_rows(connection: &Connection) -> Vec<Vec<Value>> {
-    raw_rows(
-        connection,
-        "SELECT * FROM worker_report_migration ORDER BY migration_key",
-    )
-}
-
 fn pending_schema(connection: &Connection) -> Vec<Vec<Value>> {
     raw_rows(
         connection,
@@ -108,7 +101,7 @@ fn missing_pending_case(fault: &str, sql: &str) -> bool {
         .unwrap()
         .as_nanos();
     let root = std::env::temp_dir().join(format!(
-        "wwc-report-marker-{fault}-{}-{unique}",
+        "wwc-report-schema-{fault}-{}-{unique}",
         std::process::id()
     ));
     let mut store = DeviceStore::open(&root).unwrap();
@@ -120,7 +113,7 @@ fn missing_pending_case(fault: &str, sql: &str) -> bool {
             GRANT,
             LAUNCH_SESSION,
             "RejectedCapacityExhausted",
-            "pending-marker-launch-ack",
+            "pending-schema-launch-ack",
             &receipt,
             STAMP,
         )
@@ -141,8 +134,6 @@ fn missing_pending_case(fault: &str, sql: &str) -> bool {
     store.close().unwrap();
     let connection = Connection::open(&database).unwrap();
     let original = source_rows(&connection);
-    let markers = marker_rows(&connection);
-    assert_eq!(markers.len(), 2);
     connection.execute_batch(sql).unwrap();
     let damaged_schema = pending_schema(&connection);
     let (refused, query_counts) = match DeviceStore::open(&root) {
@@ -157,19 +148,14 @@ fn missing_pending_case(fault: &str, sql: &str) -> bool {
         Err(_) => (true, None),
     };
     let raw_unchanged = source_rows(&connection) == original;
-    let marker_unchanged = marker_rows(&connection) == markers;
     let damaged_schema_unchanged = pending_schema(&connection) == damaged_schema;
     assert!(
         raw_unchanged,
         "retained registry and receipt bytes must remain exact"
     );
-    assert!(
-        marker_unchanged,
-        "existing migration markers must remain exact"
-    );
     println!(
-        "DEVICE_MARKER {}",
-        serde_json::json!({"fault":fault,"before_pending_counts":[1,1],"open_refused":refused,"after_pending_counts":query_counts,"original_source_rows_unchanged":raw_unchanged,"markers_unchanged":marker_unchanged,"damaged_schema_unchanged":damaged_schema_unchanged})
+        "DEVICE_SCHEMA {}",
+        serde_json::json!({"fault":fault,"before_pending_counts":[1,1],"open_refused":refused,"after_pending_counts":query_counts,"original_source_rows_unchanged":raw_unchanged,"damaged_schema_unchanged":damaged_schema_unchanged})
     );
     drop(connection);
     std::fs::remove_dir_all(root).unwrap();
@@ -177,7 +163,7 @@ fn missing_pending_case(fault: &str, sql: &str) -> bool {
 }
 
 #[test]
-fn existing_worker_report_migration_markers_reject_missing_pending_tables() {
+fn current_schema_rejects_missing_pending_tables() {
     let outcomes = [
         missing_pending_case("worker-report-pending", "DROP TABLE worker_report_pending;"),
         missing_pending_case(
@@ -187,7 +173,7 @@ fn existing_worker_report_migration_markers_reject_missing_pending_tables() {
     ];
     assert!(
         outcomes.into_iter().all(|refused| refused),
-        "existing markers must reject missing queues before any CREATE can hide the fault"
+        "current schema must reject missing queues without rebuilding them"
     );
 }
 
@@ -201,7 +187,7 @@ thread_local! {
     static LAST_PENDING_SEAM: std::cell::Cell<Option<(std::time::Instant, std::time::Instant)>> = const { std::cell::Cell::new(None) };
 }
 
-pub(super) fn before_pending_report_prepare_for_test(open_deadline: std::time::Instant) {
+pub(super) fn before_schema_prepare_for_test(open_deadline: std::time::Instant) {
     let gate = LATE_PENDING_GATE.with(|slot| slot.borrow_mut().take());
     if let Some(gate) = gate {
         let near_deadline = open_deadline
@@ -231,7 +217,7 @@ fn late_pending_writer_root() -> std::path::PathBuf {
 }
 
 #[test]
-fn late_pending_migration_uses_the_original_open_deadline_under_a_real_writer_lock() {
+fn schema_validation_uses_the_original_open_deadline_under_a_real_writer_lock() {
     use std::sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
@@ -247,7 +233,7 @@ fn late_pending_migration_uses_the_original_open_deadline_under_a_real_writer_lo
             GRANT,
             LAUNCH_SESSION,
             "RejectedCapacityExhausted",
-            "pending-marker-launch-ack",
+            "pending-schema-launch-ack",
             &receipt,
             STAMP,
         )
@@ -260,13 +246,6 @@ fn late_pending_migration_uses_the_original_open_deadline_under_a_real_writer_lo
     let database = store.database_path().to_owned();
     store.close().unwrap();
     let mut connection = Connection::open(&database).unwrap();
-    connection
-        .execute_batch(
-            "DROP TRIGGER worker_report_after_insert; DROP TRIGGER worker_report_after_update;
-        DROP TRIGGER worker_launch_report_after_insert; DROP TABLE worker_report_pending;
-        DROP TABLE worker_launch_report_pending; DROP TABLE worker_report_migration;",
-        )
-        .unwrap();
     let original = source_rows(&connection);
     let (enter, entered) = mpsc::channel::<Instant>();
     let (locked, wait_locked) = mpsc::channel();
@@ -300,7 +279,7 @@ fn late_pending_migration_uses_the_original_open_deadline_under_a_real_writer_lo
     let returned_while_writer_held = !released.load(Ordering::Acquire);
     let (original_deadline, seam_at) = LAST_PENDING_SEAM
         .with(std::cell::Cell::take)
-        .expect("late seam must actually run after early schema and pragmas");
+        .expect("schema seam must run after the opening pragmas");
     let remaining_at_seam = original_deadline
         .checked_duration_since(seam_at)
         .unwrap_or_default();
@@ -313,18 +292,18 @@ fn late_pending_migration_uses_the_original_open_deadline_under_a_real_writer_lo
     let connection = Connection::open(&database).unwrap();
     assert_eq!(source_rows(&connection), original);
     println!(
-        "DEVICE_MARKER {}",
+        "DEVICE_SCHEMA {}",
         serde_json::json!({"fault":"late-pending-real-writer","late_seam_executed":true,"remaining_at_seam_ms":remaining_at_seam.as_millis(),"open_duration_ms":returned.duration_since(started).as_millis(),"original_deadline_elapsed_at_return":returned>=original_deadline,"writer_held_across_original_deadline":true,"returned_while_writer_held":returned_while_writer_held,"open_refused":refused,"error":error,"original_source_rows_unchanged":true})
     );
     drop(connection);
     std::fs::remove_dir_all(root).unwrap();
     assert!(
         !remaining_at_seam.is_zero(),
-        "the late migration must enter before the original deadline"
+        "schema validation must enter before the original deadline"
     );
     assert!(
         refused && returned_while_writer_held,
-        "late pending preparation must keep the original open deadline instead of waiting for a new runtime five-second timeout"
+        "schema preparation must keep the original open deadline instead of waiting for a new runtime five-second timeout"
     );
 }
 
@@ -347,7 +326,7 @@ fn retained_pending_fixture(
             GRANT,
             LAUNCH_SESSION,
             "RejectedCapacityExhausted",
-            "pending-marker-launch-ack",
+            "pending-schema-launch-ack",
             &retained_launch_receipt(),
             STAMP,
         )
@@ -365,7 +344,7 @@ fn retained_pending_fixture(
 fn guarded_pending_schema(connection: &Connection) -> Vec<Vec<Value>> {
     raw_rows(
         connection,
-        "SELECT type,name,sql FROM sqlite_master WHERE name IN ('worker_report_migration','worker_process_registry_state_lease','worker_process_registry_active','worker_report_pending','worker_report_after_insert','worker_report_after_update','worker_launch_report_pending','worker_launch_report_after_insert') ORDER BY type,name",
+        "SELECT type,name,sql FROM sqlite_master WHERE name IN ('worker_process_registry_state_lease','worker_process_registry_active','worker_report_pending','worker_report_after_insert','worker_report_after_update','worker_launch_report_pending','worker_launch_report_after_insert') ORDER BY type,name",
     )
 }
 
@@ -373,15 +352,11 @@ const DROP_PENDING_LAYOUT: &str =
     "DROP TRIGGER worker_report_after_insert; DROP TRIGGER worker_report_after_update;
     DROP TRIGGER worker_launch_report_after_insert; DROP INDEX worker_process_registry_state_lease;
     DROP INDEX worker_process_registry_active; DROP TABLE worker_report_pending;
-    DROP TABLE worker_launch_report_pending; DROP TABLE worker_report_migration;";
+    DROP TABLE worker_launch_report_pending;";
 
 #[test]
-fn worker_report_markers_reject_each_weakened_guarded_schema_object() {
+fn current_schema_rejects_each_weakened_report_object() {
     let faults = [
-        (
-            "marker-table",
-            "ALTER TABLE worker_report_migration ADD COLUMN unused TEXT;",
-        ),
         (
             "state-lease-index",
             "DROP INDEX worker_process_registry_state_lease; CREATE INDEX worker_process_registry_state_lease ON worker_process_registry(state);",
@@ -417,7 +392,6 @@ fn worker_report_markers_reject_each_weakened_guarded_schema_object() {
         let connection = Connection::open(database).unwrap();
         let original = source_rows(&connection);
         connection.execute_batch(sql).unwrap();
-        let markers = marker_rows(&connection);
         let schema = guarded_pending_schema(&connection);
         let refused = match DeviceStore::open(&root) {
             Err(_) => true,
@@ -427,27 +401,25 @@ fn worker_report_markers_reject_each_weakened_guarded_schema_object() {
             }
         };
         let source_unchanged = source_rows(&connection) == original;
-        let markers_unchanged = marker_rows(&connection) == markers;
         let schema_unchanged = guarded_pending_schema(&connection) == schema;
         println!(
-            "DEVICE_MARKER {}",
-            serde_json::json!({"fault":fault,"open_refused":refused,"original_source_rows_unchanged":source_unchanged,"markers_unchanged":markers_unchanged,"weakened_schema_not_rebuilt":schema_unchanged})
+            "DEVICE_SCHEMA {}",
+            serde_json::json!({"fault":fault,"open_refused":refused,"original_source_rows_unchanged":source_unchanged,"weakened_schema_not_rebuilt":schema_unchanged})
         );
-        outcomes.push(refused && source_unchanged && markers_unchanged && schema_unchanged);
+        outcomes.push(refused && source_unchanged && schema_unchanged);
         drop(connection);
         std::fs::remove_dir_all(root).unwrap();
     }
     assert!(
         outcomes.into_iter().all(|ok| ok),
-        "each applied marker must validate the guarded table, index and trigger definitions before creating any missing object"
+        "current schema must validate the guarded table, index and trigger definitions"
     );
 }
 
 #[test]
-fn worker_report_first_migration_backfills_once_and_reopen_keeps_consumed_rows_consumed() {
-    let (root, database, record) = retained_pending_fixture("backfill-reopen");
+fn consumed_reports_stay_consumed_after_reopen() {
+    let (root, database, record) = retained_pending_fixture("consumed-reopen");
     let connection = Connection::open(&database).unwrap();
-    connection.execute_batch(DROP_PENDING_LAYOUT).unwrap();
     let original = source_rows(&connection);
     let mut store = DeviceStore::open(&root).unwrap();
     assert_eq!(
@@ -466,8 +438,6 @@ fn worker_report_first_migration_backfills_once_and_reopen_keeps_consumed_rows_c
     store.worker_report_queued("reconcile", &record).unwrap();
     store.worker_launch_report_queued(GRANT).unwrap();
     store.close().unwrap();
-    let markers = marker_rows(&connection);
-    assert_eq!(markers.len(), 2);
     let schema = guarded_pending_schema(&connection);
     let store = DeviceStore::open(&root).unwrap();
     assert!(
@@ -485,18 +455,17 @@ fn worker_report_first_migration_backfills_once_and_reopen_keeps_consumed_rows_c
     assert!(store.pending_worker_launch_receipts().unwrap().is_empty());
     store.close().unwrap();
     assert_eq!(source_rows(&connection), original);
-    assert_eq!(marker_rows(&connection), markers);
     assert_eq!(guarded_pending_schema(&connection), schema);
     println!(
-        "DEVICE_MARKER {}",
-        serde_json::json!({"fault":"legal-first-backfill-reopen","first_pending_counts":[1,1,1],"consumed_reopen_counts":[0,0,0],"original_source_rows_unchanged":true,"markers_unchanged_on_reopen":true,"schema_unchanged_on_reopen":true})
+        "DEVICE_SCHEMA {}",
+        serde_json::json!({"fault":"reports-consumed-reopen","first_pending_counts":[1,1,1],"consumed_reopen_counts":[0,0,0],"original_source_rows_unchanged":true,"schema_unchanged_on_reopen":true})
     );
     drop(connection);
     std::fs::remove_dir_all(root).unwrap();
 }
 
 #[test]
-fn worker_report_first_migration_rolls_back_both_families_on_late_layout_failure() {
+fn partial_report_layout_is_refused_without_rebuilding() {
     let (root, database, _) = retained_pending_fixture("late-rollback");
     let connection = Connection::open(&database).unwrap();
     connection.execute_batch(DROP_PENDING_LAYOUT).unwrap();
@@ -515,33 +484,21 @@ fn worker_report_first_migration_rolls_back_both_families_on_late_layout_failure
     };
     assert_eq!(source_rows(&connection), original);
     assert_eq!(guarded_pending_schema(&connection), schema);
-    assert_eq!(
-        connection
-            .query_row(
-                "SELECT COUNT(*) FROM sqlite_master WHERE name='worker_report_migration'",
-                [],
-                |row| row.get::<_, i64>(0)
-            )
-            .unwrap(),
-        0
-    );
     println!(
-        "DEVICE_MARKER {}",
-        serde_json::json!({"fault":"first-migration-late-launch-layout","open_refused":refused,"original_source_rows_unchanged":true,"all_schema_rolled_back":true,"marker_table_absent":true})
+        "DEVICE_SCHEMA {}",
+        serde_json::json!({"fault":"partial-report-layout","open_refused":refused,"original_source_rows_unchanged":true,"all_schema_rolled_back":true})
     );
     drop(connection);
     std::fs::remove_dir_all(root).unwrap();
     assert!(
         refused,
-        "a late launch layout rejection must roll back earlier report DDL, backfill and markers"
+        "a partial report layout must be rejected without rebuilding it"
     );
 }
 
 mod trigger_upsert_regression {
-    use super::{
-        DeviceStore, STAMP, marker_rows, pending_schema, raw_rows, source_rows, terminal_record,
-    };
-    use rusqlite::{Connection, OpenFlags, params};
+    use super::{DeviceStore, STAMP, pending_schema, raw_rows, source_rows, terminal_record};
+    use rusqlite::{Connection, OpenFlags};
     use std::path::PathBuf;
     use winwincode_client_port::domain::ClientWorkerRunState;
     use winwincode_client_port::messages::{
@@ -697,7 +654,7 @@ mod trigger_upsert_regression {
     }
 
     #[test]
-    fn worker_report_unreleased_old_trigger_layout_is_refused_without_rewriting_evidence() {
+    fn worker_report_changed_trigger_layout_is_refused_without_rewriting_evidence() {
         let root = fixture_root("old-wip-seal");
         let mut store = DeviceStore::open(&root).unwrap();
         let record = terminal_record(&root);
@@ -706,6 +663,7 @@ mod trigger_upsert_regression {
         store.close().unwrap();
         let path = root.join("device-client.sqlite3");
         let connection = Connection::open(&path).unwrap();
+        // Changing trigger conflict behavior must not rewrite retained evidence.
         connection.execute_batch("DROP TRIGGER worker_report_after_insert;
             DROP TRIGGER worker_report_after_update;
             CREATE TRIGGER worker_report_after_insert AFTER INSERT ON worker_process_registry BEGIN
@@ -715,7 +673,6 @@ mod trigger_upsert_regression {
             INSERT OR IGNORE INTO worker_report_pending VALUES (NEW.worker_session_id,'reconcile');
             INSERT OR IGNORE INTO worker_report_pending SELECT NEW.worker_session_id,'exit' WHERE NEW.state IN ('exited','crashed','missing'); END;").unwrap();
         let source_before = source_rows(&connection);
-        let markers_before = marker_rows(&connection);
         let schema_before = pending_schema(&connection);
         let pending_before = raw_rows(
             &connection,
@@ -730,7 +687,6 @@ mod trigger_upsert_regression {
         let connection =
             Connection::open_with_flags(&path, OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
         assert_eq!(source_rows(&connection), source_before);
-        assert_eq!(marker_rows(&connection), markers_before);
         assert_eq!(pending_schema(&connection), schema_before);
         assert_eq!(
             raw_rows(
@@ -746,23 +702,15 @@ mod trigger_upsert_regression {
             ),
             outbox_before
         );
-        let count: i64 = connection
-            .query_row(
-                "SELECT COUNT(*) FROM worker_report_migration WHERE migration_key=?1",
-                params!["worker-report-pending-v1"],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert_eq!(count, 1);
         println!(
             "DEVICE_TRIGGER {}",
-            serde_json::json!({"case":"unreleased-old-wip-layout-compatibility-boundary","open_refused":refused,"classification":"unpublished WIP canonical-layout difference","original_source_rows_unchanged":true,"retained_outbox_bytes_unchanged":true,"pending_membership_unchanged":true,"markers_unchanged":true,"old_schema_not_rebuilt":true})
+            serde_json::json!({"case":"changed-trigger-layout","open_refused":refused,"original_source_rows_unchanged":true,"retained_outbox_bytes_unchanged":true,"pending_membership_unchanged":true,"old_schema_not_rebuilt":true})
         );
         drop(connection);
         std::fs::remove_dir_all(root).unwrap();
         assert!(
             refused,
-            "unreleased old WIP layout must remain intact when the canonical layout differs"
+            "changed layout must remain intact when current schema validation fails"
         );
     }
 }

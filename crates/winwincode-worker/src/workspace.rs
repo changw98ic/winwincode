@@ -16,8 +16,8 @@ use winwincode_domain::{
 };
 use winwincode_execution_port::generated::{
     ExecutionJob, ExecutionJobReplacementAuthority, ExecutionLeaseStamp, ExecutionScope,
-    SnapshotFreezeReceipt, SnapshotFreezeReceiptMessage, SnapshotFreezeReceiptMessageKind,
-    SnapshotFreezeRequestMessage,
+    JobOutcomeAckMessage, JobOutcomeAckMessageStatus, JobOutcomeMessage, SnapshotFreezeReceipt,
+    SnapshotFreezeReceiptMessage, SnapshotFreezeReceiptMessageKind, SnapshotFreezeRequestMessage,
 };
 use winwincode_execution_port::snapshot_freeze::{seal_freeze_receipt, validate_freeze_receipt};
 
@@ -484,7 +484,8 @@ impl WorkspaceLayout {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum WorkspaceCloseReason {
     Completed,
     Cancelled,
@@ -623,6 +624,31 @@ struct RecoveryManifest {
     snapshot_freeze: Option<RetainedSnapshotFreeze>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     snapshot_freeze_history: Vec<RetainedSnapshotFreeze>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    terminal_cleanup: Option<TerminalWorkspaceCleanup>,
+}
+
+#[derive(Clone, Deserialize, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct TerminalWorkspaceCleanup {
+    lease: ExecutionLeaseStamp,
+    worker_session_id: WorkerSessionId,
+    session_identity: winwincode_domain::SessionIdentity,
+    reason: WorkspaceCloseReason,
+}
+
+impl TerminalWorkspaceCleanup {
+    fn matches_ack(&self, ack: &JobOutcomeAckMessage) -> bool {
+        self.lease == ack.lease
+            && self.worker_session_id == ack.worker_session_id
+            && self.session_identity == ack.session_identity
+    }
+
+    fn matches_provenance(&self, provenance: &WorkspaceProvenance) -> bool {
+        provenance_extends_lease(provenance, &self.lease)
+            && self.worker_session_id == provenance.worker_session_id
+            && provenance_matches_session(provenance, Some(&self.session_identity))
+    }
 }
 
 #[derive(Clone, Deserialize, PartialEq, Serialize)]
@@ -671,11 +697,24 @@ enum WorkspaceRecoveryEntry {
 
 struct ReservedWorkspacePlan {
     plan: WorkspacePlan,
-    owner_lock: File,
+    owner_lock: WorkspaceOwnerLock,
+}
+
+#[derive(Debug)]
+struct WorkspaceOwnerLock {
+    file: File,
+}
+
+impl Drop for WorkspaceOwnerLock {
+    fn drop(&mut self) {
+        // A concurrently spawned child can retain a descriptor until exec.
+        // Release this ownership before closing our descriptor.
+        let _ = self.file.unlock();
+    }
 }
 
 impl WorkspacePlan {
-    fn into_workspace(self, owner_lock: File) -> WorkerWorkspace {
+    fn into_workspace(self, owner_lock: WorkspaceOwnerLock) -> WorkerWorkspace {
         WorkerWorkspace {
             workspace_id: self.workspace_id,
             source_repository: self.source_repository,
@@ -699,6 +738,84 @@ impl ReservedWorkspacePlan {
 }
 
 impl WorkspaceManager {
+    /// Consumes a retained terminal checkout after the adapter validated its
+    /// exact business ACK. The existing manifest also supports restart cleanup.
+    pub(crate) fn close_acknowledged_terminal(
+        &self,
+        ack: &JobOutcomeAckMessage,
+    ) -> Result<(), WorkspaceError> {
+        if ack.error.is_some()
+            || !matches!(
+                ack.status,
+                JobOutcomeAckMessageStatus::Accepted | JobOutcomeAckMessageStatus::Duplicate
+            )
+        {
+            return Ok(());
+        }
+        let mut matched = None;
+        for entry in fs::read_dir(&self.root)
+            .map_err(|error| WorkspaceError::io("terminal workspace root cannot be read", error))?
+        {
+            let entry = entry
+                .map_err(|error| WorkspaceError::io("terminal workspace cannot be read", error))?;
+            if !entry
+                .file_type()
+                .map_err(|error| {
+                    WorkspaceError::io("terminal workspace type cannot be read", error)
+                })?
+                .is_dir()
+                || !entry.path().join(RECOVERY_MANIFEST).is_file()
+            {
+                continue;
+            }
+            let manifest = read_recovery_manifest(&entry.path())?;
+            let Some(cleanup) = manifest
+                .terminal_cleanup
+                .as_ref()
+                .filter(|cleanup| cleanup.matches_ack(ack))
+            else {
+                continue;
+            };
+            if manifest.phase != WorkspaceRecoveryPhase::Active
+                || manifest.workspace_id != entry.file_name().to_string_lossy()
+                || !cleanup.matches_provenance(&manifest.current_provenance)
+                || workspace_id(
+                    &manifest.repository_id,
+                    &manifest.source_commit_id,
+                    &manifest.origin_provenance,
+                )? != manifest.workspace_id
+            {
+                return Err(WorkspaceError::conflict(
+                    "terminal cleanup authority changed",
+                ));
+            }
+            validate_cleanup_provenance(&manifest)?;
+            if matched.replace((entry.path(), manifest)).is_some() {
+                return Err(duplicate_workspace_error());
+            }
+        }
+        let Some((path, manifest)) = matched else {
+            return Ok(());
+        };
+        let repository =
+            controlled_recovery_repository(&self.source_root, &manifest.source_repository)?;
+        let plan = recovery_workspace_plan(&manifest, repository, &path);
+        let owner_lock = acquire_workspace_owner_lock(&plan.layout)?;
+        if read_recovery_manifest(&path)? != manifest {
+            return Err(WorkspaceError::conflict(
+                "terminal cleanup manifest changed",
+            ));
+        }
+        validate_recovered_plan(&plan)?;
+        let reason = manifest
+            .terminal_cleanup
+            .as_ref()
+            .ok_or_else(duplicate_workspace_error)?
+            .reason;
+        plan.into_workspace(owner_lock).close(reason)?;
+        Ok(())
+    }
+
     fn reconcile_cleaning_workspaces(&self) -> Result<(), WorkspaceError> {
         reconcile_cleaning_workspaces(&self.root, &self.source_root)
     }
@@ -1051,6 +1168,7 @@ impl WorkspaceManager {
         archive_predecessor_snapshot_freeze(&mut manifest)?;
         manifest.current_provenance = request.provenance.clone();
         manifest.replacement = Some(replacement.clone());
+        manifest.terminal_cleanup = None;
         replace_recovery_manifest(&path, &manifest)?;
         Ok(WorkspaceRecoveryEntry::Recovered(Box::new(
             ReservedWorkspacePlan {
@@ -1291,10 +1409,38 @@ pub struct WorkerWorkspace {
     current_provenance: WorkspaceProvenance,
     max_artifact_bytes: u64,
     layout: WorkspaceLayout,
-    _owner_lock: File,
+    _owner_lock: WorkspaceOwnerLock,
 }
 
 impl WorkerWorkspace {
+    pub(crate) fn retain_terminal_cleanup(
+        &self,
+        outcome: &JobOutcomeMessage,
+        reason: WorkspaceCloseReason,
+    ) -> Result<(), WorkspaceError> {
+        let cleanup = TerminalWorkspaceCleanup {
+            lease: outcome.lease.clone(),
+            worker_session_id: outcome.worker_session_id.clone(),
+            session_identity: outcome.session_identity.clone(),
+            reason,
+        };
+        let mut manifest = read_recovery_manifest(&self.layout.root)?;
+        if manifest.phase != WorkspaceRecoveryPhase::Active
+            || manifest.current_provenance != self.current_provenance
+            || !cleanup.matches_provenance(&self.current_provenance)
+            || manifest
+                .terminal_cleanup
+                .as_ref()
+                .is_some_and(|existing| existing != &cleanup)
+        {
+            return Err(WorkspaceError::conflict(
+                "terminal cleanup differs from retained outcome authority",
+            ));
+        }
+        manifest.terminal_cleanup = Some(cleanup);
+        replace_recovery_manifest(&self.layout.root, &manifest)
+    }
+
     pub(crate) fn source_commit_id(&self) -> &str {
         &self.source_commit_id
     }
@@ -1931,6 +2077,7 @@ fn recovery_manifest(
         max_artifact_bytes: plan.max_artifact_bytes,
         snapshot_freeze: None,
         snapshot_freeze_history: Vec::new(),
+        terminal_cleanup: None,
     })
 }
 
@@ -2031,7 +2178,9 @@ fn owner_lock_path(layout: &WorkspaceLayout) -> Result<PathBuf, WorkspaceError> 
     )))
 }
 
-fn acquire_workspace_owner_lock(layout: &WorkspaceLayout) -> Result<File, WorkspaceError> {
+fn acquire_workspace_owner_lock(
+    layout: &WorkspaceLayout,
+) -> Result<WorkspaceOwnerLock, WorkspaceError> {
     let path = owner_lock_path(layout)?;
     if path.exists()
         && fs::symlink_metadata(&path)
@@ -2059,7 +2208,7 @@ fn acquire_workspace_owner_lock(layout: &WorkspaceLayout) -> Result<File, Worksp
             WorkspaceError::io("workspace owner lock cannot be acquired", error)
         }
     })?;
-    Ok(file)
+    Ok(WorkspaceOwnerLock { file })
 }
 
 fn write_creation_intent(
@@ -3056,4 +3205,27 @@ fn checked_existing_output(output: Output, context: &str) -> Result<Output, Work
         WorkspaceErrorCode::Git,
         format!("{context}: {}", stderr.trim()),
     ))
+}
+
+#[cfg(test)]
+mod owner_lock_tests {
+    use super::*;
+
+    #[test]
+    fn owner_release_is_independent_of_inherited_descriptor_lifetime() {
+        let root = tempfile::tempdir().unwrap();
+        let layout = layout(root.path().join("workspace"));
+        let owner = acquire_workspace_owner_lock(&layout).unwrap();
+        let inherited = owner.file.try_clone().unwrap();
+        assert!(acquire_workspace_owner_lock(&layout).is_err());
+
+        drop(owner);
+        let successor = acquire_workspace_owner_lock(&layout)
+            .expect("a released owner must not wait for an inherited descriptor to close");
+        drop(inherited);
+        assert!(acquire_workspace_owner_lock(&layout).is_err());
+
+        drop(successor);
+        assert!(acquire_workspace_owner_lock(&layout).is_ok());
+    }
 }

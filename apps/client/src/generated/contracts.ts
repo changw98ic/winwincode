@@ -963,6 +963,7 @@ export type ChatMessageProjection = {
   readonly "content": string
   readonly "createdAt": Instant
   readonly "id": ChatMessageId
+  readonly "outputPreparation"?: "preparing"
   readonly "productSessionId": ProductSessionId
   readonly "role": "user" | "assistant"
   readonly "sequence": number
@@ -4160,6 +4161,10 @@ export enum ExecutionPortErrorCode {
   InfrastructureError = "INFRASTRUCTURE_ERROR",
   CandidateUnchanged = "CANDIDATE_UNCHANGED",
   CandidatePreparationFailed = "CANDIDATE_PREPARATION_FAILED",
+  DeviceProviderStateInvalid = "DEVICE_PROVIDER_STATE_INVALID",
+  DeviceProviderStorageUnavailable = "DEVICE_PROVIDER_STORAGE_UNAVAILABLE",
+  DeviceProviderFilesystemUnavailable = "DEVICE_PROVIDER_FILESYSTEM_UNAVAILABLE",
+  DeviceProviderEncodingInvalid = "DEVICE_PROVIDER_ENCODING_INVALID",
 }
 
 export type ExecutionPortMessage = WorkerRegisterMessage | WorkerRegistrationResultMessage | WorkerHeartbeatMessage | WorkerHeartbeatAckMessage | JobDispatchMessage | JobDispatchResultMessage | SessionBindingMessage | LeaseRenewMessage | RuntimeEventMessage | RuntimeAckMessage | RuntimeReplayRequestMessage | ArtifactOpenMessage | ArtifactChunkMessage | ArtifactAckMessage | ModelOpenMessage | ModelChunkMessage | ModelAckMessage | InputRequestMessage | InputResponseMessage | ApprovalRequestMessage | ApprovalDecisionMessage | JobCancelMessage | JobCancelAckMessage | JobOutcomeMessage | JobOutcomeAckMessage | ActionEnforcementRequestMessage | ActionEnforcementReceiptMessage | SnapshotFreezeRequestMessage | SnapshotFreezeReceiptMessage | SnapshotVerificationDispatchMessage
@@ -4594,9 +4599,95 @@ export type ModelChunkMessage = {
 
 export type ModelExchangeId = string & { readonly __brand: "ModelExchangeId" }
 
+export enum ModelFailureAcceptance {
+  NotSent = "not_sent",
+  Unknown = "unknown",
+  ResponseReceived = "response_received",
+}
+
+export enum ModelFailureCause {
+  ConnectionUnavailable = "connection_unavailable",
+  TransportInterrupted = "transport_interrupted",
+  Timeout = "timeout",
+  RateLimited = "rate_limited",
+  ServerTransient = "server_transient",
+  Authentication = "authentication",
+  Authorization = "authorization",
+  RequestInvalid = "request_invalid",
+  ProtocolInvalid = "protocol_invalid",
+  IntegrityInvalid = "integrity_invalid",
+  TlsInvalid = "tls_invalid",
+  StreamIncomplete = "stream_incomplete",
+  EmptyResponse = "empty_response",
+  Cancelled = "cancelled",
+  AuthorityExpired = "authority_expired",
+  StorageUnavailable = "storage_unavailable",
+}
+
+export type ModelFailureFacts = {
+  readonly "acceptance"?: ModelFailureAcceptance
+  readonly "attemptId"?: string
+  readonly "cause"?: ModelFailureCause
+  readonly "networkDiagnosticCode"?: ModelNetworkDiagnosticCode
+  readonly "parserDiagnostic"?: ProviderModelFailureDiagnostic
+  readonly "phase"?: ModelFailurePhase
+  readonly "scope": "model_attempt"
+  readonly "sourceCode": ExecutionPortErrorCode
+  readonly "stopReason"?: ModelFailureStopReason
+}
+
+export enum ModelFailurePhase {
+  Connect = "connect",
+  ResponseHeaders = "response_headers",
+  ResponseBody = "response_body",
+  Stream = "stream",
+  Decode = "decode",
+  Persist = "persist",
+}
+
+export enum ModelFailureStopReason {
+  PermanentFailure = "permanent_failure",
+  RecoveryDisabled = "recovery_disabled",
+  ReconcileRequired = "reconcile_required",
+  RetryBudgetExhausted = "retry_budget_exhausted",
+}
+
 export type ModelGatewayRoute = {
   readonly "capability": string
   readonly "route": string
+}
+
+export enum ModelNetworkDiagnosticCode {
+  HttpStatus = "http_status",
+  Dns = "dns",
+  Connect = "connect",
+  Io = "io",
+  Timeout = "timeout",
+  Tls = "tls",
+  TlsCertificate = "tls_certificate",
+  HttpProtocol = "http_protocol",
+  RequestUri = "request_uri",
+  RequestHeaders = "request_headers",
+  Proxy = "proxy",
+  Redirect = "redirect",
+  ResponseHeadersTooLarge = "response_headers_too_large",
+  BodyTooLarge = "body_too_large",
+  ContentType = "content_type",
+  TransportOther = "transport_other",
+  JsonSyntax = "json_syntax",
+  JsonSchema = "json_schema",
+  ResponseInvariant = "response_invariant",
+  SchemaVersion = "schema_version",
+  SseFraming = "sse_framing",
+  SseEvent = "sse_event",
+  StreamConversion = "stream_conversion",
+  StreamIncomplete = "stream_incomplete",
+  EmptyResponse = "empty_response",
+  IdentityConflict = "identity_conflict",
+  CredentialBlocked = "credential_blocked",
+  Storage = "storage",
+  Configuration = "configuration",
+  AuthorityEnded = "authority_ended",
 }
 
 export type ModelOpenMessage = {
@@ -5537,6 +5628,12 @@ export type ProjectScope = {
   readonly "organizationId": OrganizationId
   readonly "projectId": ProjectId
   readonly "workspaceId": WorkspaceId
+}
+
+export type ProviderModelFailureDiagnostic = {
+  readonly "eventType"?: string
+  readonly "fieldPath"?: string
+  readonly "stage"?: string
 }
 
 export type PublicationCancelCommand = {

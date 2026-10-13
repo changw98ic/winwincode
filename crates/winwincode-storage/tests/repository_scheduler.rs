@@ -4,6 +4,9 @@ use std::fs;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use rusqlite::Connection;
+use sha2::{Digest, Sha256};
+
 use winwincode_domain::{
     DeliveryId, ExecutionJobId, ExecutionMessageId, ExecutionSequence, Instant, OrganizationId,
     ProductSessionId, ProjectId, RepositoryId, RequestId, Sha256Digest, WorkRunId, WorkerId,
@@ -337,6 +340,214 @@ fn repository_claim_is_fair_receipt_first_and_restart_reoffers_exact_dispatch() 
 }
 
 #[test]
+fn full_durable_resources_reoffer_the_original_dispatch_without_claiming_queued_work() {
+    use winwincode_domain::{CodexThreadId, UserId, WorkerSessionId};
+    use winwincode_storage::{
+        ExecutionAdmissionBoundary, ExecutionRepositoryAccess, ExecutionReservationRequest,
+        ExecutionReservationStart, WorkerPoolId, WorkerSlotAuthority, WorkerSlotOpenRequest,
+        WorkerSlotResourceLimits, WorkerSlotResources,
+    };
+
+    let root = directory("full-resources-reoffer");
+    let mut storage = SqliteStorage::open(&root).expect("storage");
+    submit(&mut storage, 10, 10, 1);
+    submit(&mut storage, 20, 20, 2);
+    let (worker, instance) = register(&mut storage);
+    let original_request = claim_request(180, "boot-A", worker.clone(), instance.clone());
+    let original = storage
+        .repository_scheduler()
+        .expect("scheduler")
+        .claim_next(&original_request)
+        .expect("claim")
+        .expect("dispatch");
+    let scope = queue_scope(10);
+    let pool = WorkerPoolId(id("wpl", 10));
+    {
+        let mut admission = storage.execution_admission().expect("admission");
+        for boundary in [
+            ExecutionAdmissionBoundary::Organization {
+                organization_id: scope.organization_id.clone(),
+            },
+            ExecutionAdmissionBoundary::Project {
+                organization_id: scope.organization_id.clone(),
+                project_id: scope.project_id.clone(),
+            },
+            ExecutionAdmissionBoundary::Repository {
+                organization_id: scope.organization_id.clone(),
+                project_id: scope.project_id.clone(),
+                repository_id: scope.repository_id.clone(),
+            },
+            ExecutionAdmissionBoundary::ProductSession {
+                organization_id: scope.organization_id.clone(),
+                project_id: scope.project_id.clone(),
+                product_session_id: scope.product_session_id.clone(),
+            },
+            ExecutionAdmissionBoundary::WorkerPool {
+                organization_id: scope.organization_id.clone(),
+                worker_pool_id: pool.clone(),
+            },
+        ] {
+            admission
+                .configure_runtime_policy(boundary, false)
+                .expect("policy");
+        }
+        admission
+            .reserve(&ExecutionReservationRequest {
+                scope: scope.clone(),
+                user_id: UserId(id("usr", 10)),
+                worker_pool_id: pool.clone(),
+                job_id: original.job.job_id.clone(),
+                request_id: RequestId(id("req", 185)),
+                repository_access: ExecutionRepositoryAccess::ReadOnly,
+                reserved_tokens: None,
+                reserved_cost_microunits: None,
+                runtime_limit_millis: None,
+                submitted_at: at(3),
+            })
+            .expect("reserve original Job");
+        admission
+            .start(&ExecutionReservationStart {
+                scope,
+                worker_pool_id: pool,
+                job_id: original.job.job_id.clone(),
+                request_id: RequestId(id("req", 186)),
+                expected_revision: 1,
+                started_at: at(4),
+            })
+            .expect("start original admission");
+    }
+    let authority = WorkerSlotAuthority {
+        worker_id: worker.clone(),
+        worker_instance_id: instance.clone(),
+        worker_session_id: WorkerSessionId(id("wsn", 10)),
+        codex_thread_id: CodexThreadId(id("cdx", 10)),
+        job_id: original.lease.job_id.clone(),
+        lease_id: original.lease.lease_id.clone(),
+        attempt: original.lease.attempt,
+        fencing_token: original.lease.fencing_token.clone(),
+    };
+    let slot = {
+        let mut slots = storage.worker_session_slots().expect("slots");
+        slots
+            .configure_resources(
+                &worker,
+                &instance,
+                WorkerSlotResourceLimits {
+                    max_memory_bytes: 1,
+                    max_disk_bytes: 1,
+                    max_processes: 1,
+                },
+            )
+            .expect("resource limits");
+        slots
+            .open(&WorkerSlotOpenRequest {
+                authority: authority.clone(),
+                resources: WorkerSlotResources {
+                    memory_bytes: 1,
+                    disk_bytes: 1,
+                    process_slots: 1,
+                },
+                request_id: RequestId(id("req", 181)),
+                opened_at: at(5),
+            })
+            .expect("original reserved slot")
+    };
+    drop(storage);
+    let mut storage = SqliteStorage::open(&root).expect("restart");
+    let capacity = storage
+        .worker_session_slots()
+        .expect("slots")
+        .capacity(&worker, &instance)
+        .expect("durable capacity");
+    assert_eq!(
+        capacity.reserved.memory_bytes,
+        capacity.limits.max_memory_bytes
+    );
+    assert_eq!(capacity.reserved.disk_bytes, capacity.limits.max_disk_bytes);
+    assert_eq!(
+        capacity.reserved.process_slots,
+        capacity.limits.max_processes
+    );
+    let request = claim_request(182, "boot-B", worker.clone(), instance.clone());
+    let restored = storage
+        .repository_scheduler()
+        .expect("scheduler")
+        .claim_next_with_capacity(&request, false)
+        .expect("restore at full capacity")
+        .expect("original dispatch must remain deliverable");
+    assert!(restored.recovered);
+    assert_eq!(restored.lease, original.lease);
+    assert_eq!(restored.job, original.job);
+    assert_eq!(restored.message_id, original.message_id);
+    assert_eq!(restored.request_id, original.request_id);
+    assert_eq!(
+        storage
+            .worker_session_slots()
+            .expect("slots")
+            .load(&authority.worker_session_id)
+            .expect("slot")
+            .expect("original slot"),
+        slot.slot
+    );
+    assert!(
+        storage
+            .repository_scheduler()
+            .expect("scheduler")
+            .claim_next_with_capacity(&claim_request(183, "boot-B", worker, instance), false)
+            .expect("new work waits")
+            .is_none()
+    );
+    let queued = storage
+        .execution_queue()
+        .expect("queue")
+        .load_job(&queue_scope(20), &ExecutionJobId(id("job", 20)))
+        .expect("queued Job")
+        .expect("original queued work");
+    assert_eq!(queued.state, ExecutionJobState::Queued);
+    assert_eq!(queued.attempt, 1);
+    assert!(
+        storage
+            .execution_registry()
+            .expect("registry")
+            .load_lease(&queued.job_id)
+            .expect("no new lease")
+            .is_none()
+    );
+    let replay = storage
+        .repository_scheduler()
+        .expect("scheduler")
+        .claim_next_with_capacity(&request, false)
+        .expect("exact replay")
+        .expect("original receipt");
+    assert!(replay.replayed);
+    assert_eq!(replay.lease, original.lease);
+    let replacement = register_replacement_instance(&mut storage, 2);
+    let mut replacement_request =
+        claim_request(184, "boot-C", original.lease.worker_id.clone(), replacement);
+    replacement_request.issued_at = at(51);
+    replacement_request.expires_at = at(59);
+    assert!(
+        storage
+            .repository_scheduler()
+            .expect("scheduler")
+            .claim_next_with_capacity(&replacement_request, false)
+            .expect("a replacement needs new capacity")
+            .is_none()
+    );
+    assert_eq!(
+        storage
+            .execution_registry()
+            .expect("registry")
+            .load_lease(&original.job.job_id)
+            .expect("original lease")
+            .expect("retained lease"),
+        original.lease
+    );
+    drop(storage);
+    fs::remove_dir_all(root).expect("cleanup");
+}
+
+#[test]
 fn rejected_registry_claim_rolls_back_queue_and_scheduler_receipts() {
     let root = directory("rollback");
     let mut storage = SqliteStorage::open(&root).expect("storage");
@@ -502,6 +713,170 @@ fn replacement_rotates_work_run_and_rejects_predecessor_after_restart() {
     assert_eq!(third.job.attempt, 3);
     assert_ne!(third.job.work_run_id, second.job.work_run_id);
     fs::remove_dir_all(root).expect("cleanup");
+}
+
+#[test]
+fn replacement_failure_and_successor_receipt_commit_together_or_roll_back() {
+    for (table, operation) in [
+        ("execution_lease_terminals", "INSERT"),
+        ("scheduler_execution_jobs", "UPDATE"),
+        ("execution_scope_replacements", "INSERT"),
+        ("repository_scheduler_drive_receipts", "INSERT"),
+    ] {
+        let root = directory(table);
+        let mut storage = SqliteStorage::open(&root).expect("storage");
+        submit_replacement(&mut storage, 71, "wrn_01J00000000000000000000000", 1);
+        let (worker_id, first_instance) = register(&mut storage);
+        let first = storage
+            .repository_scheduler()
+            .expect("scheduler")
+            .claim_next(&claim_request(
+                710,
+                "boot-a",
+                worker_id.clone(),
+                first_instance,
+            ))
+            .expect("claim")
+            .expect("first dispatch");
+        let second_instance = register_replacement_instance(&mut storage, 2);
+        let request = RepositorySchedulerClaimRequest {
+            scope: repository(),
+            request_id: RequestId(id("req", 711)),
+            scheduler_generation: "boot-b".into(),
+            worker_id,
+            worker_instance_id: second_instance,
+            issued_at: at(51),
+            expires_at: at(59),
+        };
+        let database = Connection::open(root.join("control-plane.sqlite3")).expect("database");
+        let counts = || {
+            [
+                "execution_lease_terminals",
+                "execution_scope_replacements",
+                "repository_scheduler_drive_receipts",
+                "repository_scheduler_offers",
+                "scheduler_execution_job_receipts",
+                "execution_lease_request_receipts",
+            ]
+            .map(|member| {
+                database
+                    .query_row(&format!("SELECT COUNT(*) FROM {member}"), [], |row| {
+                        row.get::<_, i64>(0)
+                    })
+                    .expect("member count")
+            })
+        };
+        let before = counts();
+        database
+            .execute_batch(&format!(
+                "CREATE TRIGGER fail_replacement BEFORE {operation} ON {table}
+                 BEGIN SELECT RAISE(ABORT, 'replacement commit fault'); END;"
+            ))
+            .expect("install failure");
+        let error = storage
+            .repository_scheduler()
+            .expect("scheduler")
+            .claim_next(&request)
+            .expect_err("failure must roll back the whole replacement");
+        assert_eq!(error.kind(), StorageErrorKind::Adapter, "{table}");
+        drop(storage);
+        let mut restarted = SqliteStorage::open(&root).expect("restart");
+        assert_eq!(
+            restarted
+                .execution_queue()
+                .expect("queue")
+                .load_job(&first.job.scope, &first.job.job_id)
+                .expect("load")
+                .expect("job"),
+            first.job,
+            "{table} must retain the original request"
+        );
+        assert_eq!(
+            restarted
+                .execution_registry()
+                .expect("registry")
+                .load_lease(&first.job.job_id)
+                .expect("lease")
+                .expect("original lease"),
+            first.lease,
+            "{table} must not create a successor without its predecessor result"
+        );
+        assert_eq!(
+            counts(),
+            before,
+            "{table} must leave no partial result or receipt"
+        );
+        database
+            .execute_batch("DROP TRIGGER fail_replacement")
+            .expect("remove failure");
+        let second = restarted
+            .repository_scheduler()
+            .expect("scheduler")
+            .claim_next(&request)
+            .expect("replacement")
+            .expect("successor");
+        assert_eq!(second.job.attempt, 2);
+        assert_eq!(
+            second.job.submission_request_id,
+            first.job.submission_request_id
+        );
+        let failed: (String, String, String, i64) = database
+            .query_row(
+                "SELECT lease_id, outcome, terminal_at, attempt
+                 FROM execution_lease_terminals WHERE job_id=?1",
+                [&first.job.job_id.0],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .expect("predecessor failure");
+        assert_eq!(
+            failed,
+            (
+                first.lease.lease_id.0,
+                "failed".into(),
+                request.issued_at.0.clone(),
+                1
+            )
+        );
+        let paired: (String, String) = database
+            .query_row(
+                "SELECT request_digest, response_json FROM repository_scheduler_drive_receipts
+                 WHERE request_id=?1",
+                [&request.request_id.0],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("paired recovery request and result");
+        assert_eq!(
+            paired.0,
+            format!(
+                "{:x}",
+                Sha256::digest(serde_json::to_vec(&request).unwrap())
+            )
+        );
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&paired.1).unwrap(),
+            serde_json::to_value(&second).unwrap()
+        );
+        let committed = counts();
+        drop(restarted);
+        let mut restarted = SqliteStorage::open(&root).expect("restart after commit");
+        let replay = restarted
+            .repository_scheduler()
+            .expect("scheduler")
+            .claim_next(&request)
+            .expect("replay")
+            .expect("original successor");
+        assert!(replay.replayed);
+        assert_eq!(replay.job, second.job);
+        assert_eq!(replay.lease, second.lease);
+        assert_eq!(
+            counts(),
+            committed,
+            "recovery replay cannot create another pair"
+        );
+        drop(restarted);
+        drop(database);
+        fs::remove_dir_all(root).expect("cleanup");
+    }
 }
 
 #[test]

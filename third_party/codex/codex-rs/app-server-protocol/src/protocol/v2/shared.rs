@@ -153,6 +153,8 @@ impl From<CoreCodexErrorInfo> for CodexErrorInfo {
                 }
             }
             CoreCodexErrorInfo::Other => CodexErrorInfo::Other,
+            CoreCodexErrorInfo::ExecutionLeaseExpired => CodexErrorInfo::Other,
+            CoreCodexErrorInfo::ModelAuthorityExpired => CodexErrorInfo::Other,
         }
     }
 }

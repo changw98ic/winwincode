@@ -32,7 +32,10 @@ async fn fixture() -> (
         source: "model".into(),
         binding: "binding-parent".into(),
     };
-    let ToolRequestObservation::New(observed) = store.observe_tool_request(&request).await.unwrap()
+    let ToolRequestObservation::New(observed) = store
+        .observe_tool_request(&request, "test-owner", "{}")
+        .await
+        .unwrap()
     else {
         panic!("new")
     };
@@ -60,7 +63,10 @@ async fn fixture() -> (
     request.tool_name = "request_user_input".into();
     request.source = "code_mode".into();
     request.binding = "binding-input".into();
-    let ToolRequestObservation::New(observed) = store.observe_tool_request(&request).await.unwrap()
+    let ToolRequestObservation::New(observed) = store
+        .observe_tool_request(&request, "test-owner", "{}")
+        .await
+        .unwrap()
     else {
         panic!("new")
     };

@@ -29,6 +29,24 @@ export function runtimeChildEnvironment(environment = process.env) {
     .map(key => [key, environment[key]]))
 }
 
+export function pendingDeviceTaskWorkRuns(directory, deliveryId) {
+  const path = join(directory, 'server-data', 'control-plane.sqlite3')
+  if (!existsSync(path)) return []
+  const database = new DatabaseSync(path, { readOnly: true })
+  try {
+    database.exec('PRAGMA busy_timeout = 5000')
+    return database.prepare(`SELECT work_run_id, dispatch_payload FROM scheduler_execution_jobs
+      WHERE delivery_id = ? AND state = 'queued' ORDER BY submitted_at, job_id`).all(deliveryId).map(row => {
+      const job = JSON.parse(Buffer.from(row.dispatch_payload).toString('utf8'))
+      assert.equal(job.scope.kind, 'work-run')
+      assert.equal(job.scope.workRunId, row.work_run_id)
+      assert.match(row.work_run_id, /^wrn_[0-9A-HJKMNP-TV-Z]{26}$/u)
+      return row.work_run_id
+    })
+  } finally { database.close() }
+}
+
+/** Interpret the task driver's launch response without changing public launch authority. */
 export function deviceTaskLaunchResult({ response, directory, deliveryId, workRunId,
   publicClientId, holderUserId, repositoryBindingId }) {
   if (response.status === 201) return response.json
@@ -480,6 +498,9 @@ export function startDeterministicDeviceModelServer({
   chatContent = 'WinWinCode Device deterministic Provider completed the Chat workflow.',
   repeatToolMarker = null,
   nativeCellScripts = {},
+  httpFailures = {},
+  streamFailures = {},
+  responseGateMarkers = [],
 }) {
   assert.ok(repeatToolMarker === null || (typeof repeatToolMarker === 'string' && repeatToolMarker.length > 0))
   for (const [marker, source] of Object.entries(nativeCellScripts)) {
@@ -487,6 +508,31 @@ export function startDeterministicDeviceModelServer({
     assert.equal(typeof source, 'string')
     assert.ok(source.length <= 6000)
   }
+  const remainingFailures = new Map(Object.entries(httpFailures).map(([marker, failure]) => {
+    assert.match(marker, /^[a-z0-9-]{1,100}$/u)
+    assert.ok([429, 503].includes(failure.status))
+    assert.ok(Number.isSafeInteger(failure.count) && failure.count > 0 && failure.count <= 100)
+    assert.ok(failure.retryAfterSeconds === undefined
+      || (Number.isSafeInteger(failure.retryAfterSeconds)
+        && failure.retryAfterSeconds >= 0 && failure.retryAfterSeconds <= 30))
+    return [marker, { ...failure }]
+  }))
+  const remainingStreamFailures = new Map(Object.entries(streamFailures).map(([marker, failure]) => {
+    assert.match(marker, /^[a-z0-9-]{1,100}$/u)
+    assert.ok(['overloaded_error', 'api_error', 'authentication_error', 'rate_limit_error',
+      'invalid_request_error'].includes(failure.type))
+    assert.ok(Number.isSafeInteger(failure.count) && failure.count > 0 && failure.count <= 100)
+    return [marker, { ...failure }]
+  }))
+  assert.ok(Array.isArray(responseGateMarkers) && responseGateMarkers.length <= 100)
+  assert.ok(responseGateMarkers.every(marker => typeof marker === 'string'
+    && /^[a-z0-9-]{1,100}$/u.test(marker)))
+  const knownGateMarkers = new Set(responseGateMarkers)
+  assert.equal(knownGateMarkers.size, responseGateMarkers.length)
+  const closedGates = new Set(responseGateMarkers)
+  const pendingResponses = new Map()
+  let activeRequests = 0
+  let peakActiveRequests = 0
   const errors = []
   const requests = []
   const server = createHttpsServer({
@@ -508,12 +554,54 @@ export function startDeterministicDeviceModelServer({
         const nativeCell = Object.keys(nativeCellScripts).find(marker => bodyText.includes(marker)) ?? null
         requests.push({
           path: request.url ?? '',
+          requestSha256: createHash('sha256').update(bodyText).digest('hex'),
+          idempotencyKey: request.headers['idempotency-key'] ?? null,
+          threadIdSha256: typeof request.headers['thread-id'] === 'string'
+            ? createHash('sha256').update(request.headers['thread-id']).digest('hex') : null,
           verification: bodyText.includes(DETERMINISTIC_VERIFICATION_BEHAVIOR_MARKER),
           executor: bodyText.includes(DETERMINISTIC_EXECUTOR_BEHAVIOR_MARKER),
           planner: bodyText.includes(DETERMINISTIC_PLANNER_PROTOCOL),
           hasToolOutput: /function_call_output|custom_tool_call_output|tool_result/u.test(bodyText),
           repeatTool,
         })
+        const requestRecord = requests.at(-1)
+        requestRecord.gateMarker = responseGateMarkers.find(marker => bodyText.includes(marker)) ?? null
+        requestRecord.active = true
+        activeRequests += 1
+        peakActiveRequests = Math.max(peakActiveRequests, activeRequests)
+        const finishRequest = () => {
+          if (!requestRecord.active) return
+          requestRecord.active = false
+          activeRequests -= 1
+        }
+        response.once('finish', finishRequest)
+        response.once('close', finishRequest)
+        const fault = [...remainingFailures].find(([marker, failure]) => failure.count > 0 && bodyText.includes(marker))
+        if (fault) {
+          const [, failure] = fault
+          failure.count -= 1
+          requests.at(-1).status = failure.status
+          response.writeHead(failure.status, {
+            'content-type': 'application/json',
+            'retry-after': String(failure.retryAfterSeconds ?? 0), connection: 'close',
+          })
+          response.end(JSON.stringify({ error: { type: failure.status === 429 ? 'rate_limit_error' : 'overloaded_error', message: 'fixture Provider failure' } }))
+          return
+        }
+        requests.at(-1).status = 200
+        const streamFault = [...remainingStreamFailures]
+          .find(([marker, failure]) => failure.count > 0 && bodyText.includes(marker))
+        if (streamFault) {
+          const [, failure] = streamFault
+          failure.count -= 1
+          requestRecord.streamErrorType = failure.type
+          response.writeHead(200, {
+            'content-type': 'text/event-stream', 'cache-control': 'no-store', connection: 'close',
+          })
+          response.end(`event: error\ndata: ${JSON.stringify({ type: 'error',
+            error: { type: failure.type, message: 'safe fixture Provider failure' } })}\n\n`)
+          return
+        }
         const executionTool = providerRequest.tools?.find(tool => /(?:^|__)exec$/u.test(tool.name)) ?? null
         const waitTool = providerRequest.tools?.find(tool => /(?:^|__)wait$/u.test(tool.name)) ?? null
         const workInput = workInputFromRequest(providerRequest)
@@ -661,12 +749,20 @@ export function startDeterministicDeviceModelServer({
         const payload = events
           .map(([name, value]) => `event: ${name}\ndata: ${JSON.stringify(value)}\n\n`)
           .join('')
-        response.writeHead(200, {
-          'content-type': 'text/event-stream',
-          'cache-control': 'no-store',
-          connection: 'close',
-        })
-        response.end(payload)
+        const sendResponse = () => {
+          if (response.destroyed || response.writableEnded) return
+          response.writeHead(200, {
+            'content-type': 'text/event-stream',
+            'cache-control': 'no-store',
+            connection: 'close',
+          })
+          response.end(payload)
+        }
+        if (closedGates.has(requestRecord.gateMarker)) {
+          const waiting = pendingResponses.get(requestRecord.gateMarker) ?? []
+          waiting.push(sendResponse)
+          pendingResponses.set(requestRecord.gateMarker, waiting)
+        } else sendResponse()
       } catch (error) {
         errors.push(String(error instanceof Error ? error.message : error))
         response.writeHead(500, { 'content-type': 'text/plain', connection: 'close' })
@@ -678,6 +774,15 @@ export function startDeterministicDeviceModelServer({
     errors,
     requests,
     server,
+    get activeRequests() { return activeRequests },
+    get peakActiveRequests() { return peakActiveRequests },
+    releaseResponseGate(marker) {
+      assert.ok(knownGateMarkers.has(marker), 'release requires a configured response gate')
+      closedGates.delete(marker)
+      const waiting = pendingResponses.get(marker) ?? []
+      pendingResponses.delete(marker)
+      for (const sendResponse of waiting) sendResponse()
+    },
     async listen() {
       const port = await freeLoopbackPort()
       await new Promise((resolvePromise, reject) => {
@@ -689,6 +794,7 @@ export function startDeterministicDeviceModelServer({
       return this
     },
     close() {
+      pendingResponses.clear()
       server.closeAllConnections?.()
       return new Promise(resolvePromise => server.close(() => resolvePromise()))
     },
@@ -1288,6 +1394,9 @@ export async function establishDeviceOnlyExecutionPath({
           privateKeyPath,
           repeatToolMarker: deviceProvider.repeatToolMarker,
           nativeCellScripts: deviceProvider.nativeCellScripts,
+          httpFailures: deviceProvider.httpFailures,
+          streamFailures: deviceProvider.streamFailures,
+          responseGateMarkers: deviceProvider.responseGateMarkers,
         }).listen()
       }
       providerApiKey = deviceSecret ?? `device-local-${randomBytes(24).toString('hex')}`

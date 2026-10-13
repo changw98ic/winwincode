@@ -303,28 +303,55 @@ fn identity_seed_launch_stamp_and_issued_identity_are_validated() {
 }
 
 #[test]
-fn version_eight_upgrade_discards_pending_rotation_and_preserves_device_identity() {
-    let root = temporary_directory("remove-unused-rotation");
-    let mut store = DeviceStore::open(&root).unwrap();
-    let original = ensure_device_identity(&mut store, &seed(), "2026-09-04T00:00:00.000Z").unwrap();
-    let database = store.database_path().to_path_buf();
-    store.close().unwrap();
-    let legacy = rusqlite::Connection::open(&database).unwrap();
-    legacy.execute_batch("CREATE TABLE device_credential_rotations (command_message_id TEXT, credential_secret BLOB); INSERT INTO device_credential_rotations VALUES ('unused-rotation', zeroblob(32)); PRAGMA user_version = 8;").unwrap();
-    drop(legacy);
-    let store = DeviceStore::open(&root).unwrap();
-    let restored = winwincode_device_client::identity::load_device_identity(&store)
-        .unwrap()
-        .unwrap();
-    assert_eq!(
-        restored.identity().device_id(),
-        original.identity().device_id()
-    );
-    assert_eq!(restored.credential(), original.credential());
-    store.close().unwrap();
-    let database = rusqlite::Connection::open(database).unwrap();
-    let pending: i64 = database.query_row("SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'device_credential_rotations'", [], |row| row.get(0)).unwrap();
-    assert_eq!(pending, 0);
-    drop(database);
-    fs::remove_dir_all(root).unwrap();
+fn unpublished_versions_are_refused_without_changing_identity_or_schema() {
+    for version in [6, 7, 8] {
+        let root = temporary_directory("unsupported-schema");
+        let mut store = DeviceStore::open(&root).unwrap();
+        let original =
+            ensure_device_identity(&mut store, &seed(), "2026-09-04T00:00:00.000Z").unwrap();
+        let database = store.database_path().to_path_buf();
+        store.close().unwrap();
+        let connection = rusqlite::Connection::open(&database).unwrap();
+        connection
+            .pragma_update(None, "user_version", version)
+            .unwrap();
+        let schema_before: Vec<(String, String, Option<String>)> = connection
+            .prepare("SELECT type,name,sql FROM sqlite_master ORDER BY type,name")
+            .unwrap()
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert!(DeviceStore::open(&root).is_err());
+        let stored = connection
+            .query_row(
+                "SELECT device_id,current_instance_id,client_node_id FROM device_identity",
+                [],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                    ))
+                },
+            )
+            .unwrap();
+        assert_eq!(stored.0, original.identity().device_id());
+        assert_eq!(
+            connection
+                .pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))
+                .unwrap(),
+            version
+        );
+        let schema_after: Vec<(String, String, Option<String>)> = connection
+            .prepare("SELECT type,name,sql FROM sqlite_master ORDER BY type,name")
+            .unwrap()
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert_eq!(schema_after, schema_before);
+        drop(connection);
+        fs::remove_dir_all(root).unwrap();
+    }
 }

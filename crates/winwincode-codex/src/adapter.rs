@@ -1,8 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
 
+#[path = "chat_completion_diagnostics.rs"]
+mod chat_completion_diagnostics;
 #[cfg(test)]
 #[path = "fusion_claim_admission_tests.rs"]
 mod fusion_claim_admission_tests;
+use chat_completion_diagnostics::{ChatCompletionDiagnostics, ChatCompletionOperation};
 #[path = "tool_fact_projection.rs"]
 mod tool_fact_projection;
 #[path = "tool_runtime_contract.rs"]
@@ -536,6 +539,7 @@ pub struct ProductionCodexAdapter {
     runs: HashMap<String, ActiveRun>,
     thread_to_run: HashMap<String, String>,
     last_duplicate_model_chunk_sequence: Option<i64>,
+    chat_completion_diagnostics: ChatCompletionDiagnostics,
 }
 
 impl ProductionCodexAdapter {
@@ -579,6 +583,7 @@ impl ProductionCodexAdapter {
                 capability_catalog.clone(),
                 config.execution_envelope.clone(),
                 config.action_signing_key.clone(),
+                bridge.authority(),
             )
             .map_err(|_| unavailable())?,
         );
@@ -620,6 +625,7 @@ impl ProductionCodexAdapter {
             runs: HashMap::new(),
             thread_to_run: HashMap::new(),
             last_duplicate_model_chunk_sequence: None,
+            chat_completion_diagnostics: ChatCompletionDiagnostics::default(),
         })
     }
 
@@ -715,11 +721,11 @@ impl ProductionCodexAdapter {
         if !directory.is_absolute() {
             return Err(invalid_configuration());
         }
-        if self.config.jev_context.is_some() || self.config.jev_judge.is_some() {
-            self.bridge
-                .attach_device_provider_directory(directory.clone())
-                .map_err(map_bridge_error)?;
-        }
+        // Primary accounting includes every physical Provider attempt, including
+        // Chat runs whose sealed configuration disables both JEv extensions.
+        self.bridge
+            .attach_device_provider_directory(directory.clone())
+            .map_err(map_bridge_error)?;
         self.device_extension_directory = Some(directory);
         Ok(self)
     }
@@ -888,6 +894,9 @@ impl ProductionCodexAdapter {
     ) -> Result<(), ProductionCodexError> {
         let run_key = self.run_key_for_thread(thread_id)?.to_owned();
         let run = self.runs.get(&run_key).ok_or_else(unknown_thread)?;
+        if run.record.operation_fenced_at.is_some() {
+            return Err(conflict());
+        }
         let submission_id = run.record.submission_id.clone();
         let submission_options = turn_submission_options(&run.record);
         let session = self.session_for_thread(thread_id)?;
@@ -960,6 +969,18 @@ impl ProductionCodexAdapter {
             .get(&thread_id.0)
             .map(String::as_str)
             .ok_or_else(unknown_thread)
+    }
+
+    pub(super) fn current_binding_for_run(
+        &self,
+        run_key: &str,
+    ) -> Result<ModelRunBinding, ProductionCodexError> {
+        let run = self.runs.get(run_key).ok_or_else(unknown_thread)?;
+        self.bridge
+            .binding_for_thread(&run.binding.canonical_thread_id)
+            .map_err(map_bridge_error)?
+            .filter(|binding| binding.run_key == run_key)
+            .ok_or_else(conflict)
     }
 
     fn session_for_thread(
@@ -1491,27 +1512,43 @@ impl ProductionCodexAdapter {
                 session_identity: run.binding.authority.session_identity.clone(),
             }
         };
+        let infrastructure = self
+            .runs
+            .get(run_key)
+            .ok_or_else(unknown_thread)?
+            .record
+            .failure_diagnostic
+            .as_ref()
+            .is_some_and(CodexFailureDiagnostic::is_infrastructure);
         if self
             .diagnostic_artifacts
-            .has_pending(&authority)
+            .has_required_pending(&authority)
             .map_err(map_store_error)?
         {
             let run = self.runs.get_mut(run_key).ok_or_else(unknown_thread)?;
             run.record.last_activity_at = now.clone();
             run.record.pending_completion = Some(StoredPendingCompletion {
                 final_message: None,
-                kind: StoredPendingTerminalKind::Failed,
+                kind: if infrastructure {
+                    StoredPendingTerminalKind::InfrastructureFailed
+                } else {
+                    StoredPendingTerminalKind::Failed
+                },
             });
             self.persist_run(run_key)?;
             return Ok(CodexPoll::Pending);
         }
         let artifacts = self
             .diagnostic_artifacts
-            .accepted_references(&authority)
+            .completion_references(&authority)
             .map_err(map_store_error)?;
         let run = self.runs.get_mut(run_key).ok_or_else(unknown_thread)?;
         run.record.last_activity_at = now.clone();
-        run.record.terminal = Some(StoredTerminal::Failed { artifacts });
+        run.record.terminal = Some(if infrastructure {
+            StoredTerminal::InfrastructureFailed { artifacts }
+        } else {
+            StoredTerminal::Failed { artifacts }
+        });
         run.record.phase = StoredRunPhase::TerminalTracePending;
         self.persist_run(run_key)?;
         self.poll_retained_terminal(run_key)?
@@ -1786,7 +1823,7 @@ impl ProductionCodexAdapter {
         };
         if self
             .diagnostic_artifacts
-            .has_pending(&authority)
+            .has_required_pending(&authority)
             .map_err(map_store_error)?
         {
             let run = self.runs.get_mut(run_key).ok_or_else(unknown_thread)?;
@@ -1807,7 +1844,7 @@ impl ProductionCodexAdapter {
         if first_failure {
             let artifacts = self
                 .diagnostic_artifacts
-                .accepted_references(&authority)
+                .completion_references(&authority)
                 .map_err(map_store_error)?;
             {
                 let run = self.runs.get_mut(run_key).ok_or_else(unknown_thread)?;
@@ -1866,7 +1903,7 @@ impl ProductionCodexAdapter {
         };
         if self
             .diagnostic_artifacts
-            .has_pending(&authority)
+            .has_required_pending(&authority)
             .map_err(map_store_error)?
         {
             let run = self.runs.get_mut(run_key).ok_or_else(unknown_thread)?;
@@ -1878,7 +1915,7 @@ impl ProductionCodexAdapter {
         }
         let artifacts = self
             .diagnostic_artifacts
-            .accepted_references(&authority)
+            .completion_references(&authority)
             .map_err(map_store_error)?;
         {
             let run = self.runs.get_mut(run_key).ok_or_else(unknown_thread)?;
@@ -1903,6 +1940,7 @@ impl ProductionCodexAdapter {
         let thread_id = run.binding.canonical_thread_id.clone();
         let session_id = run.record.kernel_session_id.clone();
         let kernel_live = run.kernel_live;
+        self.fence_thread(&thread_id, now)?;
         let _ = self.bridge.cancel_thread(&thread_id, now).await;
         let _ = self.bridge.discard_messages_for_thread(&thread_id);
         let _ = self.action_gate.cancel_session(&session_id);
@@ -2254,9 +2292,17 @@ impl ProductionCodexAdapter {
             .record
             .phase = StoredRunPhase::RuntimeStarted;
         self.persist_run(run_key)?;
-        Ok(stage.map_or(CodexPoll::RuntimeTrace(trace), |stage| {
-            CodexPoll::RuntimeTrace(Box::new(stage))
-        }))
+        if let Some(stage) = stage {
+            // Both start facts must reach the Worker before a later Core event.
+            self.runs
+                .get_mut(run_key)
+                .ok_or_else(unknown_thread)?
+                .replay
+                .push_back(*trace);
+            Ok(CodexPoll::RuntimeTrace(Box::new(stage)))
+        } else {
+            Ok(CodexPoll::RuntimeTrace(trace))
+        }
     }
 
     #[allow(
@@ -2285,6 +2331,15 @@ impl ProductionCodexAdapter {
                 ),
             )?;
         }
+        let infrastructure = completed.error.is_some()
+            && self
+                .runs
+                .get(run_key)
+                .ok_or_else(unknown_thread)?
+                .record
+                .failure_diagnostic
+                .as_ref()
+                .is_some_and(CodexFailureDiagnostic::is_infrastructure);
         let (failed, final_message) = {
             let run = self.runs.get_mut(run_key).ok_or_else(unknown_thread)?;
             run.record.current_turn_id = Some(completed.turn_id.clone());
@@ -2319,6 +2374,9 @@ impl ProductionCodexAdapter {
                     .is_some_and(|run| is_format_repair_turn(&run.record, &completed.turn_id))
                 {
                     return self.retain_delegated_repair_infrastructure_failure(run_key, now);
+                }
+                if infrastructure {
+                    return self.retain_failed_terminal(run_key, now);
                 }
                 return self.retain_delegated_inconclusive(run_key, now);
             }
@@ -2363,13 +2421,15 @@ impl ProductionCodexAdapter {
         };
         if self
             .diagnostic_artifacts
-            .has_pending(&diagnostic_authority)
+            .has_required_pending(&diagnostic_authority)
             .map_err(map_store_error)?
         {
             let run = self.runs.get_mut(run_key).ok_or_else(unknown_thread)?;
             run.record.pending_completion = Some(StoredPendingCompletion {
                 final_message: final_message.clone(),
-                kind: if failed {
+                kind: if infrastructure {
+                    StoredPendingTerminalKind::InfrastructureFailed
+                } else if failed {
                     StoredPendingTerminalKind::Failed
                 } else {
                     StoredPendingTerminalKind::Completed
@@ -2383,7 +2443,7 @@ impl ProductionCodexAdapter {
         let diagnostic_artifacts = {
             let run = self.runs.get(run_key).ok_or_else(unknown_thread)?;
             self.diagnostic_artifacts
-                .accepted_references(&DiagnosticArtifactAuthority {
+                .completion_references(&DiagnosticArtifactAuthority {
                     snapshot_id: run.record.snapshot_id.clone(),
                     job: run.record.job.clone(),
                     scope: run.record.job.scope.clone(),
@@ -2394,7 +2454,11 @@ impl ProductionCodexAdapter {
                 .map_err(map_store_error)?
         };
         let run = self.runs.get_mut(run_key).ok_or_else(unknown_thread)?;
-        run.record.terminal = Some(if failed {
+        run.record.terminal = Some(if infrastructure {
+            StoredTerminal::InfrastructureFailed {
+                artifacts: diagnostic_artifacts,
+            }
+        } else if failed {
             StoredTerminal::Failed {
                 artifacts: diagnostic_artifacts,
             }
@@ -3115,6 +3179,17 @@ impl ProductionCodexAdapter {
             {
                 return self.retain_delegated_repair_infrastructure_failure(run_key, now);
             }
+            if self
+                .runs
+                .get(run_key)
+                .ok_or_else(unknown_thread)?
+                .record
+                .failure_diagnostic
+                .as_ref()
+                .is_some_and(CodexFailureDiagnostic::is_infrastructure)
+            {
+                return self.retain_failed_terminal(run_key, now);
+            }
             return self.retain_delegated_inconclusive(run_key, now);
         }
         self.retain_failed_terminal(run_key, now)
@@ -3188,7 +3263,8 @@ impl ProductionCodexAdapter {
             choice_replay_keys.as_deref(),
             &operation.choice_identities,
         )?;
-        let authority = &run.binding.authority;
+        let current = self.current_binding_for_run(run_key)?;
+        let authority = &current.authority;
         let mode = if choices.as_ref().is_some_and(|choices| !choices.is_empty()) {
             InteractiveInputMode::SingleChoice
         } else {
@@ -3370,19 +3446,30 @@ impl ProductionCodexAdapter {
         self.store
             .save_run(run_key, &record)
             .map_err(map_store_error)?;
-        self.bridge
-            .install_binding(binding.clone())
-            .map_err(map_bridge_error)?;
+        if record.operation_fenced_at.is_some()
+            || record.terminal_message_id.is_some()
+            || record.terminal.is_some()
+            || record.final_candidate_freeze.is_some()
+            || record.delegated_stop.is_some()
+        {
+            self.bridge
+                .fence_binding(&binding)
+                .map_err(map_bridge_error)?;
+        } else {
+            self.bridge
+                .install_binding(binding.clone())
+                .map_err(map_bridge_error)?;
+        }
         self.action_gate
-            .install_binding(
-                binding.clone(),
+            .configure_run(
+                &binding,
                 is_delegated_composer(&record).then_some(record.workspace.as_path()),
             )
             .map_err(|_| unavailable())?;
         self.action_gate
             .install_tool_dependencies(&binding, &self.config.kernel_home, &record.workspace)
             .map_err(|_| unavailable())?;
-        if record.terminal.is_none() {
+        if record.terminal.is_none() && record.operation_fenced_at.is_none() {
             for operation in self
                 .store
                 .list_pending_approval_operations(run_key)
@@ -3586,10 +3673,14 @@ impl ProductionCodexAdapter {
                 .retain_approval_operation(&operation)
                 .map_err(map_store_error)?;
         }
-        let authority = &run.binding.authority;
-        self.original_approval_request(&operation, authority)
+        let current = self.current_binding_for_run(run_key)?;
+        self.original_approval_request(&operation, &current.authority)
     }
 
+    #[allow(
+        clippy::too_many_lines,
+        reason = "Validate, consume and persist one exact approval operation before confirming control delivery"
+    )]
     async fn accept_approval_decision_exact(
         &mut self,
         decision: &ApprovalDecisionMessage,
@@ -3600,11 +3691,35 @@ impl ProductionCodexAdapter {
             .load_approval_operation(&decision.approval_id.0)
             .map_err(map_store_error)?
             .ok_or_else(conflict)?;
+        if decision.sent_at != decision.decided_at
+            || !canonical_instant(&decision.decided_at)
+            || !canonical_instant(received_at)
+            || decision.decided_at.0 > received_at.0
+            || !valid_prefixed_id(&decision.approval_id.0, "apr_")
+            || !valid_prefixed_id(&decision.message_id.0, "xmsg_")
+        {
+            return Err(conflict());
+        }
+        let resolution_digest =
+            private_payload_digest(b"winwincode.approval-decision.v1", decision)?;
+        if operation.state == StoredApprovalOperationState::Resolved {
+            if operation.resolution_digest.as_deref() != Some(resolution_digest.as_str()) {
+                return Err(conflict());
+            }
+            // The complete operation digest is proof of the earlier Core
+            // resolution. Repair transport proof without resolving a new waiter.
+            return self
+                .outbox
+                .record_applied_response(&ExecutionPortMessage::ApprovalDecisionMessage(
+                    decision.clone(),
+                ))
+                .map_err(map_store_error);
+        }
         let run = self
             .runs
             .get(&operation.run_key)
             .ok_or_else(unknown_thread)?;
-        let authority = &run.binding.authority;
+        let authority = self.current_binding_for_run(&operation.run_key)?.authority;
         let kernel_session_id = run.record.kernel_session_id.clone();
         if !retained_lease_matches_current(&decision.lease, &authority.lease)
             || decision.worker_session_id != authority.worker_session_id
@@ -3627,18 +3742,6 @@ impl ProductionCodexAdapter {
         self.action_gate
             .update_now(received_at)
             .map_err(|_| unavailable())?;
-        let resolution_digest =
-            private_payload_digest(b"winwincode.approval-decision.v1", decision)?;
-        if operation.state == StoredApprovalOperationState::Resolved {
-            self.store
-                .resolve_approval_operation(
-                    &operation.approval_id,
-                    &operation.request_digest,
-                    &resolution_digest,
-                )
-                .map_err(map_store_error)?;
-            return Ok(());
-        }
         self.ensure_approval_deadline(&operation, decision, received_at)
             .await?;
         if operation.operation_kind == StoredApprovalOperationKind::Mcp
@@ -3696,7 +3799,8 @@ impl ProductionCodexAdapter {
         workspace: &Path,
         role_policy: Option<RoleSessionPolicy>,
     ) -> Result<bool, ProductionCodexError> {
-        if record.terminal.is_some()
+        if record.operation_fenced_at.is_some()
+            || record.terminal.is_some()
             || record.final_candidate_freeze.is_some()
             || record.delegated_stop.is_some()
         {
@@ -3775,6 +3879,23 @@ impl ProductionCodexAdapter {
                 .iter()
                 .find(|stored| stored.turn_id == turn_id)
                 .ok_or_else(conflict)?;
+            if run.record.operation_fenced_at.is_some() {
+                return match stored.state {
+                    StoredDelegatedTransitionState::Completed => {
+                        Ok(DelegatedLoopTransitionOutcome::Completed {
+                            turn_id: turn_id.to_owned(),
+                            counters: stored.counters.clone(),
+                        })
+                    }
+                    StoredDelegatedTransitionState::Stopped => {
+                        Ok(DelegatedLoopTransitionOutcome::Stopped {
+                            reason: stored.stop_reason.clone().ok_or_else(conflict)?,
+                            counters: stored.counters.clone(),
+                        })
+                    }
+                    _ => Err(conflict()),
+                };
+            }
             (
                 run.record.kernel_session_id.clone(),
                 stored.prompt.clone(),
@@ -4000,7 +4121,7 @@ fn complete_reconciled_turn(
     };
     if adapter
         .diagnostic_artifacts
-        .has_pending(&authority)
+        .has_required_pending(&authority)
         .map_err(map_store_error)?
     {
         let run = adapter.runs.get_mut(run_key).ok_or_else(unknown_thread)?;
@@ -4012,7 +4133,7 @@ fn complete_reconciled_turn(
     }
     let artifacts = adapter
         .diagnostic_artifacts
-        .accepted_references(&authority)
+        .completion_references(&authority)
         .map_err(map_store_error)?;
     let run = adapter.runs.get_mut(run_key).ok_or_else(unknown_thread)?;
     run.record.terminal = Some(StoredTerminal::Completed {
@@ -4078,7 +4199,7 @@ impl ProductionCodexAdapter {
         if let Some(completion) = pending_completion {
             if self
                 .diagnostic_artifacts
-                .has_pending(&current)
+                .has_required_pending(&current)
                 .map_err(map_store_error)?
             {
                 let run = self.runs.get_mut(&run_key).ok_or_else(unknown_thread)?;
@@ -4087,7 +4208,7 @@ impl ProductionCodexAdapter {
             } else {
                 let artifacts = self
                     .diagnostic_artifacts
-                    .accepted_references(&current)
+                    .completion_references(&current)
                     .map_err(map_store_error)?;
                 let run = self.runs.get_mut(&run_key).ok_or_else(unknown_thread)?;
                 let terminal = terminal_from_pending_completion(
@@ -4152,14 +4273,14 @@ impl ProductionCodexAdapter {
         if let Some(completion) = record.pending_completion.take() {
             if self
                 .diagnostic_artifacts
-                .has_pending(&current)
+                .has_required_pending(&current)
                 .map_err(map_store_error)?
             {
                 record.pending_completion = Some(completion);
             } else {
                 let artifacts = self
                     .diagnostic_artifacts
-                    .accepted_references(&current)
+                    .completion_references(&current)
                     .map_err(map_store_error)?;
                 let terminal = terminal_from_pending_completion(
                     completion,
@@ -4209,17 +4330,11 @@ impl CodexCoreAdapter for ProductionCodexAdapter {
         &mut self,
         open: &winwincode_execution_port::generated::ModelOpenMessage,
         now: &Instant,
-        observed_at: std::time::Instant,
+        _observed_at: std::time::Instant,
     ) -> Result<Option<crate::LocalModelStartGuard>, Self::Error> {
         let original = open.clone();
-        let base =
-            time::OffsetDateTime::parse(&now.0, &time::format_description::well_known::Rfc3339)
-                .map_err(|_| conflict())?;
-        let format = time::format_description::parse(
-            "[year]-[month]-[day]T[hour]:[minute]:[second].[subsecond digits:3]Z",
-        )
-        .map_err(|_| conflict())?;
         let source = self.bridge.authority();
+        source.update_now(now).map_err(map_bridge_error)?;
         let authority = ModelLeaseAuthority {
             lease: open.lease.clone(),
             worker_session_id: open.worker_session_id.clone(),
@@ -4233,15 +4348,6 @@ impl CodexCoreAdapter for ProductionCodexAdapter {
         .stream;
         let store = self.store.clone();
         Ok(Some(Arc::new(move || {
-            let Ok(elapsed) = time::Duration::try_from(observed_at.elapsed()) else {
-                return false;
-            };
-            let Some(current) = base.checked_add(elapsed) else {
-                return false;
-            };
-            let Ok(current) = current.format(&format) else {
-                return false;
-            };
             let Ok(cursor) =
                 crate::model_port_client::ModelCursorStore::load(&mut store.clone(), &stream)
             else {
@@ -4252,13 +4358,10 @@ impl CodexCoreAdapter for ProductionCodexAdapter {
             {
                 return false;
             }
-            let current = Instant(current);
             if ExecutionOutbox::model_start_request_allowed(&store, &original) != Ok(true) {
                 return false;
             }
-            source
-                .validate_exchange(&authority, &exchange, &current)
-                .is_ok()
+            source.validate_invocation(&authority, &exchange).is_ok()
         })))
     }
 
@@ -4267,9 +4370,6 @@ impl CodexCoreAdapter for ProductionCodexAdapter {
             .authority()
             .update_now(now)
             .map_err(map_bridge_error)?;
-        self.action_gate
-            .update_now(now)
-            .map_err(|_| unavailable())?;
         self.expire_retained_interactions(now)?;
         self.kernel
             .enforce_private_permissions()
@@ -4287,25 +4387,38 @@ impl CodexCoreAdapter for ProductionCodexAdapter {
         let retained_result = run.record.terminal.is_some()
             || run.record.final_candidate_freeze.is_some()
             || run.record.delegated_stop.is_some();
-        if (!run.kernel_live && !retained_result)
+        if (run.record.operation_fenced_at.is_some() || !run.kernel_live) && !retained_result
             || !valid_lease_renewal(&run.binding.authority.lease, renewal, now)
         {
             return Err(conflict());
         }
         let mut binding = run.binding.clone();
         binding.authority.lease = renewal.lease.clone();
-        self.bridge
-            .install_binding(binding.clone())
-            .map_err(map_bridge_error)?;
-        self.action_gate
-            .install_binding(
-                binding.clone(),
-                is_delegated_composer(&run.record).then_some(run.record.workspace.as_path()),
-            )
-            .map_err(|_| unavailable())?;
-        self.action_gate
-            .install_tool_dependencies(&binding, &self.config.kernel_home, &run.record.workspace)
-            .map_err(|_| unavailable())?;
+        if run.record.operation_fenced_at.is_some() || retained_result {
+            self.bridge
+                .fence_binding(&binding)
+                .map_err(map_bridge_error)?;
+            self.bridge
+                .renew_retained_binding(&binding)
+                .map_err(map_bridge_error)?;
+        } else {
+            self.bridge
+                .install_binding(binding.clone())
+                .map_err(map_bridge_error)?;
+            self.action_gate
+                .configure_run(
+                    &binding,
+                    is_delegated_composer(&run.record).then_some(run.record.workspace.as_path()),
+                )
+                .map_err(|_| unavailable())?;
+            self.action_gate
+                .install_tool_dependencies(
+                    &binding,
+                    &self.config.kernel_home,
+                    &run.record.workspace,
+                )
+                .map_err(|_| unavailable())?;
+        }
         self.runs
             .get_mut(&run_key)
             .ok_or_else(unknown_thread)?
@@ -4477,7 +4590,7 @@ impl CodexCoreAdapter for ProductionCodexAdapter {
             };
             let accepted = self
                 .diagnostic_artifacts
-                .accepted_references(&authority)
+                .completion_references(&authority)
                 .map_err(map_store_error)?;
             for reference in accepted {
                 self.attach_accepted_diagnostic_artifact(&reference, &authority, &run_key, false)?;
@@ -4510,6 +4623,7 @@ impl CodexCoreAdapter for ProductionCodexAdapter {
             .await
             .map_err(|error| classified_kernel_error(CodexFailureStage::SessionCreate, &error))?;
         let record = StoredRun {
+            operation_fenced_at: None,
             host_action_approvals: self.config.host_action_approvals,
             task_handoff: Some(
                 winwincode_execution_port::task_handoff::TaskHandoffRecord::from_job(
@@ -4604,7 +4718,8 @@ impl CodexCoreAdapter for ProductionCodexAdapter {
                 Some(_) => {}
                 None => run.record.submission_digest = Some(submission_digest),
             }
-            if run.record.terminal.is_some()
+            if run.record.operation_fenced_at.is_some()
+                || run.record.terminal.is_some()
                 || run.record.final_candidate_freeze.is_some()
                 || run.record.delegated_stop.is_some()
                 || run.record.batch_intent.is_some()
@@ -4727,6 +4842,7 @@ impl CodexCoreAdapter for ProductionCodexAdapter {
         let (prompt, counters, actual_counters, stop_reason) = {
             let run = self.runs.get(&run_key).ok_or_else(unknown_thread)?;
             if !is_delegated_composer(&run.record)
+                || run.record.operation_fenced_at.is_some()
                 || run.record.terminal.is_some()
                 || run.record.final_candidate_freeze.is_some()
                 || run.record.delegated_stop.is_some()
@@ -5093,6 +5209,10 @@ impl CodexCoreAdapter for ProductionCodexAdapter {
         }))
     }
 
+    fn durable_state_unavailable(&self, error: &Self::Error) -> bool {
+        error.kind == ProductionCodexErrorKind::DurableState
+    }
+
     fn retained_outcome_usage(
         &mut self,
         thread_id: &CodexThreadId,
@@ -5124,6 +5244,14 @@ impl CodexCoreAdapter for ProductionCodexAdapter {
         Ok(())
     }
 
+    fn runtime_trace_batch_limit(&self) -> usize {
+        16
+    }
+
+    #[allow(
+        clippy::too_many_lines,
+        reason = "Drain retained runtime and required artifact facts before exposing the original terminal"
+    )]
     async fn poll(
         &mut self,
         thread_id: &CodexThreadId,
@@ -5133,9 +5261,6 @@ impl CodexCoreAdapter for ProductionCodexAdapter {
             .authority()
             .update_now(now)
             .map_err(map_bridge_error)?;
-        self.action_gate
-            .update_now(now)
-            .map_err(|_| unavailable())?;
         let run_key = self.run_key_for_thread(thread_id)?.to_owned();
         if let Some(message) = self
             .runs
@@ -5146,6 +5271,30 @@ impl CodexCoreAdapter for ProductionCodexAdapter {
         }
         if let Some(fact) = self.poll_final_tool_facts(&run_key, now).await? {
             return Ok(fact);
+        }
+        if self.runs.get(&run_key).is_some_and(|run| {
+            run.record.operation_fenced_at.is_some()
+                && run.record.terminal.is_none()
+                && run.record.final_candidate_freeze.is_none()
+                && run.record.delegated_stop.is_none()
+                && !run
+                    .record
+                    .pending_completion
+                    .as_ref()
+                    .is_some_and(|completion| {
+                        matches!(completion.kind, StoredPendingTerminalKind::Cancelled)
+                    })
+        }) {
+            // Recovery of an interrupted cancellation resumes only receipt and
+            // accounting cleanup. No Core session or turn is started again.
+            self.interrupt(thread_id, now).await?;
+            if let Some(message) = self
+                .runs
+                .get_mut(&run_key)
+                .and_then(|run| run.replay.pop_front())
+            {
+                return Ok(CodexPoll::RuntimeTrace(Box::new(message)));
+            }
         }
         if self.runs.get(&run_key).is_some_and(|run| {
             run.record.final_candidate_freeze.is_some() || run.record.delegated_stop.is_some()
@@ -5217,6 +5366,17 @@ impl CodexCoreAdapter for ProductionCodexAdapter {
         chunk: &ModelChunkMessage,
         received_at: &Instant,
     ) -> Result<(), Self::Error> {
+        if self
+            .bridge
+            .acknowledge_consumed_terminal_without_owner(chunk, received_at)
+            .map_err(map_bridge_error)?
+            .is_some()
+        {
+            // Historical transport cleanup neither observes a new authority
+            // clock sample nor writes activity into any replacement run.
+            self.last_duplicate_model_chunk_sequence = Some(chunk.sequence.0);
+            return Ok(());
+        }
         let disposition = self
             .bridge
             .accept_chunk(chunk, received_at)
@@ -5234,9 +5394,6 @@ impl CodexCoreAdapter for ProductionCodexAdapter {
             .binding_for_thread(&chunk.session_identity.codex_thread_id)
             .map_err(map_bridge_error)?;
         if let Some(binding) = binding {
-            self.action_gate
-                .install_child_binding(binding.clone())
-                .map_err(|_| unavailable())?;
             let run_key = binding.run_key;
             let run = self.runs.get_mut(&run_key).ok_or_else(unknown_thread)?;
             run.record.last_activity_at = received_at.clone();
@@ -5250,13 +5407,45 @@ impl CodexCoreAdapter for ProductionCodexAdapter {
         receipt: &winwincode_execution_port::generated::ActionEnforcementReceiptMessage,
         received_at: &Instant,
     ) -> Result<(), Self::Error> {
+        if !canonical_instant(&receipt.evaluated_at)
+            || !canonical_instant(received_at)
+            || receipt.sent_at != receipt.evaluated_at
+            || receipt.evaluated_at.0 > received_at.0
+            || !valid_prefixed_id(&receipt.message_id.0, "xmsg_")
+            || !valid_prefixed_id(&receipt.request_id.0, "req_")
+        {
+            return Err(conflict());
+        }
+        self.action_gate
+            .verify_receipt_signature(receipt)
+            .map_err(map_action_receipt_error)?;
+        let message = ExecutionPortMessage::ActionEnforcementReceiptMessage(receipt.clone());
+        if self
+            .outbox
+            .has_applied_response(&message)
+            .map_err(map_store_error)?
+        {
+            // Existing proof consumes only the original transport frame. It
+            // cannot claim another permit or wake an unrelated Core waiter.
+            return Ok(());
+        }
+        if self
+            .action_gate
+            .has_consumed_receipt(receipt)
+            .map_err(map_action_receipt_error)?
+        {
+            // The side-effect claim was durable before a crash, while the
+            // transport proof was not. Verify only that original claim and
+            // signature; never wake another waiter or extend live authority.
+            return self
+                .outbox
+                .record_applied_response(&message)
+                .map_err(map_store_error);
+        }
         if let Err(error) = self.action_gate.accept_receipt(receipt, received_at)
             && !matches!(error, ActionBridgeError::Consumed)
         {
-            return Err(ProductionCodexError::new(
-                ProductionCodexErrorKind::Authority,
-                "embedded Codex action receipt was rejected",
-            ));
+            return Err(map_action_receipt_error(error));
         }
         self.bridge
             .authority()
@@ -5276,10 +5465,6 @@ impl CodexCoreAdapter for ProductionCodexAdapter {
     ) -> Result<(), Self::Error> {
         self.accept_approval_decision_exact(decision, received_at)
             .await?;
-        self.bridge
-            .authority()
-            .update_now(received_at)
-            .map_err(map_bridge_error)?;
         self.outbox
             .record_applied_response(&ExecutionPortMessage::ApprovalDecisionMessage(
                 decision.clone(),
@@ -5430,11 +5615,19 @@ impl CodexCoreAdapter for ProductionCodexAdapter {
                 .map_err(map_store_error);
         }
         if let ExecutionPortMessage::RuntimeAckMessage(acknowledgement) = acknowledgement {
-            let receipt = self
-                .installation
-                .runtime_trace_outbox
-                .acknowledge(&mut self.store, &self.bridge.authority(), acknowledgement)
-                .map_err(|_| unavailable())?;
+            let responder = &self.installation.runtime_trace_outbox;
+            let receipt = match responder
+                .retained_acknowledgement::<_, SharedAuthoritySource>(
+                    &mut self.store,
+                    acknowledgement,
+                )
+                .map_err(|_| unavailable())?
+            {
+                Some(receipt) => receipt,
+                None => responder
+                    .acknowledge(&mut self.store, &self.bridge.authority(), acknowledgement)
+                    .map_err(|_| unavailable())?,
+            };
             self.outbox
                 .apply_runtime_ack(acknowledgement, &receipt)
                 .map(|_| ())
@@ -5450,9 +5643,17 @@ impl CodexCoreAdapter for ProductionCodexAdapter {
         &mut self,
         upload: &CandidateArtifactUpload,
     ) -> Result<RetainedCandidateArtifact, Self::Error> {
-        self.candidate_artifacts
+        let result = self
+            .candidate_artifacts
             .retain(upload)
-            .map_err(map_store_error)
+            .map_err(map_store_error);
+        self.chat_completion_diagnostics.record(
+            &self.config.data_directory.join("model-intake.log"),
+            upload.execution_profile == "codex-chat",
+            ChatCompletionOperation::RetainCandidateArtifact,
+            &result,
+        );
+        result
     }
 
     fn accept_candidate_artifact_ack(
@@ -5533,9 +5734,17 @@ impl CodexCoreAdapter for ProductionCodexAdapter {
         &mut self,
         authority: &CandidateArtifactAuthority,
     ) -> Result<Option<ArtifactReference>, Self::Error> {
-        self.candidate_artifacts
+        let result = self
+            .candidate_artifacts
             .accepted_reference(authority)
-            .map_err(map_store_error)
+            .map_err(map_store_error);
+        self.chat_completion_diagnostics.record(
+            &self.config.data_directory.join("model-intake.log"),
+            authority.execution_profile == "codex-chat",
+            ChatCompletionOperation::AcceptedCandidateArtifact,
+            &result,
+        );
+        result
     }
 
     fn retain_final_candidate_freeze(
@@ -5681,86 +5890,101 @@ impl CodexCoreAdapter for ProductionCodexAdapter {
         thread_id: &CodexThreadId,
         outcome: &JobOutcomeMessage,
     ) -> Result<DurableExecutionDelivery, Self::Error> {
-        let run_key = self.run_key_for_thread(thread_id)?.to_owned();
-        let run = self.runs.get(&run_key).ok_or_else(unknown_thread)?;
-        let terminal_authorities = usize::from(run.record.terminal.is_some())
-            + usize::from(run.record.final_candidate_freeze.is_some())
-            + usize::from(run.record.delegated_stop.is_some());
-        if terminal_authorities != 1
-            || outcome.lease != run.binding.authority.lease
-            || outcome.worker_session_id != run.binding.authority.worker_session_id
-            || outcome.session_identity != run.binding.authority.session_identity
-            || outcome.outcome.codex_thread_id.as_ref() != Some(thread_id)
-        {
-            return Err(conflict());
-        }
-        let identity = RuntimeReplayIdentity {
-            lease: run.binding.authority.lease.clone(),
-            worker_session_id: run.binding.authority.worker_session_id.clone(),
-            session_identity: run.binding.authority.session_identity.clone(),
-            codex_thread_id: run.binding.canonical_thread_id.clone(),
-        };
-        self.observe_now(&outcome.sent_at)?;
-        loop {
-            match self
-                .poll_final_tool_facts(&run_key, &outcome.sent_at)
-                .await?
+        let is_chat = self
+            .thread_to_run
+            .get(&thread_id.0)
+            .and_then(|run_key| self.runs.get(run_key))
+            .is_some_and(|run| run.record.job.execution_profile == "codex-chat");
+        let result = async {
+            let run_key = self.run_key_for_thread(thread_id)?.to_owned();
+            let run = self.runs.get(&run_key).ok_or_else(unknown_thread)?;
+            let terminal_authorities = usize::from(run.record.terminal.is_some())
+                + usize::from(run.record.final_candidate_freeze.is_some())
+                + usize::from(run.record.delegated_stop.is_some());
+            if terminal_authorities != 1
+                || outcome.lease != run.binding.authority.lease
+                || outcome.worker_session_id != run.binding.authority.worker_session_id
+                || outcome.session_identity != run.binding.authority.session_identity
+                || outcome.outcome.codex_thread_id.as_ref() != Some(thread_id)
             {
-                Some(CodexPoll::RuntimeTrace(_)) => {}
-                Some(_) => return Err(unavailable()),
-                None => break,
+                return Err(conflict());
             }
+            let identity = RuntimeReplayIdentity {
+                lease: run.binding.authority.lease.clone(),
+                worker_session_id: run.binding.authority.worker_session_id.clone(),
+                session_identity: run.binding.authority.session_identity.clone(),
+                codex_thread_id: run.binding.canonical_thread_id.clone(),
+            };
+            self.observe_now(&outcome.sent_at)?;
+            loop {
+                match self
+                    .poll_final_tool_facts(&run_key, &outcome.sent_at)
+                    .await?
+                {
+                    Some(CodexPoll::RuntimeTrace(_)) => {}
+                    Some(_) => return Err(unavailable()),
+                    None => break,
+                }
+            }
+            let highest_sequence =
+                ReplayStore::load_watermarks(&mut self.store, &identity.stream_key())
+                    .map_err(map_store_error)?
+                    .highest_sequence;
+            let last_event_sequence = i64::try_from(highest_sequence).map_err(|_| unavailable())?;
+            if outcome.outcome.last_event_sequence.0 > last_event_sequence {
+                return Err(conflict());
+            }
+            let run = self.runs.get(&run_key).ok_or_else(unknown_thread)?;
+            if run.kernel_live
+                || run.record.core_tool_final_cursor != Some(run.record.core_tool_cursor)
+                || run.record.core_tool_pending.is_some()
+            {
+                return Err(unavailable());
+            }
+            let mut finalized = run.record.clone();
+            let binding = run.binding.clone();
+            let kernel_live = run.kernel_live;
+            let canonical_outcome = if let Some(original) =
+                self.validate_retained_outcome(&run_key, &finalized, &binding, kernel_live)?
+            {
+                original
+            } else {
+                let mut proposed = outcome.clone();
+                proposed.message_id = finalized
+                    .terminal_message_id
+                    .clone()
+                    .unwrap_or_else(|| outcome.message_id.clone());
+                proposed.outcome.last_event_sequence =
+                    winwincode_domain::ExecutionAckSequence(last_event_sequence);
+                proposed
+            };
+            finalized.phase = StoredRunPhase::OutcomeRetained;
+            finalized.terminal_message_id = Some(canonical_outcome.message_id.clone());
+            let delivery = self
+                .store
+                .transaction(|transaction| {
+                    AdapterStore::save_run_in_transaction(transaction, &run_key, &finalized)?;
+                    ExecutionOutbox::retain_terminal_in_transaction(
+                        transaction,
+                        &run_key,
+                        &canonical_outcome,
+                    )
+                })
+                .map_err(map_store_error)?;
+            self.runs
+                .get_mut(&run_key)
+                .ok_or_else(unknown_thread)?
+                .record = finalized;
+            Ok(delivery)
         }
-        let highest_sequence =
-            ReplayStore::load_watermarks(&mut self.store, &identity.stream_key())
-                .map_err(map_store_error)?
-                .highest_sequence;
-        let last_event_sequence = i64::try_from(highest_sequence).map_err(|_| unavailable())?;
-        if outcome.outcome.last_event_sequence.0 > last_event_sequence {
-            return Err(conflict());
-        }
-        let run = self.runs.get(&run_key).ok_or_else(unknown_thread)?;
-        if run.kernel_live
-            || run.record.core_tool_final_cursor != Some(run.record.core_tool_cursor)
-            || run.record.core_tool_pending.is_some()
-        {
-            return Err(unavailable());
-        }
-        let mut finalized = run.record.clone();
-        let binding = run.binding.clone();
-        let kernel_live = run.kernel_live;
-        let canonical_outcome = if let Some(original) =
-            self.validate_retained_outcome(&run_key, &finalized, &binding, kernel_live)?
-        {
-            original
-        } else {
-            let mut proposed = outcome.clone();
-            proposed.message_id = finalized
-                .terminal_message_id
-                .clone()
-                .unwrap_or_else(|| outcome.message_id.clone());
-            proposed.outcome.last_event_sequence =
-                winwincode_domain::ExecutionAckSequence(last_event_sequence);
-            proposed
-        };
-        finalized.phase = StoredRunPhase::OutcomeRetained;
-        finalized.terminal_message_id = Some(canonical_outcome.message_id.clone());
-        let delivery = self
-            .store
-            .transaction(|transaction| {
-                AdapterStore::save_run_in_transaction(transaction, &run_key, &finalized)?;
-                ExecutionOutbox::retain_terminal_in_transaction(
-                    transaction,
-                    &run_key,
-                    &canonical_outcome,
-                )
-            })
-            .map_err(map_store_error)?;
-        self.runs
-            .get_mut(&run_key)
-            .ok_or_else(unknown_thread)?
-            .record = finalized;
-        Ok(delivery)
+        .await;
+        self.chat_completion_diagnostics.record(
+            &self.config.data_directory.join("model-intake.log"),
+            is_chat,
+            ChatCompletionOperation::RetainJobOutcome,
+            &result,
+        );
+        result
     }
 
     fn take_execution_messages(&mut self) -> Result<Vec<ExecutionPortMessage>, Self::Error> {
@@ -5796,11 +6020,38 @@ impl CodexCoreAdapter for ProductionCodexAdapter {
         retained.map_err(map_store_error)
     }
 
+    fn fence_thread(
+        &mut self,
+        thread_id: &CodexThreadId,
+        interrupted_at: &Instant,
+    ) -> Result<(), Self::Error> {
+        let run_key = self.run_key_for_thread(thread_id)?.to_owned();
+        let binding = self
+            .runs
+            .get(&run_key)
+            .ok_or_else(unknown_thread)?
+            .binding
+            .clone();
+        // Close live aliases first, including descendant action waiters.
+        // A failed durable write still leaves this process fail-closed.
+        let fenced = self
+            .bridge
+            .fence_binding(&binding)
+            .map_err(map_bridge_error);
+        let run = self.runs.get_mut(&run_key).ok_or_else(unknown_thread)?;
+        if run.record.operation_fenced_at.is_none() {
+            run.record.operation_fenced_at = Some(interrupted_at.clone());
+        }
+        self.persist_run(&run_key)?;
+        fenced
+    }
+
     async fn interrupt(
         &mut self,
         thread_id: &CodexThreadId,
         interrupted_at: &Instant,
     ) -> Result<(), Self::Error> {
+        self.fence_thread(thread_id, interrupted_at)?;
         let run_key = self.run_key_for_thread(thread_id)?.to_owned();
         let awaiting_panel = self
             .runs
@@ -5815,19 +6066,16 @@ impl CodexCoreAdapter for ProductionCodexAdapter {
         let sealed = run.record.delegated_stop.is_some()
             || run.record.final_candidate_freeze.is_some()
             || run.record.terminal_message_id.is_some();
-        self.action_gate
-            .cancel_session(&session)
-            .map_err(|_| unavailable())?;
+        self.bridge
+            .cancel_thread(thread_id, interrupted_at)
+            .await
+            .map_err(map_bridge_error)?;
         if !sealed && !awaiting_panel && kernel_live {
             self.kernel
                 .interrupt(&session)
                 .await
                 .map_err(|_| kernel_error())?;
         }
-        self.bridge
-            .cancel_thread(thread_id, interrupted_at)
-            .await
-            .map_err(map_bridge_error)?;
         if sealed {
             return Ok(());
         }
@@ -5848,7 +6096,7 @@ impl CodexCoreAdapter for ProductionCodexAdapter {
         };
         if self
             .diagnostic_artifacts
-            .has_pending(&authority)
+            .has_required_pending(&authority)
             .map_err(map_store_error)?
         {
             let run = self.runs.get_mut(&run_key).ok_or_else(unknown_thread)?;
@@ -5861,7 +6109,7 @@ impl CodexCoreAdapter for ProductionCodexAdapter {
         }
         let artifacts = self
             .diagnostic_artifacts
-            .accepted_references(&authority)
+            .completion_references(&authority)
             .map_err(map_store_error)?;
         {
             let run = self.runs.get_mut(&run_key).ok_or_else(unknown_thread)?;
@@ -5887,6 +6135,14 @@ impl CodexCoreAdapter for ProductionCodexAdapter {
 
     async fn close_thread(&mut self, thread_id: &CodexThreadId) -> Result<(), Self::Error> {
         let run_key = self.run_key_for_thread(thread_id)?.to_owned();
+        let closed_at = self
+            .runs
+            .get(&run_key)
+            .ok_or_else(unknown_thread)?
+            .record
+            .last_activity_at
+            .clone();
+        self.fence_thread(thread_id, &closed_at)?;
         let run = self.runs.remove(&run_key).ok_or_else(unknown_thread)?;
         self.thread_to_run.remove(&thread_id.0);
         self.action_gate
@@ -6221,6 +6477,10 @@ fn migrate_stored_run_role_policies_v1_to_v2(
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct StoredRun {
+    /// A consumed cancellation prevents new root/child operations after
+    /// restart. It leaves the original terminal and receipt identities intact.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    operation_fenced_at: Option<Instant>,
     #[serde(default)]
     task_handoff: Option<winwincode_execution_port::task_handoff::TaskHandoffRecord>,
     #[serde(default)]
@@ -6526,63 +6786,58 @@ impl StoredTerminal {
     }
 
     fn into_poll(self) -> Result<CodexPoll, ProductionCodexError> {
-        match self {
+        use crate::CodexExecutionOutcome;
+        let (outcome, diagnostics) = match self {
             Self::Completed {
                 summary,
                 final_message: _,
                 artifacts,
                 usage,
-            } => {
-                let completion = CodexTurnCompletion {
+            } => (
+                CodexExecutionOutcome::Completed(CodexTurnCompletion {
                     summary: SecretSafeTraceSummary::new(summary).map_err(|_| unavailable())?,
                     artifacts: Vec::new(),
                     usage,
-                };
-                Ok(if artifacts.is_empty() {
-                    CodexPoll::Completed(completion)
-                } else {
-                    CodexPoll::CompletedWithDiagnostics(completion, artifacts)
-                })
-            }
-            Self::Failed { artifacts } => Ok(if artifacts.is_empty() {
-                CodexPoll::Failed(
+                }),
+                artifacts,
+            ),
+            Self::Failed { artifacts } => (
+                CodexExecutionOutcome::Failed(
                     SecretSafeTraceSummary::new("embedded Codex turn failed")
                         .map_err(|_| unavailable())?,
-                )
-            } else {
-                CodexPoll::FailedWithDiagnostics(
-                    SecretSafeTraceSummary::new("embedded Codex turn failed")
+                ),
+                artifacts,
+            ),
+            Self::DelegatedInconclusive => (
+                CodexExecutionOutcome::Inconclusive(
+                    SecretSafeTraceSummary::new("delegated ChangeBatch proposal was inconclusive")
                         .map_err(|_| unavailable())?,
-                    artifacts,
-                )
-            }),
-            Self::DelegatedInconclusive => Ok(CodexPoll::Inconclusive(
-                SecretSafeTraceSummary::new("delegated ChangeBatch proposal was inconclusive")
-                    .map_err(|_| unavailable())?,
-            )),
-            Self::DelegatedRepairInfrastructureFailed => Ok(CodexPoll::InfrastructureFailed(
-                SecretSafeTraceSummary::new("delegated format-repair infrastructure failure")
-                    .map_err(|_| unavailable())?,
-            )),
-            Self::Cancelled { artifacts } => {
-                let summary = SecretSafeTraceSummary::new("embedded Codex turn cancelled")
-                    .map_err(|_| unavailable())?;
-                Ok(if artifacts.is_empty() {
-                    CodexPoll::Cancelled(summary)
-                } else {
-                    CodexPoll::CancelledWithDiagnostics(summary, artifacts)
-                })
-            }
-            Self::InfrastructureFailed { artifacts } => {
-                let summary = SecretSafeTraceSummary::new("embedded Codex infrastructure failure")
-                    .map_err(|_| unavailable())?;
-                Ok(if artifacts.is_empty() {
-                    CodexPoll::InfrastructureFailed(summary)
-                } else {
-                    CodexPoll::InfrastructureFailedWithDiagnostics(summary, artifacts)
-                })
-            }
-        }
+                ),
+                Vec::new(),
+            ),
+            Self::DelegatedRepairInfrastructureFailed => (
+                CodexExecutionOutcome::InfrastructureFailed(
+                    SecretSafeTraceSummary::new("delegated format-repair infrastructure failure")
+                        .map_err(|_| unavailable())?,
+                ),
+                Vec::new(),
+            ),
+            Self::Cancelled { artifacts } => (
+                CodexExecutionOutcome::Cancelled(
+                    SecretSafeTraceSummary::new("embedded Codex turn cancelled")
+                        .map_err(|_| unavailable())?,
+                ),
+                artifacts,
+            ),
+            Self::InfrastructureFailed { artifacts } => (
+                CodexExecutionOutcome::InfrastructureFailed(
+                    SecretSafeTraceSummary::new("embedded Codex infrastructure failure")
+                        .map_err(|_| unavailable())?,
+                ),
+                artifacts,
+            ),
+        };
+        Ok(CodexPoll::terminal(outcome, diagnostics))
     }
 }
 
@@ -8059,6 +8314,21 @@ fn map_store_error(error: AdapterStoreError) -> ProductionCodexError {
     }
 }
 
+fn map_action_receipt_error(error: ActionBridgeError) -> ProductionCodexError {
+    let failure = match error {
+        ActionBridgeError::Unavailable => unavailable(),
+        ActionBridgeError::Conflict => conflict(),
+        _ => ProductionCodexError::new(
+            ProductionCodexErrorKind::Authority,
+            "embedded Codex action receipt was rejected",
+        ),
+    };
+    failure.with_diagnostic(CodexFailureDiagnostic::kernel(
+        CodexFailureStage::AdapterOperation,
+        crate::action_bridge::action_kernel_failure(error).code(),
+    ))
+}
+
 fn map_bridge_error(_: BridgeError) -> ProductionCodexError {
     ProductionCodexError::new(
         ProductionCodexErrorKind::ModelBridge,
@@ -8070,6 +8340,8 @@ fn map_bridge_error(_: BridgeError) -> ProductionCodexError {
 mod tests {
     include!("storage_post_action_regression.rs");
     include!("storage_task_context_hotpath_tests.rs");
+    include!("device_primary_accounting_tests.rs");
+    include!("runtime_start_delivery_tests.rs");
     use super::{
         AdapterStore, ExecutionMode, HELPER_RELEASE_BINARY_MODE, MAX_HELPER_BYTES,
         ModelLeaseAuthority, ModelRunBinding, ProductionCodexAdapter, ProductionCodexConfig,
@@ -8092,6 +8364,7 @@ mod tests {
         mcp_approval_detail, patch_approval_detail,
     };
     use crate::helper_release::HelperReleaseManifest;
+    use crate::model_port_client::ModelLeaseAuthoritySource as _;
     use crate::{CodexCoreAdapter, CodexPoll, CodexRunKey, CodexThreadStart};
     use codex_protocol::protocol::{
         Event as CodexEvent, EventMsg as CodexEventMsg, ExecCommandEndEvent, ExecCommandSource,
@@ -8897,7 +9170,11 @@ mod tests {
         );
         let restored: StoredTerminal =
             serde_json::from_slice(&serde_json::to_vec(&terminal).unwrap()).unwrap();
-        let CodexPoll::Completed(completion) = restored.into_poll().unwrap() else {
+        let CodexPoll::Terminal(crate::CodexExecutionResult {
+            outcome: crate::CodexExecutionOutcome::Completed(completion),
+            ..
+        }) = restored.into_poll().unwrap()
+        else {
             panic!("completion remains successful")
         };
         assert_eq!(
@@ -9305,6 +9582,42 @@ mod tests {
     }
 
     #[cfg(unix)]
+    fn seed_recorded_closed_cell(home: &std::path::Path, session: &str) -> String {
+        let database = std::fs::read_dir(home)
+            .unwrap()
+            .filter_map(Result::ok)
+            .map(|entry| entry.path())
+            .find(|path| {
+                path.file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| name.starts_with("state_") && name.ends_with(".sqlite"))
+            })
+            .unwrap();
+        let fact = serde_json::json!({"kind":"cell","fact":{
+            "schema_version":1,"sequence":1,"thread_id":session,
+            "parent_request_sequence":1,"cell_id":"1","scope_id":"recorded-scope",
+            "owner_id":"recorded-owner","lifecycle":"closed","revision":2
+        }})
+        .to_string();
+        let request = serde_json::json!({
+            "thread_id":session,"logical_id":"recorded-exec","turn_id":"recorded-turn",
+            "scope_id":"recorded-scope","cell_id":"1","parent_call_id":null,
+            "tool_name":"exec_command","source":"code_mode","binding":"recorded-binding"
+        })
+        .to_string();
+        let database = rusqlite::Connection::open(database).unwrap();
+        database
+            .execute(
+                "INSERT INTO tool_requests(sequence,thread_id,logical_id,binding,request_json,request_owner,original_input,call_status)
+                 VALUES (1,?1,'recorded-exec','recorded-binding',?2,'recorded-owner',?3,'pending')",
+                rusqlite::params![session, request, r#"{"cmd":"printf recorded"}"#],
+            )
+            .unwrap();
+        database.execute("INSERT INTO tool_fact_events(request_sequence,thread_id,fact_json) VALUES (1,?1,?2)", [session, fact.as_str()]).unwrap();
+        fact
+    }
+
+    #[cfg(unix)]
     async fn recorded_closed_cell_projection_test() {
         use base64::{Engine as _, engine::general_purpose::STANDARD};
         let mut fixture = session_end_shutdown_fixture(true, "closed-cell-during-shutdown").await;
@@ -9323,27 +9636,7 @@ mod tests {
             .record
             .kernel_session_id
             .clone();
-        let home = &fixture.adapter.config.kernel_home;
-        let database = std::fs::read_dir(home)
-            .unwrap()
-            .filter_map(Result::ok)
-            .map(|entry| entry.path())
-            .find(|path| {
-                path.file_name()
-                    .and_then(|name| name.to_str())
-                    .is_some_and(|name| name.starts_with("state_") && name.ends_with(".sqlite"))
-            })
-            .unwrap();
-        let fact = serde_json::json!({"kind":"cell","fact":{
-            "schema_version":1,"sequence":1,"thread_id":session,
-            "parent_request_sequence":1,"cell_id":"1","scope_id":"recorded-scope",
-            "owner_id":"recorded-owner","lifecycle":"closed","revision":2
-        }})
-        .to_string();
-        let database = rusqlite::Connection::open(database).unwrap();
-        database.execute("INSERT INTO tool_requests(sequence,thread_id,logical_id,binding,request_json) VALUES (1,?1,'recorded-exec','recorded-binding','{}')", [&session]).unwrap();
-        database.execute("INSERT INTO tool_fact_events(request_sequence,thread_id,fact_json) VALUES (1,?1,?2)", [&session, &fact]).unwrap();
-        drop(database);
+        let fact = seed_recorded_closed_cell(&fixture.adapter.config.kernel_home, &session);
         let poll = fixture.adapter.poll(&fixture.thread, &fixture.now).await;
         assert!(
             !fixture.done.exists(),
@@ -9384,7 +9677,10 @@ mod tests {
                     .poll(&fixture.thread, &fixture.now)
                     .await
                     .unwrap(),
-                CodexPoll::Cancelled(_)
+                CodexPoll::Terminal(crate::CodexExecutionResult {
+                    outcome: crate::CodexExecutionOutcome::Cancelled(_),
+                    ..
+                })
             ) {
                 break;
             }
@@ -9521,11 +9817,17 @@ mod tests {
                     .unwrap()
                 {
                     CodexPoll::RuntimeTrace(_) => {}
-                    CodexPoll::Cancelled(_) if cancelled => {
+                    CodexPoll::Terminal(crate::CodexExecutionResult {
+                        outcome: crate::CodexExecutionOutcome::Cancelled(_),
+                        ..
+                    }) if cancelled => {
                         observed_terminal = true;
                         break;
                     }
-                    CodexPoll::Completed(completion) if !cancelled => {
+                    CodexPoll::Terminal(crate::CodexExecutionResult {
+                        outcome: crate::CodexExecutionOutcome::Completed(completion),
+                        ..
+                    }) if !cancelled => {
                         assert_eq!(completion.summary.as_str(), "embedded Codex turn completed");
                         observed_terminal = true;
                         break;
@@ -9793,6 +10095,701 @@ mod tests {
         std::fs::remove_dir_all(root).unwrap();
     }
 
+    fn interaction_fixture_message(kind: &str) -> ExecutionPortMessage {
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../tests/fixtures/contracts/execution-port.valid.json"
+        ))
+        .unwrap();
+        serde_json::from_value(
+            fixture["messages"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|message| message["kind"] == kind)
+                .unwrap()
+                .clone(),
+        )
+        .unwrap()
+    }
+
+    #[tokio::test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "historical acceptance, owner removal and reopen share one immutable operation fixture"
+    )]
+    async fn resolved_approval_replay_after_owner_removal_and_reopen_only_cleans_transport() {
+        let root = test_root("historical-approval");
+        let mut adapter = ProductionCodexAdapter::open(diagnostic_adapter_config(&root)).unwrap();
+        let (mut record, binding) = delegated_record_and_binding();
+        record.workspace = root.join("workspace");
+        std::fs::create_dir_all(&record.workspace).unwrap();
+        let key = binding.run_key.clone();
+        let job_id = binding.authority.lease.job_id.clone();
+        adapter
+            .install_active_run(&key, record, binding, false, false)
+            .unwrap();
+        let request_digest = format!("sha256:{}", "a".repeat(64));
+        let prompt = adapter
+            .retain_approval_request(
+                &key,
+                StoredApprovalOperationKind::Exec,
+                "historical-exec-operation".into(),
+                Some("turn-fixture".into()),
+                request_digest.clone(),
+                None,
+            )
+            .unwrap();
+        let original = ExecutionPortMessage::ApprovalRequestMessage(prompt.clone());
+        adapter.outbox.retain(&original).unwrap();
+        let ExecutionPortMessage::ApprovalDecisionMessage(mut decision) =
+            interaction_fixture_message("approval.decision")
+        else {
+            panic!("approval decision fixture");
+        };
+        decision.approval_id = prompt.approval_id.clone();
+        decision.lease = prompt.lease.clone();
+        decision.worker_session_id = prompt.worker_session_id.clone();
+        decision.session_identity = prompt.session_identity.clone();
+        decision.decided_at = Instant("2026-08-28T00:01:00.000Z".into());
+        decision.sent_at = decision.decided_at.clone();
+        let digest =
+            super::private_payload_digest(b"winwincode.approval-decision.v1", &decision).unwrap();
+        // The stored resolved operation is the permanent proof of prior Core
+        // consumption, independent of transport receipt compaction.
+        adapter
+            .store
+            .resolve_approval_operation(&decision.approval_id.0, &request_digest, &digest)
+            .unwrap();
+        let before = adapter
+            .store
+            .load_approval_operation(&decision.approval_id.0)
+            .unwrap()
+            .unwrap();
+        adapter.bridge.authority().remove(&job_id.0, &key).unwrap();
+        adapter.runs.remove(&key);
+        let received_at = Instant("2026-08-28T00:16:00.000Z".into());
+        adapter
+            .accept_approval_decision_exact(&decision, &received_at)
+            .await
+            .unwrap();
+        let response = ExecutionPortMessage::ApprovalDecisionMessage(decision.clone());
+        adapter.outbox.acknowledge_response(&response).unwrap();
+        assert!(adapter.outbox.pending().unwrap().is_empty());
+        assert_eq!(
+            adapter
+                .store
+                .load_approval_operation(&decision.approval_id.0)
+                .unwrap()
+                .unwrap(),
+            before
+        );
+        drop(adapter);
+        let mut adapter = ProductionCodexAdapter::open(diagnostic_adapter_config(&root)).unwrap();
+        adapter
+            .accept_approval_decision_exact(&decision, &received_at)
+            .await
+            .unwrap();
+        adapter.outbox.acknowledge_response(&response).unwrap();
+        let mut changed = decision.clone();
+        changed.lease.expires_at = received_at.clone();
+        assert!(
+            adapter
+                .accept_approval_decision_exact(&changed, &received_at)
+                .await
+                .is_err()
+        );
+        changed = decision.clone();
+        changed.scope =
+            winwincode_execution_port::generated::ApprovalDecisionMessageScope::WorkerSession;
+        assert_ne!(changed.scope, decision.scope);
+        assert!(
+            adapter
+                .accept_approval_decision_exact(&changed, &received_at)
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            adapter
+                .store
+                .load_approval_operation(&decision.approval_id.0)
+                .unwrap()
+                .unwrap(),
+            before
+        );
+        drop(adapter);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn consumed_action_claim_repairs_missing_transport_proof_after_replacement_and_restart() {
+        Box::pin(consumed_action_claim_crash_window(true)).await;
+    }
+
+    #[tokio::test]
+    async fn consumed_action_rejection_repairs_missing_transport_proof_after_replacement_and_restart()
+     {
+        Box::pin(consumed_action_claim_crash_window(false)).await;
+    }
+
+    #[allow(
+        clippy::too_many_lines,
+        reason = "a consumed signed decision, missing outbox proof, replacement and restart reproduce one crash window"
+    )]
+    async fn consumed_action_claim_crash_window(permitted: bool) {
+        use winwincode_execution_port::action_enforcement::{
+            ActionEnforcementIssuer, FileActionReceiptUseStore,
+        };
+        use winwincode_execution_port::generated::ActionEnforcementDecision;
+        use winwincode_kernel::{KernelActionGate as _, KernelActionPayload, KernelActionRequest};
+
+        let root = test_root("action-claim-before-transport-proof");
+        let config = diagnostic_adapter_config(&root);
+        let mut adapter = ProductionCodexAdapter::open(config.clone()).unwrap();
+        let original = crate::action_bridge::tests::binding();
+        adapter
+            .action_gate
+            .install_binding(&original, None)
+            .unwrap();
+        let now = Instant("2030-01-01T00:00:02.000Z".into());
+        adapter.action_gate.update_now(&now).unwrap();
+        let task = tokio::spawn(adapter.action_gate.authorize(KernelActionRequest {
+            session_id: original.kernel_session_id.clone(),
+            turn_id: "claim-crash-turn".into(),
+            operation_id: "claim-crash-action".into(),
+            namespace: Some("functions".into()),
+            tool_name: "shell_command".into(),
+            payload: KernelActionPayload::Shell {
+                program: "pnpm".into(),
+                args: vec!["add".into(), "exact-package".into()],
+                working_directory: "/tmp/exact".into(),
+            },
+        }));
+        tokio::task::yield_now().await;
+        let request_message = adapter.action_gate.take_messages().unwrap().pop().unwrap();
+        adapter.outbox.retain(&request_message).unwrap();
+        let ExecutionPortMessage::ActionEnforcementRequestMessage(request) = request_message else {
+            panic!("live action request");
+        };
+        let ExecutionPortMessage::ActionEnforcementReceiptMessage(mut receipt) =
+            interaction_fixture_message("action.enforcement_receipt")
+        else {
+            panic!("receipt fixture");
+        };
+        receipt.request_id = request.request_id;
+        receipt.job_id = request.job_id;
+        receipt.lease = request.lease;
+        receipt.worker_session_id = request.worker_session_id;
+        receipt.session_identity = request.session_identity;
+        receipt.policy_kind = request.policy_kind;
+        receipt.resource = request.resource;
+        receipt.subject_sha256 = request.subject_sha256;
+        receipt.matched_condition_sha256 = request.matched_condition_sha256;
+        receipt.evaluated_at = now.clone();
+        receipt.sent_at = now.clone();
+        receipt.decision = if permitted {
+            ActionEnforcementDecision::Permit
+        } else {
+            ActionEnforcementDecision::Reject
+        };
+        ActionEnforcementIssuer::new(config.action_signing_key.clone())
+            .sign(&mut receipt)
+            .unwrap();
+        let receipt_directory = config.data_directory.join("action-enforcement-receipts");
+        let saved_directory = config
+            .data_directory
+            .join("action-enforcement-receipts.saved");
+        std::fs::rename(&receipt_directory, &saved_directory).unwrap();
+        std::fs::write(&receipt_directory, b"required storage unavailable").unwrap();
+        let failure = adapter
+            .accept_action_receipt(&receipt, &now)
+            .await
+            .unwrap_err();
+        assert_eq!(failure.kind(), ProductionCodexErrorKind::DurableState);
+        assert!(adapter.durable_state_unavailable(&failure));
+        assert_eq!(
+            serde_json::to_value(adapter.error_diagnostic(&failure).unwrap()).unwrap()["cause"],
+            "ACTION_ENFORCEMENT_UNAVAILABLE"
+        );
+        let message = ExecutionPortMessage::ActionEnforcementReceiptMessage(receipt.clone());
+        assert!(!adapter.outbox.has_applied_response(&message).unwrap());
+        assert!(
+            !task.is_finished(),
+            "storage unavailability cannot deny the original Core waiter"
+        );
+        std::fs::remove_file(&receipt_directory).unwrap();
+        std::fs::rename(&saved_directory, &receipt_directory).unwrap();
+        let mut invalid_signature = receipt.clone();
+        invalid_signature.receipt_signature.0 = format!("sha256:{}", "f".repeat(64));
+        let failure = adapter
+            .accept_action_receipt(&invalid_signature, &now)
+            .await
+            .unwrap_err();
+        assert_eq!(failure.kind(), ProductionCodexErrorKind::Authority);
+        assert!(!adapter.durable_state_unavailable(&failure));
+        assert!(!adapter.outbox.has_applied_response(&message).unwrap());
+        assert!(
+            !task.is_finished(),
+            "a forged receipt cannot resolve the original Core waiter"
+        );
+        adapter.action_gate.accept_receipt(&receipt, &now).unwrap();
+        let authorization = task.await.unwrap();
+        if permitted {
+            authorization.unwrap();
+        } else {
+            assert_eq!(
+                authorization.unwrap_err().code(),
+                "ACTION_ENFORCEMENT_REJECTED"
+            );
+        }
+        let message = ExecutionPortMessage::ActionEnforcementReceiptMessage(receipt.clone());
+        assert!(!adapter.outbox.has_applied_response(&message).unwrap());
+        assert!(
+            FileActionReceiptUseStore::open(&config.data_directory)
+                .unwrap()
+                .has_consumed(&receipt)
+                .unwrap()
+        );
+        drop(adapter);
+        let mut adapter = ProductionCodexAdapter::open(config.clone()).unwrap();
+        let mut replacement = original.clone();
+        replacement.run_key = format!("sha256:{}", "c".repeat(64));
+        replacement.kernel_session_id = "replacement-action-kernel".into();
+        replacement.canonical_thread_id.0 = format!("cdx_{}", "B".repeat(26));
+        replacement.authority.session_identity.codex_thread_id =
+            replacement.canonical_thread_id.clone();
+        replacement.authority.worker_session_id.0 = format!("wsn_{}", "B".repeat(26));
+        replacement.authority.session_identity.worker_session_id =
+            replacement.authority.worker_session_id.clone();
+        replacement.authority.lease.attempt = 2;
+        replacement.authority.lease.fencing_token.0 = "2".into();
+        adapter
+            .action_gate
+            .install_binding(&replacement, None)
+            .unwrap();
+        let replacement_waiter = tokio::spawn(adapter.action_gate.authorize(KernelActionRequest {
+            session_id: replacement.kernel_session_id.clone(),
+            turn_id: "replacement-turn".into(),
+            operation_id: "replacement-action".into(),
+            namespace: Some("functions".into()),
+            tool_name: "shell_command".into(),
+            payload: KernelActionPayload::Shell {
+                program: "pnpm".into(),
+                args: vec!["add".into(), "exact-package".into()],
+                working_directory: "/tmp/exact".into(),
+            },
+        }));
+        tokio::task::yield_now().await;
+        let replacement_requests = adapter.action_gate.take_messages().unwrap();
+        assert_eq!(replacement_requests.len(), 1);
+        let ExecutionPortMessage::ActionEnforcementRequestMessage(replacement_request) =
+            &replacement_requests[0]
+        else {
+            panic!("replacement action request");
+        };
+        assert_ne!(replacement_request.request_id, receipt.request_id);
+        let received_at = Instant("2030-01-02T00:00:00.000Z".into());
+        for change in 0..9 {
+            let mut changed = receipt.clone();
+            match change {
+                0 => {
+                    changed.decision = if permitted {
+                        ActionEnforcementDecision::Reject
+                    } else {
+                        ActionEnforcementDecision::Permit
+                    };
+                }
+                1 => changed.lease.attempt += 1,
+                2 => changed.job_id.0 = format!("job_{}", "Z".repeat(26)),
+                3 => changed.message_id.0 = format!("xmsg_{}", "Z".repeat(26)),
+                4 => {
+                    changed.evaluated_at.0 = "2030-01-01T00:00:03.000Z".into();
+                    changed.sent_at = changed.evaluated_at.clone();
+                }
+                5 => changed.lease.expires_at.0 = "2030-01-01T02:00:00.000Z".into(),
+                6 => changed.session_identity.codex_thread_id.0 = format!("cdx_{}", "Z".repeat(26)),
+                7 => changed.resource.push_str("changed"),
+                _ => changed.receipt_signature.0 = format!("sha256:{}", "f".repeat(64)),
+            }
+            assert!(
+                adapter
+                    .accept_action_receipt(&changed, &received_at)
+                    .await
+                    .is_err(),
+                "changed consumed receipt {change}"
+            );
+        }
+        assert!(!adapter.outbox.has_applied_response(&message).unwrap());
+        adapter
+            .accept_action_receipt(&receipt, &received_at)
+            .await
+            .unwrap();
+        assert!(adapter.outbox.has_applied_response(&message).unwrap());
+        adapter.outbox.acknowledge_response(&message).unwrap();
+        assert!(adapter.outbox.pending().unwrap().is_empty());
+        assert!(adapter.action_gate.take_messages().unwrap().is_empty());
+        tokio::task::yield_now().await;
+        assert!(
+            !replacement_waiter.is_finished(),
+            "historical cleanup cannot wake the replacement Core waiter"
+        );
+        assert!(
+            adapter
+                .bridge
+                .authority()
+                .observed_now()
+                .unwrap()
+                .unwrap()
+                .0
+                < received_at.0,
+            "historical cleanup cannot advance the current run clock"
+        );
+        adapter
+            .bridge
+            .authority()
+            .validate_current(&replacement.authority, &now)
+            .unwrap();
+        assert!(
+            adapter
+                .bridge
+                .binding_for_thread(&original.canonical_thread_id)
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(
+            adapter
+                .bridge
+                .binding_for_thread(&replacement.canonical_thread_id)
+                .unwrap()
+                .unwrap()
+                .run_key,
+            replacement.run_key
+        );
+        assert!(adapter.kernel.list_sessions().await.unwrap().is_empty());
+        adapter
+            .action_gate
+            .cancel_session(&replacement.kernel_session_id)
+            .unwrap();
+        assert_eq!(
+            replacement_waiter.await.unwrap().unwrap_err().code(),
+            "ACTION_CANCELLED"
+        );
+        drop(adapter);
+        let mut adapter = ProductionCodexAdapter::open(config).unwrap();
+        adapter
+            .accept_action_receipt(&receipt, &received_at)
+            .await
+            .unwrap();
+        assert!(adapter.kernel.list_sessions().await.unwrap().is_empty());
+        assert!(adapter.outbox.pending().unwrap().is_empty());
+        drop(adapter);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn consumed_action_receipt_replays_after_reopen_without_a_live_waiter() {
+        let root = test_root("historical-action");
+        let adapter = ProductionCodexAdapter::open(diagnostic_adapter_config(&root)).unwrap();
+        let original = interaction_fixture_message("action.enforcement_request");
+        let ExecutionPortMessage::ActionEnforcementReceiptMessage(mut signed) =
+            interaction_fixture_message("action.enforcement_receipt")
+        else {
+            panic!("action receipt fixture");
+        };
+        winwincode_execution_port::action_enforcement::ActionEnforcementIssuer::new(
+            adapter.config.action_signing_key.clone(),
+        )
+        .sign(&mut signed)
+        .unwrap();
+        let response = ExecutionPortMessage::ActionEnforcementReceiptMessage(signed);
+        adapter.outbox.retain(&original).unwrap();
+        assert!(!adapter.outbox.has_applied_response(&response).unwrap());
+        adapter.outbox.record_applied_response(&response).unwrap();
+        assert!(adapter.outbox.has_applied_response(&response).unwrap());
+        adapter.outbox.acknowledge_response(&response).unwrap();
+        drop(adapter);
+        let mut adapter = ProductionCodexAdapter::open(diagnostic_adapter_config(&root)).unwrap();
+        let ExecutionPortMessage::ActionEnforcementReceiptMessage(receipt) = &response else {
+            panic!("action receipt fixture");
+        };
+        let received_at = Instant("2026-08-24T12:16:00.000Z".into());
+        adapter
+            .accept_action_receipt(receipt, &received_at)
+            .await
+            .unwrap();
+        adapter.outbox.acknowledge_response(&response).unwrap();
+        assert!(adapter.outbox.pending().unwrap().is_empty());
+        assert!(
+            adapter
+                .bridge
+                .authority()
+                .binding_for_alias(&receipt.session_identity.codex_thread_id.0)
+                .unwrap()
+                .is_none()
+        );
+        let mut changed = receipt.clone();
+        changed.lease.attempt += 1;
+        assert!(
+            adapter
+                .accept_action_receipt(&changed, &received_at)
+                .await
+                .is_err()
+        );
+        changed = receipt.clone();
+        changed.decision = winwincode_execution_port::generated::ActionEnforcementDecision::Reject;
+        assert!(
+            adapter
+                .accept_action_receipt(&changed, &received_at)
+                .await
+                .is_err(),
+            "same signature cannot change the accepted decision"
+        );
+        changed = receipt.clone();
+        changed.request_id.0 = "req_00000000000000000000000999".into();
+        assert!(
+            adapter
+                .accept_action_receipt(&changed, &received_at)
+                .await
+                .is_err(),
+            "no historical proof cannot consume a new waiter"
+        );
+        assert!(adapter.outbox.has_applied_response(&response).unwrap());
+        let mut changed = receipt.clone();
+        changed.message_id.0 = "xmsg_00000000000000000000000998".into();
+        assert!(
+            adapter
+                .accept_action_receipt(&changed, &received_at)
+                .await
+                .is_err()
+        );
+        changed = receipt.clone();
+        changed.evaluated_at.0 = "2026-08-24T12:00:03.000Z".into();
+        changed.sent_at = changed.evaluated_at.clone();
+        assert!(
+            adapter
+                .accept_action_receipt(&changed, &received_at)
+                .await
+                .is_err()
+        );
+        drop(adapter);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "cancel recovery, retained renewal and replay authority stay in one durable run fixture"
+    )]
+    async fn interrupted_cancellation_recovery_emits_cancelled_and_renewal_keeps_operations_fenced()
+    {
+        use winwincode_execution_port::generated::{LeaseRenewMessage, LeaseRenewMessageKind};
+        let root = test_root("cancelled-run-recovery");
+        let mut adapter = ProductionCodexAdapter::open(diagnostic_adapter_config(&root)).unwrap();
+        let (mut record, mut binding) = delegated_record_and_binding();
+        record.role_policy = None;
+        record.workspace = root.join("workspace");
+        std::fs::create_dir_all(&record.workspace).unwrap();
+        binding.authority.lease.fencing_token = FencingToken("1".into());
+        binding.authority.lease.lease_id = LeaseId("lse_00000000000000000000000001".into());
+        binding.authority.lease.issued_at = Instant("2026-08-28T00:00:00.000Z".into());
+        binding.authority.lease.expires_at = Instant("2026-08-28T00:15:00.000Z".into());
+        let key = binding.run_key.clone();
+        let thread = binding.canonical_thread_id.clone();
+        adapter
+            .install_active_run(&key, record, binding.clone(), false, false)
+            .unwrap();
+        let now = Instant("2026-08-28T00:01:00.000Z".into());
+        adapter.fence_thread(&thread, &now).unwrap();
+        drop(adapter);
+        let mut adapter = ProductionCodexAdapter::open(diagnostic_adapter_config(&root)).unwrap();
+        let mut saved = load_stored_run(&adapter.store, &key).unwrap().unwrap();
+        let workspace = saved.workspace.clone();
+        assert!(
+            !adapter
+                .recover_stored_kernel_session(&key, &mut saved, &workspace, None)
+                .await
+                .unwrap(),
+            "fenced recovery cannot create or resume Core"
+        );
+        adapter
+            .install_active_run(&key, saved, binding, false, true)
+            .unwrap();
+        let mut cancelled = false;
+        for _ in 0..8 {
+            match adapter.poll(&thread, &now).await.unwrap() {
+                CodexPoll::Terminal(crate::CodexExecutionResult {
+                    outcome: crate::CodexExecutionOutcome::Cancelled(_),
+                    ..
+                }) => {
+                    cancelled = true;
+                    break;
+                }
+                CodexPoll::RuntimeTrace(_) | CodexPoll::Pending => {}
+                _ => panic!("cancel recovery cannot change terminal category"),
+            }
+        }
+        assert!(cancelled);
+        let terminal = serde_json::to_vec(&adapter.runs[&key].record.terminal).unwrap();
+        let prior = adapter.runs[&key].binding.authority.lease.clone();
+        let mut extended = prior.clone();
+        extended.expires_at = Instant("2026-08-28T00:30:00.000Z".into());
+        let renewal = LeaseRenewMessage {
+            kind: LeaseRenewMessageKind::LeaseRenew,
+            lease: extended.clone(),
+            prior_expires_at: prior.expires_at,
+            message_id: ExecutionMessageId("xmsg_00000000000000000000000001".into()),
+            request_id: winwincode_domain::RequestId("req_00000000000000000000000001".into()),
+            schema_version: SchemaVersion::WinwincodeV1,
+            sent_at: now.clone(),
+        };
+        assert!(adapter.renew_lease(&thread, &renewal, &now).unwrap());
+        assert_eq!(adapter.runs[&key].binding.authority.lease, extended);
+        assert!(
+            adapter
+                .bridge
+                .binding_for_thread(&thread)
+                .unwrap()
+                .is_none()
+        );
+        let goal = crate::stage_product::snapshot_bound_prompt(
+            &adapter.runs[&key].record.job,
+            adapter.runs[&key].record.snapshot_id.as_ref(),
+        )
+        .unwrap();
+        adapter.submit_turn(&thread, &goal).await.unwrap();
+        assert!(adapter.submit_kernel_turn(&thread, &goal).await.is_err());
+        assert!(!adapter.runs[&key].kernel_live);
+        assert_ne!(
+            adapter.runs[&key].record.phase,
+            StoredRunPhase::SubmissionIntent
+        );
+        assert_eq!(
+            serde_json::to_vec(&adapter.runs[&key].record.terminal).unwrap(),
+            terminal
+        );
+        let saved = load_stored_run(&adapter.store, &key).unwrap().unwrap();
+        let binding = adapter.runs[&key].binding.clone();
+        drop(adapter);
+        let mut reopened = ProductionCodexAdapter::open(diagnostic_adapter_config(&root)).unwrap();
+        reopened
+            .install_active_run(&key, saved, binding, false, true)
+            .unwrap();
+        assert!(
+            reopened
+                .bridge
+                .binding_for_thread(&thread)
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(
+            serde_json::to_vec(&reopened.runs[&key].record.terminal).unwrap(),
+            terminal
+        );
+        drop(reopened);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn synchronous_cancellation_fence_survives_restart_and_blocks_child_reactivation() {
+        let root = test_root("run-cancellation-fence");
+        let mut adapter = ProductionCodexAdapter::open(diagnostic_adapter_config(&root)).unwrap();
+        let (mut record, mut binding) = delegated_record_and_binding();
+        record.workspace = root.join("workspace");
+        std::fs::create_dir_all(&record.workspace).unwrap();
+        binding.authority.lease.fencing_token = FencingToken("1".into());
+        binding.authority.lease.lease_id = LeaseId("lse_00000000000000000000000001".into());
+        binding.authority.lease.expires_at = Instant("2026-08-28T01:00:00.000Z".into());
+        let key = binding.run_key.clone();
+        adapter
+            .install_active_run(&key, record, binding.clone(), false, false)
+            .unwrap();
+        let mut child = binding.clone();
+        child.canonical_thread_id = CodexThreadId("cdx_00000000000000000000000002".into());
+        child.kernel_session_id = "cancelled-child-session".into();
+        child.authority.session_identity.codex_thread_id = child.canonical_thread_id.clone();
+        adapter.bridge.install_child_binding(child.clone()).unwrap();
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../tests/fixtures/contracts/execution-port.valid.json"
+        ))
+        .unwrap();
+        let mut open: winwincode_execution_port::generated::ModelOpenMessage =
+            serde_json::from_value(
+                fixture["messages"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .find(|message| message["kind"] == "model.open")
+                    .unwrap()
+                    .clone(),
+            )
+            .unwrap();
+        open.lease = child.authority.lease.clone();
+        open.worker_session_id = child.authority.worker_session_id.clone();
+        open.session_identity = child.authority.session_identity.clone();
+        adapter
+            .outbox
+            .retain(&ExecutionPortMessage::ModelOpenMessage(open.clone()))
+            .unwrap();
+        let now = Instant("2026-08-28T00:00:02.000Z".into());
+        let guard = adapter
+            .local_model_start_guard(&open, &now, std::time::Instant::now())
+            .unwrap()
+            .unwrap();
+        assert!(guard());
+        adapter
+            .fence_thread(&binding.canonical_thread_id, &now)
+            .unwrap();
+        assert!(
+            !guard(),
+            "slot-waiting and retrying child calls immediately lose invocation authority"
+        );
+        assert!(
+            adapter
+                .bridge
+                .binding_for_thread(&binding.canonical_thread_id)
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            adapter
+                .bridge
+                .binding_for_thread(&child.canonical_thread_id)
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            adapter.bridge.install_child_binding(child.clone()).is_err(),
+            "durable lineage cannot reactivate a cancelled child"
+        );
+        assert!(
+            adapter
+                .bridge
+                .authority()
+                .validate_retained_exchange(&child.authority, &open.model_exchange_id, &now)
+                .is_ok(),
+            "original model receipt settlement keeps exact authority"
+        );
+        let saved = load_stored_run(&adapter.store, &key).unwrap().unwrap();
+        assert_eq!(saved.operation_fenced_at, Some(now.clone()));
+        assert!(
+            saved.terminal.is_none(),
+            "the fence records cancellation authority before Core reaches terminal"
+        );
+        drop(adapter);
+        let mut reopened = ProductionCodexAdapter::open(diagnostic_adapter_config(&root)).unwrap();
+        reopened
+            .install_active_run(&key, saved, binding.clone(), false, true)
+            .unwrap();
+        assert!(reopened.bridge.install_binding(binding).is_err());
+        assert!(reopened.bridge.install_child_binding(child).is_err());
+        assert!(!reopened
+            .local_model_start_guard(&open, &now, std::time::Instant::now())
+            .unwrap()
+            .unwrap()());
+        drop(reopened);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
     #[cfg(unix)]
     #[test]
     #[allow(
@@ -9930,6 +10927,122 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn fatal_runtime_classification_survives_both_core_terminal_forms_and_restart() {
+        use codex_protocol::protocol::{CodexErrorInfo, ErrorEvent, TurnCompleteEvent};
+        for completed in [false, true] {
+            let root = test_root("core-fatal-classification");
+            let mut adapter =
+                ProductionCodexAdapter::open(diagnostic_adapter_config(&root)).unwrap();
+            let (mut record, mut binding) = delegated_record_and_binding();
+            record.workspace = root.join("workspace");
+            std::fs::create_dir_all(&record.workspace).unwrap();
+            binding.authority.lease.fencing_token = FencingToken("1".into());
+            binding.authority.lease.lease_id = LeaseId("lse_00000000000000000000000001".into());
+            let key = binding.run_key.clone();
+            adapter
+                .install_active_run(&key, record, binding, false, false)
+                .unwrap();
+            let now = Instant("2026-08-28T00:00:02.000Z".into());
+            let error = ErrorEvent {
+                message: "private tool runtime detail".into(),
+                codex_error_info: Some(CodexErrorInfo::InternalServerError),
+            };
+            if completed {
+                adapter
+                    .accept_turn_complete(
+                        &key,
+                        &TurnCompleteEvent {
+                            turn_id: "turn-fixture".into(),
+                            last_agent_message: None,
+                            error: Some(error),
+                            started_at: None,
+                            completed_at: None,
+                            duration_ms: Some(1),
+                            time_to_first_token_ms: None,
+                        },
+                        &now,
+                    )
+                    .unwrap();
+            } else {
+                adapter.accept_error(&key, &error, &now).unwrap();
+            }
+            drop(adapter);
+            let reopened = ProductionCodexAdapter::open(diagnostic_adapter_config(&root)).unwrap();
+            let saved = load_stored_run(&reopened.store, &key).unwrap().unwrap();
+            assert!(
+                matches!(
+                    saved.terminal,
+                    Some(super::StoredTerminal::InfrastructureFailed { .. })
+                ),
+                "Core runtime failure must remain infrastructure failure for a delegated role"
+            );
+            assert!(saved.failure_diagnostic.unwrap().is_infrastructure());
+            drop(reopened);
+            std::fs::remove_dir_all(root).unwrap();
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ordinary_nonzero_tool_result_keeps_execution_running() {
+        let root = test_root("ordinary-tool-failure");
+        let mut adapter = ProductionCodexAdapter::open(diagnostic_adapter_config(&root)).unwrap();
+        let (mut record, mut binding) = delegated_record_and_binding();
+        binding.authority.lease.fencing_token = FencingToken("1".into());
+        binding.authority.lease.lease_id = LeaseId("lse_00000000000000000000000001".into());
+        record.workspace = root.join("workspace");
+        std::fs::create_dir_all(&record.workspace).unwrap();
+        let command = ExecCommandEndEvent {
+            call_id: "ordinary-tool-failure".into(),
+            plugin_id: None,
+            script_path: None,
+            process_id: None,
+            turn_id: "turn-fixture".into(),
+            completed_at_ms: 2,
+            command: vec!["cargo".into(), "test".into()],
+            cwd: serde_json::from_value(serde_json::json!(format!(
+                "file://{}",
+                record.workspace.display()
+            )))
+            .unwrap(),
+            parsed_cmd: vec![],
+            source: ExecCommandSource::Agent,
+            interaction_input: None,
+            stdout: String::new(),
+            stderr: "test failed".into(),
+            aggregated_output: "test failed".into(),
+            exit_code: 1,
+            duration: std::time::Duration::from_millis(1),
+            formatted_output: "test failed".into(),
+            status: ExecCommandStatus::Failed,
+        };
+        let key = binding.run_key.clone();
+        adapter.register_performance_run(&key, &record.job).unwrap();
+        adapter
+            .install_active_run(&key, record, binding, false, false)
+            .unwrap();
+        adapter
+            .accept_polled_event(
+                &key,
+                CodexEvent {
+                    id: "tool-event".into(),
+                    msg: CodexEventMsg::ExecCommandEnd(command),
+                },
+                &Instant("2026-08-28T00:00:02.000Z".into()),
+            )
+            .unwrap();
+        let run = &adapter.runs[&key].record;
+        assert!(run.terminal.is_none());
+        assert!(run.failure_diagnostic.is_none());
+        assert!(run.post_action_traces.iter().any(|trace| trace.source
+            == winwincode_execution_port::action_normalizer::ActionSource::Shell
+            && trace.retained));
+        drop(adapter);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
     #[allow(
         clippy::too_many_lines,
         reason = "native first-start fixture checks child lineage, renewal, expiry and durable cancellation"
@@ -9968,7 +11081,7 @@ mod tests {
         child.authority.session_identity.codex_thread_id = child.canonical_thread_id.clone();
         open.session_identity = child.authority.session_identity.clone();
         assert!(!adapter.model_start_session_allowed(&open, &parent).unwrap());
-        adapter.bridge.install_child_binding(child).unwrap();
+        adapter.bridge.install_child_binding(child.clone()).unwrap();
         assert!(adapter.model_start_session_allowed(&open, &parent).unwrap());
         adapter
             .outbox
@@ -10014,7 +11127,36 @@ mod tests {
             .unwrap()
             .unwrap();
         extended.authority.lease.expires_at = Instant("2026-08-28T03:00:00.000Z".into());
-        adapter.bridge.install_binding(extended).unwrap();
+        adapter.bridge.install_binding(extended.clone()).unwrap();
+        assert!(guard());
+        adapter.bridge.detach_binding(&extended).unwrap();
+        assert!(
+            !guard(),
+            "a closed Core run cannot start a retained model request"
+        );
+        assert!(
+            adapter
+                .bridge
+                .authority()
+                .validate_retained_exchange(
+                    &ModelLeaseAuthority {
+                        lease: open.lease.clone(),
+                        worker_session_id: open.worker_session_id.clone(),
+                        session_identity: open.session_identity.clone(),
+                    },
+                    &open.model_exchange_id,
+                    &Instant("2026-08-28T02:01:00.000Z".into()),
+                )
+                .is_ok(),
+            "closing Core retains original exchange settlement authority"
+        );
+        adapter.bridge.install_binding(extended.clone()).unwrap();
+        assert!(
+            !guard(),
+            "reopening only the root does not reactivate a closed child"
+        );
+        child.authority.lease = extended.authority.lease.clone();
+        adapter.bridge.install_child_binding(child).unwrap();
         assert!(guard());
         let stream = winwincode_execution_port::typed_replay::stream_key_from_message(
             &ExecutionPortMessage::ModelOpenMessage(open.clone()),
@@ -10316,11 +11458,23 @@ mod tests {
             terminal = adapter
                 .poll_retained_terminal(&key)
                 .expect("optional report cannot block business result");
-            if matches!(terminal, Some(CodexPoll::Completed(_))) {
+            if matches!(
+                terminal,
+                Some(CodexPoll::Terminal(crate::CodexExecutionResult {
+                    outcome: crate::CodexExecutionOutcome::Completed(_),
+                    ..
+                }))
+            ) {
                 break;
             }
         }
-        assert!(matches!(terminal, Some(CodexPoll::Completed(_))));
+        assert!(matches!(
+            terminal,
+            Some(CodexPoll::Terminal(crate::CodexExecutionResult {
+                outcome: crate::CodexExecutionOutcome::Completed(_),
+                ..
+            }))
+        ));
         adapter
             .store
             .lock()
@@ -10333,7 +11487,10 @@ mod tests {
         );
         assert!(matches!(
             adapter.poll_retained_terminal(&key).unwrap(),
-            Some(CodexPoll::Completed(_))
+            Some(CodexPoll::Terminal(crate::CodexExecutionResult {
+                outcome: crate::CodexExecutionOutcome::Completed(_),
+                ..
+            }))
         ));
         drop(adapter);
         std::fs::remove_dir_all(root).unwrap();
@@ -12412,7 +13569,11 @@ mod tests {
                 .await
                 .expect("poll recovered diagnostic")
             {
-                CodexPoll::CompletedWithDiagnostics(_, artifacts) => {
+                CodexPoll::Terminal(crate::CodexExecutionResult {
+                    outcome: crate::CodexExecutionOutcome::Completed(_),
+                    diagnostics: artifacts,
+                    ..
+                }) => {
                     assert_eq!(artifacts, vec![artifact.clone()]);
                     terminal_reference = Some(artifact.clone());
                     break;
@@ -12499,6 +13660,7 @@ mod tests {
             .expect("Delivery policy");
         let agent_config = fixture_agent_config(&job, &policy);
         let record = StoredRun {
+            operation_fenced_at: None,
             host_action_approvals: false,
             task_handoff: None,
             snapshot_id: None,
@@ -12591,6 +13753,18 @@ mod tests {
 
     #[cfg(unix)]
     fn process_is_running(process_id: u32) -> bool {
+        // Minimal Linux container init processes can retain a killed orphan
+        // as a zombie. kill -0 reports its PID, although it cannot run or keep
+        // inherited pipes open. A live descendant still fails this assertion.
+        #[cfg(target_os = "linux")]
+        if std::fs::read_to_string(format!("/proc/{process_id}/stat"))
+            .ok()
+            .and_then(|stat| stat.rsplit_once(')').map(|(_, tail)| tail.to_owned()))
+            .and_then(|tail| tail.split_whitespace().next().map(str::to_owned))
+            .is_some_and(|state| state == "Z")
+        {
+            return false;
+        }
         std::process::Command::new("/bin/kill")
             .args(["-0", "--", &process_id.to_string()])
             .stdin(std::process::Stdio::null())
@@ -12667,6 +13841,7 @@ mod tests {
             .expect("delegated role policy");
         let agent_config = fixture_agent_config(&job, &role_policy);
         let record = StoredRun {
+            operation_fenced_at: None,
             host_action_approvals: false,
             task_handoff: None,
             snapshot_id: None,

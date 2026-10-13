@@ -798,6 +798,19 @@ pub struct ShutdownInfo {
     pub timed_out: Vec<String>,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ActionEnforcementFailureKind {
+    Unavailable,
+    StaleAuthority,
+    InvalidAction,
+    UnknownCapability,
+    UnknownReceipt,
+    Rejected,
+    Consumed,
+    Conflict,
+    Cancelled,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KernelFailure {
     code: &'static str,
@@ -814,9 +827,26 @@ impl KernelFailure {
 
     #[must_use]
     pub fn action_rejected() -> Self {
+        Self::action_enforcement(ActionEnforcementFailureKind::Rejected)
+    }
+
+    /// Preserves a finite host authority failure while every tool path fails closed.
+    #[must_use]
+    pub fn action_enforcement(kind: ActionEnforcementFailureKind) -> Self {
+        let code = match kind {
+            ActionEnforcementFailureKind::Unavailable => "ACTION_ENFORCEMENT_UNAVAILABLE",
+            ActionEnforcementFailureKind::StaleAuthority => "ACTION_AUTHORITY_STALE",
+            ActionEnforcementFailureKind::InvalidAction => "ACTION_REQUEST_INVALID",
+            ActionEnforcementFailureKind::UnknownCapability => "ACTION_CAPABILITY_UNKNOWN",
+            ActionEnforcementFailureKind::UnknownReceipt => "ACTION_RECEIPT_UNKNOWN",
+            ActionEnforcementFailureKind::Rejected => "ACTION_ENFORCEMENT_REJECTED",
+            ActionEnforcementFailureKind::Consumed => "ACTION_RECEIPT_CONSUMED",
+            ActionEnforcementFailureKind::Conflict => "ACTION_IDENTITY_CONFLICT",
+            ActionEnforcementFailureKind::Cancelled => "ACTION_CANCELLED",
+        };
         Self::new(
-            "ACTION_ENFORCEMENT_REJECTED",
-            "Control Plane action enforcement rejected the tool call",
+            code,
+            "Control Plane action enforcement stopped the tool call",
         )
     }
 
@@ -840,6 +870,27 @@ impl fmt::Display for KernelFailure {
 impl std::error::Error for KernelFailure {}
 
 pub type KernelResult<T> = Result<T, KernelFailure>;
+
+/// Closes abandoned tool calls through the same Core state authority. Live
+/// threads are protected by process-held OS locks and are skipped.
+/// Returns a storage failure when pending calls cannot be closed durably.
+pub async fn recover_interrupted_tool_calls(kernel_home: &Path) -> KernelResult<u64> {
+    let sqlite = codex_core_api::SqliteConfig::from_sqlite_home(
+        AbsolutePathBuf::try_from(kernel_home.to_path_buf()).map_err(|error| {
+            KernelFailure::new("KERNEL_RECOVERY_PATH_INVALID", error.to_string())
+        })?,
+    );
+    if !sqlite.state_db_path().is_file() {
+        return Ok(0);
+    }
+    let store = codex_core_api::StateRuntime::init(sqlite, "recovery".into())
+        .await
+        .map_err(|error| KernelFailure::new("KERNEL_RECOVERY_STORAGE_FAILED", error.to_string()))?;
+    store
+        .recover_abandoned_tool_calls()
+        .await
+        .map_err(|error| KernelFailure::new("KERNEL_RECOVERY_STORAGE_FAILED", error.to_string()))
+}
 
 struct SessionRuntime {
     thread: Arc<CodexThread>,

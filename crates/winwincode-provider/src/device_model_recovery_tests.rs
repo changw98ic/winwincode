@@ -17,6 +17,7 @@ use std::{
 use winwincode_execution_port::action_enforcement::ActionEnforcementSigningKey;
 
 type DeviceAttemptRow = (i64, String, Option<String>, Option<Vec<u8>>);
+type InvocationPairRow = (String, String, Vec<u8>, Option<String>, Option<String>);
 
 const CHILD_CASE: &str = "WWC_MODEL_RECOVERY_TEST_CASE";
 const CHILD_ROOT: &str = "WWC_MODEL_RECOVERY_TEST_ROOT";
@@ -332,7 +333,7 @@ fn interrupted_and_cancelled_attempts_close_with_honest_financial_facts() {
         } else {
             "invoking"
         };
-        store.connection.execute("INSERT INTO model_invocation_attempts(exchange_id,attempt_number,adapter_request_id,state) VALUES(?1,1,?2,?3)",params![open.model_exchange_id.0,format!("device-{}:attempt:1",open.model_exchange_id.0),state]).unwrap();
+        store.connection.execute("INSERT INTO model_invocation_attempts(exchange_id,attempt_number,adapter_request_id,state,request_json,request_payload) VALUES(?1,1,?2,?3,?4,?5)",params![open.model_exchange_id.0,format!("device-{}:attempt:1",open.model_exchange_id.0),state,request,payload]).unwrap();
         store.connection.execute("INSERT INTO model_attempt_diagnostics VALUES (?1,1,1,10,20,'accepted',NULL,'original_terminal')",[&open.model_exchange_id.0]).unwrap();
         store.connection.execute("INSERT INTO model_attempt_diagnostics VALUES (?1,2,1,30,NULL,'in_flight',NULL,NULL)",[&open.model_exchange_id.0]).unwrap();
         if original_state == "completed_before_outer" {
@@ -505,6 +506,10 @@ fn real_provider_attempts_recover_without_replaying_tools_or_network() {
         "cross_process_cancel",
         "completed_reset",
         "incomplete_reset",
+        "auxiliary_begin_lost",
+        "auxiliary_finish_lost",
+        "auxiliary_stop_reason_lost",
+        "required_accounting_lost",
     ] {
         let root = std::env::temp_dir().join(format!(
             "wwc-model-recovery-{}-{}-{case}",
@@ -559,7 +564,11 @@ fn real_provider_attempts_recover_without_replaying_tools_or_network() {
             "cancel_wait" | "authority_wait" => {
                 vec![("429 Too Many Requests", "Retry-After: 60\r\n", "{}")]
             }
-            "cross_process_cancel" => vec![success()],
+            "cross_process_cancel"
+            | "auxiliary_begin_lost"
+            | "auxiliary_finish_lost"
+            | "auxiliary_stop_reason_lost"
+            | "required_accounting_lost" => vec![success()],
             "completed_reset" => vec![(
                 "200 OK",
                 "X-Test-Truncated-Length: true\r\n",
@@ -651,6 +660,24 @@ fn run_child(case: &str) {
     open.request.content_type = "application/json".into();
     open.request.data_base64 = STANDARD.encode(&payload);
     open.request.payload_digest.0 = format!("sha256:{:x}", Sha256::digest(&payload));
+    let fault = match case {
+        "auxiliary_begin_lost" => Some(
+            "CREATE TRIGGER auxiliary_failure BEFORE INSERT ON model_attempt_diagnostics BEGIN SELECT RAISE(ABORT, 'local diagnostic insert failure'); END;",
+        ),
+        "auxiliary_finish_lost" => Some(
+            "CREATE TRIGGER auxiliary_failure BEFORE UPDATE OF finished_ms ON model_attempt_diagnostics BEGIN SELECT RAISE(ABORT, 'local diagnostic completion failure'); END;",
+        ),
+        "auxiliary_stop_reason_lost" => Some(
+            "CREATE TRIGGER auxiliary_failure BEFORE UPDATE OF stop_reason ON model_attempt_diagnostics BEGIN SELECT RAISE(ABORT, 'local diagnostic stop failure'); END;",
+        ),
+        "required_accounting_lost" => Some(
+            "CREATE TRIGGER accounting_failure BEFORE UPDATE OF accounting_chunks ON model_invocation_attempts WHEN NEW.state='completed' BEGIN SELECT RAISE(ABORT, 'required accounting persistence failure'); END;",
+        ),
+        _ => None,
+    };
+    if let Some(fault) = fault {
+        store.connection.execute_batch(fault).unwrap();
+    }
     let admissions = Cell::new(0);
     let releases = Cell::new(0);
     let authority = Cell::new(true);
@@ -676,7 +703,7 @@ fn run_child(case: &str) {
             || authority.get(),
             || {
                 admissions.set(admissions.get() + 1);
-                Ok(())
+                store.wait_model_attempt_permit(&open, &|| authority.get())
             },
             || {
                 releases.set(releases.get() + 1);
@@ -698,6 +725,20 @@ fn run_child(case: &str) {
         "every attempt releases admission before waiting"
     );
     let attempts:Vec<DeviceAttemptRow> = store.connection.prepare("SELECT attempt_number,state,failure_chunks,response_bytes FROM model_invocation_attempts ORDER BY attempt_number").unwrap().query_map([],|row|Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?))).unwrap().collect::<Result<_,_>>().unwrap();
+    let pairs: Vec<InvocationPairRow> = store.connection.prepare("SELECT call_status,request_json,request_payload,failure_chunks,accounting_chunks FROM model_invocation_attempts ORDER BY attempt_number").unwrap()
+        .query_map([],|row|Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?,row.get(4)?))).unwrap().collect::<Result<_,_>>().unwrap();
+    for (status, request, input, failure, accounting) in &pairs {
+        assert_eq!(request, &serde_json::to_string(&open).unwrap());
+        assert!(!input.is_empty());
+        if case == "required_accounting_lost" {
+            assert_eq!(status, "pending");
+            assert!(failure.is_none());
+            assert!(accounting.is_none());
+        } else {
+            assert_ne!(status, "pending");
+            assert!(failure.is_some() || accounting.is_some());
+        }
+    }
     let expected = if matches!(
         case,
         "rate_limit" | "upstream" | "incomplete" | "incomplete_reset"
@@ -711,6 +752,97 @@ fn run_child(case: &str) {
         expected,
         "case {case}: returned chunks {chunks:?}, attempt records {attempts:?}"
     );
+    if matches!(
+        case,
+        "rate_limit" | "upstream" | "incomplete" | "incomplete_reset" | "completed_reset"
+    ) {
+        let usage = store.model_primary_usage(&open).unwrap();
+        assert_eq!(
+            usage.usage_known,
+            matches!(case, "incomplete" | "incomplete_reset" | "completed_reset")
+        );
+        assert_eq!(
+            usage.input_tokens + usage.output_tokens,
+            if matches!(case, "incomplete" | "incomplete_reset") {
+                15
+            } else {
+                5
+            },
+            "all measured physical calls remain in the lower bound"
+        );
+        assert_eq!(usage.cost_microunits, None);
+        let reopened = DeviceProviderStore::open(&root).unwrap();
+        assert_eq!(reopened.model_primary_usage(&open).unwrap(), usage);
+        assert!(
+            reopened
+                .model_primary_usage(&{
+                    let mut foreign = open.clone();
+                    foreign.lease.fencing_token.0 = "999".into();
+                    foreign
+                })
+                .is_err()
+        );
+    }
+    if case.starts_with("auxiliary_") {
+        assert_eq!(attempts[0].1, "completed");
+        assert!(chunks.last().unwrap().is_final);
+        assert!(
+            chunks.iter().all(|chunk| chunk.error.is_none()),
+            "pure diagnostics cannot change a model success"
+        );
+        let key = ActionEnforcementSigningKey::from_bytes([7; 32]).unwrap();
+        let statement = store
+            .accounting_statement(&open.lease, &key)
+            .unwrap()
+            .unwrap();
+        statement.verify(&key).unwrap();
+        assert_eq!(statement.receipts[0].tokens, Some(5));
+        drop(store);
+        let reopened = DeviceProviderStore::open(&root).unwrap();
+        assert_eq!(
+            reopened
+                .execute_model_recovering_authorized(
+                    &open,
+                    || false,
+                    || panic!("stored replay needs no slot"),
+                    || panic!("no physical attempt")
+                )
+                .unwrap(),
+            chunks
+        );
+        return;
+    }
+    if case == "required_accounting_lost" {
+        assert_eq!(
+            attempts[0].1, "invoking",
+            "a missing required receipt remains unreconciled"
+        );
+        assert!(
+            chunks.last().unwrap().error.is_some(),
+            "missing formal accounting cannot report success"
+        );
+        store
+            .connection
+            .execute_batch("DROP TRIGGER accounting_failure")
+            .unwrap();
+        let key = ActionEnforcementSigningKey::from_bytes([7; 32]).unwrap();
+        let statement = store
+            .accounting_statement(&open.lease, &key)
+            .unwrap()
+            .unwrap();
+        statement.verify(&key).unwrap();
+        assert!(
+            statement
+                .receipts
+                .iter()
+                .all(|receipt| receipt.tokens.is_none())
+        );
+        assert!(
+            !statement.receipts.is_empty(),
+            "an issued request with missing usage cannot become zero cost"
+        );
+        return;
+    }
     if case == "completed_reset" {
         assert_eq!(
             attempts[0].1, "completed",
@@ -831,6 +963,10 @@ fn run_child(case: &str) {
         assert_eq!(
             statement.receipts[0].tokens, None,
             "known successful usage cannot erase unknown failed-attempt charge"
+        );
+        assert_eq!(
+            statement.receipts[0].known_tokens, 5,
+            "the signed statement preserves measured success even if Worker statistics are unavailable"
         );
     }
 }

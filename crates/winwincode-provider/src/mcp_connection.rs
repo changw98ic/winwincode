@@ -15,11 +15,11 @@ use std::{collections::BTreeSet, path::Path, sync::Arc, time::Duration};
 
 pub(crate) fn validate(configuration: &str) -> Result<McpServerConfig, DeviceProviderError> {
     if configuration.len() > 32_768 {
-        return Err(DeviceProviderError);
+        return Err(DeviceProviderError::StateInvalid);
     }
     let config: McpServerConfig = serde_json::from_str(configuration)?;
     if !config.is_local_environment() {
-        return Err(DeviceProviderError);
+        return Err(DeviceProviderError::StateInvalid);
     }
     match &config.transport {
         McpServerTransportConfig::Stdio {
@@ -32,7 +32,7 @@ pub(crate) fn validate(configuration: &str) -> Result<McpServerConfig, DevicePro
                     .as_ref()
                     .is_some_and(|path| !Path::new(path.as_str()).is_absolute())
             {
-                return Err(DeviceProviderError);
+                return Err(DeviceProviderError::StateInvalid);
             }
         }
         McpServerTransportConfig::StreamableHttp {
@@ -45,7 +45,7 @@ pub(crate) fn validate(configuration: &str) -> Result<McpServerConfig, DevicePro
                 || url.starts_with("http://localhost:"))
                 || http_headers_helper.is_some()
             {
-                return Err(DeviceProviderError);
+                return Err(DeviceProviderError::StateInvalid);
             }
         }
     }
@@ -77,7 +77,7 @@ pub(crate) async fn discover(
             Arc::new(LocalStdioServerLauncher::new(home.to_path_buf())),
         )
         .await
-        .map_err(|_| DeviceProviderError)?,
+        .map_err(|_| DeviceProviderError::StateInvalid)?,
         McpServerTransportConfig::StreamableHttp {
             url,
             bearer_token_env_var,
@@ -86,7 +86,7 @@ pub(crate) async fn discover(
             ..
         } => {
             let bearer = bearer_token_env_var
-                .map(|key| std::env::var(key).map_err(|_| DeviceProviderError))
+                .map(|key| std::env::var(key).map_err(|_| DeviceProviderError::StateInvalid))
                 .transpose()?;
             let http = codex_exec_server::RouteAwareHttpClient::new(
                 codex_http_client::HttpClientFactory::new(
@@ -105,7 +105,7 @@ pub(crate) async fn discover(
                 None,
             )
             .await
-            .map_err(|_| DeviceProviderError)?
+            .map_err(|_| DeviceProviderError::StateInvalid)?
         }
     };
     let result = tokio::time::timeout(Duration::from_secs(20), async {
@@ -128,7 +128,7 @@ pub(crate) async fn discover(
                 }),
             )
             .await
-            .map_err(|_| DeviceProviderError)?;
+            .map_err(|_| DeviceProviderError::StateInvalid)?;
         let mut names = BTreeSet::new();
         let mut cursor = None;
         let mut cursors = BTreeSet::new();
@@ -143,7 +143,7 @@ pub(crate) async fn discover(
                     Some(Duration::from_secs(10)),
                 )
                 .await
-                .map_err(|_| DeviceProviderError)?;
+                .map_err(|_| DeviceProviderError::StateInvalid)?;
             for tool in page.tools {
                 let name = tool.name.to_string();
                 if !valid_tool(&name)
@@ -153,7 +153,7 @@ pub(crate) async fn discover(
                         .iter()
                         .any(|existing: &String| existing.eq_ignore_ascii_case(&name))
                 {
-                    return Err(DeviceProviderError);
+                    return Err(DeviceProviderError::StateInvalid);
                 }
                 names.insert(name);
             }
@@ -161,7 +161,7 @@ pub(crate) async fn discover(
             match &cursor {
                 Some(next) if cursors.len() < 16 && cursors.insert(next.clone()) => {}
                 None => break,
-                Some(_) => return Err(DeviceProviderError),
+                Some(_) => return Err(DeviceProviderError::StateInvalid),
             }
         }
         Ok(names
@@ -175,7 +175,7 @@ pub(crate) async fn discover(
             .collect())
     })
     .await
-    .unwrap_or(Err(DeviceProviderError));
+    .unwrap_or(Err(DeviceProviderError::StateInvalid));
     client.shutdown().await;
     result
 }

@@ -1114,6 +1114,9 @@ pub struct ChatMessageProjection {
     pub created_at: winwincode_domain::Instant,
     #[serde(rename = "id")]
     pub id: winwincode_domain::ChatMessageId,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(rename = "outputPreparation")]
+    pub output_preparation: Option<String>,
     #[serde(rename = "productSessionId")]
     pub product_session_id: winwincode_domain::ProductSessionId,
     #[serde(rename = "role")]

@@ -1,0 +1,1288 @@
+--- a/codex-rs/core-api/src/lib.rs
++++ b/codex-rs/core-api/src/lib.rs
+@@ -154,4 +154,5 @@
+ pub use codex_protocol::protocol::W3cTraceContext;
+ pub use codex_protocol::user_input::UserInput;
+ pub use codex_state::SqliteConfig;
++pub use codex_state::StateRuntime;
+ pub use codex_utils_absolute_path::AbsolutePathBuf;
+--- a/codex-rs/core/src/tools/control_input_recovery_tests.rs
++++ b/codex-rs/core/src/tools/control_input_recovery_tests.rs
+@@ -210,8 +210,10 @@
+         source: "model".into(),
+         binding: digest(payload_value(&invocation.payload)),
+     };
+-    let ToolRequestObservation::New(parent_observed) =
+-        store.observe_tool_request(&parent_request).await.unwrap()
++    let ToolRequestObservation::New(parent_observed) = store
++        .observe_tool_request(&parent_request, "test-owner", "{}")
++        .await
++        .unwrap()
+     else {
+         panic!("new parent")
+     };
+@@ -267,8 +269,10 @@
+         source: "code_mode".into(),
+         binding: digest(payload_value(&control.payload)),
+     };
+-    let ToolRequestObservation::New(input_observed) =
+-        store.observe_tool_request(&input_request).await.unwrap()
++    let ToolRequestObservation::New(input_observed) = store
++        .observe_tool_request(&input_request, "test-owner", "{}")
++        .await
++        .unwrap()
+     else {
+         panic!("new input")
+     };
+--- a/codex-rs/core/src/tools/execution_facts.rs
++++ b/codex-rs/core/src/tools/execution_facts.rs
+@@ -42,6 +42,7 @@
+     owner: ToolFactOwner,
+     pub(super) store: OnceCell<Arc<StateRuntime>>,
+     pub(super) owner_id: OnceLock<String>,
++    owner_lock: OnceCell<std::fs::File>,
+     cells: Mutex<HashMap<String, (String, String)>>,
+     pub(super) active_requests: Mutex<HashSet<i64>>,
+ }
+@@ -168,6 +169,13 @@
+             .await
+             .map_err(storage_error)?
+             .clone();
++        service.owner_lock.get_or_try_init(|| async {
++            let thread = invocation.session.thread_id.to_string();
++            let lock = store.try_tool_owner_lock(&thread).map_err(storage_error)?.ok_or_else(|| FunctionCallError::RespondToModel(
++                serde_json::json!({"schema_version":1,"state":"execution_owner_unverified"}).to_string()))?;
++            store.fail_pending_tool_calls(&thread,None).await.map_err(storage_error)?;
++            Ok::<_,FunctionCallError>(lock)
++        }).await?;
+         let (logical_id, cell_id, parent_call_id, scope_id, source) = match &invocation.source {
+             ToolCallSource::Direct => (
+                 direct_identity(invocation),
+@@ -212,7 +220,7 @@
+             source: source.into(),
+             binding: digest(payload_value(&invocation.payload)),
+         };
+-        match store.observe_tool_request(&request).await.map_err(storage_error)? {
++        match store.observe_tool_request(&request, &owner_id, &payload_value(&invocation.payload).to_string()).await.map_err(storage_error)? {
+             ToolRequestObservation::New(fact) => Ok(ToolFactAdmission::New(Self {
+                 writer,
+                 service: service.clone(),
+@@ -235,10 +243,10 @@
+         }
+     }
+ 
+-    pub(super) async fn deny(&self) -> Result<(), FunctionCallError> {
++    pub(super) async fn deny(&self, result: &str) -> Result<(), FunctionCallError> {
+         self.settled.store(true, Ordering::Release);
+         self.store
+-            .deny_tool_request(self.sequence)
++            .deny_tool_request(self.sequence, result)
+             .await
+             .map_err(storage_error)
+     }
+@@ -288,21 +296,34 @@
+     }
+ 
+     pub(super) async fn completed(&self, encoded: Option<String>) -> Result<(), FunctionCallError> {
+-        if self.shared.load(Ordering::Acquire) || self.completed.load(Ordering::Acquire) {
+-            return Ok(());
+-        }
+         let execution = if encoded.is_some() {
+             ToolExecutionStatus::Completed
+         } else {
+             ToolExecutionStatus::Uncertain
+         };
++        self.record_completion(execution, encoded.as_deref()).await
++    }
++
++    pub(super) async fn failed(&self, body: &str) -> Result<(), FunctionCallError> {
++        self.record_completion(ToolExecutionStatus::Uncertain, Some(body))
++            .await
++    }
++
++    async fn record_completion(
++        &self,
++        execution: ToolExecutionStatus,
++        body: Option<&str>,
++    ) -> Result<(), FunctionCallError> {
++        if self.shared.load(Ordering::Acquire) || self.completed.load(Ordering::Acquire) {
++            return Ok(());
++        }
+         self.store
+             .complete_tool_attempt(
+                 self.sequence,
+                 &self.attempt_id,
+                 &self.owner_id,
+                 execution,
+-                encoded.as_deref(),
++                body,
+             )
+             .await
+             .map_err(storage_error)?;
+--- a/codex-rs/core/src/tools/execution_facts_tests.rs
++++ b/codex-rs/core/src/tools/execution_facts_tests.rs
+@@ -175,7 +175,7 @@
+ async fn rejection_and_changed_input_have_distinct_recovery_outcomes() {
+     let invocation = invocation().await;
+     let record = begin_new(&invocation).await.unwrap();
+-    record.deny().await.unwrap();
++    record.deny("test denial").await.unwrap();
+     let replay = begin_new(&invocation).await.err().unwrap();
+     assert_eq!(recovery_state(replay)["state"], "request_denied");
+     let mut changed = invocation;
+--- a/codex-rs/core/src/tools/registry.rs
++++ b/codex-rs/core/src/tools/registry.rs
+@@ -586,11 +586,12 @@
+             }
+         };
+         if direct_surface_rejected {
+-            facts.deny().await?;
+-            return Err(FunctionCallError::RespondToModel(format!(
++            let message = format!(
+                 "tool {} must be invoked through Code Mode exec",
+                 invocation.tool_name
+-            )));
++            );
++            facts.deny(&message).await?;
++            return Err(FunctionCallError::RespondToModel(message));
+         }
+         let tool_name = invocation.tool_name.clone();
+         let tool_name_flat = flat_tool_name(&tool_name);
+@@ -642,7 +643,7 @@
+                 );
+                 let err = FunctionCallError::RespondToModel(message);
+                 dispatch_trace.record_failed(&err);
+-                facts.deny().await?;
++                facts.deny(&err.to_string()).await?;
+                 return Err(err);
+             }
+         };
+@@ -675,7 +676,7 @@
+             );
+             let err = FunctionCallError::RespondToModel(message);
+             dispatch_trace.record_failed(&err);
+-            facts.deny().await?;
++            facts.deny(&err.to_string()).await?;
+             return Err(err);
+         }
+ 
+@@ -702,7 +703,7 @@
+                         ToolCallOutcome::Blocked,
+                     )
+                     .await;
+-                    facts.deny().await?;
++                    facts.deny(&err.to_string()).await?;
+                     return Err(err);
+                 }
+                 PreToolUseHookResult::Continue {
+@@ -725,7 +726,7 @@
+                             },
+                         )
+                         .await;
+-                        facts.deny().await?;
++                        facts.deny(&err.to_string()).await?;
+                         return Err(err);
+                     }
+                 },
+@@ -747,7 +748,7 @@
+                 ToolCallOutcome::Blocked,
+             )
+             .await;
+-            facts.deny().await?;
++            facts.deny(&err.to_string()).await?;
+             return Err(err);
+         }
+ 
+@@ -959,7 +960,7 @@
+                 Ok(result)
+             }
+             Err(err) => {
+-                facts.rejected("handler_result_unknown").await?;
++                facts.rejected(&err.to_string()).await?;
+                 dispatch_trace.record_failed(&err);
+                 Err(err)
+             }
+--- a/codex-rs/core/src/tools/tool_fact_owner.rs
++++ b/codex-rs/core/src/tools/tool_fact_owner.rs
+@@ -104,6 +104,17 @@
+         } else {
+             Ok(())
+         };
++        let calls_result = match facts.store.get().or(session.services.state_db.as_ref()) {
++            Some(store) => match facts.owner_id.get() {
++                Some(owner) => store
++                    .fail_pending_tool_calls(&session.thread_id.to_string(), Some(owner))
++                    .await
++                    .map(|_| ())
++                    .map_err(|error| error.to_string()),
++                None => Ok(()),
++            },
++            None => Ok(()),
++        };
+         // sqlx may finish a queued COMMIT after its Rust future was cancelled.
+         // Every fact append is transactional: this write lock fences those commits,
+         // including direct-only sessions which have no cells to close.
+@@ -114,9 +125,12 @@
+                 .map_err(|error| error.to_string()),
+             None => Ok(()),
+         };
+-        facts
+-            .owner
+-            .finish(runtime_result.and(cells_result).and(fence_result));
++        facts.owner.finish(
++            runtime_result
++                .and(cells_result)
++                .and(calls_result)
++                .and(fence_result),
++        );
+     }
+ }
+ impl super::ToolFactRecord {
+@@ -147,9 +161,7 @@
+ 
+ impl Drop for super::ToolFactRecord {
+     fn drop(&mut self) {
+-        if (self.shared.load(Ordering::Acquire) || self.completed.load(Ordering::Acquire))
+-            && !self.settled.load(Ordering::Acquire)
+-        {
++        if !self.settled.load(Ordering::Acquire) {
+             self.persist_cancellation();
+         }
+         self.service
+--- a/codex-rs/state/migrations/0051_tool_execution_facts.sql
++++ b/codex-rs/state/migrations/0051_tool_execution_facts.sql
+@@ -6,6 +6,13 @@
+     binding TEXT NOT NULL,
+     resolution TEXT NOT NULL DEFAULT 'observed' CHECK(resolution IN ('observed', 'denied')),
+     request_json TEXT NOT NULL,
++    request_owner TEXT NOT NULL,
++    original_input TEXT,
++    call_status TEXT NOT NULL DEFAULT 'pending' CHECK(call_status IN ('pending','succeeded','failed','cancelled','forgotten')),
++    call_result TEXT,
++    CHECK((call_status='pending' AND original_input IS NOT NULL AND call_result IS NULL) OR
++          (call_status IN ('succeeded','failed','cancelled') AND original_input IS NOT NULL AND call_result IS NOT NULL) OR
++          (call_status='forgotten' AND original_input IS NULL AND call_result IS NULL)),
+     UNIQUE(thread_id, logical_id)
+ );
+ CREATE TABLE tool_attempts (
+@@ -30,8 +37,12 @@
+ );
+ CREATE INDEX tool_fact_events_thread_sequence ON tool_fact_events(thread_id, sequence);
+ 
+--- Older binaries ignore newer migration versions. Their thread deletes must
+--- still remove private execution data created by a newer binary.
++-- Thread cleanup removes private execution data and its receipts together.
+ CREATE TRIGGER threads_delete_tool_facts AFTER DELETE ON threads BEGIN
+     DELETE FROM tool_requests WHERE thread_id = OLD.id;
+ END;
++
++CREATE TRIGGER tool_call_terminal_immutable BEFORE UPDATE ON tool_requests
++WHEN OLD.call_status IN ('succeeded','failed','cancelled') AND NEW.call_status!='forgotten' AND
++    (NEW.original_input IS NOT OLD.original_input OR NEW.call_result IS NOT OLD.call_result OR NEW.call_status!=OLD.call_status)
++BEGIN SELECT RAISE(ABORT,'tool call is already closed'); END;
+--- /dev/null
++++ b/codex-rs/state/src/runtime/tool_call_records.rs
+@@ -0,0 +1,349 @@
++// SPDX-License-Identifier: Apache-2.0
++
++use super::{StateRuntime, append_event, load_fact};
++use sqlx::Row;
++use std::fs::{File, OpenOptions, TryLockError};
++
++impl StateRuntime {
++    /// A process-held lock for one thread. Its lifetime must cover every fact
++    /// writer. A released lock is proof that no cooperating owner can still write.
++    pub fn try_tool_owner_lock(&self, thread: &str) -> anyhow::Result<Option<File>> {
++        let root = self.sqlite().home().join("tool-owner-locks");
++        std::fs::create_dir_all(&root)?;
++        let name: String = thread
++            .as_bytes()
++            .iter()
++            .map(|byte| format!("{byte:02x}"))
++            .collect();
++        let mut options = OpenOptions::new();
++        options.read(true).write(true).create(true).truncate(false);
++        #[cfg(unix)]
++        {
++            use std::os::unix::fs::OpenOptionsExt;
++            options.mode(0o600);
++        }
++        let file = options.open(root.join(name))?;
++        match file.try_lock() {
++            Ok(()) => Ok(Some(file)),
++            Err(TryLockError::WouldBlock) => Ok(None),
++            Err(TryLockError::Error(error)) => Err(error.into()),
++        }
++    }
++
++    /// Close interrupted logical calls after exclusive thread ownership is
++    /// acquired. Physical effects remain uncertain; completed bodies are retained.
++    pub async fn fail_pending_tool_calls(
++        &self,
++        thread: &str,
++        owner: Option<&str>,
++    ) -> anyhow::Result<u64> {
++        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
++        let rows = sqlx::query("SELECT r.sequence,a.execution FROM tool_requests r LEFT JOIN tool_attempts a ON a.request_sequence=r.sequence
++            WHERE r.thread_id=? AND (r.call_status='pending' OR (r.original_input IS NOT NULL AND (a.execution='running' OR a.disposition='pending'))) AND (? IS NULL OR r.request_owner=?)")
++            .bind(thread).bind(owner).bind(owner).fetch_all(&mut *tx).await?;
++        for row in &rows {
++            let sequence: i64 = row.try_get("sequence")?;
++            let execution: Option<String> = row.try_get("execution")?;
++            let result = serde_json::json!({"status":"failed","code":"tool_execution_interrupted",
++                "effects":if execution.is_none() {"not_started"} else {"unknown"}})
++            .to_string();
++            sqlx::query("UPDATE tool_attempts SET execution='uncertain',execution_result=?,disposition='rejected',rejection=?,revision=revision+1
++                WHERE request_sequence=? AND execution='running'")
++                .bind(&result).bind(&result).bind(sequence).execute(&mut *tx).await?;
++            sqlx::query(
++                "UPDATE tool_attempts SET disposition='rejected',rejection=?,revision=revision+1
++                WHERE request_sequence=? AND execution!='running' AND disposition='pending'",
++            )
++            .bind(&result)
++            .bind(sequence)
++            .execute(&mut *tx)
++            .await?;
++            let shared: Option<String> =
++                sqlx::query_scalar("SELECT fact_json FROM tool_sharing WHERE request_sequence=?")
++                    .bind(sequence)
++                    .fetch_optional(&mut *tx)
++                    .await?;
++            if let Some(shared) = shared {
++                let mut fact: crate::ToolSharingFact = serde_json::from_str(&shared)?;
++                fact.disposition = crate::ToolOutputDisposition::Rejected;
++                sqlx::query("UPDATE tool_sharing SET rejection=? WHERE request_sequence=?")
++                    .bind(&result)
++                    .bind(sequence)
++                    .execute(&mut *tx)
++                    .await?;
++                super::super::tool_sharing::update(&mut tx, &fact).await?;
++            }
++            sqlx::query("UPDATE tool_requests SET call_status='failed',call_result=? WHERE sequence=? AND call_status='pending'")
++                .bind(&result).bind(sequence).execute(&mut *tx).await?;
++            let fact = load_fact(&mut tx, sequence).await?;
++            append_event(&mut tx, &fact).await?;
++        }
++        tx.commit().await?;
++        Ok(rows.len() as u64)
++    }
++
++    /// Called at startup or by verified process recovery. Live threads retain
++    /// their OS locks and are skipped even when they share this database.
++    pub async fn recover_abandoned_tool_calls(&self) -> anyhow::Result<u64> {
++        let threads: Vec<String> = sqlx::query_scalar("SELECT DISTINCT r.thread_id FROM tool_requests r LEFT JOIN tool_attempts a ON a.request_sequence=r.sequence WHERE r.call_status='pending' OR (r.original_input IS NOT NULL AND (a.execution='running' OR a.disposition='pending'))")
++            .fetch_all(self.pool.as_ref()).await?;
++        let mut closed = 0;
++        for thread in threads {
++            if let Some(_owner) = self.try_tool_owner_lock(&thread)? {
++                closed += self.fail_pending_tool_calls(&thread, None).await?;
++            }
++        }
++        Ok(closed)
++    }
++}
++
++#[cfg(test)]
++mod tests {
++    use super::super::tests::{observe, setup};
++    use super::*;
++    use crate::{ToolExecutionStatus, ToolOutputDisposition};
++
++    #[tokio::test]
++    async fn abandoned_pending_calls_fail_once_live_calls_and_late_results_are_fenced() {
++        let (store, request) = setup().await;
++        let owner = store
++            .try_tool_owner_lock(&request.thread_id)
++            .unwrap()
++            .unwrap();
++        let input = "{\"kind\":\"function\",\"input\":\"  exact request bytes \\n\"}";
++        let crate::ToolRequestObservation::New(fact) = store
++            .observe_tool_request(&request, "old-owner", input)
++            .await
++            .unwrap()
++        else {
++            panic!("new")
++        };
++        store
++            .claim_tool_attempt(
++                fact.request_sequence,
++                "old-attempt",
++                "old-owner",
++                "digest",
++                "hook input",
++            )
++            .await
++            .unwrap();
++        let other = StateRuntime::init(store.sqlite().clone(), "test".into())
++            .await
++            .unwrap();
++        assert_eq!(other.recover_abandoned_tool_calls().await.unwrap(), 0);
++        drop(owner);
++        assert_eq!(other.recover_abandoned_tool_calls().await.unwrap(), 1);
++        assert_eq!(other.recover_abandoned_tool_calls().await.unwrap(), 0);
++        let row = sqlx::query(
++            "SELECT original_input,call_status,call_result FROM tool_requests WHERE sequence=?",
++        )
++        .bind(fact.request_sequence)
++        .fetch_one(other.pool.as_ref())
++        .await
++        .unwrap();
++        assert_eq!(row.get::<String, _>("original_input"), input);
++        assert_eq!(row.get::<String, _>("call_status"), "failed");
++        assert!(row.get::<String, _>("call_result").contains("unknown"));
++        let failed = other
++            .tool_execution_fact(fact.request_sequence)
++            .await
++            .unwrap();
++        assert_eq!(
++            failed.attempt.unwrap().execution,
++            ToolExecutionStatus::Uncertain
++        );
++        assert!(
++            store
++                .complete_tool_attempt(
++                    fact.request_sequence,
++                    "old-attempt",
++                    "old-owner",
++                    ToolExecutionStatus::Completed,
++                    Some("late success")
++                )
++                .await
++                .is_err()
++        );
++        assert!(
++            store
++                .decide_tool_output(
++                    fact.request_sequence,
++                    "old-attempt",
++                    "old-owner",
++                    ToolOutputDisposition::Accepted,
++                    Some("late success")
++                )
++                .await
++                .is_err()
++        );
++        assert!(
++            !serde_json::to_string(
++                &store
++                    .tool_execution_fact(fact.request_sequence)
++                    .await
++                    .unwrap()
++            )
++            .unwrap()
++            .contains("exact request bytes")
++        );
++    }
++
++    #[tokio::test]
++    async fn call_pair_and_receipt_roll_back_on_output_or_recovery_failure() {
++        let (store, request) = setup().await;
++        let fact = observe(&store, &request).await;
++        store
++            .claim_tool_attempt(
++                fact.request_sequence,
++                "attempt",
++                "owner",
++                "digest",
++                "actual input",
++            )
++            .await
++            .unwrap();
++        store
++            .complete_tool_attempt(
++                fact.request_sequence,
++                "attempt",
++                "owner",
++                ToolExecutionStatus::Completed,
++                Some("actual result"),
++            )
++            .await
++            .unwrap();
++        sqlx::query("CREATE TRIGGER fail_call_pair BEFORE UPDATE OF call_result ON tool_requests BEGIN SELECT RAISE(ABORT,'injected'); END;")
++            .execute(store.pool.as_ref()).await.unwrap();
++        assert!(
++            store
++                .decide_tool_output(
++                    fact.request_sequence,
++                    "attempt",
++                    "owner",
++                    ToolOutputDisposition::Accepted,
++                    Some("accepted result")
++                )
++                .await
++                .is_err()
++        );
++        let physical = store
++            .tool_execution_fact(fact.request_sequence)
++            .await
++            .unwrap()
++            .attempt
++            .unwrap();
++        assert_eq!(physical.disposition, ToolOutputDisposition::Pending);
++        assert!(store.recover_abandoned_tool_calls().await.is_err());
++        assert_eq!(
++            store
++                .tool_execution_fact(fact.request_sequence)
++                .await
++                .unwrap()
++                .attempt
++                .unwrap(),
++            physical
++        );
++        sqlx::query("DROP TRIGGER fail_call_pair")
++            .execute(store.pool.as_ref())
++            .await
++            .unwrap();
++        assert_eq!(store.recover_abandoned_tool_calls().await.unwrap(), 1);
++        let retained = store
++            .read_tool_results(fact.request_sequence)
++            .await
++            .unwrap();
++        assert_eq!(retained.execution.as_deref(), Some("actual result"));
++        assert_eq!(retained.effective_input, "actual input");
++        assert!(retained.rejection.unwrap().contains("interrupted"));
++    }
++
++    #[tokio::test]
++    async fn recovery_closes_cancelled_physical_attempts_and_fences_unclaimed_calls() {
++        let (store, request) = setup().await;
++        let fact = observe(&store, &request).await;
++        store
++            .claim_tool_attempt(
++                fact.request_sequence,
++                "cancelled-attempt",
++                "owner",
++                "digest",
++                "actual input",
++            )
++            .await
++            .unwrap();
++        store
++            .cancel_tool_waiter(fact.request_sequence)
++            .await
++            .unwrap();
++        let cancelled: String =
++            sqlx::query_scalar("SELECT call_result FROM tool_requests WHERE sequence=?")
++                .bind(fact.request_sequence)
++                .fetch_one(store.pool.as_ref())
++                .await
++                .unwrap();
++        assert_eq!(store.recover_abandoned_tool_calls().await.unwrap(), 1);
++        let row = sqlx::query("SELECT call_status,call_result FROM tool_requests WHERE sequence=?")
++            .bind(fact.request_sequence)
++            .fetch_one(store.pool.as_ref())
++            .await
++            .unwrap();
++        assert_eq!(row.get::<String, _>("call_status"), "cancelled");
++        assert_eq!(row.get::<String, _>("call_result"), cancelled);
++        assert_eq!(
++            store
++                .tool_execution_fact(fact.request_sequence)
++                .await
++                .unwrap()
++                .attempt
++                .unwrap()
++                .execution,
++            ToolExecutionStatus::Uncertain
++        );
++        assert!(
++            store
++                .complete_tool_attempt(
++                    fact.request_sequence,
++                    "cancelled-attempt",
++                    "owner",
++                    ToolExecutionStatus::Completed,
++                    Some("late physical success")
++                )
++                .await
++                .is_err()
++        );
++
++        let mut unclaimed = request.clone();
++        unclaimed.logical_id = "unclaimed".into();
++        let unclaimed = observe(&store, &unclaimed).await;
++        assert_eq!(store.recover_abandoned_tool_calls().await.unwrap(), 1);
++        assert!(
++            matches!(store.claim_tool_attempt(unclaimed.request_sequence, "late-attempt", "owner", "digest", "late input").await.unwrap(), crate::ToolAttemptClaim::Existing(fact) if fact.attempt.is_none())
++        );
++        let failure: String =
++            sqlx::query_scalar("SELECT call_result FROM tool_requests WHERE sequence=?")
++                .bind(unclaimed.request_sequence)
++                .fetch_one(store.pool.as_ref())
++                .await
++                .unwrap();
++        assert!(failure.contains("not_started"));
++        assert_eq!(store.recover_abandoned_tool_calls().await.unwrap(), 0);
++
++        let mut retry = request;
++        retry.logical_id = "new-attempt-call".into();
++        let retry = observe(&store, &retry).await;
++        assert!(matches!(
++            store
++                .claim_tool_attempt(
++                    retry.request_sequence,
++                    "new-attempt",
++                    "new-owner",
++                    "digest",
++                    "actual input"
++                )
++                .await
++                .unwrap(),
++            crate::ToolAttemptClaim::Claimed(_)
++        ));
++    }
++}
+--- a/codex-rs/state/src/runtime/tool_control_input_recovery_tests.rs
++++ b/codex-rs/state/src/runtime/tool_control_input_recovery_tests.rs
+@@ -32,7 +32,10 @@
+         source: "model".into(),
+         binding: "binding-parent".into(),
+     };
+-    let ToolRequestObservation::New(observed) = store.observe_tool_request(&request).await.unwrap()
++    let ToolRequestObservation::New(observed) = store
++        .observe_tool_request(&request, "test-owner", "{}")
++        .await
++        .unwrap()
+     else {
+         panic!("new")
+     };
+@@ -60,7 +63,10 @@
+     request.tool_name = "request_user_input".into();
+     request.source = "code_mode".into();
+     request.binding = "binding-input".into();
+-    let ToolRequestObservation::New(observed) = store.observe_tool_request(&request).await.unwrap()
++    let ToolRequestObservation::New(observed) = store
++        .observe_tool_request(&request, "test-owner", "{}")
++        .await
++        .unwrap()
+     else {
+         panic!("new")
+     };
+--- a/codex-rs/state/src/runtime/tool_dependencies_tests.rs
++++ b/codex-rs/state/src/runtime/tool_dependencies_tests.rs
+@@ -39,7 +39,10 @@
+         source: "code_mode".into(),
+         binding: "binding".into(),
+     };
+-    let ToolRequestObservation::New(fact) = store.observe_tool_request(&request).await.unwrap()
++    let ToolRequestObservation::New(fact) = store
++        .observe_tool_request(&request, "test-owner", "{}")
++        .await
++        .unwrap()
+     else {
+         panic!("new request")
+     };
+--- a/codex-rs/state/src/runtime/tool_diagnostics_tests.rs
++++ b/codex-rs/state/src/runtime/tool_diagnostics_tests.rs
+@@ -22,7 +22,10 @@
+         source: "model".into(),
+         binding: logical.into(),
+     };
+-    let ToolRequestObservation::New(fact) = store.observe_tool_request(&identity).await.unwrap()
++    let ToolRequestObservation::New(fact) = store
++        .observe_tool_request(&identity, "test-owner", "{}")
++        .await
++        .unwrap()
+     else {
+         panic!("new");
+     };
+--- a/codex-rs/state/src/runtime/tool_execution.rs
++++ b/codex-rs/state/src/runtime/tool_execution.rs
+@@ -1,7 +1,6 @@
+ // SPDX-License-Identifier: Apache-2.0
+ 
+ use super::StateRuntime;
+-use crate::MAX_TOOL_RESULT_BYTES;
+ use crate::ToolAttemptClaim;
+ use crate::ToolAttemptReceipt;
+ use crate::ToolExecutionFact;
+@@ -50,6 +49,8 @@
+     pub async fn observe_tool_request(
+         &self,
+         request: &ToolRequestIdentity,
++        owner_id: &str,
++        original_input: &str,
+     ) -> anyhow::Result<ToolRequestObservation> {
+         ensure!(
+             !request.thread_id.is_empty() && !request.logical_id.is_empty(),
+@@ -62,13 +63,15 @@
+         );
+         let mut tx = self.pool.begin().await?;
+         let inserted = sqlx::query(
+-            "INSERT INTO tool_requests(thread_id, logical_id, binding, request_json)
+-            VALUES (?, ?, ?, ?) ON CONFLICT(thread_id, logical_id) DO NOTHING",
++            "INSERT INTO tool_requests(thread_id, logical_id, binding, request_json,request_owner,original_input,call_status)
++            VALUES (?, ?, ?, ?, ?, ?, 'pending') ON CONFLICT(thread_id, logical_id) DO NOTHING",
+         )
+         .bind(&request.thread_id)
+         .bind(&request.logical_id)
+         .bind(&request.binding)
+         .bind(encoded)
++        .bind(owner_id)
++        .bind(original_input)
+         .execute(&mut *tx)
+         .await?
+         .rows_affected()
+@@ -149,10 +152,14 @@
+     }
+ 
+     /// A pre-dispatch rejection remains distinct from an executed handler.
+-    pub async fn deny_tool_request(&self, request_sequence: i64) -> anyhow::Result<()> {
+-        let mut tx = self.pool.begin().await?;
+-        let changed = sqlx::query("UPDATE tool_requests SET resolution = 'denied' WHERE sequence = ? AND resolution = 'observed' AND NOT EXISTS(SELECT 1 FROM tool_attempts WHERE request_sequence = ?)")
+-            .bind(request_sequence).bind(request_sequence).execute(&mut *tx).await?.rows_affected();
++    pub async fn deny_tool_request(
++        &self,
++        request_sequence: i64,
++        result: &str,
++    ) -> anyhow::Result<()> {
++        let mut tx = self.pool.begin().await?;
++        let changed = sqlx::query("UPDATE tool_requests SET resolution = 'denied',call_status='failed',call_result=? WHERE sequence = ? AND resolution = 'observed' AND call_status='pending' AND NOT EXISTS(SELECT 1 FROM tool_attempts WHERE request_sequence = ?)")
++            .bind(result).bind(request_sequence).bind(request_sequence).execute(&mut *tx).await?.rows_affected();
+         ensure!(
+             changed == 1,
+             "tool request has already been dispatched or denied"
+@@ -172,13 +179,9 @@
+         operation_digest: &str,
+         effective_input: &str,
+     ) -> anyhow::Result<ToolAttemptClaim> {
+-        ensure!(
+-            effective_input.len() <= MAX_TOOL_RESULT_BYTES,
+-            "effective tool input exceeds retention limit"
+-        );
+         let mut tx = self.pool.begin().await?;
+         let inserted = sqlx::query("INSERT INTO tool_attempts(request_sequence, attempt_id, owner_id, operation_digest, effective_input, execution)
+-            SELECT ?, ?, ?, ?, ?, 'running' WHERE EXISTS(SELECT 1 FROM tool_requests WHERE sequence = ? AND resolution = 'observed' AND NOT EXISTS(SELECT 1 FROM tool_sharing s WHERE s.request_sequence=tool_requests.sequence)) ON CONFLICT(request_sequence) DO NOTHING")
++            SELECT ?, ?, ?, ?, ?, 'running' WHERE EXISTS(SELECT 1 FROM tool_requests WHERE sequence = ? AND resolution = 'observed' AND call_status='pending' AND NOT EXISTS(SELECT 1 FROM tool_sharing s WHERE s.request_sequence=tool_requests.sequence)) ON CONFLICT(request_sequence) DO NOTHING")
+             .bind(request_sequence).bind(attempt_id).bind(owner_id).bind(operation_digest).bind(effective_input).bind(request_sequence)
+             .execute(&mut *tx).await?.rows_affected() == 1;
+         let fact = load_fact(&mut tx, request_sequence).await?;
+@@ -192,7 +195,7 @@
+         Ok(outcome)
+     }
+ 
+-    /// Commit actual execution before running output hooks. Oversize bodies are not retained.
++    /// Commit every actual execution body before running output hooks.
+     pub async fn complete_tool_attempt(
+         &self,
+         request_sequence: i64,
+@@ -210,7 +213,8 @@
+             ToolExecutionStatus::Uncertain => "uncertain",
+             ToolExecutionStatus::Running => unreachable!(),
+         };
+-        let body = result.filter(|body| body.len() <= MAX_TOOL_RESULT_BYTES);
++        let unknown = serde_json::json!({"status":"failed","code":"execution_outcome_unknown","effects":"unknown"}).to_string();
++        let body = Some(result.unwrap_or(&unknown));
+         let mut tx = self.pool.begin().await?;
+         let changed = sqlx::query("UPDATE tool_attempts SET execution = ?, execution_result = ?, revision = revision + 1
+             WHERE request_sequence = ? AND attempt_id = ? AND owner_id = ? AND execution = 'running'")
+@@ -241,7 +245,7 @@
+             ToolOutputDisposition::Rejected => "rejected",
+             ToolOutputDisposition::Pending => unreachable!(),
+         };
+-        let body = result.filter(|body| body.len() <= MAX_TOOL_RESULT_BYTES);
++        let body = Some(result.ok_or_else(|| anyhow::anyhow!("missing tool output result"))?);
+         let mut tx = self.pool.begin().await?;
+         let changed = sqlx::query("UPDATE tool_attempts SET disposition = ?, accepted_result = ?, rejection = ?, revision = revision + 1
+             WHERE request_sequence = ? AND attempt_id = ? AND owner_id = ? AND (execution = 'completed' OR ? = 'rejected') AND execution != 'running' AND disposition = 'pending'")
+@@ -253,6 +257,10 @@
+             changed == 1,
+             "tool output decision conflicts with its receipt"
+         );
++        let status = logical_output_status(disposition, body.unwrap_or_default());
++        let changed = sqlx::query("UPDATE tool_requests SET call_status=?,call_result=? WHERE sequence=? AND call_status='pending'")
++            .bind(status).bind(body).bind(request_sequence).execute(&mut *tx).await?.rows_affected();
++        ensure!(changed == 1, "tool call is already closed");
+         let fact = load_fact(&mut tx, request_sequence).await?;
+         append_event(&mut tx, &fact).await?;
+         tx.commit().await?;
+@@ -308,8 +316,16 @@
+     /// Result cleanup preserves execution receipts and projection history.
+     pub async fn forget_tool_results(&self, request_sequence: i64) -> anyhow::Result<()> {
+         let mut tx = self.pool.begin().await?;
+-        sqlx::query("UPDATE tool_attempts SET execution_result = NULL, accepted_result = NULL, rejection = NULL, revision = revision + 1 WHERE request_sequence = ?")
++        sqlx::query("UPDATE tool_attempts SET effective_input='',execution_result = NULL, accepted_result = NULL, rejection = NULL, revision = revision + 1 WHERE request_sequence = ?")
+             .bind(request_sequence).execute(&mut *tx).await?;
++        sqlx::query("UPDATE tool_requests SET original_input=NULL,call_result=NULL,call_status='forgotten' WHERE sequence=?")
++            .bind(request_sequence).execute(&mut *tx).await?;
++        sqlx::query(
++            "UPDATE tool_sharing SET accepted_result=NULL,rejection=NULL WHERE request_sequence=?",
++        )
++        .bind(request_sequence)
++        .execute(&mut *tx)
++        .await?;
+         let fact = load_fact(&mut tx, request_sequence).await?;
+         append_event(&mut tx, &fact).await?;
+         tx.commit().await?;
+@@ -336,6 +352,26 @@
+     }
+ }
+ 
++pub(super) fn logical_output_status(
++    disposition: ToolOutputDisposition,
++    body: &str,
++) -> &'static str {
++    let failed = serde_json::from_str::<serde_json::Value>(body)
++        .ok()
++        .is_some_and(|value| {
++            value.get("success").and_then(serde_json::Value::as_bool) == Some(false)
++                || value
++                    .get("response_success")
++                    .and_then(serde_json::Value::as_bool)
++                    == Some(false)
++        });
++    if disposition == ToolOutputDisposition::Accepted && !failed {
++        "succeeded"
++    } else {
++        "failed"
++    }
++}
++
+ pub(super) async fn load_fact(
+     connection: &mut SqliteConnection,
+     sequence: i64,
+@@ -345,7 +381,7 @@
+     decode_fact(&query.build().fetch_one(connection).await?)
+ }
+ 
+-async fn append_event(
++pub(super) async fn append_event(
+     connection: &mut SqliteConnection,
+     fact: &ToolExecutionFact,
+ ) -> anyhow::Result<()> {
+@@ -403,3 +439,6 @@
+ #[cfg(test)]
+ #[path = "tool_receipts_tests.rs"]
+ mod receipt_tests;
++
++#[path = "tool_call_records.rs"]
++mod call_records;
+--- a/codex-rs/state/src/runtime/tool_execution_migration_tests.rs
++++ b/codex-rs/state/src/runtime/tool_execution_migration_tests.rs
+@@ -7,36 +7,10 @@
+ use pretty_assertions::assert_eq;
+ 
+ #[tokio::test]
+-async fn additive_migration_preserves_existing_thread_metadata_and_old_readers() {
+-    use std::borrow::Cow;
++async fn current_schema_thread_cleanup_removes_tool_pairs_and_receipts() {
+     let home = unique_temp_dir();
+     tokio::fs::create_dir_all(&home).await.unwrap();
+     let sqlite = crate::SqliteConfig::new_for_testing(home.as_path().abs());
+-    let current = &crate::migrations::STATE_MIGRATOR;
+-    let old = sqlx::migrate::Migrator {
+-        migrations: Cow::Owned(
+-            current
+-                .migrations
+-                .iter()
+-                .filter(|m| m.version < 51)
+-                .cloned()
+-                .collect(),
+-        ),
+-        ignore_missing: true,
+-        locking: current.locking,
+-        no_tx: current.no_tx,
+-        table_name: current.table_name.clone(),
+-        create_schemas: current.create_schemas.clone(),
+-    };
+-    let pool = sqlite
+-        .open_read_write_pool(&sqlite.state_db_path())
+-        .await
+-        .unwrap();
+-    old.run(&pool).await.unwrap();
+-    let thread = ThreadId::new();
+-    sqlx::query("INSERT INTO threads(id, rollout_path, created_at, updated_at, source, model_provider, cwd, title, sandbox_policy, approval_mode) VALUES (?, 'rollout', 1, 1, 'cli', 'test', '/workspace', 'existing', 'read-only', 'never')")
+-        .bind(thread.to_string()).execute(&pool).await.unwrap();
+-    pool.close().await;
+     let runtime = StateRuntime::init(sqlite.clone(), "test".into())
+         .await
+         .unwrap();
+@@ -44,7 +18,9 @@
+         .open_read_write_pool(&sqlite.state_db_path())
+         .await
+         .unwrap();
+-    old.run(&pool).await.unwrap();
++    let thread = ThreadId::new();
++    sqlx::query("INSERT INTO threads(id, rollout_path, created_at, updated_at, source, model_provider, cwd, title, sandbox_policy, approval_mode) VALUES (?, 'rollout', 1, 1, 'cli', 'test', '/workspace', 'existing', 'read-only', 'never')")
++        .bind(thread.to_string()).execute(&pool).await.unwrap();
+     let row = sqlx::query("SELECT title FROM threads WHERE id = ?")
+         .bind(thread.to_string())
+         .fetch_one(&pool)
+@@ -63,7 +39,10 @@
+         binding: "digest".into(),
+     };
+     assert!(matches!(
+-        runtime.observe_tool_request(&request).await.unwrap(),
++        runtime
++            .observe_tool_request(&request, "test-owner", "{}")
++            .await
++            .unwrap(),
+         ToolRequestObservation::New(_)
+     ));
+     assert_eq!(
+--- a/codex-rs/state/src/runtime/tool_execution_tests.rs
++++ b/codex-rs/state/src/runtime/tool_execution_tests.rs
+@@ -33,7 +33,10 @@
+     runtime: &StateRuntime,
+     request: &ToolRequestIdentity,
+ ) -> ToolExecutionFact {
+-    let ToolRequestObservation::New(fact) = runtime.observe_tool_request(request).await.unwrap()
++    let ToolRequestObservation::New(fact) = runtime
++        .observe_tool_request(request, "test-owner", "{}")
++        .await
++        .unwrap()
+     else {
+         panic!("new observation")
+     };
+@@ -47,8 +50,8 @@
+         .await
+         .unwrap();
+     let (a, b) = tokio::join!(
+-        runtime.observe_tool_request(&request),
+-        other.observe_tool_request(&request)
++        runtime.observe_tool_request(&request, "test-owner", "{}"),
++        other.observe_tool_request(&request, "test-owner", "{}")
+     );
+     let (a, b) = (a.unwrap(), b.unwrap());
+     let fact = match (a, b) {
+@@ -119,7 +122,10 @@
+         },
+     ] {
+         assert_eq!(
+-            runtime.observe_tool_request(&changed).await.unwrap(),
++            runtime
++                .observe_tool_request(&changed, "test-owner", "{}")
++                .await
++                .unwrap(),
+             ToolRequestObservation::IdentityConflict
+         );
+     }
+@@ -248,8 +254,10 @@
+         .forget_tool_results(fact.request_sequence)
+         .await
+         .unwrap();
+-    let ToolRequestObservation::Replay(recovered) =
+-        runtime.observe_tool_request(&request).await.unwrap()
++    let ToolRequestObservation::Replay(recovered) = runtime
++        .observe_tool_request(&request, "test-owner", "{}")
++        .await
++        .unwrap()
+     else {
+         panic!("receipt")
+     };
+@@ -378,14 +386,14 @@
+ }
+ 
+ #[tokio::test]
+-async fn oversize_results_keep_receipts_and_thread_deletion_removes_all_facts() {
++async fn large_results_keep_complete_bodies_and_thread_deletion_removes_all_facts() {
+     let (runtime, request) = setup().await;
+     let fact = observe(&runtime, &request).await;
+     runtime
+         .claim_tool_attempt(fact.request_sequence, "attempt", "owner", "effective", "{}")
+         .await
+         .unwrap();
+-    let body = "x".repeat(MAX_TOOL_RESULT_BYTES + 1);
++    let body = "x".repeat(4 * 1024 * 1024 + 1);
+     runtime
+         .complete_tool_attempt(
+             fact.request_sequence,
+@@ -396,13 +404,14 @@
+         )
+         .await
+         .unwrap();
+-    assert!(
++    assert_eq!(
+         runtime
+             .read_tool_results(fact.request_sequence)
+             .await
+             .unwrap()
+             .execution
+-            .is_none()
++            .as_deref(),
++        Some(body.as_str())
+     );
+     runtime
+         .delete_thread(ThreadId::from_string(&request.thread_id).unwrap())
+@@ -428,7 +437,7 @@
+     let (runtime, request) = setup().await;
+     let fact = observe(&runtime, &request).await;
+     runtime
+-        .deny_tool_request(fact.request_sequence)
++        .deny_tool_request(fact.request_sequence, "test denial")
+         .await
+         .unwrap();
+     let ToolAttemptClaim::Existing(denied) = runtime
+@@ -441,7 +450,10 @@
+     assert_eq!(denied.resolution, crate::ToolRequestResolution::Denied);
+     assert_eq!(denied.attempt, None);
+     assert!(matches!(
+-        runtime.observe_tool_request(&request).await.unwrap(),
++        runtime
++            .observe_tool_request(&request, "test-owner", "{}")
++            .await
++            .unwrap(),
+         ToolRequestObservation::Replay(_)
+     ));
+     assert_eq!(
+--- a/codex-rs/state/src/runtime/tool_reconciliation_tests.rs
++++ b/codex-rs/state/src/runtime/tool_reconciliation_tests.rs
+@@ -28,7 +28,10 @@
+         source: "model".into(),
+         binding: "binding".into(),
+     };
+-    let ToolRequestObservation::New(observed) = store.observe_tool_request(&request).await.unwrap()
++    let ToolRequestObservation::New(observed) = store
++        .observe_tool_request(&request, "test-owner", "{}")
++        .await
++        .unwrap()
+     else {
+         panic!("new");
+     };
+@@ -61,7 +64,10 @@
+     store.record_tool_reconciliation(&fact).await.unwrap();
+     let reopened = StateRuntime::init(config, "test".into()).await.unwrap();
+     assert_eq!(
+-        reopened.observe_tool_request(&request).await.unwrap(),
++        reopened
++            .observe_tool_request(&request, "test-owner", "{}")
++            .await
++            .unwrap(),
+         ToolRequestObservation::Replay(claimed)
+     );
+     let events = reopened
+--- a/codex-rs/state/src/runtime/tool_runtime_tests.rs
++++ b/codex-rs/state/src/runtime/tool_runtime_tests.rs
+@@ -19,7 +19,10 @@
+         source: "model".into(),
+         binding: "input".into(),
+     };
+-    let ToolRequestObservation::New(fact) = store.observe_tool_request(&identity).await.unwrap()
++    let ToolRequestObservation::New(fact) = store
++        .observe_tool_request(&identity, "test-owner", "{}")
++        .await
++        .unwrap()
+     else {
+         panic!("new")
+     };
+--- a/codex-rs/state/src/runtime/tool_sharing.rs
++++ b/codex-rs/state/src/runtime/tool_sharing.rs
+@@ -1,6 +1,5 @@
+ // SPDX-License-Identifier: Apache-2.0
+ use super::StateRuntime;
+-use crate::MAX_TOOL_RESULT_BYTES;
+ use crate::ToolCoalescingPermission;
+ use crate::ToolOutputDelivery;
+ use crate::ToolOutputDisposition;
+@@ -46,7 +45,7 @@
+                 "source is not reusable"
+             );
+         }
+-        let unclaimed: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM tool_requests r WHERE r.sequence=? AND r.thread_id=? AND r.resolution='observed' AND NOT EXISTS(SELECT 1 FROM tool_attempts a WHERE a.request_sequence=r.sequence))")
++        let unclaimed: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM tool_requests r WHERE r.sequence=? AND r.thread_id=? AND r.resolution='observed' AND r.call_status='pending' AND NOT EXISTS(SELECT 1 FROM tool_attempts a WHERE a.request_sequence=r.sequence))")
+             .bind(fact.request_sequence).bind(&fact.thread_id).fetch_one(&mut *tx).await?;
+         ensure!(
+             unclaimed,
+@@ -107,10 +106,14 @@
+             "shared execution is not complete"
+         );
+         fact.disposition = disposition;
+-        let retained = (body.len() <= MAX_TOOL_RESULT_BYTES).then_some(body);
++        let retained = Some(body);
+         sqlx::query("UPDATE tool_sharing SET fact_json=?,accepted_result=?,rejection=? WHERE request_sequence=?")
+             .bind(serde_json::to_string(&fact)?).bind(if disposition == ToolOutputDisposition::Accepted { retained } else { None })
+             .bind(if disposition == ToolOutputDisposition::Rejected { retained } else { None }).bind(sequence).execute(&mut *tx).await?;
++        let status = super::tool_execution::logical_output_status(disposition, body);
++        let changed = sqlx::query("UPDATE tool_requests SET call_status=?,call_result=? WHERE sequence=? AND call_status='pending'")
++            .bind(status).bind(body).bind(sequence).execute(&mut *tx).await?.rows_affected();
++        ensure!(changed == 1, "shared tool call is already closed");
+         append(&mut tx, &fact).await?;
+         tx.commit().await?;
+         Ok(())
+@@ -139,7 +142,10 @@
+             .await?;
+     Ok(serde_json::from_str(&encoded)?)
+ }
+-async fn update(connection: &mut SqliteConnection, fact: &ToolSharingFact) -> anyhow::Result<()> {
++pub(super) async fn update(
++    connection: &mut SqliteConnection,
++    fact: &ToolSharingFact,
++) -> anyhow::Result<()> {
+     sqlx::query("UPDATE tool_sharing SET fact_json=? WHERE request_sequence=?")
+         .bind(serde_json::to_string(fact)?)
+         .bind(fact.request_sequence)
+@@ -173,7 +179,7 @@
+ impl StateRuntime {
+     pub async fn cancel_tool_waiter(&self, sequence: i64) -> anyhow::Result<()> {
+         let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+-        let row = sqlx::query("SELECT r.thread_id,COALESCE(s.source_request_sequence,r.sequence) AS source FROM tool_requests r LEFT JOIN tool_sharing s ON s.request_sequence=r.sequence LEFT JOIN tool_attempts a ON a.request_sequence=r.sequence WHERE r.sequence=? AND (a.delivery='pending' OR json_extract(s.fact_json,'$.delivery')='pending')")
++        let row = sqlx::query("SELECT r.thread_id,COALESCE(s.source_request_sequence,r.sequence) AS source FROM tool_requests r LEFT JOIN tool_sharing s ON s.request_sequence=r.sequence LEFT JOIN tool_attempts a ON a.request_sequence=r.sequence WHERE r.sequence=? AND (r.call_status='pending' OR a.delivery='pending' OR json_extract(s.fact_json,'$.delivery')='pending')")
+             .bind(sequence).fetch_optional(&mut *tx).await?;
+         let Some(row) = row else {
+             return Ok(());
+@@ -181,6 +187,9 @@
+         let inserted = sqlx::query("INSERT INTO tool_waiter_cancellations(request_sequence) VALUES (?) ON CONFLICT(request_sequence) DO NOTHING")
+             .bind(sequence).execute(&mut *tx).await?.rows_affected() == 1;
+         if inserted {
++            sqlx::query("UPDATE tool_requests SET call_status='cancelled',call_result=? WHERE sequence=? AND call_status='pending'")
++                .bind(serde_json::json!({"status":"cancelled","code":"tool_waiter_cancelled","effects":"unknown"}).to_string())
++                .bind(sequence).execute(&mut *tx).await?;
+             let fact = crate::ToolWaiterCancellationFact {
+                 schema_version: 1,
+                 thread_id: row.try_get("thread_id")?,
+--- a/codex-rs/state/src/runtime/tool_sharing_tests.rs
++++ b/codex-rs/state/src/runtime/tool_sharing_tests.rs
+@@ -32,7 +32,10 @@
+             source: "model".into(),
+             binding: logical.into(),
+         };
+-        let ToolRequestObservation::New(fact) = store.observe_tool_request(&request).await.unwrap()
++        let ToolRequestObservation::New(fact) = store
++            .observe_tool_request(&request, "test-owner", "{}")
++            .await
++            .unwrap()
+         else {
+             panic!("new request")
+         };
+@@ -143,4 +146,116 @@
+             .disposition,
+         ToolOutputDisposition::Accepted
+     );
++    store.forget_tool_results(ids[0]).await.unwrap();
++    assert!(
++        store
++            .read_shared_tool_output(ids[0])
++            .await
++            .unwrap()
++            .is_none()
++    );
++    let pair = sqlx::query(
++        "SELECT original_input,call_result,call_status FROM tool_requests WHERE sequence=?",
++    )
++    .bind(ids[0])
++    .fetch_one(store.pool.as_ref())
++    .await
++    .unwrap();
++    assert!(pair.get::<Option<String>, _>("original_input").is_none());
++    assert!(pair.get::<Option<String>, _>("call_result").is_none());
++    assert_eq!(pair.get::<String, _>("call_status"), "forgotten");
+ }
++
++#[tokio::test]
++async fn abandoned_shared_call_keeps_source_result_and_rejects_late_output() {
++    let home = crate::runtime::test_support::unique_temp_dir();
++    let store = StateRuntime::init(
++        crate::SqliteConfig::new_for_testing(home.as_path().abs()),
++        "test".into(),
++    )
++    .await
++    .unwrap();
++    let source = attempt(&store, "actual", snapshot("a"), Some("a")).await;
++    let request = ToolRequestIdentity {
++        thread_id: "thread".into(),
++        logical_id: "shared".into(),
++        turn_id: "turn".into(),
++        scope_id: "scope".into(),
++        cell_id: None,
++        parent_call_id: None,
++        tool_name: "smoke".into(),
++        source: "model".into(),
++        binding: "shared".into(),
++    };
++    let ToolRequestObservation::New(fact) = store
++        .observe_tool_request(&request, "old-owner", "original shared request")
++        .await
++        .unwrap()
++    else {
++        panic!("new request")
++    };
++    store
++        .link_tool_sharing(&ToolSharingFact {
++            schema_version: 1,
++            thread_id: "thread".into(),
++            request_sequence: fact.request_sequence,
++            source_request_sequence: source,
++            source_attempt_id: "actual".into(),
++            operation_digest: "a".repeat(64),
++            snapshot: snapshot("a"),
++            kind: ToolSharingKind::Reuse,
++            disposition: ToolOutputDisposition::Pending,
++            delivery: ToolOutputDelivery::Pending,
++            cancelled: false,
++        })
++        .await
++        .unwrap();
++    assert_eq!(store.recover_abandoned_tool_calls().await.unwrap(), 1);
++    let shared = store
++        .tool_sharing_fact(fact.request_sequence)
++        .await
++        .unwrap()
++        .unwrap();
++    assert_eq!(shared.disposition, ToolOutputDisposition::Rejected);
++    assert!(
++        store
++            .decide_shared_tool_output(
++                fact.request_sequence,
++                ToolOutputDisposition::Accepted,
++                "late output"
++            )
++            .await
++            .is_err()
++    );
++    assert!(
++        store
++            .read_shared_tool_output(fact.request_sequence)
++            .await
++            .unwrap()
++            .is_none()
++    );
++    assert_eq!(
++        store
++            .tool_execution_fact(source)
++            .await
++            .unwrap()
++            .attempt
++            .unwrap()
++            .disposition,
++        ToolOutputDisposition::Accepted
++    );
++    assert_eq!(store.recover_abandoned_tool_calls().await.unwrap(), 0);
++    let row = sqlx::query(
++        "SELECT original_input,call_status,call_result FROM tool_requests WHERE sequence=?",
++    )
++    .bind(fact.request_sequence)
++    .fetch_one(store.pool.as_ref())
++    .await
++    .unwrap();
++    assert_eq!(
++        row.get::<String, _>("original_input"),
++        "original shared request"
++    );
++    assert_eq!(row.get::<String, _>("call_status"), "failed");
++    assert!(row.get::<String, _>("call_result").contains("interrupted"));
++}
+--- a/codex-rs/state/src/tool_execution.rs
++++ b/codex-rs/state/src/tool_execution.rs
+@@ -102,5 +102,5 @@
+     pub rejection: Option<String>,
+ }
+ 
+-/// Receipt retention is independent of the optional result body retention.
++/// Bound for the separate control-input recovery envelope. Tool call bodies are retained in full.
+ pub const MAX_TOOL_RESULT_BYTES: usize = 4 * 1024 * 1024;
+--- a/codex-rs/core/src/tools/tool_sharing.rs
++++ b/codex-rs/core/src/tools/tool_sharing.rs
+@@ -298,9 +298,10 @@
+         tool: Arc<dyn CoreToolRuntime>,
+     ) -> Result<AnyToolResult, FunctionCallError> {
+         let result = handle_any_tool(tool.as_ref(), invocation).await;
+-        self.facts
+-            .completed(result.as_ref().ok().map(snapshot).transpose()?)
+-            .await?;
++        match &result {
++            Ok(output) => self.facts.completed(Some(snapshot(output)?)).await?,
++            Err(error) => self.facts.failed(&error.to_string()).await?,
++        }
+         if let Some((gate, context, input)) = &self.trusted
+             && let Ok(result) = &result
+         {

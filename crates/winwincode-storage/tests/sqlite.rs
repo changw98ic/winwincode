@@ -20,12 +20,12 @@ use winwincode_storage::{
     MAX_STATE_MUTATIONS_PER_COMMIT, NewOutboxEvent, OutboxEvent, PendingAuditEvent,
     ProductStateStorage, ProjectionEventCursor, ProjectionEventStream, ProjectionEventStreamKey,
     ProjectionReadCut, PublicEventActor, PublicEventScope, PublicEventSource, ReceiptActorKey,
-    ReceiptIdentity, ReceiptScopeKey, RepositorySchedulerClaimRequest,
-    RepositorySchedulerDispatchResultRequest, RepositorySchedulerScope,
-    RepositorySchedulerTerminalRequest, SqliteStorage, StateCommit, StateMutation,
-    StateRevisionGuard, StorageError, StorageErrorKind, StoredState, WorkerAuthenticationIdentity,
-    WorkerHeartbeatRequest, WorkerPlatform, WorkerRegistrationRequest, receipt_actor_key,
-    receipt_scope_key,
+    ReceiptIdentity, ReceiptScopeKey, RepositorySchedulerCancellationRequest,
+    RepositorySchedulerClaimRequest, RepositorySchedulerDispatchResultRequest,
+    RepositorySchedulerScope, RepositorySchedulerTerminalRequest, SqliteStorage, StateCommit,
+    StateMutation, StateRevisionGuard, StorageError, StorageErrorKind, StoredState,
+    WorkerAuthenticationIdentity, WorkerHeartbeatRequest, WorkerPlatform,
+    WorkerRegistrationRequest, receipt_actor_key, receipt_scope_key,
 };
 
 static NEXT_TEMP_DIRECTORY: AtomicU64 = AtomicU64::new(1);
@@ -438,6 +438,246 @@ fn assert_guard_commit_absent(
     );
     assert_guard_event_absent(storage, event_id);
     assert_guard_receipt_absent(storage, commit);
+}
+
+#[test]
+#[allow(
+    clippy::too_many_lines,
+    reason = "one transaction fixture follows injected failure through rollback, exact acceptance and owner replacement replay"
+)]
+fn execution_terminal_commit_rolls_back_product_receipt_queue_and_registry_together() {
+    let root = temporary_directory("execution-terminal-atomic");
+    let mut storage = SqliteStorage::open(&root).unwrap();
+    let running = running_authority_fixture(&mut storage);
+    let guard = ExecutionAuthorityCommitGuard::terminal_round(
+        running.job.clone(),
+        running.dispatch.clone(),
+    )
+    .unwrap();
+    let request = RepositorySchedulerTerminalRequest {
+        scope: guard_repository_scope(),
+        terminal: ExecutionLeaseTerminalRequest {
+            job_id: running.lease.job_id.clone(),
+            lease_id: running.lease.lease_id.clone(),
+            worker_id: running.lease.worker_id.clone(),
+            worker_instance_id: running.lease.worker_instance_id.clone(),
+            attempt: running.lease.attempt,
+            fencing_token: running.lease.fencing_token.clone(),
+            outcome: ExecutionLeaseTerminalOutcome::Completed,
+            terminal_at: guard_at(5),
+            request_id: RequestId(guard_id("req", 81)),
+        },
+    };
+    let commit = guard_state_commit(80, "execution-terminal:atomic", "event:atomic-terminal");
+    let connection = Connection::open(storage.database_path()).unwrap();
+    connection
+        .execute_batch(
+            "CREATE TRIGGER fail_terminal_registry BEFORE INSERT ON execution_lease_terminals
+         BEGIN SELECT RAISE(ABORT, 'injected terminal registry failure'); END;",
+        )
+        .unwrap();
+    assert!(
+        storage
+            .commit_with_execution_terminal(&commit, &guard, &request)
+            .is_err()
+    );
+    assert_guard_commit_absent(
+        &storage,
+        &commit,
+        "execution-terminal:atomic",
+        "event:atomic-terminal",
+    );
+    assert_eq!(
+        storage
+            .load_execution_job_record(&running.job.job_id)
+            .unwrap()
+            .unwrap(),
+        running.job
+    );
+    assert_eq!(
+        storage
+            .load_execution_dispatch_authority(&running.job.job_id)
+            .unwrap()
+            .unwrap(),
+        running.dispatch
+    );
+    connection
+        .execute_batch("DROP TRIGGER fail_terminal_registry")
+        .unwrap();
+    let accepted = storage
+        .commit_with_execution_terminal(&commit, &guard, &request)
+        .unwrap();
+    assert!(!accepted.idempotent_replay);
+    assert_eq!(
+        storage
+            .load_execution_job_record(&running.job.job_id)
+            .unwrap()
+            .unwrap()
+            .state,
+        ExecutionJobState::Completed
+    );
+    replace_guard_worker(&mut storage, running.lease.worker_id.clone());
+    let replay = storage
+        .commit_with_execution_terminal(&commit, &guard, &request)
+        .unwrap();
+    assert!(
+        replay.idempotent_replay,
+        "receipt replay survives owner replacement without another settlement"
+    );
+    let fresh = guard_state_commit(82, "execution-terminal:late", "event:late-terminal");
+    assert!(
+        storage
+            .commit_with_execution_terminal(&fresh, &guard, &request)
+            .is_err()
+    );
+    assert_guard_commit_absent(
+        &storage,
+        &fresh,
+        "execution-terminal:late",
+        "event:late-terminal",
+    );
+    assert_eq!(
+        storage
+            .pending_events()
+            .unwrap()
+            .iter()
+            .filter(|event| event.event_id == "event:atomic-terminal")
+            .count(),
+        1
+    );
+    drop(connection);
+    drop(storage);
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+#[allow(
+    clippy::too_many_lines,
+    reason = "one cancellation fixture checks rollback for both forbidden terminals, the exact Cancelled commit and historical receipt replay"
+)]
+fn cancelling_terminal_commit_rejects_fresh_non_cancelled_outcomes_without_any_writes() {
+    let root = temporary_directory("execution-terminal-cancelling");
+    let mut storage = SqliteStorage::open(&root).unwrap();
+    let running = running_authority_fixture(&mut storage);
+    let cancellation = storage
+        .repository_scheduler()
+        .unwrap()
+        .request_cancellation(&RepositorySchedulerCancellationRequest {
+            scope: guard_repository_scope(),
+            job_id: running.job.job_id.clone(),
+            request_id: RequestId(guard_id("req", 90)),
+            expected_revision: running.job.revision,
+            requested_at: guard_at(5),
+        })
+        .unwrap();
+    assert_eq!(cancellation.job.state, ExecutionJobState::Cancelling);
+    let guard = ExecutionAuthorityCommitGuard::terminal_round(
+        cancellation.job.clone(),
+        running.dispatch.clone(),
+    )
+    .unwrap();
+    let mut request = RepositorySchedulerTerminalRequest {
+        scope: guard_repository_scope(),
+        terminal: ExecutionLeaseTerminalRequest {
+            job_id: running.lease.job_id.clone(),
+            lease_id: running.lease.lease_id.clone(),
+            worker_id: running.lease.worker_id.clone(),
+            worker_instance_id: running.lease.worker_instance_id.clone(),
+            attempt: running.lease.attempt,
+            fencing_token: running.lease.fencing_token.clone(),
+            outcome: ExecutionLeaseTerminalOutcome::Cancelled,
+            terminal_at: guard_at(6),
+            request_id: RequestId(guard_id("req", 93)),
+        },
+    };
+    let connection = Connection::open(storage.database_path()).unwrap();
+    let before = atomic_member_counts(storage.database_path());
+    for (index, outcome) in [
+        ExecutionLeaseTerminalOutcome::Completed,
+        ExecutionLeaseTerminalOutcome::Failed,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        request.terminal.outcome = outcome;
+        let stream = format!("execution-terminal:forbidden-{index}");
+        let event = format!("event:forbidden-terminal-{index}");
+        let commit = guard_state_commit(91 + u64::try_from(index).unwrap(), &stream, &event)
+            .with_state_mutation(
+                StateMutation::new("terminal-secondary", 0, b"secondary".to_vec()).unwrap(),
+            )
+            .with_journal_publication(journal_create("cancelled-terminal", b"journal"))
+            .with_pending_audit_event(
+                PendingAuditEvent::new("terminal-audit", b"audit".to_vec()).unwrap(),
+            );
+        let error = storage
+            .commit_with_execution_terminal(&commit, &guard, &request)
+            .expect_err("cancellation must reject a fresh non-cancelled terminal");
+        assert_eq!(error.kind(), StorageErrorKind::InvalidInput);
+        assert_guard_commit_absent(&storage, &commit, &stream, &event);
+        assert_eq!(atomic_member_counts(storage.database_path()), before);
+        assert_eq!(
+            storage
+                .load_execution_job_record(&running.job.job_id)
+                .unwrap()
+                .unwrap(),
+            cancellation.job
+        );
+        assert_eq!(
+            storage
+                .load_execution_dispatch_authority(&running.job.job_id)
+                .unwrap()
+                .unwrap(),
+            running.dispatch
+        );
+        let terminals: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM execution_lease_terminals",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(terminals, 0, "a rejected commit must not settle the lease");
+    }
+    request.terminal.outcome = ExecutionLeaseTerminalOutcome::Cancelled;
+    let commit = guard_state_commit(
+        94,
+        "execution-terminal:cancelled",
+        "event:cancelled-terminal",
+    );
+    let accepted = storage
+        .commit_with_execution_terminal(&commit, &guard, &request)
+        .unwrap();
+    assert!(!accepted.idempotent_replay);
+    assert_eq!(
+        storage
+            .load_execution_job_record(&running.job.job_id)
+            .unwrap()
+            .unwrap()
+            .state,
+        ExecutionJobState::Failed
+    );
+    let outcome: String = connection
+        .query_row(
+            "SELECT outcome FROM execution_lease_terminals WHERE lease_id=?1",
+            [&running.lease.lease_id.0],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(outcome, "cancelled");
+    replace_guard_worker(&mut storage, running.lease.worker_id.clone());
+    let settled = atomic_member_counts(storage.database_path());
+    let replay = storage
+        .commit_with_execution_terminal(&commit, &guard, &request)
+        .unwrap();
+    assert!(
+        replay.idempotent_replay,
+        "original receipt replay precedes current owner and Job checks"
+    );
+    assert_eq!(atomic_member_counts(storage.database_path()), settled);
+    drop(connection);
+    drop(storage);
+    fs::remove_dir_all(root).unwrap();
 }
 
 #[test]
@@ -1191,143 +1431,6 @@ fn journal_append(
     }
 }
 
-fn create_v1_fixture(database_path: &Path) {
-    let connection = Connection::open(database_path).expect("v1 database should open");
-    connection
-        .execute_batch(
-            "CREATE TABLE product_state (
-                 stream_id TEXT PRIMARY KEY NOT NULL,
-                 revision INTEGER NOT NULL CHECK (revision > 0),
-                 payload BLOB NOT NULL
-             );
-             CREATE TABLE command_receipts (
-                 request_id TEXT PRIMARY KEY NOT NULL,
-                 command_signature BLOB NOT NULL,
-                 stream_id TEXT NOT NULL,
-                 revision INTEGER NOT NULL CHECK (revision > 0)
-             );
-             CREATE TABLE outbox (
-                 sequence INTEGER PRIMARY KEY AUTOINCREMENT,
-                 event_id TEXT UNIQUE NOT NULL,
-                 request_id TEXT NOT NULL,
-                 topic TEXT NOT NULL,
-                 payload BLOB NOT NULL,
-                 published INTEGER NOT NULL DEFAULT 0 CHECK (published IN (0, 1))
-             );
-             CREATE INDEX outbox_pending_sequence ON outbox (published, sequence);
-             INSERT INTO product_state VALUES ('legacy-stream', 1, X'6C6567616379');
-             INSERT INTO command_receipts VALUES (
-                 'req_01J00000000000000000000002', X'010203', 'legacy-stream', 1
-             );
-             INSERT INTO outbox
-                 (event_id, request_id, topic, payload, published)
-                 VALUES (
-                     'legacy-published-event', 'req_01J00000000000000000000002',
-                     'control-plane.state.changed', X'7075626C6973686564', 1
-                 );
-             INSERT INTO outbox
-                 (event_id, request_id, topic, payload, published)
-                 VALUES (
-                     'legacy-event', 'req_01J00000000000000000000002',
-                     'control-plane.state.changed', X'6576656E74', 0
-                 );
-             PRAGMA user_version = 1;",
-        )
-        .expect("v1 fixture should be created");
-    connection.close().expect("v1 fixture should close");
-}
-
-fn create_v2_fixture(database_path: &Path) {
-    let connection = Connection::open(database_path).expect("v2 database should open");
-    connection
-        .execute_batch(
-            "CREATE TABLE product_state (
-                 stream_id TEXT PRIMARY KEY NOT NULL,
-                 revision INTEGER NOT NULL CHECK (revision > 0),
-                 payload BLOB NOT NULL
-             );
-             CREATE TABLE command_receipts (
-                 actor_key BLOB NOT NULL,
-                 scope_key BLOB NOT NULL,
-                 request_id TEXT NOT NULL,
-                 command_digest TEXT NOT NULL,
-                 stream_id TEXT NOT NULL,
-                 revision INTEGER NOT NULL CHECK (revision > 0),
-                 PRIMARY KEY (actor_key, scope_key, request_id)
-             );
-             CREATE TABLE outbox (
-                 sequence INTEGER PRIMARY KEY AUTOINCREMENT,
-                 event_id TEXT UNIQUE NOT NULL,
-                 receipt_actor_key BLOB NOT NULL,
-                 receipt_scope_key BLOB NOT NULL,
-                 request_id TEXT NOT NULL,
-                 topic TEXT NOT NULL,
-                 payload BLOB NOT NULL,
-                 published INTEGER NOT NULL DEFAULT 0 CHECK (published IN (0, 1)),
-                 FOREIGN KEY (receipt_actor_key, receipt_scope_key, request_id)
-                     REFERENCES command_receipts (actor_key, scope_key, request_id)
-                     DEFERRABLE INITIALLY DEFERRED
-             );
-             CREATE INDEX outbox_pending_sequence ON outbox (published, sequence);
-             INSERT INTO product_state VALUES ('v2-stream', 1, X'76322D7374617465');
-             INSERT INTO command_receipts VALUES (
-                 X'76322D6163746F72', X'76322D73636F7065',
-                 'req_01J00000000000000000000009',
-                 'sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
-                 'v2-stream', 1
-             );
-             INSERT INTO outbox
-                 (event_id, receipt_actor_key, receipt_scope_key, request_id, topic, payload)
-                 VALUES (
-                     'v2-event', X'76322D6163746F72', X'76322D73636F7065',
-                     'req_01J00000000000000000000009',
-                     'control-plane.state.changed', X'76322D6576656E74'
-                 );
-             PRAGMA user_version = 2;",
-        )
-        .expect("v2 fixture should be created");
-    connection.close().expect("v2 fixture should close");
-}
-
-fn assert_current_receipt_schema(database_path: &Path) {
-    let connection = Connection::open(database_path).expect("migrated database should open");
-    let version: i64 = connection
-        .pragma_query_value(None, "user_version", |row| row.get(0))
-        .expect("schema version should be readable");
-    assert_eq!(version, 6);
-    let receipt_columns = {
-        let mut statement = connection
-            .prepare("PRAGMA table_info(command_receipts)")
-            .expect("receipt schema should be readable");
-        statement
-            .query_map([], |row| row.get::<_, String>(1))
-            .expect("receipt columns should be readable")
-            .collect::<Result<Vec<_>, _>>()
-            .expect("receipt columns should collect")
-    };
-    assert_eq!(
-        receipt_columns,
-        [
-            "actor_key",
-            "scope_key",
-            "request_id",
-            "command_digest",
-            "stream_id",
-            "revision",
-        ]
-    );
-    let legacy_digest: String = connection
-        .query_row(
-            "SELECT command_digest FROM command_receipts WHERE stream_id = 'legacy-stream'",
-            [],
-            |row| row.get(0),
-        )
-        .expect("legacy receipt should have one migrated digest");
-    assert!(legacy_digest.starts_with("sha256:"));
-    assert_eq!(legacy_digest.len(), 71);
-    connection.close().expect("migrated database should close");
-}
-
 #[test]
 fn startup_rejects_a_database_from_a_newer_schema_version() {
     let root = temporary_directory("newer-schema");
@@ -1348,202 +1451,86 @@ fn startup_rejects_a_database_from_a_newer_schema_version() {
 }
 
 #[test]
-fn v4_public_rows_without_envelope_context_fail_closed_and_rollback_migration() {
-    let root = temporary_directory("v4-unbound-public-event");
-    fs::create_dir_all(&root).expect("test directory should exist");
-    let database_path = root.join("control-plane.sqlite3");
-    create_v2_fixture(&database_path);
-    let connection = Connection::open(&database_path).expect("v4 fixture database");
-    connection
-        .execute_batch(
-            "ALTER TABLE outbox ADD COLUMN projection_stream_kind TEXT;\
-             ALTER TABLE outbox ADD COLUMN projection_resource_id TEXT;\
-             ALTER TABLE outbox ADD COLUMN projection_stream_sequence INTEGER;\
-             CREATE TABLE projection_event_stream_heads (\
-               scope_key BLOB NOT NULL,stream_kind TEXT NOT NULL,resource_id TEXT NOT NULL,\
-               sequence INTEGER NOT NULL,event_id TEXT NOT NULL,\
-               PRIMARY KEY(scope_key,stream_kind,resource_id));\
-             UPDATE outbox SET projection_stream_kind='delivery',\
-               projection_resource_id='dlv_01J00000000000000000000000',\
-               projection_stream_sequence=1 WHERE event_id='v2-event';\
-             PRAGMA user_version=4;",
-        )
-        .expect("v4 public fixture should be created");
-    connection.close().expect("v4 fixture should close");
-
-    let Err(error) = SqliteStorage::open(&root) else {
-        panic!("unbound public row must fail closed");
-    };
-    assert!(
-        error
-            .to_string()
-            .contains("legacy public outbox rows have no durable envelope context")
-    );
-    let connection = Connection::open(&database_path).expect("failed migration database");
-    let version: i64 = connection
-        .pragma_query_value(None, "user_version", |row| row.get(0))
-        .expect("rolled-back schema version");
-    assert_eq!(version, 4);
-    let context_columns: i64 = connection
-        .query_row(
-            "SELECT COUNT(*) FROM pragma_table_info('outbox') \
-             WHERE name IN ('public_scope_json','public_stream_json',\
-                            'public_occurred_at_json','public_source_json')",
-            [],
-            |row| row.get(0),
-        )
-        .expect("context column count");
-    assert_eq!(context_columns, 0);
-    connection
-        .close()
-        .expect("failed migration connection close");
-    fs::remove_dir_all(root).expect("remove v4 fixture");
-}
-
-#[test]
-fn startup_migrates_v1_receipts_once_without_a_legacy_runtime_lookup_path() {
-    let root = temporary_directory("v1-receipt-migration");
-    fs::create_dir_all(&root).expect("test directory should exist");
-    let database_path = root.join("control-plane.sqlite3");
-    create_v1_fixture(&database_path);
-
-    let mut storage = SqliteStorage::open(&root).expect("v1 storage should migrate to v2");
-    assert_eq!(
+fn unpublished_schema_versions_are_refused_without_rewriting_state_or_receipts() {
+    for version in 1..6 {
+        let root = temporary_directory("unsupported-schema");
+        let mut storage = SqliteStorage::open(&root).expect("current storage");
         storage
-            .load_state("legacy-stream")
-            .expect("migrated state read")
-            .expect("migrated state")
-            .payload,
-        b"legacy"
-    );
-    assert_eq!(
-        storage.pending_events().expect("migrated outbox read"),
-        [OutboxEvent {
-            sequence: 2,
-            event_id: "legacy-event".to_owned(),
-            topic: "control-plane.state.changed".to_owned(),
-            payload: b"event".to_vec(),
-            projection_cursor: None,
-            public_context: None,
-        }]
-    );
-
-    storage
-        .commit(&state_commit(
-            (
-                "user:new",
-                "organization:new",
-                "req_01J00000000000000000000002",
-            ),
-            &format!("sha256:{}", "4".repeat(64)),
-            "new-stream",
-            0,
-            b"new",
-            "new-event",
-        ))
-        .expect("a canonical identity may reuse a v1 globally-scoped request id");
-    Box::new(storage).close().expect("storage should close");
-
-    assert_current_receipt_schema(&database_path);
-    fs::remove_dir_all(root).expect("database directory should be released");
-}
-
-#[test]
-fn startup_migrates_v2_to_the_single_journal_schema_before_serving() {
-    let root = temporary_directory("v2-journal-migration");
-    fs::create_dir_all(&root).expect("test directory should exist");
-    let database_path = root.join("control-plane.sqlite3");
-    create_v2_fixture(&database_path);
-
-    let storage = SqliteStorage::open(&root).expect("v2 storage should migrate to v4");
-    assert_eq!(
-        storage
-            .load_state("v2-stream")
-            .expect("migrated state read")
-            .expect("migrated state")
-            .payload,
-        b"v2-state"
-    );
-    assert_eq!(
-        storage.pending_events().expect("migrated outbox")[0].event_id,
-        "v2-event"
-    );
-    assert!(
-        storage
-            .load_journal(&journal_key())
-            .expect("new journal read")
-            .is_none()
-    );
-    Box::new(storage).close().expect("storage should close");
-
-    let connection = Connection::open(&database_path).expect("migrated database");
-    let version: i64 = connection
-        .pragma_query_value(None, "user_version", |row| row.get(0))
-        .expect("schema version");
-    assert_eq!(version, 6);
-    for table in ["aggregate_journals", "aggregate_journal_records"] {
-        let exists: i64 = connection
+            .commit(&state_commit(
+                ("user:current", "organization:current", "req_current_schema"),
+                &format!("sha256:{}", "4".repeat(64)),
+                "current-stream",
+                0,
+                b"current-state",
+                "current-event",
+            ))
+            .expect("retained current data");
+        Box::new(storage).close().expect("close");
+        let connection = Connection::open(root.join("control-plane.sqlite3")).expect("inspection");
+        connection
+            .pragma_update(None, "user_version", version)
+            .expect("unsupported version");
+        let schema_before = stored_schema(&connection);
+        let outbox_before = outbox_sequences(&connection);
+        assert!(SqliteStorage::open(&root).is_err());
+        assert_eq!(
+            connection
+                .pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))
+                .unwrap(),
+            version
+        );
+        assert_eq!(stored_schema(&connection), schema_before);
+        assert_eq!(outbox_sequences(&connection), outbox_before);
+        let retained: Vec<u8> = connection
             .query_row(
-                "SELECT COUNT(*) FROM sqlite_schema WHERE type = 'table' AND name = ?1",
-                [table],
+                "SELECT payload FROM product_state WHERE stream_id='current-stream'",
+                [],
                 |row| row.get(0),
             )
-            .expect("journal table lookup");
-        assert_eq!(exists, 1, "{table} must exist after v2 migration");
+            .unwrap();
+        assert_eq!(retained, b"current-state");
+        let receipts: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM command_receipts WHERE request_id='req_current_schema'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(receipts, 1);
+        drop(connection);
+        fs::remove_dir_all(root).unwrap();
     }
+}
+
+fn stored_schema(connection: &Connection) -> Vec<(String, String, Option<String>)> {
     connection
-        .close()
-        .expect("inspection connection should close");
-    fs::remove_dir_all(root).expect("database directory should be released");
+        .prepare("SELECT type,name,sql FROM sqlite_master ORDER BY type,name")
+        .unwrap()
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap()
 }
 
 #[test]
-fn interrupted_v2_migration_rolls_back_before_serving() {
-    let root = temporary_directory("v2-migration-rollback");
-    fs::create_dir_all(&root).expect("test directory should exist");
-    let database_path = root.join("control-plane.sqlite3");
-    create_v2_fixture(&database_path);
-    let connection = Connection::open(&database_path).expect("v2 database");
+fn initial_schema_failure_rolls_back_before_serving() {
+    let root = temporary_directory("initial-schema-rollback");
+    fs::create_dir_all(&root).unwrap();
+    let connection = Connection::open(root.join("control-plane.sqlite3")).unwrap();
     connection
         .execute_batch("CREATE VIEW aggregate_journal_records AS SELECT 1 AS incompatible_fixture;")
-        .expect("migration blocker should install");
-    connection.close().expect("v2 database should close");
-
-    let error = SqliteStorage::open(&root)
-        .err()
-        .expect("migration failure must prevent storage startup");
-    assert!(
-        error
-            .to_string()
-            .contains("aggregate journal record schema is not canonical")
+        .unwrap();
+    let schema_before = stored_schema(&connection);
+    assert!(SqliteStorage::open(&root).is_err());
+    assert_eq!(stored_schema(&connection), schema_before);
+    assert_eq!(
+        connection
+            .pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))
+            .unwrap(),
+        0
     );
-
-    let connection = Connection::open(&database_path).expect("rolled back database");
-    let version: i64 = connection
-        .pragma_query_value(None, "user_version", |row| row.get(0))
-        .expect("rolled back version");
-    assert_eq!(version, 2);
-    let journal_table_count: i64 = connection
-        .query_row(
-            "SELECT COUNT(*) FROM sqlite_schema \
-             WHERE type = 'table' AND name = 'aggregate_journals'",
-            [],
-            |row| row.get(0),
-        )
-        .expect("rolled back journal table lookup");
-    assert_eq!(journal_table_count, 0);
-    let state: Vec<u8> = connection
-        .query_row(
-            "SELECT payload FROM product_state WHERE stream_id = 'v2-stream'",
-            [],
-            |row| row.get(0),
-        )
-        .expect("v2 state must remain intact");
-    assert_eq!(state, b"v2-state");
-    connection
-        .close()
-        .expect("inspection connection should close");
-    fs::remove_dir_all(root).expect("database directory should be released");
+    drop(connection);
+    fs::remove_dir_all(root).unwrap();
 }
 
 #[test]
@@ -1796,233 +1783,7 @@ fn malformed_scope_and_lease_stream_storage_fails_closed() {
     fs::remove_dir_all(root).expect("database directory should be released");
 }
 
-type ProjectionHeadRow = (String, String, String, i64, String);
 type OutboxSequenceRow = (i64, String, Option<i64>);
-
-fn install_v5_projection_stream_fixture(
-    root: &Path,
-) -> (Vec<ProjectionHeadRow>, Vec<OutboxSequenceRow>) {
-    let delivery =
-        ProjectionEventStream::Delivery(DeliveryId("dlv_01J00000000000000000000000".into()));
-    let product_session = ProjectionEventStream::ProductSession(ProductSessionId(
-        "psn_01J00000000000000000000000".into(),
-    ));
-    let mut storage = SqliteStorage::open(root).expect("fresh v6 storage should open");
-    storage
-        .commit(&projection_commit(
-            "req_v5_delivery_01",
-            "state:v5:delivery:1",
-            "evt_v5_delivery_event_01",
-            delivery.clone(),
-        ))
-        .expect("Delivery head seed");
-    storage
-        .commit(&projection_commit(
-            "req_v5_delivery_02",
-            "state:v5:delivery:2",
-            "evt_v5_delivery_event_02",
-            delivery,
-        ))
-        .expect("Delivery head advance");
-    storage
-        .commit(&projection_commit(
-            "req_v5_product_session_01",
-            "state:v5:product-session:1",
-            "evt_v5_product_session_01",
-            product_session,
-        ))
-        .expect("ProductSession head seed");
-    Box::new(storage).close().expect("seed storage close");
-
-    let database_path = root.join("control-plane.sqlite3");
-    let connection = Connection::open(&database_path).expect("migration fixture database");
-    let before_heads = projection_head_rows(&connection);
-    let before_outbox_sequences = outbox_sequences(&connection);
-    connection
-        .execute_batch(
-            "ALTER TABLE projection_event_stream_heads
-                 RENAME TO projection_event_stream_heads_v6_fixture;
-             CREATE TABLE projection_event_stream_heads (
-                 scope_key BLOB NOT NULL,
-                 stream_kind TEXT NOT NULL CHECK (
-                     stream_kind IN ('delivery', 'product-session')
-                 ),
-                 resource_id TEXT NOT NULL,
-                 sequence INTEGER NOT NULL CHECK (sequence > 0),
-                 event_id TEXT NOT NULL,
-                 PRIMARY KEY (scope_key, stream_kind, resource_id),
-                 UNIQUE (scope_key, stream_kind, resource_id, sequence),
-                 FOREIGN KEY (event_id) REFERENCES outbox (event_id)
-             );
-             INSERT INTO projection_event_stream_heads
-                 (scope_key, stream_kind, resource_id, sequence, event_id)
-                 SELECT scope_key, stream_kind, resource_id, sequence, event_id
-                 FROM projection_event_stream_heads_v6_fixture;
-             DROP TABLE projection_event_stream_heads_v6_fixture;
-             PRAGMA user_version = 5;",
-        )
-        .expect("v5 heads fixture should be installed");
-    connection.close().expect("migration fixture close");
-    (before_heads, before_outbox_sequences)
-}
-
-#[test]
-fn v5_to_v6_migration_preserves_existing_heads_and_enables_scope_and_lease() {
-    let root = temporary_directory("v5-to-v6-streams");
-    let (before_heads, before_outbox_sequences) = install_v5_projection_stream_fixture(&root);
-    let database_path = root.join("control-plane.sqlite3");
-
-    let mut storage = SqliteStorage::open(&root).expect("v5 storage should migrate to v6");
-    let connection = Connection::open(&database_path).expect("migrated database inspection");
-    assert_eq!(projection_head_rows(&connection), before_heads);
-    assert_eq!(outbox_sequences(&connection), before_outbox_sequences);
-    let version: i64 = connection
-        .pragma_query_value(None, "user_version", |row| row.get(0))
-        .expect("migrated schema version");
-    assert_eq!(version, 6);
-    let schema: String = connection
-        .query_row(
-            "SELECT sql FROM sqlite_schema
-             WHERE type='table' AND name='projection_event_stream_heads'",
-            [],
-            |row| row.get(0),
-        )
-        .expect("migrated heads schema");
-    assert!(schema.contains("'scope'"));
-    assert!(schema.contains("'lease'"));
-    connection.close().expect("migration inspection close");
-
-    for (request_id, state_stream, event_id, stream) in [
-        (
-            "req_v6_scope_01",
-            "state:v6:scope:1",
-            "evt_v6_scope_event_01",
-            ProjectionEventStream::Scope,
-        ),
-        (
-            "req_v6_lease_01",
-            "state:v6:lease:1",
-            "evt_v6_lease_event_01",
-            ProjectionEventStream::Lease {
-                worker_id: WorkerId("wrk_01J00000000000000000000000".into()),
-                lease_id: LeaseId("lse_01J00000000000000000000000".into()),
-            },
-        ),
-    ] {
-        storage
-            .commit(&projection_commit(
-                request_id,
-                state_stream,
-                event_id,
-                stream,
-            ))
-            .expect("new v6 stream should commit after migration");
-    }
-    Box::new(storage).close().expect("migrated storage close");
-    fs::remove_dir_all(root).expect("database directory should be released");
-}
-
-#[test]
-fn empty_v4_projection_schema_migrates_through_public_context_to_v6() {
-    let root = temporary_directory("empty-v4-to-v6");
-    fs::create_dir_all(&root).expect("fixture directory");
-    let database_path = root.join("control-plane.sqlite3");
-    create_v2_fixture(&database_path);
-    let connection = Connection::open(&database_path).expect("v4 fixture database");
-    connection
-        .execute_batch(
-            "CREATE TABLE aggregate_journals (
-                 aggregate_type TEXT NOT NULL,
-                 aggregate_id TEXT NOT NULL,
-                 manifest BLOB NOT NULL,
-                 PRIMARY KEY (aggregate_type, aggregate_id)
-             );
-             CREATE TABLE aggregate_journal_records (
-                 aggregate_type TEXT NOT NULL,
-                 aggregate_id TEXT NOT NULL,
-                 sequence INTEGER NOT NULL CHECK (sequence > 0),
-                 digest TEXT NOT NULL,
-                 payload BLOB NOT NULL,
-                 PRIMARY KEY (aggregate_type, aggregate_id, sequence),
-                 FOREIGN KEY (aggregate_type, aggregate_id)
-                     REFERENCES aggregate_journals (aggregate_type, aggregate_id)
-                     ON DELETE CASCADE
-             );
-             ALTER TABLE outbox ADD COLUMN projection_stream_kind TEXT;
-             ALTER TABLE outbox ADD COLUMN projection_resource_id TEXT;
-             ALTER TABLE outbox ADD COLUMN projection_stream_sequence INTEGER;
-             CREATE TABLE projection_event_stream_heads (
-                 scope_key BLOB NOT NULL,
-                 stream_kind TEXT NOT NULL CHECK (
-                     stream_kind IN ('delivery', 'product-session')
-                 ),
-                 resource_id TEXT NOT NULL,
-                 sequence INTEGER NOT NULL CHECK (sequence > 0),
-                 event_id TEXT NOT NULL,
-                 PRIMARY KEY (scope_key, stream_kind, resource_id),
-                 UNIQUE (scope_key, stream_kind, resource_id, sequence),
-                 FOREIGN KEY (event_id) REFERENCES outbox (event_id)
-             );
-             CREATE UNIQUE INDEX outbox_projection_stream_sequence
-                 ON outbox (receipt_scope_key, projection_stream_kind,
-                            projection_resource_id, projection_stream_sequence)
-                 WHERE projection_stream_kind IS NOT NULL;
-             PRAGMA user_version = 4;",
-        )
-        .expect("empty v4 projection schema fixture");
-    connection.close().expect("v4 fixture close");
-
-    let storage = SqliteStorage::open(&root).expect("empty v4 should migrate to v6");
-    assert_eq!(
-        storage
-            .load_state("v2-stream")
-            .expect("legacy state read")
-            .expect("legacy state")
-            .payload,
-        b"v2-state"
-    );
-    Box::new(storage).close().expect("migrated storage close");
-    let connection = Connection::open(&database_path).expect("migrated v6 database");
-    let version: i64 = connection
-        .pragma_query_value(None, "user_version", |row| row.get(0))
-        .expect("migrated version");
-    assert_eq!(version, 6);
-    let context_columns: i64 = connection
-        .query_row(
-            "SELECT COUNT(*) FROM pragma_table_info('outbox')
-             WHERE name IN ('public_scope_json','public_stream_json',
-                            'public_occurred_at_json','public_source_json')",
-            [],
-            |row| row.get(0),
-        )
-        .expect("public context columns");
-    assert_eq!(context_columns, 4);
-    connection.close().expect("migration inspection close");
-    fs::remove_dir_all(root).expect("database directory should be released");
-}
-
-fn projection_head_rows(connection: &Connection) -> Vec<ProjectionHeadRow> {
-    let mut statement = connection
-        .prepare(
-            "SELECT hex(scope_key), stream_kind, resource_id, sequence, event_id
-             FROM projection_event_stream_heads
-             ORDER BY scope_key, stream_kind, resource_id",
-        )
-        .expect("projection head query");
-    statement
-        .query_map([], |row| {
-            Ok((
-                row.get(0)?,
-                row.get(1)?,
-                row.get(2)?,
-                row.get(3)?,
-                row.get(4)?,
-            ))
-        })
-        .expect("projection head rows")
-        .collect::<Result<Vec<_>, _>>()
-        .expect("projection head collection")
-}
 
 fn outbox_sequences(connection: &Connection) -> Vec<OutboxSequenceRow> {
     let mut statement = connection

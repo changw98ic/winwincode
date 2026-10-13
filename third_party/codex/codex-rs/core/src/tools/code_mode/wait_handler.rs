@@ -164,10 +164,7 @@ impl CodeModeWaitHandler {
                     .code_mode_service
                     .await_boundary(&cell_id, wait_future)
                     .await
-                    .map_err(|error| {
-                        telemetry.finish(/*success*/ false);
-                        FunctionCallError::RespondToModel(error)
-                    })?;
+                    .inspect_err(|_| telemetry.finish(/*success*/ false))?;
                 if let Some(durable_wait) = durable_wait {
                     durable_wait.settle().await?;
                 }

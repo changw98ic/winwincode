@@ -1023,10 +1023,16 @@ async fn deferred_executor_promotes_primary_environment_when_startup_completes()
 }
 
 async fn read_exec_server_json(websocket: &mut WebSocketStream<TcpStream>) -> Value {
+    timeout(Duration::from_secs(5), next_exec_server_json(websocket))
+        .await
+        .expect("websocket read should not time out")
+}
+
+async fn next_exec_server_json(websocket: &mut WebSocketStream<TcpStream>) -> Value {
     loop {
-        match timeout(Duration::from_secs(5), websocket.next())
+        match websocket
+            .next()
             .await
-            .expect("websocket read should not time out")
             .expect("websocket should stay open")
             .expect("websocket frame should read")
         {
@@ -1099,7 +1105,7 @@ async fn serve_environment_with_agents_md(
     let mut agents_md_reads = 0;
     loop {
         let request = tokio::select! {
-            request = read_exec_server_json(&mut websocket) => request,
+            request = next_exec_server_json(&mut websocket) => request,
             _ = &mut shutdown => return agents_md_reads,
         };
         let is_agents_md = request["params"]["path"]
@@ -1149,6 +1155,65 @@ async fn serve_environment_with_agents_md(
             .await
             .expect("filesystem response");
     }
+}
+
+#[tokio::test]
+async fn ready_environment_server_remains_available_while_idle() {
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("remote listener");
+    let address = listener.local_addr().expect("remote listener address");
+    let (attach_tx, attach_rx) = tokio::sync::oneshot::channel();
+    let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
+    let exec_server = tokio::spawn(serve_environment_with_agents_md(
+        listener,
+        "",
+        attach_rx,
+        shutdown_rx,
+    ));
+    let socket = TcpStream::connect(address)
+        .await
+        .expect("connect remote fixture");
+    let (mut client, _) = tokio_tungstenite::client_async(format!("ws://{address}"), socket)
+        .await
+        .expect("remote fixture handshake");
+    client
+        .send(Message::Text(
+            json!({"id": 1, "method": "initialize"}).to_string().into(),
+        ))
+        .await
+        .expect("initialize remote fixture");
+    let initialized = read_exec_server_json(&mut client).await;
+    assert_eq!(initialized["id"], json!(1));
+    client
+        .send(Message::Text(
+            json!({"method": "initialized"}).to_string().into(),
+        ))
+        .await
+        .expect("confirm remote initialization");
+    attach_tx.send(()).expect("attach remote fixture");
+    client
+        .send(Message::Text(
+            json!({"id": 2, "method": "environment/info"})
+                .to_string()
+                .into(),
+        ))
+        .await
+        .expect("query remote environment");
+    let info = read_exec_server_json(&mut client).await;
+    assert_eq!(info["result"]["shell"]["name"], json!("zsh"));
+    tokio::task::yield_now().await;
+    tokio::time::pause();
+    tokio::time::advance(Duration::from_secs(6)).await;
+    tokio::task::yield_now().await;
+    assert!(
+        !exec_server.is_finished(),
+        "ready remote fixture must survive idle time"
+    );
+    shutdown_tx
+        .send(())
+        .expect("stop idle remote environment server");
+    assert_eq!(exec_server.await.expect("remote server should finish"), 0);
 }
 
 fn tool_names(body: &Value) -> Vec<String> {

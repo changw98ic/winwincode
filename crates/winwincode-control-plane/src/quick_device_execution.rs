@@ -4,13 +4,15 @@ use std::fmt;
 
 use sha2::{Digest, Sha256};
 use winwincode_domain::{ExecutionJobId, Instant, ProductSessionId, RequestId, UserId};
-use winwincode_execution_port::generated::{ExecutionJob, ExecutionWorkspaceWriteMode};
 use winwincode_storage::{
     DeviceExecutionBindingIssuance, DeviceExecutionBindingRecord, DeviceExecutionBindingState,
-    DeviceExecutionFactsAttachment, DeviceExecutionReservationFacts, ExecutionAdmissionBoundary,
-    ExecutionAdmissionErrorCode, ExecutionJobRecord, ExecutionQueueScope,
-    ExecutionRepositoryAccess, ExecutionReservationRequest, ExecutionReservationState,
-    ProductStateStorage, SqliteStorage, WorkerPoolId,
+    DeviceExecutionFactsAttachment, DeviceExecutionReservationFacts, ExecutionJobRecord,
+    ExecutionJobState, ExecutionReservationState, ProductStateStorage, SqliteStorage, WorkerPoolId,
+};
+
+use crate::execution_admission::{
+    execution_admission_boundaries, execution_admission_deferred, execution_admission_job,
+    execution_reservation_request,
 };
 
 use crate::client_launch_grant::{
@@ -125,7 +127,6 @@ pub fn dispatch_chat_job_to_device_worker(
             QuickDeviceDispatchError::invalid_input("the Chat execution job does not exist")
         })?;
     if record.work_run_id.is_some()
-        || record.cancellation.is_some()
         || anchor.work_run_id.is_some()
         || anchor.product_session_id.as_deref() != Some(&record.scope.product_session_id.0)
     {
@@ -133,15 +134,13 @@ pub fn dispatch_chat_job_to_device_worker(
             "the Chat execution scope differs from its launch",
         ));
     }
-    if !matches!(
-        anchor.state,
-        LaunchGrantState::Issued | LaunchGrantState::Consumed
+    if matches!(
+        record.state,
+        ExecutionJobState::Completed | ExecutionJobState::Failed
     ) {
-        return Err(QuickDeviceDispatchError::new(
-            QuickDeviceDispatchErrorKind::AnchorNotLive,
-            "the session's launch anchor grant can no longer execute work",
-        ));
+        return replay_terminal_dispatch(storage, &record, anchor);
     }
+    validate_active_dispatch(&record, anchor)?;
 
     let binding = {
         let mut bindings = DeviceExecutionBindingService::new(storage);
@@ -216,6 +215,80 @@ pub fn dispatch_chat_job_to_device_worker(
     Ok(QuickDeviceDispatch { binding, facts })
 }
 
+fn validate_active_dispatch(
+    record: &ExecutionJobRecord,
+    anchor: &WorkerLaunchGrantRecord,
+) -> Result<(), QuickDeviceDispatchError> {
+    if record.cancellation.is_some() {
+        return Err(QuickDeviceDispatchError::invalid_input(
+            "the Chat execution already has a cancellation intent",
+        ));
+    }
+    if !matches!(
+        anchor.state,
+        LaunchGrantState::Issued | LaunchGrantState::Consumed
+    ) {
+        return Err(QuickDeviceDispatchError::new(
+            QuickDeviceDispatchErrorKind::AnchorNotLive,
+            "the session's launch anchor grant can no longer execute work",
+        ));
+    }
+    Ok(())
+}
+
+// A terminal job is only a receipt replay. Read its original dispatch join
+// before live-slot checks, and never bind, reserve, attach or stage recovery.
+fn replay_terminal_dispatch(
+    storage: &mut SqliteStorage,
+    record: &ExecutionJobRecord,
+    anchor: &WorkerLaunchGrantRecord,
+) -> Result<QuickDeviceDispatch, QuickDeviceDispatchError> {
+    let mut bindings = DeviceExecutionBindingService::new(storage);
+    let facts = bindings
+        .facts(&record.job_id.0)
+        .map_err(|_| QuickDeviceDispatchError::storage())?
+        .ok_or_else(|| {
+            QuickDeviceDispatchError::corrupt("terminal Chat job lost its dispatch facts")
+        })?;
+    let binding = bindings
+        .snapshot(&facts.worker_session_id)
+        .map_err(|_| QuickDeviceDispatchError::storage())?
+        .ok_or_else(|| {
+            QuickDeviceDispatchError::corrupt("terminal Chat job lost its device binding")
+        })?;
+    if facts.job_id != record.job_id.0
+        || facts.work_run_id.is_some()
+        || facts.role.is_some()
+        || facts.product_session_id.as_deref() != Some(&record.scope.product_session_id.0)
+        || facts.worker_launch_grant_id != anchor.worker_launch_grant_id
+        || facts.worker_session_id != anchor.worker_session_id
+        || facts.worker_id != anchor.worker_id
+        || facts.worker_instance_id != anchor.worker_instance_id
+        || facts.client_node_id != anchor.client_node_id
+        || facts.client_instance_id != anchor.client_instance_id
+        || facts.holder_user_id != anchor.holder_user_id
+        || facts.repository_binding_id != anchor.repository_binding_id
+        || facts.occupancy_lease_id != anchor.occupancy_lease_id
+        || facts.occupancy_fencing_token != anchor.occupancy_fencing_token
+        || binding.worker_session_id != facts.worker_session_id
+        || binding.worker_launch_grant_id != facts.worker_launch_grant_id
+        || binding.product_session_id != facts.product_session_id
+        || binding.work_run_id.is_some()
+        || binding.client_node_id != facts.client_node_id
+        || binding.client_instance_id != facts.client_instance_id
+        || binding.holder_user_id != facts.holder_user_id
+        || binding.repository_binding_id != facts.repository_binding_id
+        || binding.occupancy_lease_id != facts.occupancy_lease_id
+        || binding.occupancy_fencing_token != facts.occupancy_fencing_token
+    {
+        return Err(QuickDeviceDispatchError::new(
+            QuickDeviceDispatchErrorKind::DispatchConflict,
+            "terminal Chat dispatch differs from its original launch identity",
+        ));
+    }
+    Ok(QuickDeviceDispatch { binding, facts })
+}
+
 fn bind_command(
     anchor: &WorkerLaunchGrantRecord,
 ) -> Result<DeviceExecutionBindingIssuance, QuickDeviceDispatchError> {
@@ -248,12 +321,15 @@ fn ensure_device_admission_reservation(
     anchor: &WorkerLaunchGrantRecord,
 ) -> Result<(), QuickDeviceDispatchError> {
     let record = load_queued_job(storage, execution_job_id)?;
-    let job = decode_execution_job(&record)?;
-    let runtime_limit_millis = job_runtime_limit_millis(&job)?;
+    let (job, runtime_limit_millis) = execution_admission_job(&record)
+        .map_err(|error| QuickDeviceDispatchError::corrupt(error.to_string()))?;
     let mut admission = storage
         .execution_admission()
         .map_err(|_| QuickDeviceDispatchError::storage())?;
-    for boundary in admission_boundaries(&record.scope) {
+    for boundary in execution_admission_boundaries(
+        &record.scope,
+        &WorkerPoolId(QUICK_DEVICE_WORKER_POOL_ID.to_owned()),
+    ) {
         admission
             .configure_runtime_policy(boundary, runtime_limit_millis.is_some())
             .map_err(|error| admission_error(&error))?;
@@ -272,22 +348,18 @@ fn ensure_device_admission_reservation(
             }
         };
     }
-    let request = ExecutionReservationRequest {
-        scope: record.scope.clone(),
-        user_id: UserId(anchor.holder_user_id.clone()),
-        worker_pool_id: WorkerPoolId(QUICK_DEVICE_WORKER_POOL_ID.to_owned()),
-        job_id: record.job_id.clone(),
-        request_id: RequestId(derived_id(
+    let request = execution_reservation_request(
+        &record,
+        &job,
+        UserId(anchor.holder_user_id.clone()),
+        WorkerPoolId(QUICK_DEVICE_WORKER_POOL_ID.to_owned()),
+        RequestId(derived_id(
             "req_",
             RESERVATION_REQUEST_NAMESPACE,
             &record.job_id.0,
         )),
-        repository_access: repository_access(&job, &record.job_id),
-        reserved_tokens: None,
-        reserved_cost_microunits: None,
-        runtime_limit_millis,
-        submitted_at: record.submitted_at.clone(),
-    };
+    )
+    .map_err(|error| QuickDeviceDispatchError::corrupt(error.to_string()))?;
     admission
         .reserve(&request)
         .map(|_| ())
@@ -312,100 +384,10 @@ fn load_queued_job(
     Ok(record)
 }
 
-fn decode_execution_job(
-    record: &ExecutionJobRecord,
-) -> Result<ExecutionJob, QuickDeviceDispatchError> {
-    let job: ExecutionJob = serde_json::from_slice(&record.dispatch_payload).map_err(|_| {
-        QuickDeviceDispatchError::corrupt("the queued dispatch payload is not an ExecutionJob")
-    })?;
-    if job.job_id != record.job_id
-        || job.payload_digest != record.payload_digest
-        || job.attempt != i64::try_from(record.attempt).unwrap_or(-1)
-    {
-        return Err(QuickDeviceDispatchError::corrupt(
-            "the queued dispatch payload does not match its durable job",
-        ));
-    }
-    Ok(job)
-}
-
-fn job_runtime_limit_millis(job: &ExecutionJob) -> Result<Option<u64>, QuickDeviceDispatchError> {
-    if job.limits.deadline_at.is_some() != job.limits.max_runtime_seconds.is_some() {
-        return Err(QuickDeviceDispatchError::corrupt(
-            "the queued job runtime policy is inconsistent",
-        ));
-    }
-    job.limits
-        .max_runtime_seconds
-        .map(|seconds| {
-            u64::try_from(seconds)
-                .ok()
-                .filter(|seconds| (1..=604_800).contains(seconds))
-                .and_then(|seconds| seconds.checked_mul(1_000))
-                .ok_or_else(|| {
-                    QuickDeviceDispatchError::corrupt(
-                        "the queued job execution deadline is invalid",
-                    )
-                })
-        })
-        .transpose()
-}
-
-fn repository_access(job: &ExecutionJob, job_id: &ExecutionJobId) -> ExecutionRepositoryAccess {
-    match job.workspace.write_mode {
-        ExecutionWorkspaceWriteMode::ReadOnly => ExecutionRepositoryAccess::ReadOnly,
-        ExecutionWorkspaceWriteMode::Candidate => ExecutionRepositoryAccess::IsolatedWrite {
-            worktree_key: format!("job-{}", job_id.0),
-        },
-    }
-}
-
-fn admission_boundaries(scope: &ExecutionQueueScope) -> Vec<ExecutionAdmissionBoundary> {
-    let pool = WorkerPoolId(QUICK_DEVICE_WORKER_POOL_ID.to_owned());
-    let mut boundaries = vec![
-        ExecutionAdmissionBoundary::Organization {
-            organization_id: scope.organization_id.clone(),
-        },
-        ExecutionAdmissionBoundary::Project {
-            organization_id: scope.organization_id.clone(),
-            project_id: scope.project_id.clone(),
-        },
-        ExecutionAdmissionBoundary::Repository {
-            organization_id: scope.organization_id.clone(),
-            project_id: scope.project_id.clone(),
-            repository_id: scope.repository_id.clone(),
-        },
-        ExecutionAdmissionBoundary::ProductSession {
-            organization_id: scope.organization_id.clone(),
-            project_id: scope.project_id.clone(),
-            product_session_id: scope.product_session_id.clone(),
-        },
-        ExecutionAdmissionBoundary::WorkerPool {
-            organization_id: scope.organization_id.clone(),
-            worker_pool_id: pool,
-        },
-    ];
-    if let Some(delivery_id) = &scope.delivery_id {
-        boundaries.push(ExecutionAdmissionBoundary::Delivery {
-            organization_id: scope.organization_id.clone(),
-            delivery_id: delivery_id.clone(),
-        });
-    }
-    boundaries
-}
-
 fn admission_error(
     error: &winwincode_storage::ExecutionAdmissionError,
 ) -> QuickDeviceDispatchError {
-    if matches!(
-        error.code(),
-        ExecutionAdmissionErrorCode::QueueCapacityExhausted
-            | ExecutionAdmissionErrorCode::ConcurrencyExhausted
-            | ExecutionAdmissionErrorCode::TokenBudgetExhausted
-            | ExecutionAdmissionErrorCode::CostBudgetExhausted
-            | ExecutionAdmissionErrorCode::RepositoryWriteConflict
-            | ExecutionAdmissionErrorCode::RevisionConflict
-    ) {
+    if execution_admission_deferred(error.code()) {
         QuickDeviceDispatchError::new(
             QuickDeviceDispatchErrorKind::AdmissionUnavailable,
             "device dispatch admission is temporarily unavailable",

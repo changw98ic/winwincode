@@ -189,22 +189,51 @@ impl DurableWorkerExecutionLifecycle {
         if !winwincode_execution_port::usage::valid_usage(&usage) {
             return Err(authority_error());
         }
-        if usage.tokens.is_none() {
+        if trusted.state == ExecutionReservationState::Settled {
+            // Signed physical accounting can later refine the financial view.
+            // Cleanup still replays the immutable original settlement receipt.
+            return self.replay_settled_terminal(message).map(Some);
+        }
+        if trusted.state == ExecutionReservationState::Released
+            && trusted.release_reason == Some(ExecutionReservationReleaseReason::Cancelled)
+            && crate::execution_outcome_commit::is_cancellation_cleanup(&self.storage, message)
+                .map_err(storage_error)?
+        {
+            return retain_cancelled_terminal_accounting(
+                &mut self.storage,
+                message,
+                &trusted,
+                &usage,
+            )
+            .map(Some);
+        }
+        let unknown_request_id = stable_request_id("terminal-unknown", &message.message_id.0);
+        let retained_unknown = if trusted.state == ExecutionReservationState::Released {
+            self.storage
+                .execution_admission()
+                .map_err(admission_error)?
+                .load_retained_terminal_usage(&trusted.job_id, &unknown_request_id)
+                .map_err(admission_error)?
+        } else {
+            None
+        };
+        if usage.tokens.is_none() || retained_unknown.is_some() {
+            let original_usage = retained_unknown.unwrap_or_else(|| usage.clone());
             let current = require_terminal_authority(
                 &mut self.storage,
                 &WorkerUsageSettlement {
                     outcome_status: message.outcome.status.clone(),
                     job_id: message.lease.job_id.clone(),
                     worker_session_id: message.worker_session_id.clone(),
-                    request_id: stable_request_id("terminal-unknown", &message.message_id.0),
-                    actual_tokens: u64::try_from(usage.known_tokens)
+                    request_id: unknown_request_id.clone(),
+                    actual_tokens: u64::try_from(original_usage.known_tokens)
                         .map_err(|_| authority_error())?,
-                    actual_cost_microunits: usage
+                    actual_cost_microunits: original_usage
                         .cost_microunits
                         .map(u64::try_from)
                         .transpose()
                         .map_err(|_| authority_error())?,
-                    actual_runtime_millis: u64::try_from(usage.runtime_millis)
+                    actual_runtime_millis: u64::try_from(original_usage.runtime_millis)
                         .map_err(|_| authority_error())?,
                     completed_at: message.outcome.finished_at.clone(),
                 },
@@ -217,7 +246,7 @@ impl DurableWorkerExecutionLifecycle {
             } else {
                 current.revision
             };
-            return self
+            let receipt = self
                 .storage
                 .execution_admission()
                 .map_err(admission_error)?
@@ -226,7 +255,7 @@ impl DurableWorkerExecutionLifecycle {
                         scope: current.scope,
                         worker_pool_id: current.worker_pool_id,
                         job_id: current.job_id,
-                        request_id: stable_request_id("terminal-unknown", &message.message_id.0),
+                        request_id: unknown_request_id.clone(),
                         expected_revision,
                         reason: if message.outcome.status == ExecutionOutcomeStatus::Cancelled {
                             ExecutionReservationReleaseReason::Cancelled
@@ -235,10 +264,19 @@ impl DurableWorkerExecutionLifecycle {
                         },
                         released_at: message.outcome.finished_at.clone(),
                     },
-                    &usage,
+                    &original_usage,
                 )
-                .map(Some)
-                .map_err(admission_error);
+                .map_err(admission_error)?;
+            settle_complete_terminal_reconciliation(
+                &mut self.storage,
+                message,
+                &trusted.job_id,
+                &unknown_request_id,
+                "terminal-unknown-reconciliation",
+                &original_usage,
+                &usage,
+            )?;
+            return Ok(Some(receipt));
         }
         self.settle_usage(&WorkerUsageSettlement {
             outcome_status: message.outcome.status.clone(),
@@ -330,6 +368,29 @@ impl DurableWorkerExecutionLifecycle {
         }
     }
 
+    fn replay_settled_terminal(
+        &mut self,
+        message: &JobOutcomeMessage,
+    ) -> Result<ExecutionAdmissionReceipt, WorkerExecutionLifecycleError> {
+        let source = self
+            .storage
+            .execution_admission()
+            .map_err(admission_error)?
+            .load_settlement_source(&message.lease.job_id)
+            .map_err(admission_error)?
+            .ok_or_else(authority_error)?;
+        self.settle_usage(&WorkerUsageSettlement {
+            outcome_status: message.outcome.status.clone(),
+            job_id: message.lease.job_id.clone(),
+            worker_session_id: message.worker_session_id.clone(),
+            request_id: stable_request_id("terminal-settle", &message.message_id.0),
+            actual_tokens: source.fact.actual_tokens,
+            actual_cost_microunits: source.fact.actual_cost_microunits,
+            actual_runtime_millis: source.fact.actual_runtime_millis,
+            completed_at: message.outcome.finished_at.clone(),
+        })
+    }
+
     fn release_admission_after_claim_failure(
         &mut self,
         admission: &ExecutionReservationRecord,
@@ -350,6 +411,76 @@ impl DurableWorkerExecutionLifecycle {
             .map_err(admission_error)?;
         Ok(())
     }
+}
+
+pub(crate) fn retain_cancelled_terminal_accounting(
+    storage: &mut SqliteStorage,
+    message: &JobOutcomeMessage,
+    reservation: &ExecutionReservationRecord,
+    usage: &winwincode_execution_port::generated::ExecutionOutcomeUsage,
+) -> Result<ExecutionAdmissionReceipt, WorkerExecutionLifecycleError> {
+    let terminal_request_id =
+        stable_request_id("cancelled-terminal-accounting", &message.message_id.0);
+    let retained_usage = storage
+        .execution_admission()
+        .map_err(admission_error)?
+        .load_retained_terminal_usage(&reservation.job_id, &terminal_request_id)
+        .map_err(admission_error)?
+        .unwrap_or_else(|| usage.clone());
+    let receipt = storage
+        .execution_admission()
+        .map_err(admission_error)?
+        .retain_released_terminal_usage(
+            &ExecutionReservationRelease {
+                scope: reservation.scope.clone(),
+                worker_pool_id: reservation.worker_pool_id.clone(),
+                job_id: reservation.job_id.clone(),
+                request_id: terminal_request_id.clone(),
+                expected_revision: reservation.revision,
+                reason: ExecutionReservationReleaseReason::Cancelled,
+                released_at: message.outcome.finished_at.clone(),
+            },
+            &retained_usage,
+        )
+        .map_err(admission_error)?;
+    settle_complete_terminal_reconciliation(
+        storage,
+        message,
+        &reservation.job_id,
+        &terminal_request_id,
+        "cancelled-terminal-reconciliation",
+        &retained_usage,
+        usage,
+    )?;
+    Ok(receipt)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn settle_complete_terminal_reconciliation(
+    storage: &mut SqliteStorage,
+    message: &JobOutcomeMessage,
+    job_id: &ExecutionJobId,
+    terminal_request_id: &RequestId,
+    settlement_namespace: &str,
+    retained_usage: &winwincode_execution_port::generated::ExecutionOutcomeUsage,
+    current_usage: &winwincode_execution_port::generated::ExecutionOutcomeUsage,
+) -> Result<(), WorkerExecutionLifecycleError> {
+    if current_usage.tokens.is_some() && current_usage.cost_microunits.is_some() {
+        let mut reconciled_usage = current_usage.clone();
+        reconciled_usage.runtime_millis = retained_usage.runtime_millis;
+        storage
+            .execution_admission()
+            .map_err(admission_error)?
+            .settle_reconciliation(
+                job_id,
+                terminal_request_id,
+                &stable_request_id(settlement_namespace, &message.message_id.0),
+                &reconciled_usage,
+                &message.outcome.finished_at,
+            )
+            .map_err(admission_error)?;
+    }
+    Ok(())
 }
 
 pub(crate) fn trusted_execution_runtime_millis(

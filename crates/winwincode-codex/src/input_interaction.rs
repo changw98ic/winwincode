@@ -97,7 +97,12 @@ impl ProductionCodexAdapter {
             turn_id,
             call_id: request.call_id.clone(),
             questions,
-            expires_at: run.binding.authority.lease.expires_at.clone(),
+            expires_at: self
+                .current_binding_for_run(run_key)?
+                .authority
+                .lease
+                .expires_at
+                .clone(),
             answers: BTreeMap::new(),
             ready_incarnation_id: incarnation.clone(),
             applied_incarnation_id: None,
@@ -170,6 +175,66 @@ impl ProductionCodexAdapter {
         Ok(())
     }
 
+    async fn replay_resolved_input_response_exact(
+        &mut self,
+        response: &InputResponseMessage,
+        operation: &StoredInputOperation,
+        received_at: &Instant,
+    ) -> Result<(), ProductionCodexError> {
+        if response.sent_at != response.responded_at
+            || !canonical_instant(&response.responded_at)
+            || !canonical_instant(received_at)
+            || response.responded_at.0 > received_at.0
+            || !valid_prefixed_id(&response.input_request_id.0, "inp_")
+            || !valid_prefixed_id(&response.message_id.0, "xmsg_")
+        {
+            return Err(conflict());
+        }
+        let resolution_digest = private_payload_digest(b"winwincode.input-response.v1", response)?;
+        if operation.resolution_digest.as_deref() != Some(resolution_digest.as_str()) {
+            return Err(conflict());
+        }
+        let original = self.retained_input_request(operation)?;
+        let value = interaction_timeout::input_response_value(response, &original)?;
+        let call: InputCallIntent = self
+            .store
+            .load_input_call(&operation.run_key, &operation.request_digest)
+            .map_err(map_store_error)?
+            .ok_or_else(conflict)?;
+        let answer = InputAnswerIntent {
+            resolution_digest,
+            values: value.into_iter().collect(),
+        };
+        if call.turn_id != operation.turn_id
+            || call.answers.get(&operation.input_request_id) != Some(&answer)
+            || !call.questions.iter().any(|question| {
+                question.input_request_id == operation.input_request_id
+                    && question.question_id == operation.question_id
+            })
+        {
+            return Err(conflict());
+        }
+        self.outbox
+            .record_applied_response(&ExecutionPortMessage::InputResponseMessage(
+                response.clone(),
+            ))
+            .map_err(map_store_error)?;
+        // A valid replay can arrive after expiry while the Adapter's
+        // last observation still predates it. Observe receipt time before
+        // considering consumption by a live Core waiter.
+        self.bridge
+            .authority()
+            .update_now(received_at)
+            .map_err(map_bridge_error)?;
+        // Durable acceptance of one answer does not prove consumption of
+        // the complete multi-question call by its current exact waiter.
+        if self.runs.contains_key(&operation.run_key) {
+            self.apply_complete_input_call(&operation.run_key, &operation.request_digest)
+                .await?;
+        }
+        Ok(())
+    }
+
     pub(super) async fn accept_input_response_exact(
         &mut self,
         response: &InputResponseMessage,
@@ -180,12 +245,12 @@ impl ProductionCodexAdapter {
             .load_input_operation(&response.input_request_id.0)
             .map_err(map_store_error)?
             .ok_or_else(conflict)?;
-        let authority = &self
-            .runs
-            .get(&operation.run_key)
-            .ok_or_else(unknown_thread)?
-            .binding
-            .authority;
+        if operation.state == StoredInputOperationState::Resolved {
+            return self
+                .replay_resolved_input_response_exact(response, &operation, received_at)
+                .await;
+        }
+        let authority = self.current_binding_for_run(&operation.run_key)?.authority;
         if !retained_lease_matches_current(&response.lease, &authority.lease)
             || response.worker_session_id != authority.worker_session_id
             || response.session_identity != authority.session_identity
@@ -218,16 +283,10 @@ impl ProductionCodexAdapter {
         {
             return Err(conflict());
         }
-        if operation.state == StoredInputOperationState::Resolved {
-            if operation.resolution_digest.as_deref() != Some(resolution_digest.as_str()) {
-                return Err(conflict());
-            }
-        } else {
-            self.ensure_input_deadline(&operation, response, received_at)
-                .await?;
-            if received_at.0 >= call.expires_at.0 || response.responded_at.0 >= call.expires_at.0 {
-                return Err(conflict());
-            }
+        self.ensure_input_deadline(&operation, response, received_at)
+            .await?;
+        if received_at.0 >= call.expires_at.0 || response.responded_at.0 >= call.expires_at.0 {
+            return Err(conflict());
         }
         let answer = InputAnswerIntent {
             resolution_digest: resolution_digest.clone(),
@@ -270,12 +329,44 @@ impl ProductionCodexAdapter {
         run_key: &str,
         digest: &str,
     ) -> Result<(), ProductionCodexError> {
+        self.apply_input_call(run_key, digest).await
+    }
+
+    async fn apply_input_call(
+        &mut self,
+        run_key: &str,
+        digest: &str,
+    ) -> Result<(), ProductionCodexError> {
         let mut call: InputCallIntent = self
             .store
             .load_input_call(run_key, digest)
             .map_err(map_store_error)?
             .ok_or_else(conflict)?;
         let run = self.runs.get(run_key).ok_or_else(unknown_thread)?;
+        if !run.kernel_live || run.record.operation_fenced_at.is_some() {
+            return Ok(());
+        }
+        let source = self.bridge.authority();
+        let Some(binding) = source
+            .binding_for_alias(&run.binding.canonical_thread_id.0)
+            .map_err(map_bridge_error)?
+        else {
+            return Ok(());
+        };
+        let now = source
+            .observed_now()
+            .map_err(map_bridge_error)?
+            .ok_or_else(conflict)?;
+        // Answer admission enforces the immutable input deadline. Once accepted,
+        // the settlement remains deliverable to this exact live waiter after it.
+        if binding.run_key != run_key
+            || binding.kernel_session_id != run.record.kernel_session_id
+            || binding.authority != run.binding.authority
+            || now.0 < binding.authority.lease.issued_at.0
+            || now.0 >= binding.authority.lease.expires_at.0
+        {
+            return Ok(());
+        }
         let session = run.record.kernel_session_id.clone();
         let incarnation = private_payload_digest(
             b"winwincode.input-waiter-incarnation.v1",
@@ -356,7 +447,9 @@ impl ProductionCodexAdapter {
         self.store
             .resolve_input_call_answer(operation, resolution_digest, &previous, &call)
             .map_err(map_store_error)?;
-        self.apply_complete_input_call(&operation.run_key, &operation.request_digest)
+        // The original deadline authorizes timeout acceptance. Delivery of any
+        // accepted settlement still requires the exact live waiter and lease.
+        self.apply_input_call(&operation.run_key, &operation.request_digest)
             .await
     }
 }

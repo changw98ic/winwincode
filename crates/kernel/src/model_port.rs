@@ -34,7 +34,7 @@ impl fmt::Debug for ModelPortRequest {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct ModelPortFailure {
     pub code: String,
     pub message: String,
@@ -42,6 +42,8 @@ pub struct ModelPortFailure {
     pub retryable: Option<bool>,
     pub provider_retry_after_millis: Option<u64>,
     pub provider_request_id: Option<String>,
+    /// Original bounded attempt facts; absent on older streams.
+    pub facts: Option<Box<winwincode_execution_port::generated::ModelFailureFacts>>,
 }
 
 impl ModelPortFailure {
@@ -54,6 +56,7 @@ impl ModelPortFailure {
             retryable: None,
             provider_retry_after_millis: None,
             provider_request_id: None,
+            facts: None,
         }
     }
 }
@@ -226,6 +229,7 @@ struct ModelPortFailureWire {
     retryable: Option<bool>,
     provider_retry_after_millis: Option<u64>,
     provider_request_id: Option<String>,
+    facts: Option<winwincode_execution_port::generated::ModelFailureFacts>,
 }
 
 impl From<ModelPortFailureWire> for ModelPortFailure {
@@ -237,6 +241,7 @@ impl From<ModelPortFailureWire> for ModelPortFailure {
             retryable: failure.retryable,
             provider_retry_after_millis: failure.provider_retry_after_millis,
             provider_request_id: failure.provider_request_id,
+            facts: failure.facts.map(Box::new),
         }
     }
 }
@@ -315,17 +320,19 @@ async fn forward_model_stream(
             break;
         };
         let message = match item {
-            Ok(payload) => match serde_json::from_str::<ModelPortMessage>(&payload) {
-                Ok(message) => message,
-                Err(error) => {
+            Ok(payload) => {
+                if let Ok(message) = serde_json::from_str::<ModelPortMessage>(&payload) {
+                    message
+                } else {
                     let _ = tx_event
-                        .send(Err(ApiError::Stream(format!(
-                            "[WINWINCODE_KERNEL:MODEL_PORT_PROTOCOL_INVALID] {error}"
-                        ))))
+                        .send(Err(ApiError::Stream(
+                            "[WINWINCODE_KERNEL:MODEL_PORT_PROTOCOL_INVALID] invalid canonical model message".to_owned()
+                        )
+                        .without_retry()))
                         .await;
                     return;
                 }
-            },
+            }
             Err(error) => {
                 let _ = tx_event.send(Err(model_port_api_error(&error))).await;
                 return;
@@ -343,37 +350,71 @@ async fn forward_model_stream(
         .send(Err(ApiError::Stream(
             "[WINWINCODE_KERNEL:STREAM_CLOSED] model stream ended without a terminal message"
                 .to_string(),
-        )))
+        )
+        .without_retry()))
         .await;
+}
+
+fn provider_http_error(failure: &ModelPortFailure, status: u16, message: String) -> ApiError {
+    let mut headers = http::HeaderMap::new();
+    if let Some(value) = failure
+        .provider_request_id
+        .as_ref()
+        .and_then(|value| http::HeaderValue::from_str(value).ok())
+    {
+        headers.insert("x-request-id", value);
+    }
+    ApiError::Transport(codex_api::TransportError::Http {
+        status: http::StatusCode::from_u16(status).unwrap_or(http::StatusCode::BAD_GATEWAY),
+        url: None,
+        headers: Some(headers),
+        body: Some(message),
+    })
 }
 
 fn model_port_api_error(failure: &ModelPortFailure) -> ApiError {
     let message = failure.to_string();
+    let terminal = failure.retryable == Some(false);
     match failure.code.as_str() {
         "CONTEXT_WINDOW_EXCEEDED" => ApiError::ContextWindowExceeded,
         "QUOTA" | "QUOTA_EXCEEDED" => ApiError::QuotaExceeded,
-        "AUTH"
-        | "MISSING_CREDENTIAL"
-        | "INVALID_CREDENTIAL"
-        | "INVALID_REQUEST"
+        "AUTH" | "MISSING_CREDENTIAL" | "INVALID_CREDENTIAL" => {
+            provider_http_error(failure, failure.status.unwrap_or(401), message).without_retry()
+        }
+        "LEASE_EXPIRED" => ApiError::ExecutionLeaseExpired,
+        "MODEL_AUTHORITY_EXPIRED" => ApiError::ModelAuthorityExpired,
+        "STALE_FENCING_TOKEN"
+        | "WORKER_INSTANCE_CHANGED"
+        | "MODEL_AUTHORITY_STALE"
+        | "DEVICE_MODEL_PAUSED"
+        | "DEVICE_MODEL_INTERRUPTED"
+        | "DEVICE_MODEL_IDENTITY_CONFLICT"
+        | "DEVICE_PROVIDER_CREDENTIAL_LEAK_BLOCKED"
+        | "CANCELLED" => ApiError::Stream(message).without_retry(),
+        "INVALID_REQUEST"
         | "NO_ADAPTER"
         | "UNKNOWN_MODEL"
         | "UNSUPPORTED_CONTENT"
         | "CONTENT_FILTER"
         | "UNSUPPORTED_OPTION"
         | "UNSUPPORTED_REASONING_EFFORT"
-        | "UNSUPPORTED_TOOL"
-        | "LEASE_EXPIRED"
-        | "STALE_FENCING_TOKEN"
-        | "WORKER_INSTANCE_CHANGED"
-        | "MODEL_AUTHORITY_EXPIRED"
-        | "MODEL_AUTHORITY_STALE"
-        | "DEVICE_MODEL_PAUSED"
-        | "DEVICE_MODEL_INTERRUPTED"
-        | "DEVICE_MODEL_IDENTITY_CONFLICT"
-        | "DEVICE_PROVIDER_CREDENTIAL_LEAK_BLOCKED"
-        | "CANCELLED" => ApiError::InvalidRequest { message },
-        _ if failure.retryable == Some(false) => ApiError::InvalidRequest { message },
+        | "UNSUPPORTED_TOOL" => ApiError::InvalidRequest { message },
+        _ if terminal => {
+            let source = match failure.code.as_str() {
+                "RATE_LIMIT" | "SERVER" => provider_http_error(
+                    failure,
+                    failure.status.unwrap_or(if failure.code == "RATE_LIMIT" {
+                        429
+                    } else {
+                        503
+                    }),
+                    message,
+                ),
+                "TIMEOUT" => ApiError::Transport(codex_api::TransportError::Timeout),
+                _ => ApiError::Stream(message),
+            };
+            source.without_retry()
+        }
         "RATE_LIMIT" | "SERVER" | "TIMEOUT" | "TRANSPORT" | "EMPTY_RESPONSE" => {
             ApiError::Retryable {
                 message,
@@ -441,15 +482,91 @@ mod tests {
     }
 
     #[test]
-    fn explicit_terminal_failure_overrides_legacy_retry_category() {
-        for code in ["RATE_LIMIT", "SERVER", "TRANSPORT", "INCOMPLETE_STREAM"] {
-            let mut failure = ModelPortFailure::new(code, "terminal");
+    fn host_retry_exhaustion_preserves_source_category_and_suppresses_core_retry() {
+        use codex_protocol::error::CodexErrorDetails;
+        for code in [
+            "RATE_LIMIT",
+            "SERVER",
+            "TIMEOUT",
+            "TRANSPORT",
+            "INCOMPLETE_STREAM",
+        ] {
+            let mut failure = ModelPortFailure::new(code, "host attempts exhausted");
             failure.retryable = Some(false);
-            assert!(matches!(
-                model_port_api_error(&failure),
-                ApiError::InvalidRequest { .. }
+            let error = codex_api::map_api_error(model_port_api_error(&failure));
+            assert!(
+                !error.is_retryable(),
+                "{code} cannot acquire another Core retry budget"
+            );
+            match code {
+                "RATE_LIMIT" => assert!(
+                    matches!(error.details(), CodexErrorDetails::RetryLimit(details) if details.status.as_u16() == 429)
+                ),
+                "SERVER" => assert!(
+                    matches!(error.details(), CodexErrorDetails::UnexpectedStatus(details) if details.status.as_u16() == 503)
+                ),
+                "TIMEOUT" => assert!(matches!(error.details(), CodexErrorDetails::RequestTimeout)),
+                _ => assert!(matches!(error.details(), CodexErrorDetails::Stream(_))),
+            }
+            assert!(!matches!(
+                error.details(),
+                CodexErrorDetails::InvalidRequest(_)
             ));
         }
+    }
+
+    #[test]
+    fn http_failure_retains_request_identity_and_typed_protocol_category() {
+        use codex_protocol::error::CodexErrorDetails;
+        use codex_protocol::protocol::CodexErrorInfo;
+        for (code, status) in [("RATE_LIMIT", 429), ("SERVER", 503), ("AUTH", 403)] {
+            let mut failure = ModelPortFailure::new(code, "safe host summary");
+            failure.status = Some(status);
+            failure.retryable = Some(false);
+            failure.provider_request_id = Some("upstream-42".to_owned());
+            let error = codex_api::map_api_error(model_port_api_error(&failure));
+            assert!(!error.is_retryable());
+            let request_id = match error.details() {
+                CodexErrorDetails::RetryLimit(details) => details.request_id.as_deref(),
+                CodexErrorDetails::UnexpectedStatus(details) => details.request_id.as_deref(),
+                other => panic!("lost HTTP classification: {other:?}"),
+            };
+            assert_eq!(request_id, Some("upstream-42"));
+            assert_eq!(
+                error.to_codex_protocol_error(),
+                match code {
+                    "RATE_LIMIT" => CodexErrorInfo::ResponseTooManyFailedAttempts {
+                        http_status_code: Some(429)
+                    },
+                    "SERVER" => CodexErrorInfo::HttpConnectionFailed {
+                        http_status_code: Some(503)
+                    },
+                    _ => CodexErrorInfo::Unauthorized,
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn fatal_tool_runtime_and_invalid_request_have_distinct_typed_categories() {
+        use codex_protocol::error::CodexErr;
+        use codex_protocol::protocol::CodexErrorInfo;
+        assert_eq!(
+            CodexErr::Fatal("runtime failed".to_owned()).to_codex_protocol_error(),
+            CodexErrorInfo::InternalServerError
+        );
+        assert_eq!(
+            CodexErr::InvalidRequest("request invalid".to_owned()).to_codex_protocol_error(),
+            CodexErrorInfo::BadRequest
+        );
+        assert_eq!(
+            CodexErr::RequestTimeout
+                .without_retry()
+                .to_codex_protocol_error(),
+            CodexErrorInfo::ResponseStreamConnectionFailed {
+                http_status_code: None
+            }
+        );
     }
 
     #[test]
@@ -463,6 +580,25 @@ mod tests {
     }
 
     #[test]
+    fn execution_lease_expiry_preserves_typed_terminal_cause() {
+        for (code, info) in [
+            ("LEASE_EXPIRED", "execution_lease_expired"),
+            ("MODEL_AUTHORITY_EXPIRED", "model_authority_expired"),
+        ] {
+            for retryable in [None, Some(false), Some(true)] {
+                let mut failure = ModelPortFailure::new(code, "original execution expired");
+                failure.retryable = retryable;
+                let error = codex_api::map_api_error(model_port_api_error(&failure));
+                assert!(!error.is_retryable());
+                assert_eq!(
+                    serde_json::to_value(error.to_codex_protocol_error()).unwrap(),
+                    serde_json::json!(info)
+                );
+            }
+        }
+    }
+
+    #[test]
     fn authority_and_authentication_failures_cannot_request_retry() {
         for code in [
             "AUTH",
@@ -473,11 +609,57 @@ mod tests {
         ] {
             let mut failure = ModelPortFailure::new(code, "terminal");
             failure.retryable = Some(true);
-            assert!(matches!(
-                model_port_api_error(&failure),
-                ApiError::InvalidRequest { .. }
+            let error = codex_api::map_api_error(model_port_api_error(&failure));
+            assert!(!error.is_retryable());
+            assert!(!matches!(
+                error.details(),
+                codex_protocol::error::CodexErrorDetails::InvalidRequest(_)
             ));
         }
+    }
+
+    #[test]
+    fn canonical_error_preserves_typed_attempt_facts() {
+        let facts = serde_json::json!({
+            "sourceCode": "DEVICE_PROVIDER_TRANSPORT_FAILED",
+            "scope": "model_attempt",
+            "cause": "timeout",
+            "acceptance": "unknown",
+            "phase": "response_body",
+            "attemptId": "physical_attempt_2",
+            "stopReason": "retry_budget_exhausted",
+            "networkDiagnosticCode": "timeout",
+            "parserDiagnostic": {
+                "stage": "body",
+                "eventType": "error",
+                "fieldPath": "stream"
+            }
+        });
+        let frame = serde_json::json!({
+            "type": "error",
+            "error": {
+                "code": "TIMEOUT",
+                "message": "safe host summary",
+                "retryable": false,
+                "providerRequestId": "upstream-42",
+                "facts": facts.clone()
+            }
+        });
+        let message: super::ModelPortMessage = serde_json::from_value(frame).unwrap();
+        let failure = message.into_response_event().unwrap_err();
+        assert_eq!(failure.code, "TIMEOUT");
+        assert_eq!(failure.retryable, Some(false));
+        assert_eq!(failure.provider_request_id.as_deref(), Some("upstream-42"));
+        assert_eq!(
+            serde_json::to_value(failure.facts.as_deref()).unwrap(),
+            facts
+        );
+        let error = codex_api::map_api_error(model_port_api_error(&failure));
+        assert!(!error.is_retryable());
+        assert!(matches!(
+            error.details(),
+            codex_protocol::error::CodexErrorDetails::RequestTimeout
+        ));
     }
 
     #[tokio::test]
@@ -489,7 +671,7 @@ mod tests {
         forward_model_stream(stream, sender).await;
         assert!(matches!(
             receiver.recv().await.unwrap(),
-            Err(ApiError::InvalidRequest { .. })
+            Err(ApiError::HostTerminal { source }) if matches!(*source, ApiError::Transport(codex_api::TransportError::Http { status, .. }) if status.as_u16() == 429)
         ));
     }
 
@@ -500,12 +682,30 @@ mod tests {
         forward_model_stream(stream, sender).await;
 
         match receiver.recv().await.expect("terminal stream error") {
-            Err(ApiError::Stream(message)) => assert_eq!(
-                message,
-                "[WINWINCODE_KERNEL:STREAM_CLOSED] model stream ended without a terminal message"
-            ),
+            Err(error @ ApiError::HostTerminal { .. }) => {
+                let error = codex_api::map_api_error(error);
+                assert!(!error.is_retryable());
+                assert!(
+                    matches!(error.details(), codex_protocol::error::CodexErrorDetails::Stream(message) if message == "[WINWINCODE_KERNEL:STREAM_CLOSED] model stream ended without a terminal message")
+                );
+            }
             other => panic!("unexpected stream result: {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn malformed_host_frame_stops_core_retry_without_exposing_private_payload() {
+        let stream: ModelPortStream = Box::pin(futures::stream::iter([Ok(
+            r#"{"type":"private-token-fixture"}"#.to_owned(),
+        )]));
+        let (sender, mut receiver) = mpsc::channel(1);
+        forward_model_stream(stream, sender).await;
+        let error = codex_api::map_api_error(receiver.recv().await.unwrap().unwrap_err());
+        assert!(!error.is_retryable());
+        assert!(!error.to_string().contains("private-token-fixture"));
+        assert!(
+            matches!(error.details(), codex_protocol::error::CodexErrorDetails::Stream(message) if message.contains("MODEL_PORT_PROTOCOL_INVALID"))
+        );
     }
 
     #[test]

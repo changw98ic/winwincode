@@ -69,6 +69,115 @@ fn agent_message_item(message: &str) -> RolloutItem {
     }))
 }
 
+#[test]
+fn canonical_rollout_preserves_only_errors_that_affect_turn_status() {
+    use codex_protocol::protocol::{CodexErrorInfo, ErrorEvent};
+
+    for history_mode in [ThreadHistoryMode::Legacy, ThreadHistoryMode::Paginated] {
+        for (info, persisted) in [
+            (Some(CodexErrorInfo::InternalServerError), true),
+            (Some(CodexErrorInfo::Other), true),
+            (None, true),
+            (Some(CodexErrorInfo::ThreadRollbackFailed), false),
+            (
+                Some(CodexErrorInfo::ActiveTurnNotSteerable {
+                    turn_kind: codex_protocol::protocol::NonSteerableTurnKind::Review,
+                }),
+                false,
+            ),
+        ] {
+            let item = RolloutItem::EventMsg(EventMsg::Error(ErrorEvent {
+                message: "same text for every typed error".into(),
+                codex_error_info: info,
+            }));
+            assert_eq!(
+                crate::is_persisted_rollout_item(&item, history_mode),
+                persisted
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn terminal_error_rollout_retains_original_cause_after_flush_and_shutdown()
+-> std::io::Result<()> {
+    use codex_protocol::config_types::ModeKind;
+    use codex_protocol::error::CodexErr;
+    use codex_protocol::protocol::{CodexErrorInfo, ErrorEvent, TurnStartedEvent};
+
+    for history_mode in [ThreadHistoryMode::Legacy, ThreadHistoryMode::Paginated] {
+        let home = TempDir::new().expect("isolated rollout home");
+        let thread_id = ThreadId::new();
+        let turn_id = "original-required-fact-store-turn";
+        let config = test_config(home.path());
+        let recorder = RolloutRecorder::new(
+            &config,
+            RolloutRecorderParams::new(
+                thread_id,
+                None,
+                None,
+                SessionSource::Exec,
+                None,
+                "terminal-error-test".into(),
+                BaseInstructions::default(),
+                Vec::new(),
+            )
+            .with_history_mode(history_mode),
+        )
+        .await?;
+        let original = CodexErr::Fatal(
+            "tool_fact_store_unavailable: execution and recovery require durable Core facts".into(),
+        )
+        .to_error_event(None);
+        let items = [
+            RolloutItem::EventMsg(EventMsg::TurnStarted(TurnStartedEvent {
+                turn_id: turn_id.into(),
+                trace_id: None,
+                started_at: None,
+                model_context_window: None,
+                collaboration_mode_kind: ModeKind::Default,
+            })),
+            RolloutItem::EventMsg(EventMsg::Error(ErrorEvent {
+                message: "rollback did not end this turn".into(),
+                codex_error_info: Some(CodexErrorInfo::ThreadRollbackFailed),
+            })),
+            RolloutItem::EventMsg(EventMsg::Error(original.clone())),
+        ];
+        let canonical = crate::persisted_rollout_items(&items, history_mode);
+        recorder.record_canonical_items(&canonical).await?;
+        recorder.flush().await?;
+        let path = recorder.rollout_path().to_path_buf();
+        let before_shutdown = fs::read(&path)?;
+        recorder.shutdown().await?;
+        assert_eq!(
+            fs::read(&path)?,
+            before_shutdown,
+            "shutdown keeps the already-flushed original bytes"
+        );
+        let lines = read_rollout_lines(&path)?;
+        assert!(
+            matches!(&lines[0].item, RolloutItem::SessionMeta(meta) if meta.meta.id == thread_id)
+        );
+        assert!(
+            matches!(&lines[1].item, RolloutItem::EventMsg(EventMsg::TurnStarted(started)) if started.turn_id == turn_id)
+        );
+        let errors = lines
+            .iter()
+            .filter_map(|line| match &line.item {
+                RolloutItem::EventMsg(EventMsg::Error(error)) => Some(error),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(errors, vec![&original]);
+        let (reloaded, reloaded_thread, parse_errors) =
+            RolloutRecorder::load_rollout_items(&path).await?;
+        assert_eq!(reloaded_thread, Some(thread_id));
+        assert_eq!(parse_errors, 0);
+        assert!(reloaded.iter().any(|item| matches!(item, RolloutItem::EventMsg(EventMsg::Error(error)) if error == &original)));
+    }
+    Ok(())
+}
+
 fn write_paginated_rollout(
     path: &Path,
     thread_id: ThreadId,

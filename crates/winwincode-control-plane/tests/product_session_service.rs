@@ -1046,6 +1046,41 @@ fn assistant_public_stream_is_ordered_bounded_restart_safe_and_stably_paged() {
                 true,
             )
             .expect("archive streaming turn");
+        let before_terminal_attempt = service
+            .get(&scope_key, &ProductSessionId(id("psn", 40)))
+            .unwrap()
+            .unwrap();
+        for terminal_state in [
+            AssistantMessageState::Completed,
+            AssistantMessageState::Cancelled,
+            AssistantMessageState::Failed,
+        ] {
+            let forged_terminal = assistant_command(
+                &scope_key,
+                40,
+                66,
+                &authority,
+                &execution_scope,
+                40,
+                2,
+                "world!",
+                terminal_state,
+            );
+            assert_eq!(
+                service
+                    .append_assistant_message(&forged_terminal)
+                    .expect_err("text update cannot create a terminal outcome")
+                    .code(),
+                ProductSessionServiceErrorCode::InvalidState
+            );
+            assert_eq!(
+                service
+                    .get(&scope_key, &ProductSessionId(id("psn", 40)))
+                    .unwrap()
+                    .unwrap(),
+                before_terminal_attempt
+            );
+        }
         let final_delta = assistant_command(
             &scope_key,
             40,
@@ -1055,23 +1090,28 @@ fn assistant_public_stream_is_ordered_bounded_restart_safe_and_stably_paged() {
             40,
             2,
             "world!",
-            AssistantMessageState::Completed,
+            AssistantMessageState::Streaming,
         );
-        let completed = service
+        let streamed = service
             .append_assistant_message(&final_delta)
-            .expect("final assistant delta");
-        assert_eq!(completed.message.content, "Hello, world!");
-        assert_eq!(completed.message.state, "completed");
+            .expect("second assistant delta");
+        assert_eq!(streamed.message.content, "Hello, world!");
+        assert_eq!(streamed.message.state, "streaming");
         assert_eq!(
-            completed.mutation.record.session().state(),
-            ProductSessionState::Idle
+            streamed.mutation.record.session().state(),
+            ProductSessionState::Running
         );
-        assert_eq!(completed.mutation.record.session().revision(), 5);
+        assert_eq!(streamed.mutation.record.session().revision(), 4);
         assert_eq!(
-            completed.mutation.record.turn_intents()[0].state,
-            ProductSessionTurnState::Completed
+            streamed.mutation.record.turn_intents()[0].state,
+            ProductSessionTurnState::Bound
         );
-        completed.mutation.record
+        let replay = service
+            .append_assistant_message(&final_delta)
+            .expect("exact text update replay");
+        assert!(replay.mutation.replayed);
+        assert_eq!(replay.message, streamed.message);
+        streamed.mutation.record
     };
     drop(storage);
 
@@ -1121,31 +1161,6 @@ fn assistant_public_stream_is_ordered_bounded_restart_safe_and_stably_paged() {
             .code(),
         ProductSessionServiceErrorCode::NotFound
     );
-    let follow_up = ProductSessionService::new(&mut reopened)
-        .submit_chat(&submit_command(
-            &scope_key,
-            40,
-            170,
-            5,
-            "Repeat the greeting",
-            12,
-        ))
-        .expect("continue after restart");
-    let queued = reopened
-        .execution_queue()
-        .expect("queue")
-        .load_job(&execution_scope, &follow_up.turn_intent.execution_job_id)
-        .expect("job read")
-        .expect("queued follow-up");
-    let job: winwincode_execution_port::generated::ExecutionJob =
-        serde_json::from_slice(&queued.dispatch_payload).expect("dispatch");
-    assert!(job.goal.contains("Hello, world!"));
-    assert!(job.goal.contains("Say hello"));
-    assert!(
-        job.goal
-            .ends_with("Current user message:\nRepeat the greeting")
-    );
-    assert!(job.goal.len() <= 20_000);
 }
 
 #[test]

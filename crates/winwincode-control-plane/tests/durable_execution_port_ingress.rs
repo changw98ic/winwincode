@@ -1367,18 +1367,13 @@ fn align_delegated_message(
 }
 
 #[test]
-fn product_terminal_model_cancel_and_action_share_one_sealed_delegate_core() {
+fn product_terminal_model_and_action_share_one_sealed_delegate_core() {
     let mut fixture = Fixture::open("closed-delegate", 88);
     let dispatch = install_product_dispatch(&mut fixture, 88);
     let mut delegate = RecordingDelegate::default();
-    for (sequence, kind) in [
-        "job.outcome",
-        "model.open",
-        "job.cancel_ack",
-        "action.enforcement_request",
-    ]
-    .into_iter()
-    .enumerate()
+    for (sequence, kind) in ["job.outcome", "model.open", "action.enforcement_request"]
+        .into_iter()
+        .enumerate()
     {
         let mut message = execution_message(kind);
         align_delegated_message(
@@ -1402,10 +1397,24 @@ fn product_terminal_model_cancel_and_action_share_one_sealed_delegate_core() {
         [
             "product-outcome",
             "model.open",
-            "job.cancel_ack",
             "action.enforcement_request"
         ]
     );
+
+    // Cancellation replies require the original scheduler control receipt.
+    // They must never escape to the generic supplement delegate.
+    let mut orphan_cancel_ack = execution_message("job.cancel_ack");
+    align_delegated_message(&mut orphan_cancel_ack, &dispatch, 8);
+    assert!(
+        fixture
+            .accept_with_delegate(
+                &orphan_cancel_ack,
+                Instant("2027-01-15T08:00:02.100Z".to_owned()),
+                &mut delegate,
+            )
+            .is_err()
+    );
+    assert_eq!(delegate.seen.len(), 3);
 
     let mut stale = execution_message("model.open");
     align_delegated_message(&mut stale, &dispatch, 9);
@@ -1421,7 +1430,7 @@ fn product_terminal_model_cancel_and_action_share_one_sealed_delegate_core() {
         )
         .expect_err("stale delegate message must fail before its owner");
     assert!(matches!(error, DurableExecutionPortError::Storage(_)));
-    assert_eq!(delegate.seen.len(), 4);
+    assert_eq!(delegate.seen.len(), 3);
     fixture.close();
 }
 
@@ -1460,15 +1469,15 @@ fn delegated_old_period_requires_accepted_history_without_a_delivery_deadline() 
         expected_server_time: Some(now.clone()),
         ..RecordingDelegate::default()
     };
-    for kind in ["model.open", "job.cancel_ack", "action.enforcement_request"] {
+    for kind in ["model.open", "action.enforcement_request"] {
         let mut message = execution_message(kind);
         align_delegated_message(&mut message, &dispatch, 20);
         fixture
             .accept_with_delegate(&message, now.clone(), &mut delegate)
             .expect("accepted old period reaches its owner");
     }
-    assert_eq!(delegate.seen.len(), 3);
-    for (index, kind) in ["model.open", "job.cancel_ack", "action.enforcement_request"]
+    assert_eq!(delegate.seen.len(), 2);
+    for (index, kind) in ["model.open", "action.enforcement_request"]
         .into_iter()
         .enumerate()
     {
@@ -1476,9 +1485,6 @@ fn delegated_old_period_requires_accepted_history_without_a_delivery_deadline() 
         align_delegated_message(&mut message, &dispatch, 30 + index as u64);
         match &mut message {
             ExecutionPortMessage::ModelOpenMessage(message) => {
-                message.lease.expires_at.clone_from(&renewal.expires_at);
-            }
-            ExecutionPortMessage::JobCancelAckMessage(message) => {
                 message.lease.expires_at.clone_from(&renewal.expires_at);
             }
             ExecutionPortMessage::ActionEnforcementRequestMessage(message) => {
@@ -1490,7 +1496,7 @@ fn delegated_old_period_requires_accepted_history_without_a_delivery_deadline() 
             .accept_with_delegate(&message, now.clone(), &mut delegate)
             .expect("accepted renewed period reaches its owner");
     }
-    assert_eq!(delegate.seen.len(), 6);
+    assert_eq!(delegate.seen.len(), 4);
     for invalid in 0..3 {
         let mut message = execution_message("model.open");
         align_delegated_message(&mut message, &dispatch, 21);
@@ -1542,7 +1548,7 @@ fn delegated_old_period_requires_accepted_history_without_a_delivery_deadline() 
         .expect("terminal identity still reaches the message owner");
     assert_eq!(
         delegate.seen.len(),
-        8,
+        6,
         "only identity conflicts are rejected by transport"
     );
     fixture.close();
@@ -2535,12 +2541,42 @@ fn lease_terminal_count(root: &Path, job_id: &ExecutionJobId) -> i64 {
         .expect("Registry terminal count")
 }
 
+fn terminal_write_counts(root: &Path) -> [i64; 7] {
+    let connection = rusqlite::Connection::open(root.join("control-plane.sqlite3"))
+        .expect("terminal persistence inspect");
+    [
+        "product_state",
+        "command_receipts",
+        "outbox",
+        "aggregate_journal_records",
+        "audit_outbox",
+        "execution_lease_terminals",
+        "scheduler_execution_job_receipts",
+    ]
+    .map(|table| {
+        connection
+            .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
+                row.get(0)
+            })
+            .expect("terminal persistence count")
+    })
+}
+
 #[test]
+fn delivery_registry_failure_rolls_back_the_whole_terminal_before_original_retry() {
+    assert_delivery_terminal_recovery(true);
+}
+
+#[test]
+fn accepted_delivery_outcome_replay_finishes_resources_once_after_restart_gap() {
+    assert_delivery_terminal_recovery(false);
+}
+
 #[allow(
     clippy::too_many_lines,
-    reason = "the fault-injected restart test keeps Delivery, Registry, and replay assertions together"
+    reason = "both real transaction cuts retain renewal, rollback, resources, and exact replay checks"
 )]
-fn committed_delivery_outcome_replay_finishes_registry_once_after_restart_gap() {
+fn assert_delivery_terminal_recovery(registry_failure: bool) {
     for renewal_stage in [0, 1, 2] {
         let seed = 397;
         let mut fixture = Fixture::open("terminal-registry-gap", seed);
@@ -2556,7 +2592,7 @@ fn committed_delivery_outcome_replay_finishes_registry_once_after_restart_gap() 
         prepare_workrun_slot(&mut fixture, &job, &lease, &worker_session_id, seed);
         let outcome = terminal_workrun_outcome(&job, lease, &worker_session_id, seed);
 
-        let renew = |fixture: &mut Fixture| {
+        let renew = |fixture: &mut Fixture, expected_status| {
             let lease = &outcome.lease;
             assert_eq!(
                 fixture
@@ -2585,21 +2621,33 @@ fn committed_delivery_outcome_replay_finishes_registry_once_after_restart_gap() 
                     })
                     .expect("renew around terminal commit")
                     .status,
-                winwincode_storage::LeaseWriteStatus::Accepted
+                expected_status
             );
         };
         if renewal_stage == 1 {
-            renew(&mut fixture);
+            renew(&mut fixture, winwincode_storage::LeaseWriteStatus::Accepted);
         }
+
+        let original_delivery = fixture
+            .control_plane
+            .load_state(&format!("delivery:{}", delivery.id().0))
+            .expect("original Delivery read")
+            .expect("original Delivery state");
+        let before = terminal_write_counts(&fixture.root);
 
         let connection = rusqlite::Connection::open(fixture.root.join("control-plane.sqlite3"))
             .expect("Registry failure injector");
         connection
-            .execute_batch(
-                "CREATE TRIGGER fail_registry_terminal_after_delivery_commit
+            .execute_batch(if registry_failure {
+                "CREATE TRIGGER fail_delivery_terminal_cut
              BEFORE INSERT ON execution_lease_terminals
-             BEGIN SELECT RAISE(ABORT, 'injected Registry terminal failure'); END;",
-            )
+             BEGIN SELECT RAISE(ABORT, 'injected Registry terminal failure'); END;"
+            } else {
+                "CREATE TRIGGER fail_delivery_terminal_cut
+             BEFORE UPDATE ON worker_session_slots
+             WHEN OLD.state = 'running' AND NEW.state = 'failed'
+             BEGIN SELECT RAISE(ABORT, 'injected Worker slot close failure'); END;"
+            })
             .expect("install Registry failure");
         drop(connection);
         let first_error = fixture
@@ -2607,23 +2655,76 @@ fn committed_delivery_outcome_replay_finishes_registry_once_after_restart_gap() 
                 &ExecutionPortMessage::JobOutcomeMessage(outcome.clone()),
                 outcome.sent_at.clone(),
             )
-            .expect_err("Registry settlement fails after Delivery commit");
-        assert!(matches!(first_error, DurableExecutionPortError::Storage(_)));
+            .expect_err("the actual terminal transaction cut must block the business ACK");
         let committed = fixture
             .control_plane
             .load_state(&format!("delivery:{}", delivery.id().0))
             .expect("committed Delivery read")
             .expect("committed Delivery state");
-        assert_eq!(committed.revision, 5);
-        assert_eq!(lease_terminal_count(&fixture.root, &job.job_id), 0);
+        let outcome_stream = format!("execution-outcome:{}:1", job.job_id.0);
+        if registry_failure {
+            assert!(
+                matches!(&first_error,
+                    DurableExecutionPortError::Terminal(
+                        winwincode_control_plane::DeliveryTerminalOutcomeCommitError::Storage(source)
+                    ) if source.kind() == winwincode_control_plane::StorageErrorKind::Adapter
+                        && source.to_string().contains("injected Registry terminal failure")
+                ),
+                "actual atomic failure: {first_error:?}"
+            );
+            assert_eq!(committed, original_delivery);
+            assert_eq!(terminal_write_counts(&fixture.root), before);
+            assert!(
+                fixture
+                    .control_plane
+                    .load_state(&outcome_stream)
+                    .unwrap()
+                    .is_none()
+            );
+            assert_eq!(lease_terminal_count(&fixture.root, &job.job_id), 0);
+        } else {
+            let DurableExecutionPortError::Terminal(
+                winwincode_control_plane::DeliveryTerminalOutcomeCommitError::CompletionPending {
+                    commit,
+                    source,
+                },
+            ) = &first_error
+            else {
+                panic!("actual cleanup failure: {first_error:?}")
+            };
+            assert!(
+                matches!(source.as_ref(), DurableExecutionPortError::Storage(cause)
+                if cause.kind() == winwincode_control_plane::StorageErrorKind::Adapter
+                    && cause.to_string().contains("Worker slot terminalization failed"))
+            );
+            assert_eq!(commit.revision(), 5);
+            assert_eq!(committed.revision, 5);
+            assert_eq!(lease_terminal_count(&fixture.root, &job.job_id), 1);
+            let accepted = fixture
+                .control_plane
+                .load_state(&outcome_stream)
+                .unwrap()
+                .unwrap();
+            assert_eq!(accepted.revision, 1);
+            let retained: Value = serde_json::from_slice(&accepted.payload).unwrap();
+            assert_eq!(retained["message"], serde_json::to_value(&outcome).unwrap());
+            assert_eq!(retained["acknowledgementReady"], false);
+        }
         if renewal_stage == 2 {
-            renew(&mut fixture);
+            renew(
+                &mut fixture,
+                if registry_failure {
+                    winwincode_storage::LeaseWriteStatus::Accepted
+                } else {
+                    winwincode_storage::LeaseWriteStatus::RejectedConflict
+                },
+            );
         }
 
         let connection = rusqlite::Connection::open(fixture.root.join("control-plane.sqlite3"))
             .expect("Registry failure removal");
         connection
-            .execute_batch("DROP TRIGGER fail_registry_terminal_after_delivery_commit;")
+            .execute_batch("DROP TRIGGER fail_delivery_terminal_cut;")
             .expect("remove Registry failure");
         drop(connection);
         fixture = fixture.restart();
@@ -2636,9 +2737,43 @@ fn committed_delivery_outcome_replay_finishes_registry_once_after_restart_gap() 
                     )
                     .expect("exact terminal recovery replay"),
             ),
-            winwincode_execution_port::generated::JobOutcomeAckMessageStatus::Duplicate
+            if registry_failure {
+                winwincode_execution_port::generated::JobOutcomeAckMessageStatus::Accepted
+            } else {
+                winwincode_execution_port::generated::JobOutcomeAckMessageStatus::Duplicate
+            }
         );
         assert_eq!(lease_terminal_count(&fixture.root, &job.job_id), 1);
+        let accepted = fixture
+            .control_plane
+            .load_state(&outcome_stream)
+            .unwrap()
+            .unwrap();
+        assert_eq!(accepted.revision, 2);
+        let retained: Value = serde_json::from_slice(&accepted.payload).unwrap();
+        assert_eq!(retained["message"], serde_json::to_value(&outcome).unwrap());
+        assert_eq!(retained["acknowledgementReady"], true);
+        let after = terminal_write_counts(&fixture.root);
+        assert_eq!(
+            outcome_ack_status(
+                fixture
+                    .accept(
+                        &ExecutionPortMessage::JobOutcomeMessage(outcome.clone()),
+                        Instant("2027-01-15T08:06:00.000Z".into()),
+                    )
+                    .expect("ready original receipt replay")
+            ),
+            winwincode_execution_port::generated::JobOutcomeAckMessageStatus::Duplicate
+        );
+        assert_eq!(terminal_write_counts(&fixture.root), after);
+        assert_eq!(
+            fixture
+                .control_plane
+                .load_state(&outcome_stream)
+                .unwrap()
+                .unwrap(),
+            accepted
+        );
 
         if renewal_stage != 0 {
             let mut unaccepted = outcome.clone();
@@ -2698,6 +2833,7 @@ fn committed_delivery_outcome_replay_finishes_registry_once_after_restart_gap() 
             winwincode_execution_port::generated::JobOutcomeAckMessageStatus::RejectedConflict
         );
         assert_eq!(lease_terminal_count(&fixture.root, &job.job_id), 1);
+        assert_eq!(terminal_write_counts(&fixture.root), after);
         fixture.close();
     }
 }

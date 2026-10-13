@@ -28,7 +28,10 @@ async fn reconciliation_deduplicates_evidence_and_preserves_original_execution()
         source: "model".into(),
         binding: "binding".into(),
     };
-    let ToolRequestObservation::New(observed) = store.observe_tool_request(&request).await.unwrap()
+    let ToolRequestObservation::New(observed) = store
+        .observe_tool_request(&request, "test-owner", "{}")
+        .await
+        .unwrap()
     else {
         panic!("new");
     };
@@ -61,7 +64,10 @@ async fn reconciliation_deduplicates_evidence_and_preserves_original_execution()
     store.record_tool_reconciliation(&fact).await.unwrap();
     let reopened = StateRuntime::init(config, "test".into()).await.unwrap();
     assert_eq!(
-        reopened.observe_tool_request(&request).await.unwrap(),
+        reopened
+            .observe_tool_request(&request, "test-owner", "{}")
+            .await
+            .unwrap(),
         ToolRequestObservation::Replay(claimed)
     );
     let events = reopened

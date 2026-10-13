@@ -51,12 +51,12 @@ pub use winwincode_codex::diagnostic_artifact_outbox::{
     RetainedDiagnosticArtifact,
 };
 pub use winwincode_codex::{
-    ActionRequestTransport, ArtifactAckOutcome, CodexCoreAdapter, CodexPoll, CodexRunKey,
-    CodexThreadSession, CodexThreadStart, CodexTurnCompletion, DelegatedLoopPhase,
-    DelegatedLoopStopFact, DelegatedLoopTransition, DelegatedLoopTransitionOutcome,
-    DelegatedObserverPreflight, DelegatedObserverPreflightOutcome, DelegatedObserverSettlement,
-    DurableExecutionDelivery, ExecutionPortFailureKind, ObserverMode, RoleExecutionMode,
-    WorkerExecutionPort, secret_safe_runtime_summary,
+    ActionRequestTransport, ArtifactAckOutcome, CodexCoreAdapter, CodexExecutionOutcome,
+    CodexExecutionResult, CodexPoll, CodexRunKey, CodexThreadSession, CodexThreadStart,
+    CodexTurnCompletion, DelegatedLoopPhase, DelegatedLoopStopFact, DelegatedLoopTransition,
+    DelegatedLoopTransitionOutcome, DelegatedObserverPreflight, DelegatedObserverPreflightOutcome,
+    DelegatedObserverSettlement, DurableExecutionDelivery, ExecutionPortFailureKind, ObserverMode,
+    RoleExecutionMode, WorkerExecutionPort, secret_safe_runtime_summary,
 };
 use winwincode_domain::{
     AgentIdentityId, ChangeBatchId, CodexThreadId, ExecutionAckSequence, ExecutionEventId,
@@ -145,6 +145,8 @@ pub struct ActiveJob {
 pub enum WorkerErrorCode {
     InvalidLifecycle,
     UnexpectedMessage,
+    /// Required Codex receipt storage is unavailable; retry the exact control.
+    CodexDurableState,
     RegistrationMismatch,
     RegistrationRejected,
     InvalidDispatchAuthority,
@@ -734,11 +736,7 @@ where
                 .active
                 .get(&renewal.lease.job_id.0)
                 .map_or(Some("job_not_active"), |active| {
-                    if active.lifecycle == ActiveJobLifecycle::Running {
-                        lease_renewal_rejection(&active.lease, renewal, &now)
-                    } else {
-                        Some("job_not_running")
-                    }
+                    lease_renewal_rejection(&active.lease, renewal, &now)
                 }),
             _ => None,
         };
@@ -764,6 +762,19 @@ where
         }
         applied?;
         self.enqueue_codex_effects()
+    }
+
+    fn codex_control_error(&self, error: &Codex::Error) -> WorkerError {
+        if self.codex.durable_state_unavailable(error) {
+            let reason = self.codex.error_diagnostic(error).map_or_else(
+                || "embedded Codex required receipt storage is unavailable".to_owned(),
+                |diagnostic| {
+                    diagnostic.append_to("embedded Codex required receipt storage is unavailable")
+                },
+            );
+            return worker_error(WorkerErrorCode::CodexDurableState, &reason);
+        }
+        codex_model_error()
     }
 
     async fn apply_control(
@@ -803,10 +814,10 @@ where
             ExecutionPortMessage::ActionEnforcementReceiptMessage(receipt) => {
                 Box::pin(self.codex.accept_action_receipt(receipt, &now))
                     .await
-                    .map_err(|_| codex_model_error())?;
+                    .map_err(|error| self.codex_control_error(&error))?;
                 self.codex
                     .accept_execution_delivery_ack(message)
-                    .map_err(|_| codex_model_error())?;
+                    .map_err(|error| self.codex_control_error(&error))?;
                 Ok(())
             }
             ExecutionPortMessage::ApprovalDecisionMessage(decision) => {
@@ -839,12 +850,19 @@ where
                 Ok(())
             }
             ExecutionPortMessage::ModelAckMessage(_)
-            | ExecutionPortMessage::RuntimeAckMessage(_)
-            | ExecutionPortMessage::JobOutcomeAckMessage(_) => {
+            | ExecutionPortMessage::RuntimeAckMessage(_) => {
                 self.codex
                     .accept_execution_delivery_ack(message)
                     .map_err(|_| codex_model_error())?;
                 Ok(())
+            }
+            ExecutionPortMessage::JobOutcomeAckMessage(ack) => {
+                self.codex
+                    .accept_execution_delivery_ack(message)
+                    .map_err(|error| self.codex_control_error(&error))?;
+                self.workspaces
+                    .close_acknowledged_terminal(ack)
+                    .map_err(|_| workspace_error())
             }
             ExecutionPortMessage::RuntimeReplayRequestMessage(request) => {
                 self.replay_runtime(request)
@@ -1243,42 +1261,53 @@ where
                     .await?;
                 continue;
             }
-            *stage = DriveStage::CorePoll;
-            let polled = match self.codex.poll(&thread_id, &now).await {
-                Ok(polled) => polled,
-                Err(error) => {
-                    self.drive_diagnostics
-                        .record_core_poll_failure(self.intake_log_path.as_deref());
-                    let diagnostic = self
-                        .codex
-                        .retained_failure_diagnostic(&thread_id)
-                        .or_else(|| self.codex.error_diagnostic(&error));
-                    self.finish_unavailable_codex_job(&job_id, diagnostic, now.clone())
-                        .await?;
-                    continue;
+            let limit = self.codex.runtime_trace_batch_limit().clamp(1, 16);
+            for _ in 0..limit {
+                if self.port.has_pending_controls() {
+                    break;
                 }
-            };
-            let replayable = match &polled {
-                CodexPoll::ChangeBatchProposed(_) => Some(polled.clone()),
-                _ => None,
-            };
-            let delivery_result = async {
-                *stage = DriveStage::CollectPollEffects;
-                self.enqueue_codex_effects()?;
-                if self.core_interaction_jobs.remove(&job_id) {
-                    self.deferred_core_interaction_jobs.remove(&job_id);
+                let now = self.current_driver_time()?;
+                *stage = DriveStage::CorePoll;
+                let polled = match self.codex.poll(&thread_id, &now).await {
+                    Ok(polled) => polled,
+                    Err(error) => {
+                        self.drive_diagnostics
+                            .record_core_poll_failure(self.intake_log_path.as_deref());
+                        let diagnostic = self
+                            .codex
+                            .retained_failure_diagnostic(&thread_id)
+                            .or_else(|| self.codex.error_diagnostic(&error));
+                        self.finish_unavailable_codex_job(&job_id, diagnostic, now.clone())
+                            .await?;
+                        break;
+                    }
+                };
+                let runtime_fact = matches!(polled, CodexPoll::RuntimeTrace(_));
+                let replayable = match &polled {
+                    CodexPoll::ChangeBatchProposed(_) => Some(polled.clone()),
+                    _ => None,
+                };
+                let delivery_result = async {
+                    *stage = DriveStage::CollectPollEffects;
+                    self.enqueue_codex_effects()?;
+                    if self.core_interaction_jobs.remove(&job_id) {
+                        self.deferred_core_interaction_jobs.remove(&job_id);
+                    }
+                    *stage = DriveStage::CoreFact;
+                    Box::pin(self.handle_codex_poll(&job_id, polled, now)).await
                 }
-                *stage = DriveStage::CoreFact;
-                Box::pin(self.handle_codex_poll(&job_id, polled, now.clone())).await
-            }
-            .await;
-            if let Err(error) = delivery_result {
-                if let Some(delivery) = replayable {
-                    self.codex
-                        .release_poll_delivery(&thread_id, &delivery)
-                        .map_err(|_| codex_model_error())?;
+                .await;
+                if let Err(error) = delivery_result {
+                    if let Some(delivery) = replayable {
+                        self.codex
+                            .release_poll_delivery(&thread_id, &delivery)
+                            .map_err(|_| codex_model_error())?;
+                    }
+                    return Err(error);
                 }
-                return Err(error);
+                if !runtime_fact {
+                    break;
+                }
             }
         }
         if let Some(error) = dispatch_error {
@@ -1312,125 +1341,67 @@ where
                 job_id,
                 DelegatedPollOutcome::RepairRequired(envelope),
             ),
-            CodexPoll::Completed(completion) => {
-                Box::pin(self.complete_codex_job(job_id, completion, Vec::new(), now)).await
-            }
-            CodexPoll::CompletedWithDiagnostics(completion, diagnostics) => {
-                Box::pin(self.complete_codex_job(job_id, completion, diagnostics, now)).await
-            }
-            CodexPoll::Inconclusive(summary) => {
-                self.finish_job(
-                    job_id,
-                    ExecutionOutcomeStatus::Failed,
-                    summary.as_str(),
-                    Vec::new(),
-                    None,
-                    Some(port_error(
-                        ExecutionPortErrorCode::ExecutionFailed,
-                        "delegated ChangeBatch proposal was inconclusive",
-                        false,
-                    )),
-                    now,
-                )
-                .await
-            }
-            CodexPoll::Failed(summary) => {
-                self.finish_job(
-                    job_id,
-                    ExecutionOutcomeStatus::Failed,
-                    summary.as_str(),
-                    Vec::new(),
-                    None,
-                    Some(port_error(
-                        ExecutionPortErrorCode::ExecutionFailed,
-                        "embedded Codex execution failed",
-                        false,
-                    )),
-                    now,
-                )
-                .await
-            }
-            CodexPoll::FailedWithDiagnostics(summary, diagnostics) => {
-                self.finish_job(
-                    job_id,
-                    ExecutionOutcomeStatus::Failed,
-                    summary.as_str(),
-                    diagnostics,
-                    None,
-                    Some(port_error(
-                        ExecutionPortErrorCode::ExecutionFailed,
-                        "embedded Codex execution failed",
-                        false,
-                    )),
-                    now,
-                )
-                .await
-            }
-            CodexPoll::CancelledWithDiagnostics(summary, diagnostics) => {
-                self.finish_job(
-                    job_id,
-                    ExecutionOutcomeStatus::Cancelled,
-                    summary.as_str(),
-                    diagnostics,
-                    None,
-                    Some(port_error(
-                        ExecutionPortErrorCode::Cancelled,
-                        "embedded Codex execution cancelled",
-                        false,
-                    )),
-                    now,
-                )
-                .await
-            }
-            CodexPoll::InfrastructureFailedWithDiagnostics(summary, diagnostics) => {
-                self.finish_job(
-                    job_id,
-                    ExecutionOutcomeStatus::InfrastructureError,
-                    summary.as_str(),
-                    diagnostics,
-                    None,
-                    Some(port_error(
-                        ExecutionPortErrorCode::ExecutionFailed,
-                        "embedded Codex infrastructure failure",
-                        false,
-                    )),
-                    now,
-                )
-                .await
-            }
-            CodexPoll::Cancelled(summary) => {
-                self.finish_job(
-                    job_id,
-                    ExecutionOutcomeStatus::Cancelled,
-                    summary.as_str(),
-                    Vec::new(),
-                    None,
-                    Some(port_error(
-                        ExecutionPortErrorCode::Cancelled,
-                        "embedded Codex turn cancelled",
-                        false,
-                    )),
-                    now,
-                )
-                .await
-            }
-            CodexPoll::InfrastructureFailed(summary) => {
-                self.finish_job(
-                    job_id,
-                    ExecutionOutcomeStatus::InfrastructureError,
-                    summary.as_str(),
-                    Vec::new(),
-                    None,
-                    Some(port_error(
-                        ExecutionPortErrorCode::InfrastructureError,
-                        "embedded Codex infrastructure failed",
-                        true,
-                    )),
-                    now,
-                )
-                .await
+            CodexPoll::Terminal(result) => {
+                Box::pin(self.handle_codex_terminal(job_id, result, now)).await
             }
         }
+    }
+
+    async fn handle_codex_terminal(
+        &mut self,
+        job_id: &str,
+        result: CodexExecutionResult,
+        now: Instant,
+    ) -> Result<(), WorkerError> {
+        let (status, summary, code, message, retryable) = match result.outcome {
+            CodexExecutionOutcome::Completed(completion) => {
+                return Box::pin(self.complete_codex_job(
+                    job_id,
+                    completion,
+                    result.diagnostics,
+                    now,
+                ))
+                .await;
+            }
+            CodexExecutionOutcome::Failed(summary) => (
+                ExecutionOutcomeStatus::Failed,
+                summary,
+                ExecutionPortErrorCode::ExecutionFailed,
+                "embedded Codex execution failed",
+                false,
+            ),
+            CodexExecutionOutcome::Cancelled(summary) => (
+                ExecutionOutcomeStatus::Cancelled,
+                summary,
+                ExecutionPortErrorCode::Cancelled,
+                "embedded Codex execution cancelled",
+                false,
+            ),
+            CodexExecutionOutcome::InfrastructureFailed(summary) => (
+                ExecutionOutcomeStatus::InfrastructureError,
+                summary,
+                ExecutionPortErrorCode::InfrastructureError,
+                "embedded Codex infrastructure failed",
+                true,
+            ),
+            CodexExecutionOutcome::Inconclusive(summary) => (
+                ExecutionOutcomeStatus::Failed,
+                summary,
+                ExecutionPortErrorCode::ExecutionFailed,
+                "delegated ChangeBatch proposal was inconclusive",
+                false,
+            ),
+        };
+        self.finish_job(
+            job_id,
+            status,
+            summary.as_str(),
+            result.diagnostics,
+            None,
+            Some(port_error(code, message, retryable)),
+            now,
+        )
+        .await
     }
 
     async fn refence_cancelling_job(
@@ -1651,6 +1622,9 @@ where
                 "delegated loop transition has no active Job authority",
             )
         })?;
+        if active.lifecycle == ActiveJobLifecycle::Cancelling {
+            return Ok(());
+        }
         let history = self
             .workspaces
             .delegated_batch_history(&active)
@@ -2409,7 +2383,7 @@ where
                 None,
             )
         };
-        let usage = if cancelling { None } else { completion.usage };
+        let usage = completion.usage;
         let terminal_artifacts = if diagnostic_artifacts.is_empty() {
             completion.artifacts
         } else {
@@ -3676,16 +3650,16 @@ where
         let active = self
             .active
             .get(key)
-            .filter(|active| {
-                active.lifecycle == ActiveJobLifecycle::Running
-                    && valid_lease_renewal(&active.lease, renewal, now)
-            })
+            .filter(|active| valid_lease_renewal(&active.lease, renewal, now))
             .ok_or_else(|| {
                 worker_error(
                     WorkerErrorCode::InvalidDispatchAuthority,
                     "lease renewal authority is invalid",
                 )
             })?;
+        // A renewal already issued before cancellation still owns this lease.
+        // Preserve Cancelling and the adapter's operation fence while advancing
+        // its cleanup authority, so an in-flight control cannot crash the Worker.
         if active.lease == renewal.lease {
             return Ok(());
         }
@@ -3744,6 +3718,17 @@ where
             }
             None => (JobCancelAckMessageStatus::AlreadyTerminal, None),
         };
+        // Fence Provider retries and all root/child tool gates before workspace
+        // cleanup or Core interruption can yield to an in-flight attempt.
+        if matches!(
+            status,
+            JobCancelAckMessageStatus::Accepted | JobCancelAckMessageStatus::AlreadyCancelling
+        ) && let Some(thread_id) = self.active.get(&key).map(|active| &active.codex_thread_id)
+        {
+            self.codex
+                .fence_thread(thread_id, &now)
+                .map_err(|_| codex_model_error())?;
+        }
         if matches!(
             status,
             JobCancelAckMessageStatus::Accepted | JobCancelAckMessageStatus::AlreadyCancelling
@@ -3826,7 +3811,7 @@ where
         active: &ActiveJob,
         now: &Instant,
     ) -> Result<(), WorkerError> {
-        let Some(open) = self
+        let Some((open, cancelled_at)) = self
             .workspaces
             .cancel_pending_observation_model(active, now)
             .map_err(|_| workspace_error())?
@@ -3866,7 +3851,7 @@ where
             model_exchange_id: open.model_exchange_id,
             replay_from_sequence: None,
             schema_version: SchemaVersion::WinwincodeV1,
-            sent_at: now.clone(),
+            sent_at: cancelled_at,
             session_identity: open.session_identity,
             status: LeaseWriteStatus::RejectedConflict,
             worker_session_id: open.worker_session_id,
@@ -3952,6 +3937,22 @@ where
                 "terminal result has no active Job",
             )
         })?;
+        // A consumed cancellation owns the Job terminal decision. Every
+        // terminal entry, including a Core poll error, passes this boundary;
+        // retain its observed usage and diagnostics under the cancelled Job.
+        let (status, summary, error) = if active.lifecycle == ActiveJobLifecycle::Cancelling {
+            (
+                ExecutionOutcomeStatus::Cancelled,
+                "Codex turn stopped after cancellation",
+                Some(port_error(
+                    ExecutionPortErrorCode::Cancelled,
+                    "Codex turn stopped after cancellation",
+                    false,
+                )),
+            )
+        } else {
+            (status, summary, error)
+        };
         let error = if matches!(status, ExecutionOutcomeStatus::Failed | ExecutionOutcomeStatus::InfrastructureError) {
             error.map(|mut error| {
                 if matches!(error.code, ExecutionPortErrorCode::InfrastructureError | ExecutionPortErrorCode::ExecutionFailed)
@@ -3970,8 +3971,7 @@ where
             usage
         };
         let rejected_delivery_failure = status == ExecutionOutcomeStatus::InfrastructureError
-            && (active.lifecycle == ActiveJobLifecycle::Cancelling
-                || self.codex.has_rejected_job_delivery(&active.lease).map_err(|_| codex_model_error())?);
+            && self.codex.has_rejected_job_delivery(&active.lease).map_err(|_| codex_model_error())?;
         if !rejected_delivery_failure
             && active.job.execution_profile == "codex-chat"
             && self.workspaces.has_source_changes(&active).map_err(|_| workspace_error())?
@@ -3989,8 +3989,21 @@ where
                     .get(job_id)
                     .and_then(|pending| pending.artifact.clone());
                 let candidate_artifact_is_accepted = candidate_artifact.is_some();
-                let authority = candidate_artifact_authority(&active, self.dispatches.get(job_id)
+                let mut authority = candidate_artifact_authority(&active, self.dispatches.get(job_id)
                     .and_then(|record| record.replacement_authority.clone()))?;
+                if let Some(existing) = self.pending_candidates.get(job_id)
+                    && existing.authority != authority
+                {
+                    let valid_predecessor = authority.replacement_authority.as_ref().is_some_and(|proof| {
+                        replacement_candidate_authority_matches(proof, &existing.authority, &authority)
+                    });
+                    if !candidate_authority_after_renewal_matches(&existing.authority, &authority)
+                        && !valid_predecessor
+                    {
+                        return Err(candidate_artifact_error("Chat candidate predecessor differs from current replacement authority"));
+                    }
+                    authority = existing.authority.clone();
+                }
                 let pending = PendingCandidateCompletion {
                     terminal_fact: CandidateTerminalFact::ChatTerminal {
                         status: status.clone(),
@@ -4047,13 +4060,6 @@ where
                 .then(|| ExecutionOutcomeUsage::unknown(0, 0))
         });
         self.cancel_observation_open(&active, &now)?;
-        let close_reason = match status {
-            ExecutionOutcomeStatus::Succeeded => WorkspaceCloseReason::Completed,
-            ExecutionOutcomeStatus::Cancelled => WorkspaceCloseReason::Cancelled,
-            ExecutionOutcomeStatus::Failed | ExecutionOutcomeStatus::InfrastructureError => {
-                WorkspaceCloseReason::Failed
-            }
-        };
         let outcome = JobOutcomeMessage {
             kind: JobOutcomeMessageKind::JobOutcome,
             lease: active.lease.clone(),
@@ -4078,6 +4084,19 @@ where
             .retain_job_outcome(&active.codex_thread_id, &outcome)
             .await
             .map_err(|_| codex_model_error())?;
+        // The retained outcome owns cleanup identity. Keep the checkout until
+        // the CP's exact business ACK, including across process death before
+        // acceptance and official replacement of the original owner.
+        let ExecutionPortMessage::JobOutcomeMessage(canonical_outcome) = &delivery.message else {
+            return Err(codex_model_error());
+        };
+        let close_reason = match canonical_outcome.outcome.status {
+            ExecutionOutcomeStatus::Succeeded => WorkspaceCloseReason::Completed,
+            ExecutionOutcomeStatus::Cancelled => WorkspaceCloseReason::Cancelled,
+            ExecutionOutcomeStatus::Failed | ExecutionOutcomeStatus::InfrastructureError => {
+                WorkspaceCloseReason::Failed
+            }
+        };
         if let Some(progress) = self.workspaces
             .prepare_terminal_job_close(&active, close_reason, &now)
             .map_err(|_| workspace_error())?
@@ -4087,6 +4106,10 @@ where
             self.delegated_poll_outcomes.push_back(
                 DelegatedPollOutcome::ChangeBatchProgress(Box::new(progress)),
             );
+        }
+        if self.workspaces.contains(&active.job.job_id) {
+            self.workspaces.retain_terminal_cleanup(&active, canonical_outcome, close_reason)
+                .map_err(|_| workspace_error())?;
         }
         if let Some(record) = self.dispatches.get_mut(job_id) {
             record.terminal = true;
@@ -4396,11 +4419,6 @@ fn cancelling_job_has_late_result(active: Option<&ActiveJob>, polled: &CodexPoll
             CodexPoll::ChangeBatchProposed(_)
                 | CodexPoll::ChangeBatchProgress(_)
                 | CodexPoll::RepairRequired(_)
-                | CodexPoll::Inconclusive(_)
-                | CodexPoll::Failed(_)
-                | CodexPoll::FailedWithDiagnostics(_, _)
-                | CodexPoll::InfrastructureFailedWithDiagnostics(_, _)
-                | CodexPoll::InfrastructureFailed(_)
         )
 }
 
@@ -5036,7 +5054,7 @@ fn replacement_candidate_authority_matches(
                 && successor.logical_job_digest == replacement.logical_job_digest
                 && same_replacement_scope(&predecessor.scope, &replacement.scope)
                 && same_replacement_scope(&successor.scope, &replacement.scope)
-                && different_replacement_run(&predecessor.scope, &successor.scope)
+                && replacement_run_identity_valid(&predecessor.scope, &successor.scope)
                 && predecessor.lease == replacement.predecessor_lease
                 && predecessor.worker_session_id == session.worker_session_id
                 && predecessor.session_identity == *session
@@ -5065,11 +5083,15 @@ fn same_replacement_scope(left: &ExecutionScope, right: &ExecutionScope) -> bool
     }
 }
 
-fn different_replacement_run(left: &ExecutionScope, right: &ExecutionScope) -> bool {
+fn replacement_run_identity_valid(left: &ExecutionScope, right: &ExecutionScope) -> bool {
     match (left, right) {
         (ExecutionScope::WorkRunExecutionScope(a), ExecutionScope::WorkRunExecutionScope(b)) => {
             a.work_run_id != b.work_run_id
         }
+        (
+            ExecutionScope::ProductSessionExecutionScope(a),
+            ExecutionScope::ProductSessionExecutionScope(b),
+        ) => a == b,
         _ => false,
     }
 }

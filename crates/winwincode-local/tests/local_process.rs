@@ -323,8 +323,8 @@ impl FixtureCodex {
             .lock()
             .expect("FixtureCodex state")
             .polls
-            .push_back(FixturePoll::Exact(CodexPoll::Completed(
-                CodexTurnCompletion {
+            .push_back(FixturePoll::Exact(CodexPoll::terminal(
+                winwincode_worker::CodexExecutionOutcome::Completed(CodexTurnCompletion {
                     summary: secret_safe_runtime_summary("local fixture completed").unwrap(),
                     artifacts: Vec::new(),
                     usage: Some(ExecutionOutcomeUsage {
@@ -334,7 +334,8 @@ impl FixtureCodex {
                         accounting_status: ExecutionOutcomeUsageAccountingStatus::Known,
                         cost_microunits: Some(29),
                     }),
-                },
+                }),
+                Vec::new(),
             )));
         codex
     }

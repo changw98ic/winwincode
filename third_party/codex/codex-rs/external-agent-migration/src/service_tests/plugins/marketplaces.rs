@@ -480,6 +480,74 @@ async fn import_plugins_supports_relative_external_agent_plugin_marketplace_path
 
 #[tokio::test]
 async fn import_plugins_infers_external_official_marketplace_when_missing_from_settings() {
+    const CHILD_FIXTURE: &str = "CODEX_TEST_OFFICIAL_MARKETPLACE_FIXTURE";
+    if std::env::var_os(CHILD_FIXTURE).is_none() {
+        // Rewrite only the inferred official URL, in an isolated test process. The import still
+        // performs a real Git clone, manifest validation and config registration.
+        let root = TempDir::new().expect("create official marketplace fixture");
+        let repository = root.path().join("official-marketplace");
+        fs::create_dir_all(repository.join(EXTERNAL_AGENT_PLUGIN_MANIFEST_DIR))
+            .expect("create fixture manifest directory");
+        fs::write(
+            repository
+                .join(EXTERNAL_AGENT_PLUGIN_MANIFEST_DIR)
+                .join("marketplace.json"),
+            serde_json::to_vec(&serde_json::json!({
+                "name": EXTERNAL_OFFICIAL_MARKETPLACE_NAME,
+                "plugins": []
+            }))
+            .expect("serialize fixture marketplace"),
+        )
+        .expect("write fixture marketplace");
+        for args in [
+            vec!["init", "--quiet"],
+            vec!["add", "."],
+            vec![
+                "-c",
+                "user.name=Codex Test",
+                "-c",
+                "user.email=codex-test@example.com",
+                "-c",
+                "commit.gpgsign=false",
+                "commit",
+                "--quiet",
+                "-m",
+                "fixture marketplace",
+            ],
+        ] {
+            let output = std::process::Command::new("git")
+                .args(args)
+                .current_dir(&repository)
+                .output()
+                .expect("run fixture Git command");
+            assert!(
+                output.status.success(),
+                "fixture Git command failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+        let rewrite_key = format!("url.{}.insteadOf", repository.to_string_lossy());
+        let output = std::process::Command::new(std::env::current_exe().expect("locate test binary"))
+            .args([
+                "--exact",
+                "service::tests::plugins::marketplaces::import_plugins_infers_external_official_marketplace_when_missing_from_settings",
+                "--nocapture",
+            ])
+            .env(CHILD_FIXTURE, &repository)
+            .env("GIT_CONFIG_COUNT", "1")
+            .env("GIT_CONFIG_KEY_0", rewrite_key)
+            .env("GIT_CONFIG_VALUE_0", "https://github.com/anthropics/claude-plugins-official.git")
+            .output()
+            .expect("run isolated official marketplace import");
+        assert!(
+            output.status.success(),
+            "official marketplace import failed: {}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(String::from_utf8_lossy(&output.stdout).contains("1 passed"));
+        return;
+    }
     let (_root, external_agent_home, codex_home) = fixture_paths();
     fs::create_dir_all(&external_agent_home).expect("create external agent home");
     fs::create_dir_all(&codex_home).expect("create codex home");
@@ -496,7 +564,7 @@ async fn import_plugins_infers_external_official_marketplace_when_missing_from_s
     )
     .expect("write settings");
 
-    let outcome = service_for_paths(external_agent_home, codex_home)
+    let outcome = service_for_paths(external_agent_home, codex_home.clone())
         .import_plugins(
             /*cwd*/ None,
             Some(MigrationDetails {
@@ -513,6 +581,15 @@ async fn import_plugins_infers_external_official_marketplace_when_missing_from_s
     assert_eq!(
         outcome.succeeded_marketplaces,
         vec![EXTERNAL_OFFICIAL_MARKETPLACE_NAME.to_string()]
+    );
+    let config: toml::Value =
+        toml::from_str(&fs::read_to_string(codex_home.join("config.toml")).expect("read config"))
+            .expect("parse config");
+    let marketplace = &config["marketplaces"][EXTERNAL_OFFICIAL_MARKETPLACE_NAME];
+    assert_eq!(marketplace["source_type"].as_str(), Some("git"));
+    assert_eq!(
+        marketplace["source"].as_str(),
+        Some("https://github.com/anthropics/claude-plugins-official.git")
     );
     assert_eq!(outcome.succeeded_plugin_ids, Vec::<String>::new());
     assert_eq!(outcome.failed_marketplaces, Vec::<String>::new());

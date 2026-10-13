@@ -21,8 +21,8 @@ use winwincode_api::generated::{Actor, CommandEnvelope, CommandName, Scope};
 use winwincode_audit::{AuditEvent, AuditExecutionSubjectKind, AuditScope};
 use winwincode_control_plane::{
     CommitError, ControlPlane, ControlPlaneConfig, DeliveryTerminalOutcomeCommitError,
-    DurableExecutionPortIngress, EventPublishError, EventPublisher, ExecutionPortService,
-    LocalDeliveryAdapterConfig, OutboxEvent, StateChange,
+    DurableExecutionPortError, DurableExecutionPortIngress, EventPublishError, EventPublisher,
+    ExecutionPortService, LocalDeliveryAdapterConfig, OutboxEvent, StateChange,
 };
 use winwincode_delivery::{
     application::{
@@ -440,6 +440,8 @@ fn seed_delivery_and_job(root: &Path, delivery: &Delivery, job: &ExecutionJob) {
         seed_verification_snapshot(&mut storage, &repository_scope, delivery, job, seed);
     }
     Box::new(storage).close().expect("seed close");
+    let message = terminal_message(job, delivery, seed, ExecutionOutcomeStatus::Succeeded);
+    seed_authenticated_worker_execution(root, &repository_scope, job, &message, seed);
 }
 
 #[allow(clippy::too_many_lines)]
@@ -645,6 +647,7 @@ fn worker_admission_boundaries(
     scope: &RepositoryScope,
     job_scope: &WorkRunExecutionScope,
     pool_id: &WorkerPoolId,
+    delivery_id: &DeliveryId,
 ) -> Vec<ExecutionAdmissionBoundary> {
     vec![
         ExecutionAdmissionBoundary::Organization {
@@ -661,7 +664,7 @@ fn worker_admission_boundaries(
         },
         ExecutionAdmissionBoundary::Delivery {
             organization_id: scope.organization_id.clone(),
-            delivery_id: DeliveryId(canonical_id("dlv", 1)),
+            delivery_id: delivery_id.clone(),
         },
         ExecutionAdmissionBoundary::ProductSession {
             organization_id: scope.organization_id.clone(),
@@ -721,16 +724,15 @@ fn seed_worker_execution_admission(
         })
         .expect("execution queue lease");
     let mut admission = storage.execution_admission().expect("execution admission");
-    for boundary in worker_admission_boundaries(scope, job_scope, pool_id)
-        .into_iter()
-        .chain([ExecutionAdmissionBoundary::Delivery {
-            organization_id: scope.organization_id.clone(),
-            delivery_id: queue_scope
-                .delivery_id
-                .clone()
-                .expect("Delivery admission boundary"),
-        }])
-    {
+    for boundary in worker_admission_boundaries(
+        scope,
+        job_scope,
+        pool_id,
+        queue_scope
+            .delivery_id
+            .as_ref()
+            .expect("Delivery admission boundary"),
+    ) {
         admission
             .configure_policy(&ExecutionAdmissionPolicy {
                 boundary,
@@ -1056,6 +1058,47 @@ fn durable_terminal_counts(root: &Path, delivery_id: &DeliveryId) -> (i64, i64, 
     (revision, journal, receipts, outbox)
 }
 
+fn assert_accepted_outcome_state(root: &Path, message: &JobOutcomeMessage, ready: bool) {
+    let connection = rusqlite::Connection::open(root.join("control-plane.sqlite3"))
+        .expect("accepted outcome state connection");
+    let (revision, bytes): (i64, Vec<u8>) = connection
+        .query_row(
+            "SELECT revision, payload FROM product_state WHERE stream_id = ?1",
+            [format!(
+                "execution-outcome:{}:{}",
+                message.lease.job_id.0, message.lease.attempt
+            )],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .expect("accepted original outcome exists");
+    let revision = u64::try_from(revision).expect("accepted outcome revision");
+    let accepted: serde_json::Value =
+        serde_json::from_slice(&bytes).expect("accepted original outcome JSON");
+    assert_eq!(revision, if ready { 2 } else { 1 });
+    assert_eq!(accepted["acknowledgementReady"], ready);
+    assert_eq!(accepted["message"], serde_json::to_value(message).unwrap());
+    connection.close().expect("accepted outcome state close");
+}
+
+fn execution_job_counts(root: &Path) -> (i64, i64) {
+    let connection = rusqlite::Connection::open(root.join("control-plane.sqlite3"))
+        .expect("execution dispatch count connection");
+    let queue = connection
+        .query_row("SELECT COUNT(*) FROM scheduler_execution_jobs", [], |row| {
+            row.get(0)
+        })
+        .expect("scheduler Job count");
+    let outbox = connection
+        .query_row(
+            "SELECT COUNT(*) FROM outbox WHERE event_id LIKE 'execution-job:%'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("durable dispatch Job count");
+    connection.close().unwrap();
+    (queue, outbox)
+}
+
 fn audit_event_for_receipt(root: &Path, receipt: &CommitReceipt) -> AuditEvent {
     let connection = rusqlite::Connection::open(root.join("control-plane.sqlite3"))
         .expect("audit event inspection database");
@@ -1123,7 +1166,7 @@ fn terminal_message(
         lease: ExecutionLeaseStamp {
             attempt: 1,
             expires_at: Instant("2027-01-15T08:05:00.000Z".into()),
-            fencing_token: FencingToken(seed.to_string()),
+            fencing_token: binding.fencing_token.clone().expect("canonical binding fence"),
             issued_at: Instant("2027-01-15T08:00:00.200Z".into()),
             job_id: job.job_id.clone(),
             lease_id: LeaseId(canonical_id("lse", seed)),
@@ -1440,7 +1483,6 @@ fn assert_authenticated_worker_terminal_case(
     }
     let facts = outcome_facts(&delivery, &message);
     seed_delivery_and_job(&root, &delivery, &job);
-    seed_authenticated_worker_execution(&root, &scope, &job, &message, seed);
 
     let mut control_plane = ControlPlane::start_local(
         ControlPlaneConfig::local(&root),
@@ -1618,7 +1660,6 @@ fn committed_worker_resources_pending_recovers_exactly_after_restart() {
     let message = terminal_message(&job, &delivery, seed, ExecutionOutcomeStatus::Succeeded);
     let facts = outcome_facts(&delivery, &message);
     seed_delivery_and_job(&root, &delivery, &job);
-    seed_authenticated_worker_execution(&root, &scope, &job, &message, seed);
     let connection = rusqlite::Connection::open(root.join("control-plane.sqlite3"))
         .expect("Worker resource failure injector");
     connection
@@ -1639,11 +1680,17 @@ fn committed_worker_resources_pending_recovers_exactly_after_restart() {
     let error = control_plane
         .commit_delivery_terminal_outcome(&scope, &message, &facts, &message.sent_at)
         .expect_err("committed Worker resource settlement must remain pending");
-    assert!(matches!(
-        error,
-        DeliveryTerminalOutcomeCommitError::WorkerResourcesPending { .. }
-    ));
+    assert!(
+        matches!(
+            &error,
+            DeliveryTerminalOutcomeCommitError::CompletionPending { source, .. }
+                if matches!(source.as_ref(), DurableExecutionPortError::WorkerLifecycle(cause)
+                    if cause.kind() == winwincode_control_plane::WorkerExecutionLifecycleErrorKind::OperationalAdmission)
+        ),
+        "actual completion failure: {error}"
+    );
     assert!(error.committed_receipt().is_some());
+    assert_accepted_outcome_state(&root, &message, false);
     control_plane.shutdown().expect("crashed process shutdown");
     assert_eq!(
         worker_terminal_state(&root, &job.job_id),
@@ -1665,6 +1712,7 @@ fn committed_worker_resources_pending_recovers_exactly_after_restart() {
         .commit_delivery_terminal_outcome(&scope, &message, &facts, &message.sent_at)
         .expect("pending Worker resource recovery");
     assert!(replay.receipt().idempotent_replay);
+    assert_accepted_outcome_state(&root, &message, true);
     restarted.shutdown().expect("restart shutdown");
     assert_eq!(
         worker_terminal_state(&root, &job.job_id),
@@ -1983,7 +2031,7 @@ fn a_new_message_cannot_resettle_an_already_terminal_work_run() {
     let facts = outcome_facts(&delivery, &message);
     seed_delivery_and_job(&root, &delivery, &job);
     let before = durable_terminal_counts(&root, delivery.id());
-    let after = (before.0 + 1, before.1 + 1, before.2 + 1, before.3 + 3);
+    let after = (before.0 + 1, before.1 + 1, before.2 + 2, before.3 + 4);
     let mut control_plane = ControlPlane::start_local(
         ControlPlaneConfig::local(&root),
         Box::new(RecordingPublisher),
@@ -2009,20 +2057,27 @@ fn concurrently_accept_terminal_message(
     message: &JobOutcomeMessage,
 ) -> Vec<JobOutcomeAckMessageStatus> {
     let barrier = Arc::new(Barrier::new(8));
+    let startup = Arc::new(Mutex::new(()));
     (0..8)
         .map(|_| {
             let root = Arc::clone(root);
             let barrier = Arc::clone(&barrier);
+            let startup = Arc::clone(&startup);
             let scope = scope.clone();
             let message = message.clone();
             thread::spawn(move || {
+                let (mut control_plane, mut storage) = {
+                    let _guard = startup.lock().expect("fixture initialization lock");
+                    let control_plane = ControlPlane::start_local(
+                        ControlPlaneConfig::local(root.as_path()),
+                        Box::new(RecordingPublisher),
+                    )
+                    .expect("Control Plane start");
+                    let storage = SqliteStorage::open(root.as_path()).expect("ingress storage");
+                    (control_plane, storage)
+                };
+                // Race the eight terminal requests after every CP is ready.
                 barrier.wait();
-                let mut control_plane = ControlPlane::start_local(
-                    ControlPlaneConfig::local(root.as_path()),
-                    Box::new(RecordingPublisher),
-                )
-                .expect("Control Plane start");
-                let mut storage = SqliteStorage::open(root.as_path()).expect("ingress storage");
                 let response = DurableExecutionPortIngress::new(
                     &mut control_plane,
                     &mut storage,
@@ -2170,7 +2225,6 @@ fn assert_concurrent_exact_terminal_round(seed: u64) {
     let job = execution_job(&delivery, &scope);
     let message = terminal_message(&job, &delivery, seed, ExecutionOutcomeStatus::Succeeded);
     seed_delivery_and_job(&root, &delivery, &job);
-    seed_authenticated_worker_execution(&root, &scope, &job, &message, seed);
 
     let root = Arc::new(root);
     let statuses = concurrently_accept_terminal_message(&root, &scope, &message);
@@ -2233,7 +2287,75 @@ fn assert_concurrent_exact_terminal_round(seed: u64) {
     );
     connection.close().expect("durable count close");
     assert_one_terminal_resource_transition(root.as_path(), &delivery, &job, &message);
+    if seed == 4 {
+        assert_corrupt_terminal_replay(root.as_path(), &scope, &message);
+    }
     fs::remove_dir_all(root.as_path()).expect("database directory release");
+}
+
+fn assert_corrupt_terminal_replay(
+    root: &Path,
+    scope: &RepositoryScope,
+    message: &JobOutcomeMessage,
+) {
+    let stream = format!("execution-outcome:{}:1", message.lease.job_id.0);
+    let connection = rusqlite::Connection::open(root.join("control-plane.sqlite3")).unwrap();
+    let original: Vec<u8> = connection
+        .query_row(
+            "SELECT payload FROM product_state WHERE stream_id = ?1",
+            [&stream],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let mut invalid_decision: serde_json::Value = serde_json::from_slice(&original).unwrap();
+    invalid_decision["decision"]["status"] = serde_json::json!("failed");
+    for (revision, payload) in [
+        (2, vec![0]),
+        (3, original.clone()),
+        (2, serde_json::to_vec(&invalid_decision).unwrap()),
+    ] {
+        connection
+            .execute(
+                "UPDATE product_state SET revision = ?1, payload = ?2 WHERE stream_id = ?3",
+                rusqlite::params![revision, payload, &stream],
+            )
+            .unwrap();
+        let mut control_plane = ControlPlane::start_local(
+            ControlPlaneConfig::local(root),
+            Box::new(RecordingPublisher),
+        )
+        .unwrap();
+        let mut storage = SqliteStorage::open(root).unwrap();
+        for changed in [false, true] {
+            let mut replay = message.clone();
+            if changed {
+                replay.outcome.summary = "changed replay with corrupt accepted state".into();
+            }
+            let error = DurableExecutionPortIngress::new(
+                &mut control_plane,
+                &mut storage,
+                scope,
+                replay.sent_at.clone(),
+            )
+            .unwrap()
+            .handle(&ExecutionPortMessage::JobOutcomeMessage(replay))
+            .unwrap_err();
+            assert!(
+                matches!(error, DurableExecutionPortError::Storage(ref source)
+                if source.kind() == winwincode_control_plane::StorageErrorKind::Adapter),
+                "corrupt accepted state must remain a storage failure: {error:?}"
+            );
+        }
+        Box::new(storage).close().unwrap();
+        control_plane.shutdown().unwrap();
+    }
+    connection
+        .execute(
+            "UPDATE product_state SET revision = 2, payload = ?1 WHERE stream_id = ?2",
+            rusqlite::params![original, stream],
+        )
+        .unwrap();
+    connection.close().unwrap();
 }
 
 #[test]
@@ -2330,7 +2452,6 @@ fn terminal_commit_restarts_and_releases_worker_resources_after_a_write_crash() 
     message.outcome.usage = None;
     let facts = outcome_facts(&delivery, &message);
     seed_delivery_and_job(&root, &delivery, &job);
-    seed_authenticated_worker_execution(&root, &scope, &job, &message, seed);
     let connection = rusqlite::Connection::open(root.join("control-plane.sqlite3"))
         .expect("Worker resource release failure injector");
     connection
@@ -2351,11 +2472,17 @@ fn terminal_commit_restarts_and_releases_worker_resources_after_a_write_crash() 
     let error = control_plane
         .commit_delivery_terminal_outcome(&scope, &message, &facts, &message.sent_at)
         .expect_err("terminal commit must surface pending Worker resource release");
-    assert!(matches!(
-        &error,
-        DeliveryTerminalOutcomeCommitError::WorkerResourcesPending { .. }
-    ));
+    assert!(
+        matches!(
+            &error,
+            DeliveryTerminalOutcomeCommitError::CompletionPending { source, .. }
+                if matches!(source.as_ref(), DurableExecutionPortError::WorkerLifecycle(cause)
+                    if cause.kind() == winwincode_control_plane::WorkerExecutionLifecycleErrorKind::OperationalAdmission)
+        ),
+        "actual completion failure: {error}"
+    );
     assert!(error.committed_receipt().is_some());
+    assert_accepted_outcome_state(&root, &message, false);
     control_plane.shutdown().expect("crashed process shutdown");
     let connection = rusqlite::Connection::open(root.join("control-plane.sqlite3"))
         .expect("Worker resource release failure remover");
@@ -2373,6 +2500,7 @@ fn terminal_commit_restarts_and_releases_worker_resources_after_a_write_crash() 
         .commit_delivery_terminal_outcome(&scope, &message, &facts, &message.sent_at)
         .expect("receipt-first retry releases Worker resources");
     assert!(replay.receipt().idempotent_replay);
+    assert_accepted_outcome_state(&root, &message, true);
     assert_eq!(
         worker_terminal_state(&root, &job.job_id),
         ("released".to_owned(), 0)
@@ -2436,6 +2564,12 @@ fn publication_failure_keeps_terminal_commit_for_restart_and_receipt_replay() {
     let error = failing
         .commit_delivery_terminal_outcome(&scope, &message, &facts, &message.sent_at)
         .expect_err("publication must fail after commit");
+    assert!(matches!(
+        &error,
+        DeliveryTerminalOutcomeCommitError::CompletionPending { source, .. }
+            if matches!(source.as_ref(), DurableExecutionPortError::Publication(_))
+    ));
+    assert_accepted_outcome_state(&root, &message, false);
     let committed = error
         .committed_receipt()
         .expect("publication error carries committed terminal receipt");
@@ -2455,7 +2589,11 @@ fn publication_failure_keeps_terminal_commit_for_restart_and_receipt_replay() {
         .commit_delivery_terminal_outcome(&scope, &message, &facts, &message.sent_at)
         .expect("receipt replay after restart");
     assert!(replay.receipt().idempotent_replay);
-    assert_eq!(durable_terminal_counts(&root, delivery.id()), after);
+    assert_accepted_outcome_state(&root, &message, true);
+    assert_eq!(
+        durable_terminal_counts(&root, delivery.id()),
+        (after.0, after.1, after.2 + 1, after.3 + 1)
+    );
     assert_eq!(audit_event_count(&root), 1);
     let audit_event = audit_event_for_receipt(&root, replay.receipt());
     let audit_access = AuditScope::repository(
@@ -2478,14 +2616,37 @@ fn publication_failure_keeps_terminal_commit_for_restart_and_receipt_replay() {
         .expect("published event count connection");
     let pending: i64 = connection
         .query_row(
-            "SELECT COUNT(*) FROM outbox WHERE published = 0",
+            "SELECT COUNT(*) FROM outbox WHERE published = 0
+             AND topic != 'execution-outcome.acknowledgement-ready.v1'",
             [],
             |row| row.get(0),
         )
         .expect("pending event count");
     assert_eq!(pending, 0);
+    let ready_markers: i64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM outbox WHERE published = 0
+             AND topic = 'execution-outcome.acknowledgement-ready.v1'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("pending readiness marker count");
+    assert_eq!(ready_markers, 1);
     connection.close().expect("published event count close");
     restarted.shutdown().expect("shutdown");
+    let connection = rusqlite::Connection::open(root.join("control-plane.sqlite3")).unwrap();
+    let pending: i64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM outbox WHERE published = 0",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        pending, 0,
+        "shutdown publishes the internal readiness marker"
+    );
+    connection.close().unwrap();
     fs::remove_dir_all(root).expect("database directory release");
 }
 
@@ -2803,7 +2964,6 @@ fn seed_historical_candidate_success(seed: u64) -> HistoricalCandidateFixture {
         seed,
     );
     seed_delivery_and_job(&root, &delivery, &job);
-    seed_authenticated_worker_execution(&root, &scope, &job, &message, seed);
     let facts = outcome_facts_for_stage(
         &delivery,
         &message,
@@ -3214,6 +3374,33 @@ fn assert_old_terminal_preserves_new_spec(
     next: &Delivery,
 ) {
     let expected_new_spec = next.encode_json().expect("new Spec bytes");
+    let before = durable_terminal_counts(&fixture.root, fixture.delivery.id());
+    let facts = outcome_facts_for_stage(
+        &fixture.delivery,
+        &fixture.message,
+        fixture
+            .message
+            .session_identity
+            .work_run_id
+            .clone()
+            .unwrap(),
+    );
+    let public_replay = control_plane
+        .commit_delivery_terminal_outcome(
+            &fixture.scope,
+            &fixture.message,
+            &facts,
+            &Instant("2027-01-15T09:00:00.000Z".into()),
+        )
+        .expect(
+            "public exact terminal replay reads historical acceptance before replacement bindings",
+        );
+    assert!(public_replay.receipt().idempotent_replay);
+    assert_accepted_outcome_state(&fixture.root, &fixture.message, true);
+    assert_eq!(
+        durable_terminal_counts(&fixture.root, fixture.delivery.id()),
+        before
+    );
     let mut replay_storage = SqliteStorage::open(&fixture.root).expect("new Spec replay storage");
     let replay = DurableExecutionPortIngress::new(
         control_plane,
@@ -3390,7 +3577,8 @@ fn successful_writer_settles_candidate_ready_and_replays_after_lease_expiry() {
         pending.receipt().stream_id,
         format!("delivery:{}", delivery.id().0)
     );
-    assert_eq!(durable_terminal_counts(&root, delivery.id()), (2, 2, 2, 4));
+    assert_eq!(durable_terminal_counts(&root, delivery.id()), (2, 2, 3, 5));
+    assert_accepted_outcome_state(&root, &message, true);
     control_plane.shutdown().expect("shutdown");
 
     let mut restarted = ControlPlane::start_local_with_delivery_adapters(
@@ -3594,10 +3782,20 @@ struct TerminalDeliveryRaceStorage {
     inner: SqliteStorage,
     delivery_stream: String,
     injected: bool,
+    fail_post_commit_audit_read: bool,
 }
 
 impl ProductStateStorage for TerminalDeliveryRaceStorage {
     fn commit(&mut self, commit: &StateCommit) -> Result<CommitReceipt, StorageError> {
+        self.inner.commit(commit)
+    }
+
+    fn commit_with_execution_terminal(
+        &mut self,
+        commit: &StateCommit,
+        guard: &winwincode_storage::ExecutionAuthorityCommitGuard,
+        terminal: &winwincode_storage::RepositorySchedulerTerminalRequest,
+    ) -> Result<CommitReceipt, StorageError> {
         if !self.injected && commit.stream_id == self.delivery_stream {
             self.injected = true;
             let changed = rusqlite::Connection::open(self.inner.database_path())
@@ -3612,7 +3810,29 @@ impl ProductStateStorage for TerminalDeliveryRaceStorage {
                 .map_err(|error| StorageError::adapter(error.to_string()))?;
             assert_eq!(changed, 1, "concurrent Delivery update must actually occur");
         }
-        self.inner.commit(commit)
+        self.inner
+            .commit_with_execution_terminal(commit, guard, terminal)
+    }
+
+    fn load_execution_job_record(
+        &self,
+        job_id: &ExecutionJobId,
+    ) -> Result<Option<winwincode_storage::ExecutionJobRecord>, StorageError> {
+        self.inner.load_execution_job_record(job_id)
+    }
+
+    fn load_execution_dispatch_authority(
+        &self,
+        job_id: &ExecutionJobId,
+    ) -> Result<Option<winwincode_storage::ExecutionDispatchAuthority>, StorageError> {
+        self.inner.load_execution_dispatch_authority(job_id)
+    }
+
+    fn load_execution_terminal_resources(
+        &self,
+        job_id: &ExecutionJobId,
+    ) -> Result<Option<winwincode_storage::ExecutionTerminalResources>, StorageError> {
+        self.inner.load_execution_terminal_resources(job_id)
     }
 
     fn load_receipt(
@@ -3627,6 +3847,11 @@ impl ProductStateStorage for TerminalDeliveryRaceStorage {
         &self,
         identity: &ReceiptIdentity,
     ) -> Result<Option<PendingAuditEvent>, StorageError> {
+        if self.fail_post_commit_audit_read {
+            return Err(StorageError::adapter(
+                "injected accepted pending-audit read failure",
+            ));
+        }
         self.inner.load_pending_audit_event(identity)
     }
 
@@ -3689,6 +3914,7 @@ fn successful_report_rejects_delivery_changed_between_authority_read_and_commit(
         inner: SqliteStorage::open(&root).expect("race storage"),
         delivery_stream: format!("delivery:{}", delivery.id().0),
         injected: false,
+        fail_post_commit_audit_read: false,
     };
     let before = durable_terminal_counts(&root, delivery.id());
     let audits_before = storage.pending_audit_events().expect("audit baseline");
@@ -3698,6 +3924,10 @@ fn successful_report_rejects_delivery_changed_between_authority_read_and_commit(
         &message,
         &facts,
         &message.sent_at,
+    );
+    assert!(
+        storage.injected,
+        "test must reach the guarded commit before failing"
     );
     assert_eq!(
         storage
@@ -3731,4 +3961,784 @@ fn successful_report_rejects_delivery_changed_between_authority_read_and_commit(
     );
     Box::new(storage).close().expect("close storage");
     fs::remove_dir_all(root).expect("directory release");
+}
+
+#[test]
+fn terminal_resources_use_the_original_reservation_and_exact_worker_slot() {
+    let seed = 802;
+    let root = temporary_directory("terminal-resource-authority");
+    let scope = repository_scope(seed);
+    let delivery = running_non_final_executor(seed);
+    let job = execution_job(&delivery, &scope);
+    let message = terminal_message(&job, &delivery, seed, ExecutionOutcomeStatus::Succeeded);
+    seed_delivery_and_job(&root, &delivery, &job);
+    let mut storage = SqliteStorage::open(&root).expect("resource storage");
+    let resources = storage
+        .load_execution_terminal_resources(&job.job_id)
+        .expect("canonical resources")
+        .expect("reservation and slot exist");
+    let reservation = storage
+        .execution_admission()
+        .unwrap()
+        .load_reservation_by_job(&job.job_id)
+        .unwrap()
+        .unwrap();
+    let slot = storage
+        .worker_session_slots()
+        .unwrap()
+        .load(&message.worker_session_id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(resources.scope, reservation.scope);
+    assert_eq!(resources.worker_pool_id, reservation.worker_pool_id);
+    assert_eq!(resources.authority, slot.authority);
+    assert_eq!(resources.scope.delivery_id.as_ref(), Some(delivery.id()));
+    assert_eq!(
+        resources.worker_pool_id,
+        WorkerPoolId(canonical_id("wpl", seed))
+    );
+    let before = durable_terminal_counts(&root, delivery.id());
+    let connection = rusqlite::Connection::open(storage.database_path()).unwrap();
+    connection
+        .execute(
+            "UPDATE worker_session_slots SET worker_instance_id=?1 WHERE worker_session_id=?2",
+            rusqlite::params![canonical_id("wki", seed + 1), message.worker_session_id.0],
+        )
+        .unwrap();
+    assert!(
+        storage
+            .load_execution_terminal_resources(&job.job_id)
+            .is_err(),
+        "a canonical but foreign Worker instance cannot become cleanup authority"
+    );
+    connection
+        .execute(
+            "UPDATE worker_session_slots SET worker_instance_id=?1 WHERE worker_session_id=?2",
+            rusqlite::params![
+                message.lease.worker_instance_id.0,
+                message.worker_session_id.0
+            ],
+        )
+        .unwrap();
+    assert_eq!(
+        storage
+            .load_execution_terminal_resources(&job.job_id)
+            .unwrap(),
+        Some(resources)
+    );
+    assert_eq!(
+        durable_terminal_counts(&root, delivery.id()),
+        before,
+        "resource reads append no product, receipt, journal or event facts"
+    );
+    assert_eq!(
+        storage
+            .load_execution_terminal_resources(&ExecutionJobId(canonical_id("job", seed + 1)))
+            .unwrap(),
+        None
+    );
+    drop(connection);
+    Box::new(storage).close().unwrap();
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+#[allow(
+    clippy::too_many_lines,
+    reason = "One cancellation fixture checks effective product state and exact original replay together"
+)]
+fn earlier_cancellation_owns_delivery_terminal_while_the_original_worker_frame_stays_exact() {
+    let seed = 803;
+    let root = temporary_directory("delivery-cancellation-before-success");
+    let scope = repository_scope(seed);
+    let repository = root.join("repository");
+    let (base_commit, _) = initialize_git_repository(&repository);
+    let repository = fs::canonicalize(repository).unwrap();
+    let delivery = repository_executor_delivery(seed, &repository, &base_commit);
+    let job = execution_job(&delivery, &scope);
+    let message = terminal_message(&job, &delivery, seed, ExecutionOutcomeStatus::Succeeded);
+    let facts = outcome_facts(&delivery, &message);
+    seed_delivery_and_job(&root, &delivery, &job);
+    let mut storage = SqliteStorage::open(&root).unwrap();
+    let queued = storage
+        .load_execution_job_record(&job.job_id)
+        .unwrap()
+        .unwrap();
+    storage
+        .execution_queue()
+        .unwrap()
+        .request_cancellation(&winwincode_storage::ExecutionJobCancellationRequest {
+            scope: queued.scope,
+            job_id: job.job_id.clone(),
+            request_id: RequestId(canonical_id("req", seed + 30_000)),
+            expected_revision: queued.revision,
+            requested_at: Instant("2027-01-15T08:01:02.000Z".into()),
+        })
+        .unwrap();
+    Box::new(storage).close().unwrap();
+    let accepted_at = Instant("2027-01-15T08:01:03.000Z".into());
+    let before_dispatch = execution_job_counts(&root);
+    let mut control_plane = ControlPlane::start_local_with_delivery_adapters(
+        ControlPlaneConfig::local(&root),
+        Box::new(RecordingPublisher),
+        LocalDeliveryAdapterConfig::new(&repository, scope.clone()),
+    )
+    .unwrap();
+    let first = control_plane
+        .commit_delivery_terminal_outcome(&scope, &message, &facts, &accepted_at)
+        .unwrap();
+    let stored = control_plane
+        .load_state(&format!("delivery:{}", delivery.id().0))
+        .unwrap()
+        .unwrap();
+    let settled = Delivery::decode_json(&stored.payload).unwrap();
+    let run = settled
+        .snapshot()
+        .work_run_aggregate
+        .runs
+        .iter()
+        .find(|run| run.execution_job_id == job.job_id)
+        .unwrap();
+    assert_eq!(run.state, winwincode_domain::WorkRunState::Cancelled);
+    assert!(
+        settled
+            .snapshot()
+            .work_run_aggregate
+            .items
+            .iter()
+            .all(|item| item.state != winwincode_domain::WorkItemState::Done)
+    );
+    let accepted = control_plane
+        .load_state(&format!("execution-outcome:{}:1", job.job_id.0))
+        .unwrap()
+        .unwrap();
+    let frame: serde_json::Value = serde_json::from_slice(&accepted.payload).unwrap();
+    assert_eq!(
+        accepted.revision, 2,
+        "resource cleanup and publication finish before readiness"
+    );
+    assert_eq!(frame["message"], serde_json::to_value(&message).unwrap());
+    assert_eq!(
+        frame["decision"]["status"],
+        serde_json::json!(ExecutionOutcomeStatus::Cancelled)
+    );
+    assert_eq!(
+        frame["decision"]["terminalAt"],
+        serde_json::json!(accepted_at)
+    );
+    assert_eq!(
+        frame["followUp"]["completedProfile"],
+        serde_json::json!(job.execution_profile)
+    );
+    assert_eq!(
+        frame["followUp"]["controllerRequired"], true,
+        "the original accepting host owns automatic progression"
+    );
+    assert_eq!(
+        execution_job_counts(&root),
+        before_dispatch,
+        "effective cancellation never starts Controller work"
+    );
+    assert_eq!(
+        first.receipt().command_digest,
+        Sha256Digest(format!(
+            "sha256:{:x}",
+            Sha256::digest(serde_json::to_vec(&message).unwrap())
+        ))
+    );
+    let event = first
+        .receipt()
+        .events
+        .iter()
+        .find(|event| event.topic == "delivery.work_run.terminal")
+        .unwrap();
+    let terminal: serde_json::Value = serde_json::from_slice(&event.payload).unwrap();
+    assert_eq!(
+        terminal["outcome"]["status"],
+        serde_json::json!(ExecutionOutcomeStatus::Cancelled)
+    );
+    assert_eq!(
+        terminal["outcome"]["finishedAtMillis"],
+        1_800_000_063_000_u64
+    );
+    let before = durable_terminal_counts(&root, delivery.id());
+    let replay = control_plane
+        .commit_delivery_terminal_outcome(
+            &scope,
+            &message,
+            &facts,
+            &Instant("2027-01-15T08:10:00.000Z".into()),
+        )
+        .unwrap();
+    assert!(replay.receipt().idempotent_replay);
+    assert_eq!(replay.receipt().events, first.receipt().events);
+    assert_eq!(durable_terminal_counts(&root, delivery.id()), before);
+    let mut changed = message.clone();
+    changed.outcome.status = ExecutionOutcomeStatus::Cancelled;
+    assert!(
+        control_plane
+            .commit_delivery_terminal_outcome(&scope, &changed, &facts, &accepted_at,)
+            .is_err(),
+        "the effective decision never replaces the exact raw replay frame"
+    );
+    assert_eq!(durable_terminal_counts(&root, delivery.id()), before);
+    control_plane.shutdown().unwrap();
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn accepted_delivery_cleanup_failure_blocks_controller_until_exact_restart_recovery() {
+    assert_controller_completion_cut(804, true);
+}
+
+#[test]
+fn accepted_delivery_publication_failure_blocks_controller_until_exact_restart_recovery() {
+    assert_controller_completion_cut(805, false);
+}
+
+#[allow(
+    clippy::too_many_lines,
+    reason = "A real writer checks one durable cut through absent-Controller and configured-Controller restarts"
+)]
+fn assert_controller_completion_cut(seed: u64, fail_resources: bool) {
+    let root = temporary_directory("delivery-controller-completion-cut");
+    let repository = root.join("repository");
+    let (base_commit, candidate_commit) = initialize_git_repository(&repository);
+    let repository = fs::canonicalize(repository).unwrap();
+    let scope = repository_scope(seed);
+    let delivery = repository_executor_delivery(seed, &repository, &base_commit);
+    let job = execution_job(&delivery, &scope);
+    let mut message = terminal_message(&job, &delivery, seed, ExecutionOutcomeStatus::Succeeded);
+    seed_candidate_artifact(
+        &root,
+        &repository,
+        &base_commit,
+        &scope,
+        &delivery,
+        &mut message,
+        &candidate_commit,
+        seed,
+    );
+    let facts = outcome_facts(&delivery, &message);
+    seed_delivery_and_job(&root, &delivery, &job);
+    let before_dispatch = execution_job_counts(&root);
+    if fail_resources {
+        let connection = rusqlite::Connection::open(root.join("control-plane.sqlite3")).unwrap();
+        connection
+            .execute_batch(
+                "CREATE TRIGGER fail_controller_resource_cut
+             BEFORE UPDATE ON execution_admission_reservations
+             WHEN OLD.state = 'running' AND NEW.state = 'settled'
+             BEGIN SELECT RAISE(ABORT, 'injected Controller resource cut'); END;",
+            )
+            .unwrap();
+        connection.close().unwrap();
+    }
+    let publisher: Box<dyn EventPublisher> = if fail_resources {
+        Box::new(RecordingPublisher)
+    } else {
+        Box::new(FailingPublisher)
+    };
+    let mut first = ControlPlane::start_local_with_delivery_adapters(
+        ControlPlaneConfig::local(&root),
+        publisher,
+        LocalDeliveryAdapterConfig::new(&repository, scope.clone()),
+    )
+    .unwrap();
+    let pending = first
+        .commit_delivery_terminal_outcome(&scope, &message, &facts, &message.sent_at)
+        .expect_err("injected completion cut must occur after acceptance");
+    assert!(
+        matches!(&pending,
+            DeliveryTerminalOutcomeCommitError::CompletionPending { source, .. }
+                if if fail_resources {
+                matches!(source.as_ref(), DurableExecutionPortError::WorkerLifecycle(cause)
+                    if cause.kind() == winwincode_control_plane::WorkerExecutionLifecycleErrorKind::OperationalAdmission)
+                } else {
+                    matches!(source.as_ref(), DurableExecutionPortError::Publication(_))
+                }
+        ),
+        "actual completion failure: {pending}"
+    );
+    let original_receipt = pending.committed_receipt().unwrap().receipt().clone();
+    assert_accepted_outcome_state(&root, &message, false);
+    let accepted = first
+        .load_state(&format!("execution-outcome:{}:1", job.job_id.0))
+        .unwrap()
+        .unwrap();
+    let frozen: serde_json::Value = serde_json::from_slice(&accepted.payload).unwrap();
+    assert_eq!(frozen["followUp"]["controllerRequired"], true);
+    assert_eq!(frozen["followUp"]["completedProfile"], "executor");
+    assert_eq!(
+        execution_job_counts(&root),
+        before_dispatch,
+        "no follow-up dispatch precedes resource completion and required publication"
+    );
+    if fail_resources {
+        first.shutdown().unwrap();
+        let connection = rusqlite::Connection::open(root.join("control-plane.sqlite3")).unwrap();
+        connection
+            .execute_batch("DROP TRIGGER fail_controller_resource_cut;")
+            .unwrap();
+        connection.close().unwrap();
+    } else {
+        first
+            .shutdown()
+            .expect_err("publication cut leaves required events pending");
+    }
+    let mut manual = ControlPlane::start_local(
+        ControlPlaneConfig::local(&root),
+        Box::new(RecordingPublisher),
+    )
+    .unwrap();
+    let pending = manual
+        .commit_delivery_terminal_outcome(
+            &scope,
+            &message,
+            &facts,
+            &Instant("2027-01-15T08:10:00.000Z".into()),
+        )
+        .expect_err("frozen automatic continuation still requires the original Controller mode");
+    assert!(matches!(&pending,
+        DeliveryTerminalOutcomeCommitError::CompletionPending { source, .. }
+            if matches!(source.as_ref(), DurableExecutionPortError::Controller(_))
+    ));
+    assert_eq!(
+        pending.committed_receipt().unwrap().receipt().events,
+        original_receipt.events
+    );
+    assert_accepted_outcome_state(&root, &message, false);
+    assert_eq!(manual.recover_accepted_execution_outcomes().unwrap(), 0);
+    assert_accepted_outcome_state(&root, &message, false);
+    assert_eq!(execution_job_counts(&root), before_dispatch);
+    manual.shutdown().unwrap();
+    let mut restored = ControlPlane::start_local_with_delivery_adapters(
+        ControlPlaneConfig::local(&root),
+        Box::new(RecordingPublisher),
+        LocalDeliveryAdapterConfig::new(&repository, scope.clone()),
+    )
+    .unwrap();
+    assert_eq!(restored.recover_accepted_execution_outcomes().unwrap(), 1);
+    let replay = restored
+        .commit_delivery_terminal_outcome(
+            &scope,
+            &message,
+            &facts,
+            &Instant("2027-01-15T08:10:00.000Z".into()),
+        )
+        .expect("configured production Controller retains the recovered original follow-up");
+    assert!(replay.receipt().idempotent_replay);
+    assert_eq!(replay.receipt().events, original_receipt.events);
+    assert_accepted_outcome_state(&root, &message, true);
+    assert_eq!(
+        execution_job_counts(&root),
+        (before_dispatch.0 + 1, before_dispatch.1 + 1),
+        "exactly one production reviewer Job is queued"
+    );
+    let delivery_after = restored
+        .load_state(&format!("delivery:{}", delivery.id().0))
+        .unwrap()
+        .unwrap();
+    let after = durable_terminal_counts(&root, delivery.id());
+    restored
+        .commit_delivery_terminal_outcome(&scope, &message, &facts, &message.sent_at)
+        .unwrap();
+    assert_eq!(durable_terminal_counts(&root, delivery.id()), after);
+    assert_eq!(
+        restored
+            .load_state(&format!("delivery:{}", delivery.id().0))
+            .unwrap()
+            .unwrap(),
+        delivery_after
+    );
+    assert_eq!(
+        execution_job_counts(&root),
+        (before_dispatch.0 + 1, before_dispatch.1 + 1)
+    );
+    restored.shutdown().unwrap();
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+#[allow(clippy::too_many_lines)]
+fn accepted_terminal_audit_read_failure_retains_original_commit_until_exact_replay() {
+    let seed = 811;
+    let root = temporary_directory("accepted-terminal-audit-read");
+    let scope = repository_scope(seed);
+    let delivery = running_non_final_executor(seed);
+    let job = execution_job(&delivery, &scope);
+    let message = terminal_message(&job, &delivery, seed, ExecutionOutcomeStatus::Failed);
+    let facts = outcome_facts(&delivery, &message);
+    seed_delivery_and_job(&root, &delivery, &job);
+    let mut storage = TerminalDeliveryRaceStorage {
+        inner: SqliteStorage::open(&root).unwrap(),
+        delivery_stream: format!("delivery:{}", delivery.id().0),
+        injected: true,
+        fail_post_commit_audit_read: true,
+    };
+    let pending = winwincode_control_plane::test_support::commit_terminal_transaction(
+        &mut storage,
+        &scope,
+        &message,
+        &facts,
+        &message.sent_at,
+    )
+    .unwrap_err();
+    let DeliveryTerminalOutcomeCommitError::CompletionPending { commit, source } = pending else {
+        panic!("accepted outcome must preserve its original commit")
+    };
+    let DurableExecutionPortError::Storage(source) = source.as_ref() else {
+        panic!("accepted audit failure must preserve its typed storage cause")
+    };
+    assert_eq!(
+        source.to_string(),
+        "injected accepted pending-audit read failure"
+    );
+    assert_eq!(
+        commit.receipt().command_digest,
+        Sha256Digest(format!(
+            "sha256:{:x}",
+            Sha256::digest(serde_json::to_vec(&message).unwrap())
+        ))
+    );
+    assert!(!commit.receipt().idempotent_replay);
+    let original = storage
+        .load_state(&format!("execution-outcome:{}:1", job.job_id.0))
+        .unwrap()
+        .unwrap();
+    let retained: serde_json::Value = serde_json::from_slice(&original.payload).unwrap();
+    assert_eq!(original.revision, 1);
+    assert_eq!(retained["message"], serde_json::to_value(&message).unwrap());
+    assert_eq!(retained["acknowledgementReady"], false);
+    let counts = durable_terminal_counts(&root, delivery.id());
+    let retry = winwincode_control_plane::test_support::commit_terminal_transaction(
+        &mut storage,
+        &scope,
+        &message,
+        &facts,
+        &message.sent_at,
+    )
+    .unwrap_err();
+    let retry_commit = retry
+        .committed_receipt()
+        .expect("exact pending replay retains original receipt");
+    assert_eq!(
+        retry_commit.receipt().receipt_identity,
+        commit.receipt().receipt_identity
+    );
+    assert_eq!(durable_terminal_counts(&root, delivery.id()), counts);
+    storage.fail_post_commit_audit_read = false;
+    let replay = winwincode_control_plane::test_support::commit_terminal_transaction(
+        &mut storage,
+        &scope,
+        &message,
+        &facts,
+        &message.sent_at,
+    )
+    .unwrap();
+    assert!(replay.receipt().idempotent_replay);
+    assert_eq!(
+        replay.receipt().receipt_identity,
+        commit.receipt().receipt_identity
+    );
+    assert_eq!(
+        storage
+            .load_state(&format!("execution-outcome:{}:1", job.job_id.0))
+            .unwrap()
+            .unwrap(),
+        original
+    );
+    assert_eq!(durable_terminal_counts(&root, delivery.id()), counts);
+    Box::new(storage).close().unwrap();
+    assert_exact_ingress_preserves_corrupt_accepted_audit(
+        &root,
+        &scope,
+        &message,
+        commit.receipt(),
+        &original,
+    );
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+#[allow(clippy::too_many_lines)]
+fn delivery_cancel_ack_uses_original_scheduler_control_without_terminal_effects() {
+    use winwincode_control_plane::{RepositoryExecutionScheduler, WorkRunCancellationRequest};
+    use winwincode_execution_port::generated::{
+        JobCancelAckMessage, JobCancelAckMessageKind, JobCancelAckMessageStatus,
+    };
+    use winwincode_storage::RepositorySchedulerScope;
+
+    for (index, status) in [
+        JobCancelAckMessageStatus::Accepted,
+        JobCancelAckMessageStatus::RejectedExpiredLease,
+        JobCancelAckMessageStatus::RejectedStaleFencingToken,
+        JobCancelAckMessageStatus::RejectedWorkerInstance,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let seed = 160 + index as u64;
+        let root = temporary_directory("delivery-cancel-control-ack");
+        let scope = repository_scope(seed);
+        let delivery = running_non_final_executor(seed);
+        let job = execution_job(&delivery, &scope);
+        let outcome = terminal_message(&job, &delivery, seed, ExecutionOutcomeStatus::Cancelled);
+        seed_delivery_and_job(&root, &delivery, &job);
+        let mut control_plane = ControlPlane::start_local(
+            ControlPlaneConfig::local(&root),
+            Box::new(RecordingPublisher),
+        )
+        .unwrap();
+        let mut storage = SqliteStorage::open(&root).unwrap();
+        let stream = format!("delivery:{}", delivery.id().0);
+        let state = storage.load_state(&stream).unwrap().unwrap();
+        let cancel = RepositoryExecutionScheduler::new(&mut storage)
+            .request_cancellation_for_work_run(&WorkRunCancellationRequest {
+                scope: RepositorySchedulerScope {
+                    organization_id: scope.organization_id.clone(),
+                    workspace_id: scope.workspace_id.clone(),
+                    project_id: scope.project_id.clone(),
+                    repository_id: scope.repository_id.clone(),
+                },
+                delivery_id: delivery.id().clone(),
+                work_run_id: outcome.session_identity.work_run_id.clone().unwrap(),
+                request_id: RequestId(canonical_id("req", seed + 19_000)),
+                expected_delivery_revision: state.revision,
+                requested_at: Instant("2027-01-15T08:00:01.000Z".into()),
+                public_command_digest: Sha256Digest(format!("sha256:{}", "c".repeat(64))),
+            })
+            .unwrap()
+            .unwrap();
+        let ack = JobCancelAckMessage {
+            error: None,
+            kind: JobCancelAckMessageKind::JobCancelAck,
+            lease: cancel.lease.clone(),
+            message_id: ExecutionMessageId(canonical_id("xmsg", seed + 19_001)),
+            request_id: cancel.request_id.clone(),
+            schema_version: SchemaVersion::WinwincodeV1,
+            sent_at: Instant("2027-01-15T08:00:02.000Z".into()),
+            session_identity: cancel.session_identity.clone(),
+            status,
+            worker_session_id: cancel.worker_session_id.clone(),
+        };
+        let before = delivery_cancel_ack_resources(&mut storage, &stream, &outcome);
+        let connection = rusqlite::Connection::open(storage.database_path()).unwrap();
+        let counts = delivery_cancel_ack_counts(&connection);
+        let message = ExecutionPortMessage::JobCancelAckMessage(ack.clone());
+        assert!(
+            DurableExecutionPortIngress::new(
+                &mut control_plane,
+                &mut storage,
+                &scope,
+                ack.sent_at.clone()
+            )
+            .unwrap()
+            .handle(&message)
+            .unwrap()
+            .is_empty()
+        );
+        assert_eq!(
+            delivery_cancel_ack_resources(&mut storage, &stream, &outcome),
+            before
+        );
+        assert_eq!(
+            delivery_cancel_ack_counts(&connection),
+            (counts.0 + 1, counts.1 + 1, counts.2)
+        );
+        let retained: Vec<u8> = connection.query_row("SELECT payload FROM product_state WHERE stream_id LIKE 'execution-cancellation-ack:%'", [], |row| row.get(0)).unwrap();
+        let retained: serde_json::Value = serde_json::from_slice(&retained).unwrap();
+        assert_eq!(retained["message"], serde_json::to_value(&ack).unwrap());
+        assert_eq!(
+            retained["originalCancelMessageId"],
+            serde_json::to_value(&cancel.message_id).unwrap()
+        );
+        assert_eq!(
+            storage
+                .load_execution_job_record(&job.job_id)
+                .unwrap()
+                .unwrap()
+                .state,
+            ExecutionJobState::Cancelling
+        );
+        let replay_counts = delivery_cancel_ack_counts(&connection);
+        assert!(
+            DurableExecutionPortIngress::new(
+                &mut control_plane,
+                &mut storage,
+                &scope,
+                Instant("2027-01-15T10:00:00.000Z".into())
+            )
+            .unwrap()
+            .handle(&message)
+            .unwrap()
+            .is_empty()
+        );
+        assert_eq!(delivery_cancel_ack_counts(&connection), replay_counts);
+        assert_eq!(
+            delivery_cancel_ack_resources(&mut storage, &stream, &outcome),
+            before
+        );
+        drop(connection);
+        Box::new(storage).close().unwrap();
+        control_plane.shutdown().unwrap();
+        fs::remove_dir_all(root).unwrap();
+    }
+}
+
+fn delivery_cancel_ack_resources(
+    storage: &mut SqliteStorage,
+    stream: &str,
+    outcome: &JobOutcomeMessage,
+) -> Vec<u8> {
+    let state = storage.load_state(stream).unwrap().unwrap();
+    serde_json::to_vec(&(
+        (state.stream_id, state.revision, state.payload),
+        storage
+            .load_execution_job_record(&outcome.lease.job_id)
+            .unwrap()
+            .unwrap(),
+        storage
+            .execution_registry()
+            .unwrap()
+            .load_lease(&outcome.lease.job_id)
+            .unwrap()
+            .unwrap(),
+        storage
+            .execution_admission()
+            .unwrap()
+            .load_reservation_by_job(&outcome.lease.job_id)
+            .unwrap()
+            .unwrap(),
+        storage
+            .worker_session_slots()
+            .unwrap()
+            .load(&outcome.worker_session_id)
+            .unwrap()
+            .unwrap(),
+    ))
+    .unwrap()
+}
+
+fn delivery_cancel_ack_counts(connection: &rusqlite::Connection) -> (i64, i64, i64) {
+    connection.query_row("SELECT (SELECT COUNT(*) FROM command_receipts), (SELECT COUNT(*) FROM outbox), (SELECT COUNT(*) FROM execution_lease_terminals)", [], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?))).unwrap()
+}
+
+#[allow(
+    clippy::too_many_lines,
+    reason = "one accepted receipt crosses startup cleanup, audit corruption and exact replay in the same fixture"
+)]
+fn assert_exact_ingress_preserves_corrupt_accepted_audit(
+    root: &Path,
+    scope: &RepositoryScope,
+    message: &JobOutcomeMessage,
+    original_receipt: &CommitReceipt,
+    original_state: &StoredState,
+) {
+    let mut control_plane = ControlPlane::start_local(
+        ControlPlaneConfig::local(root),
+        Box::new(RecordingPublisher),
+    )
+    .unwrap();
+    let mut storage = SqliteStorage::open(root).unwrap();
+    let recovered = storage
+        .load_state(&original_state.stream_id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        recovered.revision, 2,
+        "startup finishes the already accepted cleanup"
+    );
+    let before: serde_json::Value = serde_json::from_slice(&original_state.payload).unwrap();
+    let after: serde_json::Value = serde_json::from_slice(&recovered.payload).unwrap();
+    assert_eq!(after["message"], before["message"]);
+    assert_eq!(after["decision"], before["decision"]);
+    assert_eq!(after["acknowledgementReady"], true);
+    let connection = rusqlite::Connection::open(storage.database_path()).unwrap();
+    let (event_id, payload): (String, Vec<u8>) = connection
+        .query_row(
+            "SELECT event_id, payload FROM audit_outbox WHERE request_id=?1",
+            [&original_receipt.receipt_identity.request_id().0],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(
+        connection
+            .execute(
+                "UPDATE audit_outbox SET payload=X'7b7d' WHERE event_id=?1",
+                [&event_id]
+            )
+            .unwrap(),
+        1
+    );
+    let counts = delivery_cancel_ack_counts(&connection);
+    let frame = ExecutionPortMessage::JobOutcomeMessage(message.clone());
+    let error = DurableExecutionPortIngress::new(
+        &mut control_plane,
+        &mut storage,
+        scope,
+        Instant("2027-01-15T10:00:00.000Z".into()),
+    )
+    .unwrap()
+    .handle(&frame)
+    .unwrap_err();
+    let DurableExecutionPortError::Terminal(error) = error else {
+        panic!("exact ingress must preserve typed terminal failure")
+    };
+    let DeliveryTerminalOutcomeCommitError::CompletionPending { commit, source } = error else {
+        panic!("exact ingress must preserve original commit")
+    };
+    assert_eq!(
+        commit.receipt().receipt_identity,
+        original_receipt.receipt_identity
+    );
+    assert_eq!(
+        commit.receipt().command_digest,
+        original_receipt.command_digest
+    );
+    assert!(matches!(
+        source.as_ref(),
+        DurableExecutionPortError::Storage(_)
+    ));
+    assert_eq!(
+        delivery_cancel_ack_counts(&connection),
+        counts,
+        "corrupt accepted audit cannot add terminal facts or emit successful ACK"
+    );
+    assert_eq!(
+        storage
+            .load_state(&original_state.stream_id)
+            .unwrap()
+            .unwrap(),
+        recovered
+    );
+    connection
+        .execute(
+            "UPDATE audit_outbox SET payload=?1 WHERE event_id=?2",
+            rusqlite::params![payload, event_id],
+        )
+        .unwrap();
+    let result = DurableExecutionPortIngress::new(
+        &mut control_plane,
+        &mut storage,
+        scope,
+        Instant("2027-01-15T10:00:00.000Z".into()),
+    )
+    .unwrap()
+    .handle(&frame)
+    .unwrap();
+    assert!(
+        matches!(&result[0], ExecutionPortMessage::JobOutcomeAckMessage(ack) if ack.status==JobOutcomeAckMessageStatus::Duplicate)
+    );
+    let ready = storage
+        .load_state(&original_state.stream_id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(ready.revision, 2);
+    let retained: serde_json::Value = serde_json::from_slice(&ready.payload).unwrap();
+    assert_eq!(retained["message"], serde_json::to_value(message).unwrap());
+    assert_eq!(retained["acknowledgementReady"], true);
+    drop(connection);
+    Box::new(storage).close().unwrap();
+    control_plane.shutdown().unwrap();
 }

@@ -56,7 +56,7 @@ fn mechanism_actual_empty_worker_model_queue_does_not_reload_foreign_history() {
             });
             stored_bytes += serde_json::to_vec(&vec![chunk.clone()]).unwrap().len() as u64;
             store
-                .retain_stored_model_exchange_chunks(&open.model_exchange_id.0, &[chunk])
+                .retain_stored_model_exchange_chunks(&open, &[chunk])
                 .unwrap();
         }
         assert!(models.next_chunk().unwrap().unwrap().is_final);

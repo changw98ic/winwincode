@@ -28,8 +28,9 @@ fn provider_probe_does_not_send_when_slots_are_full_and_succeeds_after_release()
         let mut permits = (0..3)
             .map(
                 |_| match store.try_provider_model_permit("probe-provider").unwrap() {
-                    DeviceModelAdmission::Ready(permit) => permit,
+                    DeviceModelAdmission::InvokeAttempt(permit) => permit,
                     DeviceModelAdmission::Deferred => panic!("expected a free slot"),
+                    _ => panic!("expected physical invocation admission"),
                 },
             )
             .collect::<Vec<_>>();
@@ -39,7 +40,7 @@ fn provider_probe_does_not_send_when_slots_are_full_and_succeeds_after_release()
         assert!(
             matches!(
                 store.try_provider_model_permit("probe-provider").unwrap(),
-                DeviceModelAdmission::Ready(_)
+                DeviceModelAdmission::InvokeAttempt(_)
             ),
             "completed probe releases its slot"
         );

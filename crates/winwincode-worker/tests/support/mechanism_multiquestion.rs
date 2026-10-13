@@ -446,140 +446,6 @@ fn old_script_marker_requests(root: &Fixture) -> i64 {
     connection.query_row("SELECT COUNT(*) FROM tool_requests WHERE json_extract(request_json,'$.tool_name')='exec_command'",[],|row|row.get(0)).unwrap()
 }
 
-async fn input_result_page_at(
-    worker: &mut NativeWorker,
-    port: &RecordedPort,
-    open: &wire::ModelOpenMessage,
-    open_index: usize,
-    call_id: &str,
-    args: serde_json::Value,
-) -> (wire::ModelOpenMessage, serde_json::Value) {
-    let script = format!(
-        "// @exec: {{\"yield_time_ms\":10000}}\n\
-         const reader = ALL_TOOLS.find(t => t.name.endsWith('request_user_input_result'));\n\
-         if (!reader) throw new Error('Required input result reader unavailable');\n\
-         try {{\n\
-           const result = await tools[reader.name]({args});\n\
-           text(result?.output ?? result);\n\
-         }} catch (error) {{\n\
-           let rejection;\n\
-           try {{ rejection = JSON.parse(error?.message ?? String(error)); }} catch {{ throw error; }}\n\
-           if (!rejection || typeof rejection !== 'object' || Array.isArray(rejection)\n\
-               || Object.keys(rejection).length !== 4 || Object.hasOwn(rejection, 'content')\n\
-               || rejection.type !== 'tool_recovery' || rejection.schema_version !== 1\n\
-               || rejection.success !== false\n\
-               || !['control_input_result_unavailable', 'control_input_cursor_invalid'].includes(rejection.state)) throw error;\n\
-           text(rejection);\n\
-         }}"
-    );
-    let frames = [
-        serde_json::json!({"type":"created"}),
-        serde_json::json!({"type":"output_item_done","item":{"type":"custom_tool_call","name":"exec","call_id":call_id,"input":script}}),
-        serde_json::json!({"type":"completed","responseId":format!("input-reader-{open_index}"),"tokenUsage":{"input_tokens":10,"cached_input_tokens":0,"output_tokens":5,"reasoning_output_tokens":0,"total_tokens":15},"endTurn":false}),
-    ];
-    deliver_frames_at(
-        worker,
-        open,
-        200 + open_index,
-        &frames,
-        false,
-        at("00:02:02"),
-    )
-    .await;
-    let next = wait_open_at(worker, port, open_index + 1, at("00:02:02")).await;
-    let body: serde_json::Value =
-        serde_json::from_slice(&STANDARD.decode(&next.request.data_base64).unwrap()).unwrap();
-    let output =
-        tool_output(&body, call_id).expect("the real private input reader returns to the model");
-    (
-        next,
-        decoded_tool_json(&output).expect("reader returns its typed page or exact rejection"),
-    )
-}
-
-async fn read_complete_input_response(
-    worker: &mut NativeWorker,
-    port: &RecordedPort,
-    mut open: wire::ModelOpenMessage,
-    recovery: &serde_json::Value,
-) -> serde_json::Value {
-    let reference = recovery["resultRef"].as_str().unwrap();
-    let mut open_index = 1;
-    for (call, args) in [
-        (
-            "reader-foreign-reference",
-            serde_json::json!({"resultRef":"input-result:foreign","cursor":"0"}),
-        ),
-        (
-            "reader-forged-cursor",
-            serde_json::json!({"resultRef":reference,"cursor":"1:forged"}),
-        ),
-    ] {
-        let (next, rejected) =
-            input_result_page_at(worker, port, &open, open_index, call, args).await;
-        assert!(
-            rejected.get("content").is_none(),
-            "foreign identity never exposes private answer bytes"
-        );
-        assert!(
-            matches!(
-                rejected["state"].as_str(),
-                Some("control_input_result_unavailable" | "control_input_cursor_invalid")
-            ),
-            "exact identity rejection: {rejected}"
-        );
-        open = next;
-        open_index += 1;
-    }
-    let mut cursor = "0".to_owned();
-    let mut reconstructed = String::new();
-    let mut pages = 0;
-    loop {
-        let call = format!("input-reader-page-{pages}");
-        let (next, page) = input_result_page_at(
-            worker,
-            port,
-            &open,
-            open_index,
-            &call,
-            serde_json::json!({"resultRef":reference,"cursor":cursor}),
-        )
-        .await;
-        assert!(
-            page.to_string().len() <= 8192,
-            "whole serialized page stays within byte cap"
-        );
-        assert_eq!(page["resultRef"], reference);
-        assert_eq!(page["responseDigest"], recovery["responseDigest"]);
-        assert_eq!(page["cursor"], cursor);
-        reconstructed.push_str(page["content"].as_str().unwrap());
-        pages += 1;
-        open = next;
-        open_index += 1;
-        if let Some(next) = page["nextCursor"].as_str() {
-            cursor = next.into();
-        } else {
-            assert_eq!(page["totalBytes"], reconstructed.len());
-            break;
-        }
-        assert!(pages < 100, "finite immutable page chain");
-    }
-    assert!(
-        pages > 2,
-        "large answer actually traverses multiple real reader invocations"
-    );
-    let actual_digest = format!(
-        "{:x}",
-        Sha256::digest(serde_json::to_vec(&reconstructed).unwrap())
-    );
-    assert_eq!(actual_digest, recovery["responseDigest"]);
-    eprintln!(
-        "INPUT_LARGE_ACTUAL_READER pages={pages} reconstructedBytes={} digestMatched=true",
-        reconstructed.len()
-    );
-    serde_json::from_str(&reconstructed).unwrap()
-}
-
 fn projected_input_requests(port: &RecordedPort) -> Vec<wire::InputRequestMessage> {
     let mut seen = std::collections::BTreeSet::new();
     port.messages()
@@ -737,6 +603,13 @@ fn malformed_multiquestion_input_returns_model_feedback_and_allows_corrected_cal
     });
 }
 
+fn input_call_record(root: &Fixture) -> serde_json::Value {
+    let encoded: Vec<u8> = core_database(root)
+        .query_row("SELECT record_json FROM input_call", [], |row| row.get(0))
+        .unwrap();
+    serde_json::from_slice(&encoded).unwrap()
+}
+
 #[derive(serde::Deserialize, serde::Serialize)]
 struct PartialInputFixture {
     dispatch: wire::JobDispatchMessage,
@@ -745,7 +618,8 @@ struct PartialInputFixture {
     first_response: wire::ExecutionPortMessage,
     final_response: Option<wire::ExecutionPortMessage>,
     original_kernel_session_id: String,
-    original_applied_incarnation_id: Option<String>,
+    original_input_call: serde_json::Value,
+    original_tool_requests: Vec<(i64, String, String, String)>,
 }
 
 #[test]
@@ -753,20 +627,20 @@ struct PartialInputFixture {
     clippy::too_many_lines,
     reason = "one subprocess crash fixture covers real partial input persistence and exact Core waiter recovery"
 )]
-fn partial_multiquestion_answer_survives_process_crash_and_exact_replay() {
-    const EXACT: &str = "mechanism_multiquestion::partial_multiquestion_answer_survives_process_crash_and_exact_replay";
+fn partial_multiquestion_answer_is_retained_after_crash_without_restarting_old_call() {
+    const EXACT: &str = "mechanism_multiquestion::partial_multiquestion_answer_is_retained_after_crash_without_restarting_old_call";
     partial_input_crash_case(EXACT, false, false);
 }
 
 #[test]
-fn large_multiquestion_answer_survives_crash_and_reaches_model_through_bounded_pages() {
-    const EXACT: &str = "mechanism_multiquestion::large_multiquestion_answer_survives_crash_and_reaches_model_through_bounded_pages";
+fn large_multiquestion_answer_remains_private_after_crash_and_old_call_fails() {
+    const EXACT: &str = "mechanism_multiquestion::large_multiquestion_answer_remains_private_after_crash_and_old_call_fails";
     partial_input_crash_case(EXACT, true, false);
 }
 
 #[test]
-fn complete_multiquestion_answer_reposts_to_new_incarnation_after_crash_before_core_consumption() {
-    const EXACT: &str = "mechanism_multiquestion::complete_multiquestion_answer_reposts_to_new_incarnation_after_crash_before_core_consumption";
+fn completed_multiquestion_answers_remain_retained_after_crash_without_reposting() {
+    const EXACT: &str = "mechanism_multiquestion::completed_multiquestion_answers_remain_retained_after_crash_without_reposting";
     partial_input_crash_case(EXACT, false, true);
 }
 
@@ -915,11 +789,26 @@ fn partial_input_crash_case(exact: &str, large: bool, all_answered: bool) {
             );
             assert!(!marker.exists());
             assert_eq!(old_script_marker_requests(&root), 0);
+            let original_input_call = input_call_record(&root);
+            assert_eq!(
+                original_input_call["answers"][&requests[0].input_request_id.0]["values"],
+                serde_json::json!([first_answer])
+            );
+            if all_answered {
+                assert_eq!(
+                    original_input_call["answers"][&requests[1].input_request_id.0]["values"],
+                    serde_json::json!(["continue"])
+                );
+            }
             fs::write(
                 root.0.join("partial-input.json"),
                 serde_json::to_vec(&PartialInputFixture {
-                    original_kernel_session_id:stored_run(&root)["kernelSessionId"].as_str().unwrap().into(),
-                    original_applied_incarnation_id:core_database(&root).query_row("SELECT json_extract(record_json,'$.appliedIncarnationId') FROM input_call",[],|row|row.get(0)).unwrap(),
+                    original_kernel_session_id: stored_run(&root)["kernelSessionId"]
+                        .as_str()
+                        .unwrap()
+                        .into(),
+                    original_input_call,
+                    original_tool_requests: pending_tool_requests(&root),
                     dispatch,
                     original_model_open: open,
                     requests,
@@ -933,6 +822,21 @@ fn partial_input_crash_case(exact: &str, large: bool, all_answered: bool) {
         }
         let saved: PartialInputFixture =
             serde_json::from_slice(&fs::read(root.0.join("partial-input.json")).unwrap()).unwrap();
+        let kernel_home = root.0.join("worker/kernel-home");
+        assert_eq!(
+            winwincode_codex::recover_interrupted_tool_calls(&kernel_home)
+                .await
+                .unwrap(),
+            u64::try_from(saved.original_tool_requests.len()).unwrap(),
+            "the confirmed exited process releases the locks for original pending calls"
+        );
+        assert_eq!(
+            winwincode_codex::recover_interrupted_tool_calls(&kernel_home)
+                .await
+                .unwrap(),
+            0,
+            "recovery closes each original call once"
+        );
         if all_answered {
             fs::remove_file(root.0.join("mechanism-barrier/input.dispatch.arm")).unwrap();
         }
@@ -991,54 +895,14 @@ fn partial_input_crash_case(exact: &str, large: bool, all_answered: bool) {
             Some(&marker),
         )
         .await;
-        for _ in 0..if all_answered { 0 } else { 400 } {
-            Box::pin(worker.poll_codex(at("00:02:01"))).await.unwrap();
-            worker.flush_durable_outbox().await.unwrap();
-            if projected_input_requests(&port)
-                .iter()
-                .any(|request| request.input_request_id == saved.requests[1].input_request_id)
-            {
-                break;
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-        }
-        if !all_answered {
+        for request in projected_input_requests(&port) {
             assert!(
-                !root
-                    .0
-                    .join("mechanism-barrier/input.waiter.consumed")
-                    .exists()
+                saved.requests.iter().any(|original| {
+                    serde_json::to_value(original).unwrap()
+                        == serde_json::to_value(&request).unwrap()
+                }),
+                "the recorded transport can retain only the exact original input frames"
             );
-        }
-        assert!(
-            !projected_input_requests(&port)
-                .iter()
-                .any(|request| request.input_request_id == saved.requests[0].input_request_id),
-            "an accepted question is not presented again after recovery"
-        );
-        if !all_answered {
-            let authority = prepare_product_input_authority(
-                &root,
-                &saved.original_model_open,
-                &saved.requests[0],
-            );
-            let second_response = product_input_response(
-                &root,
-                &authority,
-                &saved.requests[1],
-                "continue",
-                at("00:02:02"),
-                1,
-            )
-            .expect("the restarted public CP API creates the actual second outbound frame");
-            worker
-                .accept_control(&second_response, at("00:02:02"))
-                .await
-                .unwrap();
-            worker
-                .accept_control(&second_response, at("00:02:02"))
-                .await
-                .unwrap();
         }
         let continuation = wait_open_at(&mut worker, &port, 1, at("00:02:02")).await;
         let body: serde_json::Value =
@@ -1048,61 +912,32 @@ fn partial_input_crash_case(exact: &str, large: bool, all_answered: bool) {
             .expect("the restored exact Core waiter consumed both durable answers");
         let recovery = decoded_tool_json(&output)
             .expect("restored input returns typed interrupted-cell evidence");
-        assert_eq!(recovery["state"], "code_cell_interrupted");
-        assert_eq!(recovery["continuationLost"], true);
-        assert_eq!(recovery["success"], false);
-        assert_eq!(recovery["inputConsumed"], true);
-        assert!(
-            !marker.exists(),
-            "old JavaScript must never continue after recovery"
-        );
-        assert_eq!(
-            old_script_marker_requests(&root),
-            0,
-            "old continuation never invokes its post-input effect"
-        );
-        let response = if large {
-            assert!(
-                recovery.get("answers").is_none(),
-                "large private answer requires real bounded reader"
-            );
-            read_complete_input_response(&mut worker, &port, continuation.clone(), &recovery).await
-        } else {
-            recovery.clone()
-        };
-        for index in 0..2 {
-            assert_eq!(
-                response["answers"][format!("choice_{index}")]["answers"],
-                serde_json::json!([if index == 0 {
-                    first_answer.as_str()
-                } else {
-                    "continue"
-                }])
-            );
+        assert_eq!(recovery["state"], "reconciled_execution_evidence");
+        assert_failed_tool_call(&root, &body, "multiquestion-call");
+        assert!(!saved.original_tool_requests.is_empty());
+        let mut closed = Vec::new();
+        for (sequence, request, input, owner) in &saved.original_tool_requests {
+            let record = failed_tool_record(&root, *sequence);
+            assert_eq!((&record.0, &record.1, &record.2), (request, input, owner));
+            closed.push((*sequence, record));
         }
+        assert_eq!(
+            input_call_record(&root),
+            saved.original_input_call,
+            "accepted private answers remain intact without reposting to a new waiter"
+        );
         assert_eq!(
             mechanism_interactions::tool_output_count(&body, "multiquestion-call"),
             1
         );
         assert!(
-            root.0
+            !root
+                .0
                 .join("mechanism-barrier/input.waiter.consumed")
                 .exists()
         );
-        if all_answered {
-            let applied: String = core_database(&root)
-                .query_row(
-                    "SELECT json_extract(record_json,'$.appliedIncarnationId') FROM input_call",
-                    [],
-                    |row| row.get(0),
-                )
-                .unwrap();
-            assert_ne!(
-                Some(applied),
-                saved.original_applied_incarnation_id,
-                "new incarnation actually reposted complete durable answers"
-            );
-        }
+        assert!(!marker.exists());
+        assert_eq!(old_script_marker_requests(&root), 0);
         worker
             .accept_control(&saved.first_response, at("00:02:02"))
             .await
@@ -1113,6 +948,20 @@ fn partial_input_crash_case(exact: &str, large: bool, all_answered: bool) {
                 .await
                 .unwrap();
         }
+        for (sequence, before) in closed {
+            assert_eq!(
+                failed_tool_record(&root, sequence),
+                before,
+                "late original answers cannot overwrite the closed request/result pair"
+            );
+        }
+        assert_eq!(input_call_record(&root), saved.original_input_call);
+        assert!(
+            !root
+                .0
+                .join("mechanism-barrier/input.waiter.consumed")
+                .exists()
+        );
         assert!(!marker.exists());
         assert_eq!(old_script_marker_requests(&root), 0);
         Box::pin(worker.shutdown(at("00:02:03"))).await.unwrap();

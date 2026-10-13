@@ -124,7 +124,7 @@ impl DeviceProviderStore {
             match kind.as_str() {
                 "skill" => skills.push(serde_json::from_str(&projection)?),
                 "mcp" => mcp_servers.push(serde_json::from_str(&projection)?),
-                _ => return Err(DeviceProviderError),
+                _ => return Err(DeviceProviderError::StateInvalid),
             }
         }
         Ok(DeviceExtensionSnapshot {
@@ -145,7 +145,7 @@ impl DeviceProviderStore {
             || envelope.request_id.len() < 8
             || envelope.request_id.len() > 200
         {
-            return Err(DeviceProviderError);
+            return Err(DeviceProviderError::StateInvalid);
         }
         let request_digest = digest(&serde_json::to_vec(envelope)?);
         self.connection.execute_batch("BEGIN IMMEDIATE")?;
@@ -162,7 +162,7 @@ impl DeviceProviderStore {
         };
         if !replayed && receipt.outcome == DeviceExtensionOutcome::Interrupted {
             let Mutation::TestMcp { id } = self.decrypt_configuration(envelope, CONTEXT)? else {
-                return Err(DeviceProviderError);
+                return Err(DeviceProviderError::StateInvalid);
             };
             return self.test_mcp(&id, receipt);
         }
@@ -184,7 +184,7 @@ impl DeviceProviderStore {
             .optional()?;
         if let Some((original, receipt)) = previous {
             if original != request_digest {
-                return Err(DeviceProviderError);
+                return Err(DeviceProviderError::StateInvalid);
             }
             return Ok((serde_json::from_str(&receipt)?, true));
         }
@@ -241,7 +241,8 @@ impl DeviceProviderStore {
             |r| r.get(0),
         )?;
         if count >= 100
-            || retained_bytes + i64::try_from(projection.len()).map_err(|_| DeviceProviderError)?
+            || retained_bytes
+                + i64::try_from(projection.len()).map_err(|_| DeviceProviderError::StateInvalid)?
                 > 192 * 1024
         {
             return Ok(DeviceExtensionOutcome::InvalidRequest);
@@ -349,12 +350,18 @@ impl DeviceProviderStore {
         id: &str,
         mut receipt: DeviceExtensionReceipt,
     ) -> Result<DeviceExtensionReceipt, DeviceProviderError> {
-        let (configuration, projection) = self.entry(Kind::Mcp, id)?.ok_or(DeviceProviderError)?;
+        let (configuration, projection) = self
+            .entry(Kind::Mcp, id)?
+            .ok_or(DeviceProviderError::StateInvalid)?;
         let mut projection: DeviceExtensionMcp = serde_json::from_str(&projection)?;
-        let home = PathBuf::from(self.connection.path().ok_or(DeviceProviderError)?)
-            .parent()
-            .ok_or(DeviceProviderError)?
-            .to_path_buf();
+        let home = PathBuf::from(
+            self.connection
+                .path()
+                .ok_or(DeviceProviderError::StateInvalid)?,
+        )
+        .parent()
+        .ok_or(DeviceProviderError::StateInvalid)?
+        .to_path_buf();
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()?;
@@ -433,7 +440,7 @@ impl DeviceProviderStore {
             || !server.starts_with(BENCHMARK_MCP_PREFIX)
             || server.len() == BENCHMARK_MCP_PREFIX.len()
         {
-            return Err(DeviceProviderError);
+            return Err(DeviceProviderError::StateInvalid);
         }
         let entries = self
             .extension_entries()?
@@ -477,7 +484,7 @@ fn materialize_extensions(
     let mut capabilities = Vec::new();
     for entry in entries {
         if !valid_id(&entry.id) {
-            return Err(DeviceProviderError);
+            return Err(DeviceProviderError::StateInvalid);
         }
         match entry.kind.as_str() {
             "skill" => {
@@ -489,14 +496,14 @@ fn materialize_extensions(
                 let root = home.join("skills").join(&entry.id);
                 for (path, file) in bundle.files {
                     if !relative_path(&path) {
-                        return Err(DeviceProviderError);
+                        return Err(DeviceProviderError::StateInvalid);
                     }
                     private_directory(&home.join("skills"))?;
                     private_directory(&root)?;
                     let mut parent = root.clone();
                     for component in Path::new(&path)
                         .parent()
-                        .ok_or(DeviceProviderError)?
+                        .ok_or(DeviceProviderError::StateInvalid)?
                         .components()
                     {
                         parent.push(component.as_os_str());
@@ -507,7 +514,7 @@ fn materialize_extensions(
                         &target,
                         &STANDARD
                             .decode(file.data)
-                            .map_err(|_| DeviceProviderError)?,
+                            .map_err(|_| DeviceProviderError::EncodingInvalid)?,
                     )?;
                     if file.executable {
                         fs::set_permissions(target, fs::Permissions::from_mode(0o700))?;
@@ -534,11 +541,11 @@ fn materialize_extensions(
                     tools: projection.tool_names,
                 });
             }
-            _ => return Err(DeviceProviderError),
+            _ => return Err(DeviceProviderError::StateInvalid),
         }
     }
     let mut config = toml::to_string(&BTreeMap::from([("mcp_servers", servers)]))
-        .map_err(|_| DeviceProviderError)?;
+        .map_err(|_| DeviceProviderError::EncodingInvalid)?;
     config.push_str("\n[skills.bundled]\nenabled = false\n");
     write_private(&home.join("config.toml"), config.as_bytes())?;
     write_private(
@@ -571,23 +578,28 @@ fn read_skill(
         (None, Some(source)) if Path::new(&source).is_absolute() && source.len() <= 2048 => {
             let root = fs::canonicalize(&source)?;
             if fs::symlink_metadata(&source)?.file_type().is_symlink() {
-                return Err(DeviceProviderError);
+                return Err(DeviceProviderError::StateInvalid);
             }
             collect_skill(&root, &root, &mut bytes, &mut 0)?;
             source
         }
-        _ => return Err(DeviceProviderError),
+        _ => return Err(DeviceProviderError::StateInvalid),
     };
-    let content = std::str::from_utf8(&bytes.get("SKILL.md").ok_or(DeviceProviderError)?.0)
-        .map_err(|_| DeviceProviderError)?;
+    let content = std::str::from_utf8(
+        &bytes
+            .get("SKILL.md")
+            .ok_or(DeviceProviderError::StateInvalid)?
+            .0,
+    )
+    .map_err(|_| DeviceProviderError::StateInvalid)?;
     let metadata = codex_skills::parse_skill_frontmatter_metadata(content, || id.to_owned())
-        .map_err(|_| DeviceProviderError)?;
+        .map_err(|_| DeviceProviderError::StateInvalid)?;
     if metadata.name.is_empty()
         || metadata.name.len() > 64
         || metadata.description.is_empty()
         || metadata.description.len() > 1024
     {
-        return Err(DeviceProviderError);
+        return Err(DeviceProviderError::StateInvalid);
     }
     let files = SkillFiles {
         files: bytes
@@ -610,7 +622,8 @@ fn read_skill(
         source,
         enabled,
         digest: digest(&serde_json::to_vec(&files)?),
-        file_count: i64::try_from(files.files.len()).map_err(|_| DeviceProviderError)?,
+        file_count: i64::try_from(files.files.len())
+            .map_err(|_| DeviceProviderError::StateInvalid)?,
     };
     Ok((files, projection))
 }
@@ -623,19 +636,19 @@ fn collect_skill(
 ) -> Result<(), DeviceProviderError> {
     if directory
         .strip_prefix(root)
-        .map_err(|_| DeviceProviderError)?
+        .map_err(|_| DeviceProviderError::StateInvalid)?
         .components()
         .count()
         > 12
     {
-        return Err(DeviceProviderError);
+        return Err(DeviceProviderError::StateInvalid);
     }
     for entry in fs::read_dir(directory)? {
         let entry = entry?;
         let path = entry.path();
         let kind = entry.file_type()?;
         if kind.is_symlink() {
-            return Err(DeviceProviderError);
+            return Err(DeviceProviderError::StateInvalid);
         }
         if matches!(entry.file_name().to_str(), Some(".git" | "node_modules")) {
             continue;
@@ -643,30 +656,31 @@ fn collect_skill(
         if kind.is_dir() {
             collect_skill(root, &path, files, total)?;
         } else if kind.is_file() {
-            let size = usize::try_from(entry.metadata()?.len()).map_err(|_| DeviceProviderError)?;
+            let size = usize::try_from(entry.metadata()?.len())
+                .map_err(|_| DeviceProviderError::StateInvalid)?;
             if files.len() >= 256 || size > MAX_SKILL_BYTES.saturating_sub(*total) {
-                return Err(DeviceProviderError);
+                return Err(DeviceProviderError::StateInvalid);
             }
             let bytes = fs::read(&path)?;
             *total += bytes.len();
             if *total > MAX_SKILL_BYTES {
-                return Err(DeviceProviderError);
+                return Err(DeviceProviderError::StateInvalid);
             }
             let relative = path
                 .strip_prefix(root)
-                .map_err(|_| DeviceProviderError)?
+                .map_err(|_| DeviceProviderError::StateInvalid)?
                 .to_str()
-                .ok_or(DeviceProviderError)?
+                .ok_or(DeviceProviderError::StateInvalid)?
                 .to_owned();
             if !relative_path(&relative) {
-                return Err(DeviceProviderError);
+                return Err(DeviceProviderError::StateInvalid);
             }
             files.insert(
                 relative,
                 (bytes, entry.metadata()?.permissions().mode() & 0o111 != 0),
             );
         } else {
-            return Err(DeviceProviderError);
+            return Err(DeviceProviderError::StateInvalid);
         }
     }
     Ok(())
@@ -677,7 +691,7 @@ fn private_directory(path: &Path) -> Result<(), DeviceProviderError> {
         let meta = fs::symlink_metadata(path)?;
         if !meta.is_dir() || meta.file_type().is_symlink() || meta.permissions().mode() & 0o077 != 0
         {
-            return Err(DeviceProviderError);
+            return Err(DeviceProviderError::StateInvalid);
         }
         return Ok(());
     }
@@ -693,18 +707,18 @@ fn private_directory(path: &Path) -> Result<(), DeviceProviderError> {
 fn checked_file(path: &Path) -> Result<(), DeviceProviderError> {
     let meta = fs::symlink_metadata(path)?;
     if !meta.is_file() || meta.file_type().is_symlink() || meta.permissions().mode() & 0o077 != 0 {
-        return Err(DeviceProviderError);
+        return Err(DeviceProviderError::StateInvalid);
     }
     Ok(())
 }
 
 fn write_private(path: &Path, bytes: &[u8]) -> Result<(), DeviceProviderError> {
-    private_directory(path.parent().ok_or(DeviceProviderError)?)?;
+    private_directory(path.parent().ok_or(DeviceProviderError::StateInvalid)?)?;
     if path.exists() {
         checked_file(path)?;
     }
     let mut nonce = [0u8; 16];
-    getrandom::fill(&mut nonce).map_err(|_| DeviceProviderError)?;
+    getrandom::fill(&mut nonce).map_err(|_| DeviceProviderError::StateInvalid)?;
     let temporary = path.with_file_name(format!(".extension-{:x}", Sha256::digest(nonce)));
     let result = (|| {
         let mut file = fs::OpenOptions::new()
@@ -715,7 +729,7 @@ fn write_private(path: &Path, bytes: &[u8]) -> Result<(), DeviceProviderError> {
         file.write_all(bytes)?;
         file.sync_all()?;
         fs::rename(&temporary, path)?;
-        fs::File::open(path.parent().ok_or(DeviceProviderError)?)?.sync_all()?;
+        fs::File::open(path.parent().ok_or(DeviceProviderError::StateInvalid)?)?.sync_all()?;
         Ok::<_, DeviceProviderError>(())
     })();
     if result.is_err() {

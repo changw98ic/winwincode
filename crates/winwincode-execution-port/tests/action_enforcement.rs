@@ -277,3 +277,69 @@ fn durable_claim_survives_restart_and_changed_reuse_conflicts() {
     );
     fs::remove_dir_all(root).expect("receipt directory release");
 }
+
+#[test]
+fn consumed_receipt_proof_is_read_only_and_requires_the_complete_original_signature() {
+    let suffix = NEXT_DIRECTORY.fetch_add(1, Ordering::Relaxed);
+    let root = std::env::temp_dir().join(format!(
+        "winwincode-action-use-proof-{}-{suffix}",
+        std::process::id()
+    ));
+    let original = receipt(&action());
+    let mut store = FileActionReceiptUseStore::open(&root).unwrap();
+    assert!(!store.has_consumed(&original).unwrap());
+    assert_eq!(
+        fs::read_dir(root.join("action-enforcement-receipts"))
+            .unwrap()
+            .count(),
+        0
+    );
+    assert_eq!(store.claim(&original).unwrap(), ActionReceiptClaim::Fresh);
+    drop(store);
+    let store = FileActionReceiptUseStore::open(&root).unwrap();
+    let path = fs::read_dir(root.join("action-enforcement-receipts"))
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path();
+    let before = fs::read(&path).unwrap();
+    assert!(store.has_consumed(&original).unwrap());
+    issuer().verifier().verify_signature(&original).unwrap();
+    for change in 0..6 {
+        let mut changed = original.clone();
+        match change {
+            0 => changed.decision = ActionEnforcementDecision::Reject,
+            1 => changed.job_id.0 = id("job", 'B'),
+            2 => changed.lease.attempt += 1,
+            3 => changed.message_id.0 = id("xmsg", 'B'),
+            4 => changed.sent_at.0 = "2027-01-15T08:00:03.000Z".into(),
+            _ => changed.resource.push_str("changed"),
+        }
+        assert!(store.has_consumed(&changed).unwrap());
+        assert_eq!(
+            issuer().verifier().verify_signature(&changed),
+            Err(ActionEnforcementError::InvalidSignature)
+        );
+    }
+    let mut resigned = original.clone();
+    resigned.resource.push_str("resigned");
+    issuer().sign(&mut resigned).unwrap();
+    issuer().verifier().verify_signature(&resigned).unwrap();
+    assert_eq!(
+        store.has_consumed(&resigned),
+        Err(ActionReceiptUseError::Conflict)
+    );
+    let mut unknown = original.clone();
+    unknown.request_id.0 = id("req", 'B');
+    assert!(!store.has_consumed(&unknown).unwrap());
+    assert_eq!(fs::read(&path).unwrap(), before);
+    assert_eq!(
+        fs::read_dir(root.join("action-enforcement-receipts"))
+            .unwrap()
+            .count(),
+        1
+    );
+    drop(store);
+    fs::remove_dir_all(root).unwrap();
+}

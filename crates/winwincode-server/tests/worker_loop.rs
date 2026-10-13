@@ -481,13 +481,21 @@ impl WorkerLaunchMaterialSource for LaunchResponseMaterial {
     }
 }
 
-const STUB_WORKER_BODY: &str = r#"config="$2"
+const STUB_WORKER_BODY: &str = r#"[ "$#" -eq 2 ] || exit 64
+config="$2"
 for field in clientNodeId clientInstanceId occupancyLeaseId occupancyFencingToken \
              repositoryBindingId workerSessionId workerId workerInstanceId \
              sourceDirectory dataDirectory serverOrigin workerCredentialPath \
              productSessionId; do
   grep -q "\"$field\"" "$config" || exit 9
 done
+case "$1" in
+  --recover-interrupted-calls)
+    printf '%s' "$config" > "${config}.recovery-request"
+    exit 0;;
+  --managed-session) ;;
+  *) exit 64;;
+esac
 trap 'exit 0' TERM
 echo ready > "$(dirname "$config")/worker-ready"
 while :; do sleep 0.1; done"#;
@@ -1005,6 +1013,14 @@ async fn the_real_daemon_runs_the_full_worker_loop_over_http() {
             node_snapshot(&data_directory, &node_id).reported_running_worker_sessions == 0
                 && settled(daemon)
         },
+    );
+    assert_eq!(
+        fs::read_to_string(worker_data_one.join("managed-session.json.recovery-request"))
+            .expect("the original stopped instance receives call recovery"),
+        worker_data_one
+            .join("managed-session.json")
+            .to_str()
+            .expect("config path")
     );
 
     device_provider::stage_chat(&data_directory, &node_id, &owner_id, 101);

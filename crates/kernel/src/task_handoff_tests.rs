@@ -149,7 +149,7 @@ fn compact_request_and_resumed_turn_use_task_state() {
     run_core_fixture(|| Box::pin(compact_and_resume_task_state()));
 }
 
-fn run_core_fixture(test: fn() -> BoxFuture<'static, ()>) {
+fn run_core_fixture(test: fn() -> BoxFuture<'static, std::path::PathBuf>) {
     std::thread::Builder::new()
         .name("task-state-compaction-test".into())
         .stack_size(16 * 1024 * 1024)
@@ -160,14 +160,16 @@ fn run_core_fixture(test: fn() -> BoxFuture<'static, ()>) {
                 .enable_all()
                 .build()
                 .unwrap();
-            runtime.block_on(test());
+            let root = runtime.block_on(test());
+            drop(runtime);
+            std::fs::remove_dir_all(root).unwrap();
         })
         .unwrap()
         .join()
         .unwrap();
 }
 
-async fn compact_and_resume_task_state() {
+async fn compact_and_resume_task_state() -> std::path::PathBuf {
     let root =
         std::env::temp_dir().join(format!("winwincode-task-compaction-{}", std::process::id()));
     let workspace = root.join("workspace");
@@ -238,8 +240,10 @@ async fn compact_and_resume_task_state() {
         .unwrap();
     wait_for_completion(&kernel, &resumed.session_id).await;
     assert_restored_task_state(&model, &transcript);
-    kernel.shutdown().await.unwrap();
-    std::fs::remove_dir_all(root).unwrap();
+    let shutdown = kernel.shutdown().await.unwrap();
+    assert!(shutdown.submit_failed.is_empty());
+    assert!(shutdown.timed_out.is_empty());
+    root
 }
 
 fn assert_restored_task_state(model: &HandoffModel, transcript: &str) {
@@ -340,7 +344,11 @@ fn restored_host_context_is_included_in_total_budget() {
     });
 }
 
-async fn assert_rejected_budget(handoff: String, host_context: String, label: &str) {
+async fn assert_rejected_budget(
+    handoff: String,
+    host_context: String,
+    label: &str,
+) -> std::path::PathBuf {
     const ORIGINAL: &str = "Original conversation must survive a rejected compaction.";
     let root = std::env::temp_dir().join(format!("winwincode-{label}-{}", std::process::id()));
     let workspace = root.join("workspace");
@@ -370,6 +378,7 @@ async fn assert_rejected_budget(handoff: String, host_context: String, label: &s
         .unwrap();
     wait_for_completion(&kernel, &session.session_id).await;
     let runtime = kernel.runtime().await.unwrap();
+    let runtime_owner = Arc::downgrade(&runtime);
     let live = kernel.session(&runtime, &session.session_id).await.unwrap();
     live.thread.submit(Op::Compact).await.unwrap();
     tokio::time::timeout(Duration::from_secs(30), async {
@@ -412,6 +421,14 @@ async fn assert_rejected_budget(handoff: String, host_context: String, label: &s
             .to_string()
             .contains(ORIGINAL)
     );
-    kernel.shutdown().await.unwrap();
-    std::fs::remove_dir_all(root).unwrap();
+    drop(live);
+    drop(runtime);
+    let shutdown = kernel.shutdown().await.unwrap();
+    assert!(shutdown.submit_failed.is_empty());
+    assert!(shutdown.timed_out.is_empty());
+    assert!(
+        runtime_owner.upgrade().is_none(),
+        "fixture must release the complete runtime before deleting its home"
+    );
+    root
 }

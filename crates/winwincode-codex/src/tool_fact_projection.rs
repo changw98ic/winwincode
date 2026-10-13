@@ -3,6 +3,7 @@ use super::{
     CodexPoll, ProductionCodexAdapter, ProductionCodexError, canonical_id, map_store_error,
     unavailable, unknown_thread,
 };
+use crate::CodexCoreAdapter as _;
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use sha2::{Digest, Sha256};
 use winwincode_domain::{
@@ -41,7 +42,10 @@ impl ProductionCodexAdapter {
             return Ok(None);
         }
         let session = run.record.kernel_session_id.clone();
-        if run.kernel_close_pending
+        let thread_id = run.binding.canonical_thread_id.clone();
+        let kernel_close_pending = run.kernel_close_pending;
+        self.fence_thread(&thread_id, now)?;
+        if kernel_close_pending
             && let Some(fact) = self.poll_tool_facts(run_key, &session, now).await?
         {
             return Ok(Some(fact));

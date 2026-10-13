@@ -110,6 +110,22 @@
     "upstream/patches/codex/0101-stdio-lifecycle-deadlines.patch",
     "upstream/patches/codex/0102-exact-input-call-routing.patch",
     "upstream/patches/codex/0103-private-input-recovery-store.patch",
-    "upstream/patches/codex/0104-input-recovery-dispatch-and-pages.patch"
+    "upstream/patches/codex/0104-input-recovery-dispatch-and-pages.patch",
+    "upstream/patches/codex/0105-host-model-retry-semantics.patch",
+    "upstream/patches/codex/0106-required-tool-fact-storage-fatal.patch",
+    "upstream/patches/codex/0107-terminal-core-error-rollout.patch",
+    "upstream/patches/codex/0108-mcp-timeout-and-test-runtime.patch",
+    "upstream/patches/codex/0109-execution-terminal-cause-and-drain.patch",
+    "upstream/patches/codex/0110-model-authority-expiry-cause.patch",
+    "upstream/patches/codex/0111-tool-call-request-result-pairs.patch",
+    "upstream/patches/codex/0112-tool-review-handoff-receipt-order.patch",
+    "upstream/patches/codex/0113-tool-review-shutdown-owner-release.patch",
+    "upstream/patches/codex/0114-tool-review-call-pair-regressions.patch",
+    "upstream/patches/codex/0115-app-server-internal-error-schema.patch",
+    "upstream/patches/codex/0116-tool-review-output-result-reference.patch",
+    "upstream/patches/codex/0117-shared-tool-fatal-storage.patch",
+    "upstream/patches/codex/0118-guardian-transcript-test-registration.patch",
+    "upstream/patches/codex/0119-native-fixture-transport-lifecycle.patch",
+    "upstream/patches/codex/0120-native-fixture-network-isolation.patch"
   ]
 }

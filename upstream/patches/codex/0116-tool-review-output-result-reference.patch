@@ -1,0 +1,28 @@
+diff --git a/codex-rs/state/src/runtime/tool_execution.rs b/codex-rs/state/src/runtime/tool_execution.rs
+index a49c53ee..42c2f63f 100644
+--- a/codex-rs/state/src/runtime/tool_execution.rs
++++ b/codex-rs/state/src/runtime/tool_execution.rs
+@@ -245,19 +245,19 @@ impl StateRuntime {
+             ToolOutputDisposition::Rejected => "rejected",
+             ToolOutputDisposition::Pending => unreachable!(),
+         };
+-        let body = Some(result.ok_or_else(|| anyhow::anyhow!("missing tool output result"))?);
++        let body = result.ok_or_else(|| anyhow::anyhow!("missing tool output result"))?;
+         let mut tx = self.pool.begin().await?;
+         let changed = sqlx::query("UPDATE tool_attempts SET disposition = ?, accepted_result = ?, rejection = ?, revision = revision + 1
+             WHERE request_sequence = ? AND attempt_id = ? AND owner_id = ? AND (execution = 'completed' OR ? = 'rejected') AND execution != 'running' AND disposition = 'pending'")
+-            .bind(state).bind(if disposition == ToolOutputDisposition::Accepted { body } else { None })
+-            .bind(if disposition == ToolOutputDisposition::Rejected { body } else { None })
++            .bind(state).bind(if disposition == ToolOutputDisposition::Accepted { Some(body) } else { None })
++            .bind(if disposition == ToolOutputDisposition::Rejected { Some(body) } else { None })
+             .bind(request_sequence).bind(attempt_id).bind(owner_id).bind(state)
+             .execute(&mut *tx).await?.rows_affected();
+         ensure!(
+             changed == 1,
+             "tool output decision conflicts with its receipt"
+         );
+-        let status = logical_output_status(disposition, body.unwrap_or_default());
++        let status = logical_output_status(disposition, body);
+         let changed = sqlx::query("UPDATE tool_requests SET call_status=?,call_result=? WHERE sequence=? AND call_status='pending'")
+             .bind(status).bind(body).bind(request_sequence).execute(&mut *tx).await?.rows_affected();
+         ensure!(changed == 1, "tool call is already closed");

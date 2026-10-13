@@ -95,6 +95,11 @@ impl HttpsFixture {
         Self::start_with_declared_length(body[..terminal_start].to_owned(), Some(declared_length))
     }
 
+    fn start_complete_with_truncated_http_tail(body: String) -> Self {
+        let declared_length = body.len().saturating_add(64);
+        Self::start_with_declared_length(body, Some(declared_length))
+    }
+
     fn start_with_declared_length(body: String, declared_length: Option<usize>) -> Self {
         let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
         let CertifiedKey { cert, signing_key } =
@@ -1690,6 +1695,85 @@ fn truncated_external_stream_settles_failure_and_cleans_durable_resources() {
         provider,
         "gateway_adapter_connection_failed",
     );
+}
+
+#[test]
+fn complete_protocol_terminal_settles_success_before_the_declared_http_tail() {
+    const PROVIDER: &str = "winwincode-complete-terminal-fixture";
+    const MODEL: &str = "complete-terminal-model";
+    for anthropic in [false, true] {
+        let root = TestDirectory::new("complete-terminal-before-http-tail");
+        let message = setup_for_secret_with_payload(
+            &root,
+            PROVIDER,
+            MODEL,
+            if anthropic {
+                "anthropic-messages"
+            } else {
+                "verified-https-sse"
+            },
+            SECRET_FIXTURE.to_vec(),
+            if anthropic {
+                ANTHROPIC_INPUT_FIXTURE
+            } else {
+                INPUT_FIXTURE
+            },
+        );
+        let tls = HttpsFixture::start_complete_with_truncated_http_tail(if anthropic {
+            anthropic_sse("complete response")
+        } else {
+            external_sse("complete response")
+        });
+        let provider = if anthropic {
+            tls.anthropic_provider_config(PROVIDER, 64, ProviderTokenPricing::default())
+        } else {
+            tls.provider_config(PROVIDER)
+        };
+        let mut application = application_with_providers(&root, vec![provider]);
+        let open = opened(
+            application
+                .accept_local(&open_frame(&message))
+                .expect("complete protocol terminal opens"),
+        );
+        let batch = application
+            .complete_https_sse(&open, &at("2030-01-01T00:00:02.000Z"))
+            .expect("complete protocol terminal settles");
+        let terminal = batch
+            .flow
+            .gateway_terminal
+            .as_ref()
+            .expect("Gateway terminal");
+        assert_eq!(
+            terminal.outcome,
+            winwincode_control_plane::ProviderGatewayTerminalOutcome::Succeeded
+        );
+        assert_eq!(
+            terminal.admission.outcome,
+            winwincode_control_plane::ModelReservationTerminalOutcome::Completed
+        );
+        assert_eq!(
+            terminal.admission.actual_tokens,
+            if anthropic { 22 } else { 15 }
+        );
+        let final_chunk = batch.chunks.last().expect("final chunk");
+        assert!(final_chunk.is_final);
+        let acknowledgement = TypedFrame::new(
+            FrameDirection::ControlPlaneToWorker,
+            ExecutionPortMessage::ModelAckMessage(final_ack(&message, &final_chunk.sequence)),
+        )
+        .unwrap();
+        application
+            .accept_local(&acknowledgement)
+            .expect("acknowledge the actual final chunk");
+        if anthropic {
+            assert_anthropic_provider_request(&tls.finish(), MODEL);
+        } else {
+            assert_provider_request(&tls.finish());
+        }
+        drop(application);
+        assert_files_omit(&root.data(), SECRET_FIXTURE);
+        assert_files_omit(&root.data(), INPUT_FIXTURE);
+    }
 }
 
 struct LiveAnthropicGate {

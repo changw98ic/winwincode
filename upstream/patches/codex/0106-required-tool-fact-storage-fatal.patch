@@ -1,0 +1,415 @@
+diff --git a/codex-rs/core/src/tools/execution_facts.rs b/codex-rs/core/src/tools/execution_facts.rs
+--- a/codex-rs/core/src/tools/execution_facts.rs
++++ b/codex-rs/core/src/tools/execution_facts.rs
+@@ -458,7 +458,9 @@
+ 
+ pub(super) fn storage_error(error: impl std::fmt::Display) -> FunctionCallError {
+     tracing::warn!(%error, "tool execution fact storage failed");
+-    FunctionCallError::RespondToModel(
++    // Required facts are an execution precondition. Model feedback cannot
++    // repair storage or safely authorize another attempt after this failure.
++    FunctionCallError::Fatal(
+         "tool_fact_store_unavailable: execution and recovery require durable Core facts".into(),
+     )
+ }
+diff --git a/codex-rs/core/src/tools/execution_facts_tests.rs b/codex-rs/core/src/tools/execution_facts_tests.rs
+--- a/codex-rs/core/src/tools/execution_facts_tests.rs
++++ b/codex-rs/core/src/tools/execution_facts_tests.rs
+@@ -405,3 +405,74 @@
+             .all(|event| !matches!(event.fact, codex_state::ToolRuntimeFact::Wait(_)))
+     );
+ }
++
++#[test]
++fn required_fact_storage_error_is_fatal_and_has_a_safe_non_retryable_category() {
++    let private_error = "private database path and credential must remain private";
++    let FunctionCallError::Fatal(message) = storage_error(private_error) else {
++        panic!("required Core fact storage cannot be model feedback");
++    };
++    assert_eq!(
++        message,
++        "tool_fact_store_unavailable: execution and recovery require durable Core facts"
++    );
++    let error = codex_protocol::error::CodexErr::Fatal(message);
++    assert!(!error.is_retryable());
++    let event = error.to_error_event(None);
++    assert_eq!(
++        event.codex_error_info,
++        Some(codex_protocol::protocol::CodexErrorInfo::InternalServerError)
++    );
++    assert!(!event.message.contains(private_error));
++}
++
++#[tokio::test]
++async fn required_attempt_claim_storage_failure_stops_before_the_tool_handler() {
++    let invocation = invocation().await;
++    let store = StateRuntime::init(
++        invocation.turn.config.sqlite_config().clone(),
++        invocation.turn.config.model_provider_id.clone(),
++    )
++    .await
++    .unwrap();
++    let pool = store
++        .sqlite()
++        .open_read_write_pool(&store.sqlite().state_db_path())
++        .await
++        .unwrap();
++    sqlx::query(
++        "CREATE TRIGGER fail_required_attempt_claim BEFORE INSERT ON tool_attempts
++        BEGIN SELECT RAISE(ABORT,'private required-store failure'); END",
++    )
++    .execute(&pool)
++    .await
++    .unwrap();
++    assert!(
++        ExecutionFacts::for_session(&invocation.session)
++            .store
++            .set(store.clone())
++            .is_ok()
++    );
++    let effects = Arc::new(AtomicUsize::new(0));
++    let registry = ToolRegistry::from_tools([
++        Arc::new(EffectTool(effects.clone())) as Arc<dyn CoreToolRuntime>
++    ]);
++    let error = registry
++        .dispatch_any_with_terminal_outcome(invocation.clone(), None)
++        .await
++        .err()
++        .unwrap();
++    assert!(matches!(error, FunctionCallError::Fatal(_)));
++    assert_eq!(effects.load(Ordering::SeqCst), 0);
++    let events = store
++        .list_tool_fact_events(&invocation.session.thread_id.to_string(), 0, 200)
++        .await
++        .unwrap();
++    assert_eq!(events.len(), 1);
++    assert_eq!(
++        events[0].fact.request.thread_id,
++        invocation.session.thread_id.to_string()
++    );
++    assert!(events[0].fact.attempt.is_none());
++    pool.close().await;
++}
+diff --git a/codex-rs/core/src/tools/code_mode/terminal.rs b/codex-rs/core/src/tools/code_mode/terminal.rs
+--- a/codex-rs/core/src/tools/code_mode/terminal.rs
++++ b/codex-rs/core/src/tools/code_mode/terminal.rs
+@@ -12,10 +12,16 @@
+ use crate::function_tool::FunctionCallError;
+ use crate::tools::parallel::ToolContinuation;
+ 
+-/// Latches accepted host handoffs until the outer control call consumes them.
++#[derive(Clone)]
++enum HostBoundary {
++    Handoff(ToolContinuation),
++    Fatal(String),
++}
++
++/// Latches typed host boundaries until the outer control call consumes them.
+ #[derive(Default)]
+ pub(crate) struct TerminalHandoffs {
+-    cells: Mutex<HashMap<CellId, watch::Sender<Option<ToolContinuation>>>>,
++    cells: Mutex<HashMap<CellId, watch::Sender<Option<HostBoundary>>>>,
+ }
+ 
+ impl TerminalHandoffs {
+@@ -66,8 +72,24 @@
+                 "code cell already handed control to the host".to_string(),
+             ));
+         }
+-        sender.send_replace(Some(continuation));
++        sender.send_replace(Some(HostBoundary::Handoff(continuation)));
+         Ok(())
++    }
++
++    /// Retain the original typed fatal before the native runtime turns its
++    /// tool error into a catchable JavaScript exception. A closed cell cannot
++    /// regain authority, and the first fatal supersedes an earlier handoff.
++    pub(super) fn publish_fatal(&self, cell_id: &CellId, message: String) {
++        let mut cells = self
++            .cells
++            .lock()
++            .unwrap_or_else(std::sync::PoisonError::into_inner);
++        if let Some(sender) = cells.get_mut(cell_id) {
++            let already_fatal = matches!(sender.borrow().as_ref(), Some(HostBoundary::Fatal(_)));
++            if !already_fatal {
++                sender.send_replace(Some(HostBoundary::Fatal(message)));
++            }
++        }
+     }
+ 
+     pub(crate) fn is_pending(&self, cell_id: &CellId) -> bool {
+@@ -84,7 +106,7 @@
+         &self,
+         cell_id: &CellId,
+         response: impl std::future::Future<Output = Result<WaitOutcome, String>> + Send,
+-    ) -> Result<(WaitOutcome, Option<ToolContinuation>), String> {
++    ) -> Result<(WaitOutcome, Option<ToolContinuation>), FunctionCallError> {
+         let receiver = {
+             let cells = self
+                 .terminal_handoffs
+@@ -94,43 +116,70 @@
+             cells.get(cell_id).map(watch::Sender::subscribe)
+         };
+         let Some(mut receiver) = receiver else {
+-            return response.await.map(|outcome| (outcome, None));
++            return response
++                .await
++                .map(|outcome| (outcome, None))
++                .map_err(FunctionCallError::RespondToModel);
+         };
+-        let handoff = async {
++        let host_boundary = async {
+             loop {
+-                if let Some(continuation) = receiver.borrow_and_update().clone() {
+-                    return continuation;
++                if let Some(boundary) = receiver.borrow_and_update().clone() {
++                    return boundary;
+                 }
+                 if receiver.changed().await.is_err() {
+                     return std::future::pending().await;
+                 }
+             }
+         };
+-        let (boundary, continuation) = tokio::select! {
++        let (boundary, observed_host_boundary) = tokio::select! {
+             biased;
+-            continuation = handoff => {
+-                (self.terminate(cell_id.clone()).await, Some(continuation))
++            host_boundary = host_boundary => {
++                (self.terminate(cell_id.clone()).await, Some(host_boundary))
+             }
+             response = response => {
+-                let continuation = self.terminal_handoffs.cells.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
++                let host_boundary = self.terminal_handoffs.cells.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+                     .get(cell_id).and_then(|sender| sender.borrow().clone());
+-                match continuation {
+-                    Some(continuation) => (self.terminate(cell_id.clone()).await, Some(continuation)),
++                match host_boundary {
++                    Some(host_boundary) => (self.terminate(cell_id.clone()).await, Some(host_boundary)),
+                     None => (response, None),
+                 }
+             }
+         };
+-        if !matches!(
+-            &boundary,
+-            Ok(WaitOutcome::LiveCell(RuntimeResponse::Yielded { .. }))
+-        ) {
+-            self.terminal_handoffs
++        // Inspect and close the boundary under one lock. A required-fact
++        // failure outranks an observed handoff or a caught script exception.
++        let host_boundary = {
++            let mut cells = self
++                .terminal_handoffs
+                 .cells
+                 .lock()
+-                .unwrap_or_else(std::sync::PoisonError::into_inner)
+-                .remove(cell_id);
+-        }
+-        Ok((boundary?, continuation))
++                .unwrap_or_else(std::sync::PoisonError::into_inner);
++            let host_boundary = cells
++                .get(cell_id)
++                .and_then(|sender| sender.borrow().clone())
++                .or(observed_host_boundary);
++            if !matches!(host_boundary, Some(HostBoundary::Fatal(_)))
++                && !matches!(
++                    &boundary,
++                    Ok(WaitOutcome::LiveCell(RuntimeResponse::Yielded { .. }))
++                )
++            {
++                cells.remove(cell_id);
++            }
++            host_boundary
++        };
++        let continuation = match host_boundary {
++            Some(HostBoundary::Fatal(message)) => {
++                // Keep the cell fenced until normal turn interruption cleans
++                // it up, even if runtime termination itself failed.
++                return Err(FunctionCallError::Fatal(message));
++            }
++            Some(HostBoundary::Handoff(continuation)) => Some(continuation),
++            None => None,
++        };
++        Ok((
++            boundary.map_err(FunctionCallError::RespondToModel)?,
++            continuation,
++        ))
+     }
+ }
+ 
+diff --git a/codex-rs/core/src/tools/code_mode/delegate.rs b/codex-rs/core/src/tools/code_mode/delegate.rs
+--- a/codex-rs/core/src/tools/code_mode/delegate.rs
++++ b/codex-rs/core/src/tools/code_mode/delegate.rs
+@@ -311,6 +311,7 @@
+         invocation: CodeModeNestedToolCall,
+         cancellation_token: CancellationToken,
+     ) -> Result<JsonValue, String> {
++        let cell_id = invocation.cell_id.clone();
+         call_nested_tool(
+             self.exec.clone(),
+             self.tool_runtime.clone(),
+@@ -318,7 +319,17 @@
+             cancellation_token,
+         )
+         .await
+-        .map_err(|error| error.to_string())
++        .map_err(|error| {
++            if let crate::function_tool::FunctionCallError::Fatal(message) = &error {
++                self.exec
++                    .session
++                    .services
++                    .code_mode_service
++                    .terminal_handoffs
++                    .publish_fatal(&cell_id, message.clone());
++            }
++            error.to_string()
++        })
+     }
+ 
+     async fn notify(&self, call_id: String, cell_id: CellId, text: String) -> Result<(), String> {
+diff --git a/codex-rs/core/src/tools/code_mode/execute_handler.rs b/codex-rs/core/src/tools/code_mode/execute_handler.rs
+--- a/codex-rs/core/src/tools/code_mode/execute_handler.rs
++++ b/codex-rs/core/src/tools/code_mode/execute_handler.rs
+@@ -127,8 +127,7 @@
+                     .await
+                     .map(codex_code_mode::WaitOutcome::LiveCell)
+             })
+-            .await
+-            .map_err(FunctionCallError::RespondToModel)?;
++            .await?;
+         let response = response.into();
+         // Record the raw runtime boundary. The model-visible custom-tool output
+         // is produced by `handle_runtime_response` and later linked through
+diff --git a/codex-rs/core/src/tools/code_mode/wait_handler.rs b/codex-rs/core/src/tools/code_mode/wait_handler.rs
+--- a/codex-rs/core/src/tools/code_mode/wait_handler.rs
++++ b/codex-rs/core/src/tools/code_mode/wait_handler.rs
+@@ -164,10 +164,7 @@
+                     .code_mode_service
+                     .await_boundary(&cell_id, wait_future)
+                     .await
+-                    .map_err(|error| {
+-                        telemetry.finish(/*success*/ false);
+-                        FunctionCallError::RespondToModel(error)
+-                    })?;
++                    .inspect_err(|_| telemetry.finish(/*success*/ false))?;
+                 if let Some(durable_wait) = durable_wait {
+                     durable_wait.settle().await?;
+                 }
+diff --git a/codex-rs/core/src/tools/code_mode/terminal_tests.rs b/codex-rs/core/src/tools/code_mode/terminal_tests.rs
+--- a/codex-rs/core/src/tools/code_mode/terminal_tests.rs
++++ b/codex-rs/core/src/tools/code_mode/terminal_tests.rs
+@@ -193,7 +193,8 @@
+ 
+ fn latched_handoff(handoffs: &TerminalHandoffs, cell: &CellId) -> ChangeBatchHandoff {
+     let cells = handoffs.cells.lock().unwrap();
+-    let Some(ToolContinuation::YieldToHost(handoff)) = cells.get(cell).unwrap().borrow().clone()
++    let Some(super::HostBoundary::Handoff(ToolContinuation::YieldToHost(handoff))) =
++        cells.get(cell).unwrap().borrow().clone()
+     else {
+         panic!("original typed handoff must remain latched");
+     };
+@@ -417,3 +418,104 @@
+     assert_eq!((required_count, diagnostic_count), (1, 1));
+     pool.close().await;
+ }
++
++#[test]
++fn a_fatal_is_latched_only_for_its_original_live_cell_and_outranks_handoff() {
++    let handoffs = TerminalHandoffs::default();
++    let original = CellId::new("fatal-original-cell".into());
++    let other = CellId::new("independent-cell".into());
++    handoffs.register(&original);
++    handoffs.register(&other);
++    handoffs
++        .publish(
++            original.clone(),
++            ToolContinuation::YieldToHost(ChangeBatchHandoff {
++                call_id: "original-proposal".into(),
++                proposal: "original proposal".into(),
++            }),
++        )
++        .unwrap();
++    handoffs.publish_fatal(&original, "original safe fatal".into());
++    handoffs.publish_fatal(&original, "later safe fatal".into());
++    let cells = handoffs.cells.lock().unwrap();
++    assert!(matches!(
++        cells.get(&original).unwrap().borrow().as_ref(),
++        Some(super::HostBoundary::Fatal(message)) if message == "original safe fatal"
++    ));
++    drop(cells);
++    assert!(handoffs.is_pending(&original));
++    assert!(!handoffs.is_pending(&other));
++    handoffs.close_cell(&original);
++    assert!(handoffs.is_pending(&original));
++    handoffs.close_cell(&other);
++    handoffs.publish_fatal(&other, "closed cell fatal".into());
++    assert!(!handoffs.is_pending(&other));
++}
++
++#[tokio::test]
++async fn a_caught_native_exception_cannot_clear_fatal_at_execute_or_later_wait_boundary() {
++    use crate::function_tool::FunctionCallError;
++    use codex_code_mode::RuntimeResponse;
++    use codex_code_mode::WaitOutcome;
++    use std::sync::Arc;
++
++    for yielded_first in [false, true] {
++        let service = super::CodeModeService::new(
++            Arc::new(codex_code_mode::DisabledCodeModeSessionProvider),
++            &crate::config::CodeModeConfig::default(),
++        );
++        let cell = CellId::new(format!("caught-fatal-cell-{yielded_first}"));
++        let other = CellId::new(format!("unaffected-cell-{yielded_first}"));
++        service.terminal_handoffs.register(&cell);
++        service.terminal_handoffs.register(&other);
++        if yielded_first {
++            let (response, continuation) = service
++                .await_boundary(&cell, async {
++                    Ok(WaitOutcome::LiveCell(RuntimeResponse::Yielded {
++                        cell_id: cell.clone(),
++                        content_items: vec![],
++                    }))
++                })
++                .await
++                .unwrap();
++            assert!(matches!(
++                response,
++                WaitOutcome::LiveCell(RuntimeResponse::Yielded { .. })
++            ));
++            assert!(continuation.is_none());
++        }
++        service.terminal_handoffs.publish_fatal(
++            &cell,
++            "tool_fact_store_unavailable: execution and recovery require durable Core facts".into(),
++        );
++        let response = service
++            .await_boundary(&cell, async {
++                // A script may catch its nested tool exception and return
++                // normally. The host-owned fatal still owns this boundary.
++                Ok(WaitOutcome::LiveCell(RuntimeResponse::Result {
++                    cell_id: cell.clone(),
++                    content_items: vec![],
++                    error_text: None,
++                }))
++            })
++            .await;
++        assert!(matches!(
++            response,
++            Err(FunctionCallError::Fatal(message))
++                if message == "tool_fact_store_unavailable: execution and recovery require durable Core facts"
++        ));
++        assert!(service.terminal_handoffs.is_pending(&cell));
++        let independent = service
++            .await_boundary(&other, async {
++                Ok(WaitOutcome::LiveCell(RuntimeResponse::Result {
++                    cell_id: other.clone(),
++                    content_items: vec![],
++                    error_text: None,
++                }))
++            })
++            .await;
++        assert!(independent.is_ok());
++        service.terminal_handoffs.discard_all();
++        assert!(!service.terminal_handoffs.is_pending(&cell));
++    }
++}

@@ -1118,6 +1118,13 @@
           "items": {
             "$ref": "#/$defs/ChatAttachment"
           }
+        },
+        "outputPreparation": {
+          "type": "string",
+          "enum": [
+            "preparing"
+          ],
+          "description": "The exact Chat execution has frozen its project output and is waiting for durable output delivery. The message terminal state is accepted separately."
         }
       },
       "description": "Secret-safe product message projection. It excludes provider requests, provider responses, tool payloads, credentials, and Codex internals."

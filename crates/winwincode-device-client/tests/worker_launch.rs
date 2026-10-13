@@ -259,7 +259,15 @@ fn daemon_config() -> DaemonConfig {
     }
 }
 
-const LONG_RUNNING_BODY: &str = "trap 'exit 0' TERM\n\
+const LONG_RUNNING_BODY: &str = "case \"$1\" in\n\
+     --recover-interrupted-calls)\n\
+       [ \"$#\" -eq 2 ] && [ -r \"$2\" ] || exit 64\n\
+       printf '%s' \"$2\" > \"${2}.recovery-request\"\n\
+       exit 0;;\n\
+     --managed-session) ;;\n\
+     *) exit 64;;\n\
+     esac\n\
+     trap 'exit 0' TERM\n\
      echo ready > \"$(dirname \"$2\")/worker-ready\"\n\
      while :; do sleep 0.1; done";
 
@@ -361,6 +369,22 @@ impl Drop for WorkerLane {
     fn drop(&mut self) {
         let _ = self.supervisor.stop(WORKER_SESSION, false);
     }
+}
+
+fn retain_empty_provider_store_for_recovery(lane: &WorkerLane) -> PathBuf {
+    let config_path = lane
+        .directories()
+        .data_directory
+        .join("managed-session.json");
+    let config: Value = serde_json::from_slice(&fs::read(&config_path).expect("managed config"))
+        .expect("managed config JSON");
+    drop(
+        winwincode_provider::DeviceProviderStore::open(Path::new(
+            config["providerDirectory"].as_str().expect("Provider path"),
+        ))
+        .expect("the original instance has a real empty Provider store"),
+    );
+    config_path
 }
 
 fn grant(client_instance_id: &str, lease: &str, token: u64) -> WorkerLaunchGrant {
@@ -826,6 +850,7 @@ fn daemon_and_supervisor_restart_recover_stop_after_fencing_changes() {
     });
     wait_for_ready_marker(&lane.directories().data_directory);
 
+    let original_config = retain_empty_provider_store_for_recovery(&lane);
     let intent = WorkerStopIntentRecord {
         command_message_id: "srv-stop-recovery".to_owned(),
         idempotency_key: "srv-stop-recovery-key".to_owned(),
@@ -875,6 +900,11 @@ fn daemon_and_supervisor_restart_recover_stop_after_fencing_changes() {
         1
     );
     drive_until(&mut restarted, settled);
+    assert_eq!(
+        fs::read_to_string(original_config.with_extension("json.recovery-request"))
+            .expect("the stopped instance receives the one-shot recovery request"),
+        original_config.to_str().expect("config path")
+    );
     assert_eq!(
         restarted_lane
             .supervisor

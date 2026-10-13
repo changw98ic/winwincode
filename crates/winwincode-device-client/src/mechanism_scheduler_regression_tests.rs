@@ -650,24 +650,15 @@ fn indexed_worker_record(root: &Path, session: &str, state: &str) -> WorkerProce
 }
 
 #[test]
-fn indexed_worker_report_migration_reopens_and_enqueue_mark_preserves_new_state() {
-    let root = root("report-migration");
+fn indexed_worker_reports_reopen_and_enqueue_mark_preserves_new_state() {
+    let root = root("report-reopen");
     let mut store = mirrored_store(&root);
     let original = indexed_worker_record(&root, "wsn_fixture", "exited");
     store.put_worker_process(&original).unwrap();
     store
         .retain_worker_launch_receipt("grant-old", "wsn_old", "rejected", "key-old", b"{}", STAMP)
         .unwrap();
-    let db = store.database_path().to_owned();
     store.close().unwrap();
-    let conn = rusqlite::Connection::open(&db).unwrap();
-    conn.execute_batch(
-        "DROP TRIGGER worker_report_after_insert; DROP TRIGGER worker_report_after_update;
-        DROP TRIGGER worker_launch_report_after_insert; DROP TABLE worker_report_pending;
-        DROP TABLE worker_launch_report_pending; DROP TABLE worker_report_migration;",
-    )
-    .unwrap();
-    drop(conn);
     let mut store = DeviceStore::open(&root).unwrap();
     assert_eq!(
         store.worker_report_candidates("reconcile", None).unwrap(),
@@ -709,41 +700,50 @@ fn indexed_worker_report_migration_reopens_and_enqueue_mark_preserves_new_state(
 }
 
 #[test]
-fn indexed_worker_report_migration_rolls_back_marker_and_pending_rows_together() {
+fn indexed_worker_report_failure_rolls_back_the_registry_update() {
     let root = root("report-rollback");
     let mut store = mirrored_store(&root);
-    let record = indexed_worker_record(&root, "wsn_rollback", "exited");
+    let record = indexed_worker_record(&root, "wsn_rollback", "running");
     store.put_worker_process(&record).unwrap();
-    let db = store.database_path().to_owned();
-    store.close().unwrap();
-    let conn = rusqlite::Connection::open(&db).unwrap();
-    conn.execute_batch("DELETE FROM worker_report_pending; DELETE FROM worker_report_migration;
-        CREATE TRIGGER fail_report_migration BEFORE INSERT ON worker_report_migration BEGIN SELECT RAISE(ABORT,'owned migration fault'); END;").unwrap();
-    assert!(DeviceStore::open(&root).is_err());
+    store.worker_report_queued("reconcile", &record).unwrap();
+    let connection = rusqlite::Connection::open(store.database_path()).unwrap();
+    connection.execute_batch("CREATE TRIGGER fail_report_pending BEFORE INSERT ON worker_report_pending BEGIN SELECT RAISE(ABORT,'report pending unavailable'); END;").unwrap();
+    let mut terminal = record.clone();
+    terminal.state = "exited".into();
+    terminal.exit_code = Some(0);
+    assert!(store.put_worker_process(&terminal).is_err());
     assert_eq!(
-        conn.query_row("SELECT count(*) FROM worker_report_pending", [], |row| row
-            .get::<_, i64>(
-            0
-        ))
-        .unwrap(),
-        0
+        store.worker_process(&record.worker_session_id).unwrap(),
+        Some(record.clone())
+    );
+    assert!(
+        store
+            .worker_report_candidates("exit", None)
+            .unwrap()
+            .is_empty()
     );
     assert_eq!(
-        conn.query_row("SELECT count(*) FROM worker_report_migration", [], |row| {
-            row.get::<_, i64>(0)
-        })
-        .unwrap(),
-        0
-    );
-    conn.execute_batch("DROP TRIGGER fail_report_migration;")
-        .unwrap();
-    drop(conn);
-    let store = DeviceStore::open(&root).unwrap();
-    assert_eq!(
-        store.worker_report_candidates("exit", None).unwrap(),
+        store.worker_report_candidates("reconcile", None).unwrap(),
         vec![record]
     );
+    assert_eq!(
+        connection
+            .query_row("SELECT COUNT(*) FROM worker_report_pending", [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .unwrap(),
+        0
+    );
+    connection
+        .execute_batch("DROP TRIGGER fail_report_pending;")
+        .unwrap();
+    store.put_worker_process(&terminal).unwrap();
+    assert_eq!(
+        store.worker_report_candidates("exit", None).unwrap(),
+        vec![terminal]
+    );
     store.close().unwrap();
+    drop(connection);
     fs::remove_dir_all(root).unwrap();
 }
 

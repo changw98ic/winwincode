@@ -619,7 +619,7 @@ impl CodexCoreAdapter for ScriptedStageProductAdapter {
                     ))))
                 })
                 .collect();
-            polls.push_back(Ok(CodexPoll::Completed(CodexTurnCompletion {
+            polls.push_back(Ok(CodexPoll::terminal(winwincode_codex::CodexExecutionOutcome::Completed(CodexTurnCompletion {
                 summary: secret_safe_runtime_summary("scripted stage product completed")
                     .map_err(|_| ())?,
                 artifacts: Vec::new(),
@@ -632,7 +632,7 @@ impl CodexCoreAdapter for ScriptedStageProductAdapter {
                         cost_microunits: Some(29),
                     },
                 ),
-            })));
+            }), Vec::new())));
             self.state
                 .lock()
                 .expect("adapter state")
@@ -660,9 +660,12 @@ impl CodexCoreAdapter for ScriptedStageProductAdapter {
                 if run.cancel_requested {
                     run.cancel_requested = false;
                     run.polls.clear();
-                    Ok(CodexPoll::Cancelled(
-                        secret_safe_runtime_summary("scripted stage product cancelled")
-                            .expect("cancel summary"),
+                    Ok(CodexPoll::terminal(
+                        winwincode_codex::CodexExecutionOutcome::Cancelled(
+                            secret_safe_runtime_summary("scripted stage product cancelled")
+                                .expect("cancel summary"),
+                        ),
+                        Vec::new(),
                     ))
                 } else {
                     run.polls.pop_front().unwrap_or(Ok(CodexPoll::Pending))

@@ -13255,6 +13255,7 @@ dependencies = [
  "codex-protocol",
  "codex-skills-extension",
  "futures",
+ "http 1.4.0",
  "rusqlite",
  "serde",
  "serde_json",

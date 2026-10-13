@@ -42,6 +42,7 @@ pub(crate) struct ExecutionFacts {
     owner: ToolFactOwner,
     pub(super) store: OnceCell<Arc<StateRuntime>>,
     pub(super) owner_id: OnceLock<String>,
+    owner_lock: OnceCell<std::fs::File>,
     cells: Mutex<HashMap<String, (String, String)>>,
     pub(super) active_requests: Mutex<HashSet<i64>>,
 }
@@ -168,6 +169,13 @@ impl ToolFactRecord {
             .await
             .map_err(storage_error)?
             .clone();
+        service.owner_lock.get_or_try_init(|| async {
+            let thread = invocation.session.thread_id.to_string();
+            let lock = store.try_tool_owner_lock(&thread).map_err(storage_error)?.ok_or_else(|| FunctionCallError::RespondToModel(
+                serde_json::json!({"schema_version":1,"state":"execution_owner_unverified"}).to_string()))?;
+            store.fail_pending_tool_calls(&thread,None).await.map_err(storage_error)?;
+            Ok::<_,FunctionCallError>(lock)
+        }).await?;
         let (logical_id, cell_id, parent_call_id, scope_id, source) = match &invocation.source {
             ToolCallSource::Direct => (
                 direct_identity(invocation),
@@ -212,7 +220,7 @@ impl ToolFactRecord {
             source: source.into(),
             binding: digest(payload_value(&invocation.payload)),
         };
-        match store.observe_tool_request(&request).await.map_err(storage_error)? {
+        match store.observe_tool_request(&request, &owner_id, &payload_value(&invocation.payload).to_string()).await.map_err(storage_error)? {
             ToolRequestObservation::New(fact) => Ok(ToolFactAdmission::New(Self {
                 writer,
                 service: service.clone(),
@@ -235,10 +243,10 @@ impl ToolFactRecord {
         }
     }
 
-    pub(super) async fn deny(&self) -> Result<(), FunctionCallError> {
+    pub(super) async fn deny(&self, result: &str) -> Result<(), FunctionCallError> {
         self.settled.store(true, Ordering::Release);
         self.store
-            .deny_tool_request(self.sequence)
+            .deny_tool_request(self.sequence, result)
             .await
             .map_err(storage_error)
     }
@@ -288,21 +296,34 @@ impl ToolFactRecord {
     }
 
     pub(super) async fn completed(&self, encoded: Option<String>) -> Result<(), FunctionCallError> {
-        if self.shared.load(Ordering::Acquire) || self.completed.load(Ordering::Acquire) {
-            return Ok(());
-        }
         let execution = if encoded.is_some() {
             ToolExecutionStatus::Completed
         } else {
             ToolExecutionStatus::Uncertain
         };
+        self.record_completion(execution, encoded.as_deref()).await
+    }
+
+    pub(super) async fn failed(&self, body: &str) -> Result<(), FunctionCallError> {
+        self.record_completion(ToolExecutionStatus::Uncertain, Some(body))
+            .await
+    }
+
+    async fn record_completion(
+        &self,
+        execution: ToolExecutionStatus,
+        body: Option<&str>,
+    ) -> Result<(), FunctionCallError> {
+        if self.shared.load(Ordering::Acquire) || self.completed.load(Ordering::Acquire) {
+            return Ok(());
+        }
         self.store
             .complete_tool_attempt(
                 self.sequence,
                 &self.attempt_id,
                 &self.owner_id,
                 execution,
-                encoded.as_deref(),
+                body,
             )
             .await
             .map_err(storage_error)?;
@@ -458,7 +479,9 @@ pub(super) fn digest(mut value: serde_json::Value) -> String {
 
 pub(super) fn storage_error(error: impl std::fmt::Display) -> FunctionCallError {
     tracing::warn!(%error, "tool execution fact storage failed");
-    FunctionCallError::RespondToModel(
+    // Required facts are an execution precondition. Model feedback cannot
+    // repair storage or safely authorize another attempt after this failure.
+    FunctionCallError::Fatal(
         "tool_fact_store_unavailable: execution and recovery require durable Core facts".into(),
     )
 }

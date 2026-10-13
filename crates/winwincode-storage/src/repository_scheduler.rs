@@ -240,9 +240,37 @@ impl<'storage> RepositoryScheduler<'storage> {
         Ok(Self { storage })
     }
 
+    /// Reads the original scheduler-owned cancellation without hydration or writes.
+    /// Rejects malformed identity, corrupt original receipts or storage failures.
+    pub fn load_cancellation_receipt(
+        &self,
+        scope: &RepositorySchedulerScope,
+        request_id: &RequestId,
+    ) -> Result<Option<RepositorySchedulerCancellationReceipt>, StorageError> {
+        validate_scope(scope)?;
+        validate_id(&request_id.0, "req_", "requestId")?;
+        load_cancel_receipt_by_request(
+            self.storage.connection()?,
+            &repository_scope_key(scope),
+            request_id,
+        )
+    }
+
     pub fn claim_next(
         &mut self,
         request: &RepositorySchedulerClaimRequest,
+    ) -> Result<Option<RepositorySchedulerClaimReceipt>, StorageError> {
+        self.claim_next_with_capacity(request, true)
+    }
+
+    /// Reoffers original same-instance dispatches even when no new slot is available.
+    /// `new_claim_allowed` is a current capacity/admission observation, not request input.
+    /// It gates fresh claims and replacement attempts, never existing receipt replay.
+    /// Applies the same durable request, authority and storage checks as [`Self::claim_next`].
+    pub fn claim_next_with_capacity(
+        &mut self,
+        request: &RepositorySchedulerClaimRequest,
+        new_claim_allowed: bool,
     ) -> Result<Option<RepositorySchedulerClaimReceipt>, StorageError> {
         validate_claim_request(request)?;
         let scope_key = repository_scope_key(&request.scope);
@@ -268,6 +296,10 @@ impl<'storage> RepositoryScheduler<'storage> {
 
         let selected = match recover_active_job(&transaction, request, &scope_key)? {
             Some(ActiveJobRecovery::Wait) => {
+                transaction.commit().map_err(sql_error)?;
+                return Ok(None);
+            }
+            Some(ActiveJobRecovery::Replace { .. }) | None if !new_claim_allowed => {
                 transaction.commit().map_err(sql_error)?;
                 return Ok(None);
             }
@@ -344,6 +376,7 @@ impl<'storage> RepositoryScheduler<'storage> {
                 "repository scheduler retry requires an uncancelled failed Job",
             ));
         }
+        require_accepted_outcome_cleanup(&transaction, &current)?;
         let decision = scheduler_retry_decision(
             &current,
             request.retryable_failure,
@@ -693,35 +726,60 @@ impl<'storage> RepositoryScheduler<'storage> {
             .connection_mut()?
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(sql_error)?;
-        let current = load_repository_job(&transaction, &request.scope, &request.terminal.job_id)?;
-        let target = terminal_queue_state(request.terminal.outcome);
-        let (from, expected_revision) = terminal_transition_authority(
-            &transaction,
-            &current,
-            &request.terminal.request_id,
-            target,
-        )?;
-        let queue_receipt = transition_execution_job_in_transaction(
-            &transaction,
-            &ExecutionJobTransitionRequest {
-                scope: current.scope,
-                job_id: request.terminal.job_id.clone(),
-                request_id: request.terminal.request_id.clone(),
-                expected_revision,
-                from,
-                to: target,
-                occurred_at: request.terminal.terminal_at.clone(),
-            },
-        )?;
-        let lease_inserted =
-            finish_execution_lease_in_transaction(&transaction, &request.terminal)?;
+        let receipt = settle_terminal_in_transaction(&transaction, request)?;
         transaction.commit().map_err(sql_error)?;
-        Ok(RepositorySchedulerTerminalReceipt {
-            job: queue_receipt.job,
-            lease_inserted,
-            replayed: queue_receipt.replayed,
-        })
+        Ok(receipt)
     }
+}
+
+fn require_accepted_outcome_cleanup(
+    connection: &Connection,
+    current: &ExecutionJobRecord,
+) -> Result<(), StorageError> {
+    let stream = format!("execution-outcome:{}:{}", current.job_id.0, current.attempt);
+    let Some(accepted) = crate::load_state_from_connection(connection, &stream)? else {
+        // Dispatch rejection and scheduler-only failures have no accepted outcome.
+        return Ok(());
+    };
+    match accepted.revision {
+        1 => Err(StorageError::invalid_input(
+            "accepted execution outcome cleanup is still pending",
+        )),
+        2 => Ok(()),
+        _ => Err(StorageError::adapter(
+            "accepted execution outcome acknowledgement revision is invalid",
+        )),
+    }
+}
+
+/// Shares the existing queue/Registry terminal transaction with product acceptance.
+pub(crate) fn settle_terminal_in_transaction(
+    transaction: &rusqlite::Transaction<'_>,
+    request: &RepositorySchedulerTerminalRequest,
+) -> Result<RepositorySchedulerTerminalReceipt, StorageError> {
+    validate_scope(&request.scope)?;
+    let current = load_repository_job(transaction, &request.scope, &request.terminal.job_id)?;
+    let target = terminal_queue_state(request.terminal.outcome);
+    let (from, expected_revision) =
+        terminal_transition_authority(transaction, &current, &request.terminal.request_id, target)?;
+    let queue_receipt = transition_execution_job_in_transaction(
+        transaction,
+        &ExecutionJobTransitionRequest {
+            scope: current.scope,
+            job_id: request.terminal.job_id.clone(),
+            request_id: request.terminal.request_id.clone(),
+            expected_revision,
+            from,
+            to: target,
+            occurred_at: request.terminal.terminal_at.clone(),
+        },
+    )?;
+    let lease_inserted = finish_execution_lease_in_transaction(transaction, &request.terminal)?;
+    Ok(RepositorySchedulerTerminalReceipt {
+        job: queue_receipt.job,
+        lease_inserted,
+        replayed: queue_receipt.replayed,
+    })
 }
 
 fn load_repository_job(

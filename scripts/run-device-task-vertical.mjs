@@ -15,7 +15,7 @@ import { exportDeviceCandidate, exportDeviceExecutionReceipts, readDeviceExecuti
   readDevicePendingApprovalIds } from './export-device-candidate.mjs'
 import { deviceFailureWithModelCauses } from './device-model-failures.mjs'
 import { installDevicePublicSmoke, removeDevicePublicSmoke, resolveDeviceTaskApprovals,
-  seedDeviceLocalProvider, stopUnusedDeviceTaskAnchor } from './device-production-fixture.mjs'
+  seedDeviceLocalProvider, stopUnusedDeviceTaskAnchor, pendingDeviceTaskWorkRuns } from './device-production-fixture.mjs'
 import { acquireDeviceTaskSupervisor } from './device-task-supervisor.mjs'
 import { BenchmarkError, validateBenchmarkConfiguration } from './run-real-task-benchmark.mjs'
 
@@ -320,23 +320,6 @@ export function bindSharedDeviceTaskDirectory(directory, runtime) {
   const bytes = `${JSON.stringify(binding, null, 2)}\n`
   if (existsSync(path)) assert.equal(readFileSync(path, 'utf8'), bytes)
   else writeFileSync(path, bytes, { flag: 'wx', mode: 0o600 })
-}
-
-export function pendingDeviceTaskWorkRuns(directory, deliveryId) {
-  const path = join(directory, 'server-data', 'control-plane.sqlite3')
-  if (!existsSync(path)) return []
-  const database = new DatabaseSync(path, { readOnly: true })
-  try {
-    database.exec('PRAGMA busy_timeout = 5000')
-    return database.prepare(`SELECT work_run_id, dispatch_payload FROM scheduler_execution_jobs
-      WHERE delivery_id = ? AND state = 'queued' ORDER BY submitted_at, job_id`).all(deliveryId).map(row => {
-      const job = JSON.parse(Buffer.from(row.dispatch_payload).toString('utf8'))
-      assert.equal(job.scope.kind, 'work-run')
-      assert.equal(job.scope.workRunId, row.work_run_id)
-      assert.match(row.work_run_id, /^wrn_[0-9A-HJKMNP-TV-Z]{26}$/u)
-      return row.work_run_id
-    })
-  } finally { database.close() }
 }
 
 

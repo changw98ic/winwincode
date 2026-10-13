@@ -32,7 +32,10 @@ async fn sharing_keeps_independent_disposition_delivery_and_cancellation_without
             source: "model".into(),
             binding: logical.into(),
         };
-        let ToolRequestObservation::New(fact) = store.observe_tool_request(&request).await.unwrap()
+        let ToolRequestObservation::New(fact) = store
+            .observe_tool_request(&request, "test-owner", "{}")
+            .await
+            .unwrap()
         else {
             panic!("new request")
         };
@@ -143,4 +146,116 @@ async fn sharing_keeps_independent_disposition_delivery_and_cancellation_without
             .disposition,
         ToolOutputDisposition::Accepted
     );
+    store.forget_tool_results(ids[0]).await.unwrap();
+    assert!(
+        store
+            .read_shared_tool_output(ids[0])
+            .await
+            .unwrap()
+            .is_none()
+    );
+    let pair = sqlx::query(
+        "SELECT original_input,call_result,call_status FROM tool_requests WHERE sequence=?",
+    )
+    .bind(ids[0])
+    .fetch_one(store.pool.as_ref())
+    .await
+    .unwrap();
+    assert!(pair.get::<Option<String>, _>("original_input").is_none());
+    assert!(pair.get::<Option<String>, _>("call_result").is_none());
+    assert_eq!(pair.get::<String, _>("call_status"), "forgotten");
+}
+
+#[tokio::test]
+async fn abandoned_shared_call_keeps_source_result_and_rejects_late_output() {
+    let home = crate::runtime::test_support::unique_temp_dir();
+    let store = StateRuntime::init(
+        crate::SqliteConfig::new_for_testing(home.as_path().abs()),
+        "test".into(),
+    )
+    .await
+    .unwrap();
+    let source = attempt(&store, "actual", snapshot("a"), Some("a")).await;
+    let request = ToolRequestIdentity {
+        thread_id: "thread".into(),
+        logical_id: "shared".into(),
+        turn_id: "turn".into(),
+        scope_id: "scope".into(),
+        cell_id: None,
+        parent_call_id: None,
+        tool_name: "smoke".into(),
+        source: "model".into(),
+        binding: "shared".into(),
+    };
+    let ToolRequestObservation::New(fact) = store
+        .observe_tool_request(&request, "old-owner", "original shared request")
+        .await
+        .unwrap()
+    else {
+        panic!("new request")
+    };
+    store
+        .link_tool_sharing(&ToolSharingFact {
+            schema_version: 1,
+            thread_id: "thread".into(),
+            request_sequence: fact.request_sequence,
+            source_request_sequence: source,
+            source_attempt_id: "actual".into(),
+            operation_digest: "a".repeat(64),
+            snapshot: snapshot("a"),
+            kind: ToolSharingKind::Reuse,
+            disposition: ToolOutputDisposition::Pending,
+            delivery: ToolOutputDelivery::Pending,
+            cancelled: false,
+        })
+        .await
+        .unwrap();
+    assert_eq!(store.recover_abandoned_tool_calls().await.unwrap(), 1);
+    let shared = store
+        .tool_sharing_fact(fact.request_sequence)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(shared.disposition, ToolOutputDisposition::Rejected);
+    assert!(
+        store
+            .decide_shared_tool_output(
+                fact.request_sequence,
+                ToolOutputDisposition::Accepted,
+                "late output"
+            )
+            .await
+            .is_err()
+    );
+    assert!(
+        store
+            .read_shared_tool_output(fact.request_sequence)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(
+        store
+            .tool_execution_fact(source)
+            .await
+            .unwrap()
+            .attempt
+            .unwrap()
+            .disposition,
+        ToolOutputDisposition::Accepted
+    );
+    assert_eq!(store.recover_abandoned_tool_calls().await.unwrap(), 0);
+    let row = sqlx::query(
+        "SELECT original_input,call_status,call_result FROM tool_requests WHERE sequence=?",
+    )
+    .bind(fact.request_sequence)
+    .fetch_one(store.pool.as_ref())
+    .await
+    .unwrap();
+    assert_eq!(
+        row.get::<String, _>("original_input"),
+        "original shared request"
+    );
+    assert_eq!(row.get::<String, _>("call_status"), "failed");
+    assert!(row.get::<String, _>("call_result").contains("interrupted"));
 }

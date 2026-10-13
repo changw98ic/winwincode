@@ -39,7 +39,10 @@ pub(super) async fn attempt(
         source: "code_mode".into(),
         binding: "binding".into(),
     };
-    let ToolRequestObservation::New(fact) = store.observe_tool_request(&request).await.unwrap()
+    let ToolRequestObservation::New(fact) = store
+        .observe_tool_request(&request, "test-owner", "{}")
+        .await
+        .unwrap()
     else {
         panic!("new request")
     };

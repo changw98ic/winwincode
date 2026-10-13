@@ -59,10 +59,6 @@ test('server backup covers the sidecar layout dynamically and gates the product 
   )
   assert.match(
     backupModule,
-    /const SERVER_CONTROL_PLANE_MIGRATABLE_VERSIONS: \[i64; 5\] = \[1, 2, 3, 4, 5\];/,
-  )
-  assert.match(
-    backupModule,
     /winwincode_device_client::CLIENT_STORE_SCHEMA_VERSION/,
   )
 })
@@ -84,25 +80,11 @@ test('schema version constants stay locked to the canonical storage sources', ()
     'backup server version must match winwincode-storage SCHEMA_VERSION',
   )
 
-  const storageSupported = storageLib.match(
-    /if !matches!\(version, (0 \| [0-9 | ]+) \| SCHEMA_VERSION\)/,
+  assert.match(
+    backupModule,
+    /CONTROL_PLANE_DATABASE => Some\(vec!\[SERVER_CONTROL_PLANE_SCHEMA_VERSION\]\),/,
+    'restore accepts the current canonical Server schema',
   )
-  assert.ok(storageSupported, 'storage supported migration set found')
-  for (const version of storageSupported[1].split('|').map((value) => value.trim())) {
-    if (version === '0') {
-      assert.doesNotMatch(
-        backupModule,
-        /MIGRATABLE_VERSIONS: \[i64; \d+\] = \[0,/,
-        'restore must not accept an empty v0 product database',
-      )
-      continue
-    }
-    assert.match(
-      backupModule,
-      new RegExp(`const SERVER_CONTROL_PLANE_MIGRATABLE_VERSIONS: \\[i64; \\d+\\] = \\[.*\\b${version}\\b`),
-      `storage-migratable version ${version} stays accepted by restore`,
-    )
-  }
 
   const declaredDevice = backupModule.match(/CLIENT_STORE_SCHEMA_VERSION/)
   assert.ok(declaredDevice, 'device gate uses the canonical constant')

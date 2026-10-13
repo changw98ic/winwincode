@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, VecDeque};
 use std::fmt;
 #[cfg(unix)]
 use std::os::unix::fs::MetadataExt;
@@ -10,7 +10,7 @@ use std::sync::{Arc, Mutex, RwLock};
 use futures::future::BoxFuture;
 use sha2::{Digest, Sha256};
 use tokio::sync::oneshot;
-use winwincode_domain::{ExecutionMessageId, Instant, RequestId, Sha256Digest};
+use winwincode_domain::{ExecutionMessageId, Instant, RequestId};
 use winwincode_execution_port::{
     action_enforcement::{
         ActionEnforcementSigningKey, ActionEnforcementVerifier, ActionReceiptClaim,
@@ -31,10 +31,12 @@ use winwincode_kernel::{
 
 use crate::{
     ActionRequestTransport,
-    authority_clock::{AuthorityClock, AuthorityClockError, canonical_instant},
-    model_bridge::{ModelRunBinding, extend_binding_lineage},
+    authority_clock::canonical_instant,
+    model_bridge::{BridgeError, ModelRunBinding, SharedAuthoritySource},
 };
 
+#[path = "action_authority_diagnostics.rs"]
+mod action_authority_diagnostics;
 #[path = "result_read.rs"]
 mod result_read;
 
@@ -54,15 +56,15 @@ pub(super) struct ActionGateState {
     envelope: ExecutionEnvelopeToken,
     verifier: ActionEnforcementVerifier,
     receipt_store: Mutex<FileActionReceiptUseStore>,
-    bindings: RwLock<HashMap<String, ModelRunBinding>>,
+    authority: SharedAuthoritySource,
     pub(super) read_only_runs: RwLock<HashMap<String, PathBuf>>,
     trusted_read_programs: HashMap<String, TrustedReadProgram>,
     session_generations: Mutex<HashMap<String, u64>>,
-    authority_clock: AuthorityClock,
     pending: Mutex<HashMap<String, PendingAction>>,
     completed: Mutex<HashMap<String, CompletedAction>>,
     messages: Mutex<VecDeque<ExecutionPortMessage>>,
     request_transport: Mutex<Option<ActionRequestTransport>>,
+    authority_diagnostics: Mutex<action_authority_diagnostics::ActionAuthorityDiagnostics>,
 }
 
 struct PendingAction {
@@ -107,7 +109,7 @@ struct ExecutableIdentity {
 
 #[derive(Clone)]
 struct CompletedAction {
-    receipt_signature: Sha256Digest,
+    receipt: ActionEnforcementReceiptMessage,
     permitted: bool,
     session_id: String,
     generation: u64,
@@ -119,6 +121,7 @@ impl ExecutionPortActionGate {
         catalog: WorkerCapabilityCatalog,
         envelope: ExecutionEnvelopeToken,
         signing_key: ActionEnforcementSigningKey,
+        authority: SharedAuthoritySource,
     ) -> Result<Self, ActionBridgeError> {
         let receipt_store = FileActionReceiptUseStore::open(worker_data_root)
             .map_err(|_| ActionBridgeError::Unavailable)?;
@@ -129,17 +132,21 @@ impl ExecutionPortActionGate {
                 envelope,
                 verifier: signing_key.into_verifier(),
                 receipt_store: Mutex::new(receipt_store),
-                bindings: RwLock::new(HashMap::new()),
+                authority,
                 read_only_runs: RwLock::new(HashMap::new()),
                 trusted_read_programs: resolve_trusted_read_programs(),
                 session_generations: Mutex::new(HashMap::new()),
-                authority_clock: AuthorityClock::default(),
                 pending: Mutex::new(HashMap::new()),
                 completed: Mutex::new(HashMap::new()),
                 messages: Mutex::new(VecDeque::new()),
                 request_transport: Mutex::new(None),
+                authority_diagnostics: Mutex::default(),
             }),
         })
+    }
+
+    pub(crate) fn uses_authority(&self, authority: &SharedAuthoritySource) -> bool {
+        Arc::ptr_eq(&self.state.authority.bindings, &authority.bindings)
     }
 
     pub(crate) fn install_tool_dependencies(
@@ -175,14 +182,12 @@ impl ExecutionPortActionGate {
         }
     }
 
-    pub(crate) fn install_binding(
+    pub(crate) fn configure_run(
         &self,
-        binding: ModelRunBinding,
+        binding: &ModelRunBinding,
         read_only_workspace: Option<&Path>,
     ) -> Result<(), ActionBridgeError> {
-        let run_key = binding.run_key.clone();
-        self.install_binding_mode(binding, true)?;
-        let mut read_only_runs = self
+        let mut runs = self
             .state
             .read_only_runs
             .write()
@@ -190,13 +195,24 @@ impl ExecutionPortActionGate {
         if let Some(workspace) = read_only_workspace {
             let workspace =
                 std::fs::canonicalize(workspace).map_err(|_| ActionBridgeError::Unavailable)?;
-            read_only_runs.insert(run_key, workspace);
+            runs.insert(binding.run_key.clone(), workspace);
         } else {
-            read_only_runs.remove(&run_key);
+            runs.remove(&binding.run_key);
         }
         Ok(())
     }
 
+    #[cfg(test)]
+    pub(crate) fn install_binding(
+        &self,
+        binding: &ModelRunBinding,
+        read_only_workspace: Option<&Path>,
+    ) -> Result<(), ActionBridgeError> {
+        self.install_binding_mode(binding.clone(), true)?;
+        self.configure_run(binding, read_only_workspace)
+    }
+
+    #[cfg(test)]
     pub(crate) fn install_child_binding(
         &self,
         binding: ModelRunBinding,
@@ -204,79 +220,19 @@ impl ExecutionPortActionGate {
         self.install_binding_mode(binding, false)
     }
 
+    #[cfg(test)]
     fn install_binding_mode(
         &self,
         binding: ModelRunBinding,
-        replace_fenced_run: bool,
+        replace: bool,
     ) -> Result<(), ActionBridgeError> {
-        let kernel_session_id = binding.kernel_session_id.clone();
-        let thread_id = binding.canonical_thread_id.0.clone();
-        let stale_session_ids = {
-            let mut bindings = self
-                .state
-                .bindings
-                .write()
-                .map_err(|_| ActionBridgeError::Unavailable)?;
-            if replace_fenced_run && extend_binding_lineage(&mut bindings, &binding) {
-                return Ok(());
-            }
-            let fence_lineage = replace_fenced_run
-                && !bindings
-                    .get(&thread_id)
-                    .is_some_and(|existing| same_binding(existing, &binding));
-            for alias in [&kernel_session_id, &thread_id] {
-                if bindings.get(alias).is_some_and(|existing| {
-                    !same_binding(existing, &binding)
-                        && (!fence_lineage
-                            || existing.authority.lease.job_id != binding.authority.lease.job_id)
-                }) {
-                    return Err(ActionBridgeError::Conflict);
-                }
-            }
-            let stale_session_ids = bindings
-                .values()
-                .filter(|existing| {
-                    replace_fenced_run
-                        && existing.authority.lease.job_id == binding.authority.lease.job_id
-                        && !same_binding(existing, &binding)
-                        && (!fence_lineage
-                            || existing.run_key != binding.run_key
-                            || existing.canonical_thread_id == binding.canonical_thread_id)
-                })
-                .flat_map(|existing| {
-                    [
-                        existing.kernel_session_id.clone(),
-                        existing.canonical_thread_id.0.clone(),
-                    ]
-                })
-                .collect::<HashSet<_>>();
-            if fence_lineage {
-                bindings.retain(|_, existing| {
-                    existing.authority.lease.job_id != binding.authority.lease.job_id
-                        || same_binding(existing, &binding)
-                });
-            } else {
-                bindings.retain(|_, existing| {
-                    existing.authority.lease.job_id != binding.authority.lease.job_id
-                        || (existing.run_key == binding.run_key
-                            && existing.canonical_thread_id != binding.canonical_thread_id)
-                        || same_binding(existing, &binding)
-                });
-            }
-            bindings.insert(binding.kernel_session_id.clone(), binding.clone());
-            bindings.insert(binding.canonical_thread_id.0.clone(), binding);
-            stale_session_ids
-        };
-        let mut generations = self
+        let stale = self
             .state
-            .session_generations
-            .lock()
-            .map_err(|_| ActionBridgeError::Unavailable)?;
-        generations.entry(kernel_session_id).or_insert(0);
-        generations.entry(thread_id).or_insert(0);
-        drop(generations);
-        for session_id in stale_session_ids {
-            self.cancel_session(&session_id)?;
+            .authority
+            .install_run_binding(binding, replace)
+            .map_err(authority_error)?;
+        for alias in stale {
+            self.cancel_session(&alias)?;
         }
         Ok(())
     }
@@ -285,25 +241,11 @@ impl ExecutionPortActionGate {
         &self,
         binding: &ModelRunBinding,
     ) -> Result<(), ActionBridgeError> {
-        let session_ids = {
-            let mut bindings = self
-                .state
-                .bindings
-                .write()
-                .map_err(|_| ActionBridgeError::Unavailable)?;
-            let session_ids = bindings
-                .values()
-                .filter(|candidate| candidate.run_key == binding.run_key)
-                .flat_map(|candidate| {
-                    [
-                        candidate.kernel_session_id.clone(),
-                        candidate.canonical_thread_id.0.clone(),
-                    ]
-                })
-                .collect::<HashSet<_>>();
-            bindings.retain(|_, candidate| candidate.run_key != binding.run_key);
-            session_ids
-        };
+        let session_ids = self
+            .state
+            .authority
+            .detach_run(&binding.run_key)
+            .map_err(authority_error)?;
         for session_id in session_ids {
             self.cancel_session(&session_id)?;
         }
@@ -321,7 +263,10 @@ impl ExecutionPortActionGate {
     }
 
     pub(crate) fn update_now(&self, now: &Instant) -> Result<(), ActionBridgeError> {
-        self.state.authority_clock.observe(now).map_err(clock_error)
+        self.state
+            .authority
+            .update_now(now)
+            .map_err(authority_error)
     }
 
     pub(crate) fn accept_receipt(
@@ -337,25 +282,76 @@ impl ExecutionPortActionGate {
         self.validate_receipt(&action, &session_id, receipt, received_at)?;
         let (pending, generation) =
             self.take_pending_for_receipt(receipt, &session_id, pending_generation, received_at)?;
-        if receipt.decision != ActionEnforcementDecision::Permit {
-            let _ = pending.response.send(Err(ActionBridgeError::Rejected));
-            self.remember_completed(receipt, false, &session_id, generation)?;
-            return Ok(());
-        }
         let claim = self
             .state
             .receipt_store
             .lock()
-            .map_err(|_| ActionBridgeError::Unavailable)?
-            .claim(receipt)
-            .map_err(|_| ActionBridgeError::Unavailable)?;
-        let outcome = match claim {
-            ActionReceiptClaim::Fresh => Ok(()),
-            ActionReceiptClaim::AlreadyConsumed => Err(ActionBridgeError::Consumed),
+            .map_err(|_| ActionBridgeError::Unavailable)
+            .and_then(|mut store| {
+                store
+                    .claim(receipt)
+                    .map_err(|_| ActionBridgeError::Unavailable)
+            });
+        let claim = match claim {
+            Ok(claim) => claim,
+            Err(error) => {
+                let _ = pending.response.send(Err(error));
+                return Err(error);
+            }
         };
-        self.remember_completed(receipt, outcome.is_ok(), &session_id, generation)?;
+        let outcome = match (claim, &receipt.decision) {
+            (ActionReceiptClaim::Fresh, ActionEnforcementDecision::Permit) => Ok(()),
+            (ActionReceiptClaim::Fresh, ActionEnforcementDecision::Reject) => {
+                Err(ActionBridgeError::Rejected)
+            }
+            (ActionReceiptClaim::AlreadyConsumed, _) => Err(ActionBridgeError::Consumed),
+        };
+        if let Err(error) =
+            self.remember_completed(receipt, outcome.is_ok(), &session_id, generation)
+        {
+            let _ = pending.response.send(Err(error));
+            return Err(error);
+        }
         let _ = pending.response.send(outcome);
-        outcome
+        // A verified rejection consumes the decision for transport while
+        // preserving Core's denied authorization result.
+        match outcome {
+            Err(ActionBridgeError::Rejected) => Ok(()),
+            result => result,
+        }
+    }
+
+    /// Closes the claim-to-outbox crash window without claiming again or
+    /// authorizing a reconstructed Core waiter.
+    pub(crate) fn has_consumed_receipt(
+        &self,
+        receipt: &ActionEnforcementReceiptMessage,
+    ) -> Result<bool, ActionBridgeError> {
+        let consumed = self
+            .state
+            .receipt_store
+            .lock()
+            .map_err(|_| ActionBridgeError::Unavailable)?
+            .has_consumed(receipt)
+            .map_err(|_| ActionBridgeError::Unavailable)?;
+        if !consumed {
+            return Ok(false);
+        }
+        self.state
+            .verifier
+            .verify_signature(receipt)
+            .map_err(|_| ActionBridgeError::Rejected)?;
+        Ok(true)
+    }
+
+    pub(crate) fn verify_receipt_signature(
+        &self,
+        receipt: &ActionEnforcementReceiptMessage,
+    ) -> Result<(), ActionBridgeError> {
+        self.state
+            .verifier
+            .verify_signature(receipt)
+            .map_err(|_| ActionBridgeError::Rejected)
     }
 
     fn pending_receipt_action(
@@ -389,9 +385,7 @@ impl ExecutionPortActionGate {
             .get(&receipt.request_id.0)
             .cloned();
         match completed.as_ref() {
-            Some(completed) if completed.receipt_signature == receipt.receipt_signature => {
-                Err(ActionBridgeError::Consumed)
-            }
+            Some(completed) if completed.receipt == *receipt => Err(ActionBridgeError::Consumed),
             _ => Err(ActionBridgeError::UnknownReceipt),
         }
     }
@@ -405,11 +399,9 @@ impl ExecutionPortActionGate {
     ) -> Result<(), ActionBridgeError> {
         let current_binding = self
             .state
-            .bindings
-            .read()
-            .map_err(|_| ActionBridgeError::Unavailable)?
-            .get(session_id)
-            .cloned();
+            .authority
+            .binding_for_alias(session_id)
+            .map_err(authority_error)?;
         let stale = current_binding.as_ref().is_none_or(|binding| {
             !winwincode_execution_port::execution_identity::retained_lease_matches_current(
                 &action.authority.lease,
@@ -565,7 +557,7 @@ impl ExecutionPortActionGate {
             .insert(
                 receipt.request_id.0.clone(),
                 CompletedAction {
-                    receipt_signature: receipt.receipt_signature.clone(),
+                    receipt: receipt.clone(),
                     permitted,
                     session_id: session_id.to_owned(),
                     generation,
@@ -573,13 +565,6 @@ impl ExecutionPortActionGate {
             );
         Ok(())
     }
-}
-
-fn same_binding(left: &ModelRunBinding, right: &ModelRunBinding) -> bool {
-    left.run_key == right.run_key
-        && left.canonical_thread_id == right.canonical_thread_id
-        && left.kernel_session_id == right.kernel_session_id
-        && left.authority == right.authority
 }
 
 fn reject_pending(state: &ActionGateState, request_id: &str, error: ActionBridgeError) {
@@ -624,10 +609,9 @@ impl KernelActionGate for ExecutionPortActionGate {
         request: winwincode_kernel::KernelToolResultReadRequest,
     ) -> BoxFuture<'static, winwincode_kernel::KernelResult<KernelActionAuthorization>> {
         let state = Arc::clone(&self.state);
-        Box::pin(async move {
-            result_read::authorize(&state, &request)
-                .map_err(|_| winwincode_kernel::KernelFailure::action_rejected())
-        })
+        Box::pin(
+            async move { result_read::authorize(&state, &request).map_err(action_kernel_failure) },
+        )
     }
 
     fn revalidate_result_read(
@@ -637,10 +621,10 @@ impl KernelActionGate for ExecutionPortActionGate {
     ) -> BoxFuture<'static, winwincode_kernel::KernelResult<()>> {
         let state = Arc::clone(&self.state);
         Box::pin(async move {
-            let current = result_read::authorize(&state, &request)
-                .map_err(|_| winwincode_kernel::KernelFailure::action_rejected())?;
+            let current =
+                result_read::authorize(&state, &request).map_err(action_kernel_failure)?;
             if current != authorization {
-                return Err(winwincode_kernel::KernelFailure::action_rejected());
+                return Err(action_kernel_failure(ActionBridgeError::Conflict));
             }
             Ok(())
         })
@@ -654,7 +638,7 @@ impl KernelActionGate for ExecutionPortActionGate {
         Box::pin(async move {
             authorize_action(&state, request)
                 .await
-                .map_err(|_| winwincode_kernel::KernelFailure::action_rejected())
+                .map_err(action_kernel_failure)
         })
     }
 
@@ -665,8 +649,7 @@ impl KernelActionGate for ExecutionPortActionGate {
     ) -> BoxFuture<'static, winwincode_kernel::KernelResult<()>> {
         let state = Arc::clone(&self.state);
         Box::pin(async move {
-            revalidate_action(&state, &request, &authorization)
-                .map_err(|_| winwincode_kernel::KernelFailure::action_rejected())
+            revalidate_action(&state, &request, &authorization).map_err(action_kernel_failure)
         })
     }
 }
@@ -675,7 +658,7 @@ async fn authorize_action(
     state: &Arc<ActionGateState>,
     request: KernelActionRequest,
 ) -> Result<KernelActionAuthorization, ActionBridgeError> {
-    let (binding, now) = current_binding_and_time(state, &request.session_id)?;
+    let (binding, now) = current_action_binding_and_time(state, &request)?;
     if let Some(authorization) = delegated_read_only_authorization(state, &binding, &request)? {
         return Ok(authorization);
     }
@@ -922,25 +905,46 @@ pub(super) fn current_binding_and_time(
     state: &ActionGateState,
     session_id: &str,
 ) -> Result<(ModelRunBinding, Instant), ActionBridgeError> {
+    checked_binding_and_time(state, session_id, None)
+}
+
+fn current_action_binding_and_time(
+    state: &ActionGateState,
+    request: &KernelActionRequest,
+) -> Result<(ModelRunBinding, Instant), ActionBridgeError> {
+    checked_binding_and_time(state, &request.session_id, Some(request))
+}
+
+fn checked_binding_and_time(
+    state: &ActionGateState,
+    session_id: &str,
+    request: Option<&KernelActionRequest>,
+) -> Result<(ModelRunBinding, Instant), ActionBridgeError> {
     let binding = state
-        .bindings
-        .read()
-        .map_err(|_| ActionBridgeError::Unavailable)?
-        .get(session_id)
-        .cloned()
+        .authority
+        .binding_for_alias(session_id)
+        .map_err(authority_error)?
         .ok_or(ActionBridgeError::StaleAuthority)?;
     let now = state
-        .authority_clock
-        .now()
-        .map_err(clock_error)?
+        .authority
+        .observed_now()
+        .map_err(authority_error)?
         .ok_or(ActionBridgeError::StaleAuthority)?;
     if !canonical_instant(&now)
         || !canonical_instant(&binding.authority.lease.issued_at)
         || !canonical_instant(&binding.authority.lease.expires_at)
         || binding.authority.lease.issued_at.0 >= binding.authority.lease.expires_at.0
         || now.0 < binding.authority.lease.issued_at.0
-        || now.0 >= binding.authority.lease.expires_at.0
     {
+        return Err(ActionBridgeError::StaleAuthority);
+    }
+    if now.0 >= binding.authority.lease.expires_at.0 {
+        if let Some(request) = request
+            && let Ok(mut diagnostics) = state.authority_diagnostics.lock()
+            && let Some(facts) = diagnostics.record_expiry(&binding, request, &now)
+        {
+            eprintln!("component=adapter stage=action_authority_rejected facts={facts}");
+        }
         return Err(ActionBridgeError::StaleAuthority);
     }
     Ok((binding, now))
@@ -954,7 +958,7 @@ fn revalidate_action(
     if authorization.request_binding() != request_binding(request) {
         return Err(ActionBridgeError::StaleAuthority);
     }
-    let (binding, _) = current_binding_and_time(state, &request.session_id)?;
+    let (binding, _) = current_action_binding_and_time(state, request)?;
     if let Some(current) = delegated_read_only_authorization(state, &binding, request)? {
         if &current != authorization {
             return Err(ActionBridgeError::StaleAuthority);
@@ -1568,10 +1572,11 @@ fn update_digest_part(digest: &mut Sha256, part: &[u8]) {
     digest.update(part);
 }
 
-fn clock_error(error: AuthorityClockError) -> ActionBridgeError {
+fn authority_error(error: BridgeError) -> ActionBridgeError {
     match error {
-        AuthorityClockError::Unavailable => ActionBridgeError::Unavailable,
-        AuthorityClockError::InvalidTime => ActionBridgeError::StaleAuthority,
+        BridgeError::Unavailable => ActionBridgeError::Unavailable,
+        BridgeError::Conflict => ActionBridgeError::Conflict,
+        _ => ActionBridgeError::StaleAuthority,
     }
 }
 
@@ -1599,6 +1604,22 @@ pub(crate) enum ActionBridgeError {
     Cancelled,
 }
 
+pub(crate) fn action_kernel_failure(error: ActionBridgeError) -> winwincode_kernel::KernelFailure {
+    use winwincode_kernel::ActionEnforcementFailureKind as K;
+    let kind = match error {
+        ActionBridgeError::Unavailable => K::Unavailable,
+        ActionBridgeError::StaleAuthority => K::StaleAuthority,
+        ActionBridgeError::InvalidAction => K::InvalidAction,
+        ActionBridgeError::UnknownCapability => K::UnknownCapability,
+        ActionBridgeError::UnknownReceipt => K::UnknownReceipt,
+        ActionBridgeError::Rejected => K::Rejected,
+        ActionBridgeError::Consumed => K::Consumed,
+        ActionBridgeError::Conflict => K::Conflict,
+        ActionBridgeError::Cancelled => K::Cancelled,
+    };
+    winwincode_kernel::KernelFailure::action_enforcement(kind)
+}
+
 impl fmt::Display for ActionBridgeError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str("embedded Codex action enforcement failed")
@@ -1608,11 +1629,152 @@ impl fmt::Display for ActionBridgeError {
 impl std::error::Error for ActionBridgeError {}
 
 #[cfg(test)]
-mod tests {
-    use super::ExecutionPortActionGate;
-    use crate::model_bridge::ModelRunBinding;
+pub(crate) mod tests {
+    #[tokio::test]
+    #[allow(clippy::too_many_lines)]
+    async fn expired_action_keeps_original_private_cause_and_current_authority_closed() {
+        use sha2::Digest as _;
+        let root = std::env::temp_dir().join(format!("wwc-action-expiry-{}", uuid::Uuid::new_v4()));
+        let authority = SharedAuthoritySource::default();
+        let gate = ExecutionPortActionGate::open(
+            &root,
+            catalog(),
+            ExecutionEnvelopeToken {
+                version: 1,
+                digest: Sha256Digest(format!("sha256:{}", "c".repeat(64))),
+            },
+            signing_key(),
+            authority.clone(),
+        )
+        .unwrap();
+        let original = binding();
+        gate.install_binding(&original, None).unwrap();
+        let private_input = "private Provider credential and original JS bytes";
+        let request = KernelActionRequest {
+            session_id: original.kernel_session_id.clone(),
+            turn_id: "original-private-turn".into(),
+            operation_id: "original-private-call".into(),
+            namespace: None,
+            tool_name: "exec".into(),
+            payload: KernelActionPayload::CoreControl {
+                input: private_input.into(),
+            },
+        };
+        gate.update_now(&Instant("2030-01-01T00:00:02.000Z".into()))
+            .unwrap();
+        let authorization = gate.authorize(request.clone()).await.unwrap();
+        assert!(
+            gate.state
+                .authority_diagnostics
+                .lock()
+                .unwrap()
+                .entries()
+                .is_empty()
+        );
+        let mut renewed = original.clone();
+        renewed.authority.lease.expires_at = Instant("2030-01-01T02:00:00.000Z".into());
+        gate.install_binding(&renewed, None).unwrap();
+        gate.update_now(&original.authority.lease.expires_at)
+            .unwrap();
+        gate.revalidate(request.clone(), authorization.clone())
+            .await
+            .unwrap();
+        assert!(
+            gate.state
+                .authority_diagnostics
+                .lock()
+                .unwrap()
+                .entries()
+                .is_empty()
+        );
+        gate.update_now(&renewed.authority.lease.expires_at)
+            .unwrap();
+        assert_eq!(
+            gate.authorize(request.clone()).await.unwrap_err().code(),
+            "ACTION_AUTHORITY_STALE"
+        );
+        assert_eq!(
+            gate.revalidate(request.clone(), authorization)
+                .await
+                .unwrap_err()
+                .code(),
+            "ACTION_AUTHORITY_STALE"
+        );
+        assert!(gate.take_messages().unwrap().is_empty());
+        let bytes = {
+            let diagnostics = gate.state.authority_diagnostics.lock().unwrap();
+            assert_eq!(diagnostics.entries().len(), 1);
+            diagnostics.entries().values().next().unwrap().clone()
+        };
+        let facts: serde_json::Value = serde_json::from_str(&bytes).unwrap();
+        assert_eq!(facts["scope"], "execution_lease");
+        assert_eq!(facts["cause"], "lease_expired");
+        assert_eq!(
+            facts["authority"],
+            serde_json::to_value(&renewed.authority).unwrap()
+        );
+        assert_eq!(facts["observedAt"], renewed.authority.lease.expires_at.0);
+        assert_eq!(
+            facts["kernelThreadDigest"],
+            format!("{:x}", sha2::Sha256::digest(request.session_id.as_bytes()))
+        );
+        assert_eq!(
+            facts["coreTurnDigest"],
+            format!("{:x}", sha2::Sha256::digest(request.turn_id.as_bytes()))
+        );
+        assert_eq!(
+            facts["operationDigest"],
+            format!(
+                "{:x}",
+                sha2::Sha256::digest(request.operation_id.as_bytes())
+            )
+        );
+        assert_eq!(
+            facts["inputBinding"],
+            format!("{:x}", sha2::Sha256::digest(private_input.as_bytes()))
+        );
+        assert!(!bytes.contains(private_input));
+        assert!(!bytes.contains(&request.session_id));
+        assert!(!bytes.contains(&request.turn_id));
+        assert!(!bytes.contains(&request.operation_id));
+        gate.update_now(&original.authority.lease.expires_at)
+            .unwrap();
+        assert!(gate.authorize(request).await.is_err());
+        assert_eq!(
+            gate.state
+                .authority_diagnostics
+                .lock()
+                .unwrap()
+                .entries()
+                .len(),
+            1
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn action_failures_preserve_finite_categories() {
+        use super::{ActionBridgeError as E, action_kernel_failure};
+        for (error, expected) in [
+            (E::Unavailable, "ACTION_ENFORCEMENT_UNAVAILABLE"),
+            (E::StaleAuthority, "ACTION_AUTHORITY_STALE"),
+            (E::InvalidAction, "ACTION_REQUEST_INVALID"),
+            (E::UnknownCapability, "ACTION_CAPABILITY_UNKNOWN"),
+            (E::UnknownReceipt, "ACTION_RECEIPT_UNKNOWN"),
+            (E::Rejected, "ACTION_ENFORCEMENT_REJECTED"),
+            (E::Consumed, "ACTION_RECEIPT_CONSUMED"),
+            (E::Conflict, "ACTION_IDENTITY_CONFLICT"),
+            (E::Cancelled, "ACTION_CANCELLED"),
+        ] {
+            assert_eq!(action_kernel_failure(error).code(), expected);
+        }
+    }
+
+    use super::{ExecutionPortActionGate, action_kernel_failure};
+    use crate::model_bridge::{ModelRunBinding, SharedAuthoritySource};
     use crate::model_port_client::ModelLeaseAuthority;
     use std::path::Path;
+    use std::sync::Arc;
     use winwincode_domain::{
         CodexThreadId, ExecutionJobId, ExecutionMessageId, FencingToken, Instant, LeaseId,
         OrganizationId, ProductSessionId, ProjectId, RepositoryId, RepositoryScope,
@@ -1660,7 +1822,7 @@ mod tests {
         .expect("capability catalog")
     }
 
-    pub(super) fn binding() -> ModelRunBinding {
+    pub(crate) fn binding() -> ModelRunBinding {
         let worker_session_id = WorkerSessionId(id("wsn", 'A'));
         let canonical_thread_id = CodexThreadId(id("cdx", 'A'));
         ModelRunBinding {
@@ -1801,7 +1963,7 @@ mod tests {
             .expect("current permit revalidates immediately before runtime");
         assert_eq!(
             gate.authorize(action_request.clone()).await,
-            Err(winwincode_kernel::KernelFailure::action_rejected())
+            Err(action_kernel_failure(super::ActionBridgeError::Consumed))
         );
         assert!(
             gate.take_messages()
@@ -1814,6 +1976,29 @@ mod tests {
             gate.accept_receipt(&forged, now),
             Err(super::ActionBridgeError::UnknownReceipt)
         );
+        for changed in [
+            {
+                let mut changed = receipt.clone();
+                changed.decision = ActionEnforcementDecision::Reject;
+                changed
+            },
+            {
+                let mut changed = receipt.clone();
+                changed.lease.attempt += 1;
+                changed
+            },
+            {
+                let mut changed = receipt.clone();
+                changed.job_id.0 = id("job", 'Z');
+                changed
+            },
+        ] {
+            assert_eq!(
+                gate.accept_receipt(&changed, now),
+                Err(super::ActionBridgeError::UnknownReceipt),
+                "same signature cannot authenticate changed completed receipt fields"
+            );
+        }
         assert_eq!(
             gate.accept_receipt(receipt, now),
             Err(super::ActionBridgeError::Consumed)
@@ -1852,8 +2037,8 @@ mod tests {
             .expect("ignore an out-of-order older trusted time");
         assert!(
             gate.state
-                .authority_clock
-                .now()
+                .authority
+                .observed_now()
                 .expect("trusted action time")
                 .expect("observed time")
                 .0
@@ -1955,9 +2140,160 @@ mod tests {
             assert_eq!(
                 gate.revalidate(request, KernelActionAuthorization::default())
                     .await,
-                Err(winwincode_kernel::KernelFailure::action_rejected())
+                Err(action_kernel_failure(
+                    super::ActionBridgeError::StaleAuthority
+                ))
             );
         }
+    }
+
+    #[tokio::test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "Shared model authority renewal, expiry and replacement across live action waiters and result reads"
+    )]
+    async fn model_authority_changes_reach_action_and_result_read_without_sync() {
+        use crate::{
+            model_bridge::ExecutionPortModelBridge, outbox::ExecutionOutbox, store::AdapterStore,
+        };
+        use winwincode_execution_port::generated::ModelGatewayRoute;
+        use winwincode_kernel::KernelToolResultReadRequest;
+
+        let root =
+            std::env::temp_dir().join(format!("wwc-shared-authority-{}", uuid::Uuid::new_v4()));
+        let store = AdapterStore::open(&root).unwrap();
+        let bridge = ExecutionPortModelBridge::new(
+            store.clone(),
+            ExecutionOutbox::open(store).unwrap(),
+            ModelGatewayRoute {
+                capability: "model".into(),
+                route: "loopback".into(),
+            },
+            "loopback".into(),
+            SharedAuthoritySource::default(),
+        );
+        let gate = Arc::new(
+            ExecutionPortActionGate::open(
+                &root,
+                catalog(),
+                ExecutionEnvelopeToken {
+                    version: 1,
+                    digest: Sha256Digest(format!("sha256:{}", "c".repeat(64))),
+                },
+                signing_key(),
+                bridge.authority(),
+            )
+            .unwrap(),
+        );
+        bridge.attach_action_gate(gate.clone()).unwrap();
+        let original = binding();
+        bridge.install_binding(original.clone()).unwrap();
+        bridge
+            .authority()
+            .update_now(&Instant("2030-01-01T00:00:02.000Z".into()))
+            .unwrap();
+        let read = KernelToolResultReadRequest {
+            session_id: original.kernel_session_id.clone(),
+            turn_id: "turn".into(),
+            operation_id: "call".into(),
+            request_sequence: 12,
+            logical_id: "original-request".into(),
+            attempt_id: "original-attempt".into(),
+            operation_digest: "a".repeat(64),
+            revision: 4,
+        };
+        let permit = gate.authorize_result_read(read.clone()).await.unwrap();
+        let mut child = original.clone();
+        child.canonical_thread_id = CodexThreadId(id("cdx", 'B'));
+        child.kernel_session_id = "child-action".into();
+        child.authority.session_identity.codex_thread_id = child.canonical_thread_id.clone();
+        bridge.install_child_binding(child.clone()).unwrap();
+        let mut tasks = Vec::new();
+        for bound in [&original, &child] {
+            tasks.push(tokio::spawn(gate.authorize(KernelActionRequest {
+                session_id: bound.kernel_session_id.clone(),
+                turn_id: "turn".into(),
+                operation_id: "action".into(),
+                namespace: Some("functions".into()),
+                tool_name: "exec_command".into(),
+                payload: KernelActionPayload::Shell {
+                    program: "cargo".into(),
+                    args: vec!["test".into()],
+                    working_directory: "/tmp/shared-authority".into(),
+                },
+            })));
+        }
+        tokio::task::yield_now().await;
+        assert_eq!(gate.state.pending.lock().unwrap().len(), 2);
+        let mut renewed = original.clone();
+        renewed.authority.lease.expires_at = Instant("2030-01-01T02:00:00.000Z".into());
+        bridge.install_binding(renewed.clone()).unwrap();
+        bridge
+            .authority()
+            .update_now(&original.authority.lease.expires_at)
+            .unwrap();
+        gate.revalidate_result_read(read.clone(), permit.clone())
+            .await
+            .unwrap();
+        assert!(
+            tasks.iter().all(|task| !task.is_finished()),
+            "renewal preserves pending operations"
+        );
+        let (current, _) =
+            super::current_binding_and_time(&gate.state, &child.kernel_session_id).unwrap();
+        assert_eq!(
+            current.authority.lease.expires_at,
+            renewed.authority.lease.expires_at
+        );
+        let mut replacement = renewed;
+        replacement.authority.lease.attempt += 1;
+        replacement.authority.lease.fencing_token = FencingToken("2".into());
+        bridge.install_binding(replacement).unwrap();
+        for task in tasks {
+            assert!(
+                tokio::time::timeout(std::time::Duration::from_secs(1), task)
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .is_err(),
+                "replacement wakes root and child waiters"
+            );
+        }
+        assert!(gate.revalidate_result_read(read, permit).await.is_err());
+        assert!(super::current_binding_and_time(&gate.state, &child.kernel_session_id).is_err());
+        bridge
+            .authority()
+            .update_now(&Instant("2030-01-01T02:00:00.000Z".into()))
+            .unwrap();
+        assert!(super::current_binding_and_time(&gate.state, &original.kernel_session_id).is_err());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    fn typed_io_operations() -> [(&'static str, KernelActionPayload); 3] {
+        [
+            (
+                "view_image",
+                KernelActionPayload::FileRead {
+                    path: "/workspace/image.png".into(),
+                },
+            ),
+            (
+                "write_stdin",
+                KernelActionPayload::ProcessInteraction {
+                    process_id: 123,
+                    origin_call_id: "original-exec".into(),
+                    input: "printf exact-input\n".into(),
+                },
+            ),
+            (
+                "read_mcp_resource",
+                KernelActionPayload::McpResource {
+                    server: "fixture".into(),
+                    method: "resources/read".into(),
+                    arguments: r#"{"uri":"fixture://readme"}"#.into(),
+                },
+            ),
+        ]
     }
 
     #[tokio::test]
@@ -1995,38 +2331,13 @@ mod tests {
                 digest: Sha256Digest(format!("sha256:{}", "c".repeat(64))),
             },
             signing_key(),
+            SharedAuthoritySource::default(),
         )
         .unwrap();
-        gate.install_binding(binding(), None).unwrap();
+        gate.install_binding(&binding(), None).unwrap();
         let now = Instant("2030-01-01T00:00:02.000Z".into());
         gate.update_now(&now).unwrap();
-        for (index, (name, payload)) in [
-            (
-                "view_image",
-                KernelActionPayload::FileRead {
-                    path: "/workspace/image.png".into(),
-                },
-            ),
-            (
-                "write_stdin",
-                KernelActionPayload::ProcessInteraction {
-                    process_id: 123,
-                    origin_call_id: "original-exec".into(),
-                    input: "printf exact-input\n".into(),
-                },
-            ),
-            (
-                "read_mcp_resource",
-                KernelActionPayload::McpResource {
-                    server: "fixture".into(),
-                    method: "resources/read".into(),
-                    arguments: r#"{"uri":"fixture://readme"}"#.into(),
-                },
-            ),
-        ]
-        .into_iter()
-        .enumerate()
-        {
+        for (index, (name, payload)) in typed_io_operations().into_iter().enumerate() {
             let exact = KernelActionRequest {
                 session_id: "kernel-session-action".into(),
                 turn_id: "turn-io".into(),
@@ -2071,6 +2382,65 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn verified_action_store_failure_reaches_core_as_unavailable_for_both_decisions() {
+        for decision in [
+            ActionEnforcementDecision::Permit,
+            ActionEnforcementDecision::Reject,
+        ] {
+            let root = std::env::temp_dir().join(format!(
+                "winwincode-codex-action-store-failure-{}",
+                uuid::Uuid::new_v4()
+            ));
+            let gate = ExecutionPortActionGate::open(
+                &root,
+                catalog(),
+                ExecutionEnvelopeToken {
+                    version: 1,
+                    digest: Sha256Digest(format!("sha256:{}", "c".repeat(64))),
+                },
+                signing_key(),
+                SharedAuthoritySource::default(),
+            )
+            .unwrap();
+            gate.install_binding(&binding(), None).unwrap();
+            let now = Instant("2030-01-01T00:00:02.000Z".into());
+            gate.update_now(&now).unwrap();
+            let task = tokio::spawn(gate.authorize(shell_request(
+                "store-failure",
+                "pnpm",
+                &["add", "exact-package"],
+                Path::new("/tmp/exact"),
+            )));
+            tokio::task::yield_now().await;
+            let ExecutionPortMessage::ActionEnforcementRequestMessage(request) =
+                gate.take_messages().unwrap().pop().unwrap()
+            else {
+                panic!("live action request");
+            };
+            let mut receipt = signed_permit(request, &now);
+            receipt.decision = decision;
+            ActionEnforcementIssuer::new(signing_key())
+                .sign(&mut receipt)
+                .unwrap();
+            let receipt_directory = root.join("action-enforcement-receipts");
+            std::fs::remove_dir_all(&receipt_directory).unwrap();
+            std::fs::write(&receipt_directory, b"storage fault").unwrap();
+            assert_eq!(
+                gate.accept_receipt(&receipt, &now),
+                Err(super::ActionBridgeError::Unavailable)
+            );
+            assert_eq!(
+                task.await.unwrap().unwrap_err().code(),
+                "ACTION_ENFORCEMENT_UNAVAILABLE"
+            );
+            assert!(gate.take_messages().unwrap().is_empty());
+            assert!(gate.state.completed.lock().unwrap().is_empty());
+            std::fs::remove_file(receipt_directory).unwrap();
+            std::fs::remove_dir_all(root).unwrap();
+        }
+    }
+
+    #[tokio::test]
     async fn delegated_reads_and_core_controls_expire_without_owner_clock_refresh() {
         let root = std::env::temp_dir().join(format!(
             "winwincode-codex-action-elapsed-{}",
@@ -2086,12 +2456,12 @@ mod tests {
                 digest: Sha256Digest(format!("sha256:{}", "c".repeat(64))),
             },
             signing_key(),
+            SharedAuthoritySource::default(),
         )
         .unwrap();
         let mut authority = binding();
         authority.authority.lease.expires_at = Instant("2030-01-01T00:00:02.150Z".into());
-        gate.install_binding(authority.clone(), Some(&root))
-            .unwrap();
+        gate.install_binding(&authority, Some(&root)).unwrap();
         let initial = Instant("2030-01-01T00:00:02.000Z".into());
         gate.update_now(&initial).unwrap();
         let read = shell_request("elapsed-read", "cat", &["marker.txt"], &root);
@@ -2133,8 +2503,7 @@ mod tests {
         }
         assert!(gate.take_messages().unwrap().is_empty());
         authority.authority.lease.expires_at = Instant("2030-01-01T00:00:03.000Z".into());
-        gate.install_binding(authority.clone(), Some(&root))
-            .unwrap();
+        gate.install_binding(&authority, Some(&root)).unwrap();
         for (request, authorization) in permitted {
             gate.revalidate(request, authorization).await.unwrap();
         }
@@ -2155,9 +2524,10 @@ mod tests {
                 digest: Sha256Digest(format!("sha256:{}", "c".repeat(64))),
             },
             signing_key(),
+            SharedAuthoritySource::default(),
         )
         .expect("open action gate");
-        gate.install_binding(binding(), None)
+        gate.install_binding(&binding(), None)
             .expect("install binding");
         let mut now = Instant("2030-01-01T00:00:02.000Z".to_owned());
         gate.update_now(&now).expect("install trusted time");
@@ -2188,7 +2558,7 @@ mod tests {
         if renew {
             let mut renewed = binding();
             renewed.authority.lease.expires_at = Instant("2030-01-01T02:00:00.000Z".to_owned());
-            gate.install_binding(renewed, None)
+            gate.install_binding(&renewed, None)
                 .expect("renew pending action");
             now = Instant("2030-01-01T01:30:00.000Z".to_owned());
         }
@@ -2249,9 +2619,10 @@ mod tests {
                 digest: Sha256Digest(format!("sha256:{}", "c".repeat(64))),
             },
             signing_key(),
+            SharedAuthoritySource::default(),
         )
         .expect("open action gate");
-        gate.install_binding(binding(), Some(&root))
+        gate.install_binding(&binding(), Some(&root))
             .expect("install delegated binding");
         gate.update_now(&Instant("2030-01-01T00:00:02.000Z".to_owned()))
             .expect("install trusted time");
@@ -2489,11 +2860,11 @@ mod tests {
     ) -> ModelRunBinding {
         let mut renewed = original.clone();
         renewed.authority.lease.expires_at = Instant("2030-01-01T02:00:00.000Z".to_owned());
-        gate.install_binding(renewed.clone(), None)
+        gate.install_binding(&renewed, None)
             .expect("renew root binding");
         assert_eq!(gate.state.pending.lock().expect("pending").len(), 1);
         {
-            let bindings = gate.state.bindings.read().expect("bindings");
+            let bindings = gate.state.authority.bindings.read().expect("bindings");
             assert_eq!(
                 bindings
                     .get(&child.kernel_session_id)
@@ -2523,10 +2894,11 @@ mod tests {
                 digest: Sha256Digest(format!("sha256:{}", "c".repeat(64))),
             },
             signing_key(),
+            SharedAuthoritySource::default(),
         )
         .expect("open action gate");
         let original = binding();
-        gate.install_binding(original.clone(), None)
+        gate.install_binding(&original, None)
             .expect("install binding");
         let now = Instant("2030-01-01T00:00:02.000Z".to_owned());
         gate.update_now(&now).expect("install trusted time");
@@ -2553,10 +2925,11 @@ mod tests {
         gate.install_child_binding(child.clone())
             .expect("install descendant binding");
         assert_eq!(gate.state.pending.lock().expect("parent pending").len(), 1);
-        gate.install_binding(original.clone(), None)
+        gate.install_binding(&original, None)
             .expect("idempotent root rebind preserves descendant");
         assert!(
             gate.state
+                .authority
                 .bindings
                 .read()
                 .expect("bindings")
@@ -2569,7 +2942,7 @@ mod tests {
             "renewal must preserve pending authorization"
         );
         replacement.kernel_session_id = "kernel-session-rebound".to_owned();
-        gate.install_binding(replacement.clone(), None)
+        gate.install_binding(&replacement, None)
             .expect("replace binding");
         assert!(task.await.expect("authorization task").is_err());
         assert!(
@@ -2581,6 +2954,7 @@ mod tests {
         );
         assert!(
             gate.state
+                .authority
                 .bindings
                 .read()
                 .expect("bindings")
@@ -2588,7 +2962,7 @@ mod tests {
                 .is_none()
         );
         {
-            let bindings = gate.state.bindings.read().expect("bindings");
+            let bindings = gate.state.authority.bindings.read().expect("bindings");
             assert!(bindings.get(&child.kernel_session_id).is_none());
             assert!(bindings.get(&child.canonical_thread_id.0).is_none());
         }
@@ -2616,9 +2990,10 @@ mod tests {
                 digest: Sha256Digest(format!("sha256:{}", "c".repeat(64))),
             },
             signing_key(),
+            SharedAuthoritySource::default(),
         )
         .expect("open action gate");
-        gate.install_binding(binding(), None)
+        gate.install_binding(&binding(), None)
             .expect("install binding");
         let issued = Instant("2030-01-01T00:00:02.000Z".to_owned());
         gate.update_now(&issued).expect("install trusted time");
@@ -2833,6 +3208,7 @@ mod tests {
                 digest: Sha256Digest(format!("sha256:{}", "a".repeat(64))),
             },
             signing_key(),
+            SharedAuthoritySource::default(),
         )
         .expect("gate");
         let request = super::canonical_tool_requests(&KernelActionRequest {

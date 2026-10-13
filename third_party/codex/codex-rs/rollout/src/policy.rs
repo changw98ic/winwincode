@@ -87,6 +87,10 @@ pub fn should_persist_response_item_for_memories(item: &ResponseItem) -> bool {
 #[inline]
 pub fn should_persist_event_msg(ev: &EventMsg, history_mode: ThreadHistoryMode) -> bool {
     match ev {
+        // A host may close the thread after receiving its terminal error,
+        // before TurnComplete carries that same cause. Keep the original
+        // typed failure in canonical private history before it is delivered.
+        EventMsg::Error(error) => error.affects_turn_status(),
         EventMsg::ItemCompleted(event) => {
             // Paginated rollouts store TurnItems.
             // Legacy rollouts keep only items with no raw ResponseItem or legacy equivalent.
@@ -120,8 +124,7 @@ pub fn should_persist_event_msg(ev: &EventMsg, history_mode: ThreadHistoryMode) 
         | EventMsg::SubAgentActivity(_) => matches!(history_mode, ThreadHistoryMode::Legacy),
 
         // Transient, non-durable events.
-        EventMsg::Error(_)
-        | EventMsg::ThreadQueueChanged(_)
+        EventMsg::ThreadQueueChanged(_)
         | EventMsg::GuardianAssessment(_)
         | EventMsg::ExecCommandEnd(_)
         | EventMsg::ViewImageToolCall(_)

@@ -40,6 +40,7 @@ import { prepareCompactKernelHelper } from './compact-kernel-helper.mjs'
 import { projectSourceDigest } from './product-build-contract.mjs'
 import {
   runtimeChildEnvironment,
+  pendingDeviceTaskWorkRuns,
   DEVICE_ONLY_PREREQUISITES,
   FORBIDDEN_SERVER_MODEL_ENVIRONMENT_KEYS,
   assertDeviceSecretsNeverOnServer,
@@ -1368,9 +1369,18 @@ async function waitForServer(baseUrl, origin, child, errors, proof, timeoutMilli
   }, 'standalone Server health', timeoutMillis)
 }
 
-async function stopServer(child) {
+async function stopServer(child, { crash = false } = {}) {
   if (child.exitCode !== null || child.signalCode !== null) return
   const exited = new Promise(resolvePromise => child.once('exit', resolvePromise))
+  if (crash) {
+    child.kill('SIGKILL')
+    await Promise.race([
+      exited,
+      new Promise(resolvePromise => setTimeout(resolvePromise, 5_000)),
+    ])
+    assert.equal(child.signalCode, 'SIGKILL', 'standalone Server must stop at the crash cut point')
+    return
+  }
   child.kill('SIGINT')
   const graceful = await Promise.race([
     exited.then(() => true),
@@ -1410,9 +1420,19 @@ async function startServer({
   serverEnvironment,
   timeoutMillis,
   port = null,
+  allowedClientOrigin = null,
 }) {
   const selectedPort = port ?? await freePort()
-  const origin = `https://api.localhost:${String(selectedPort)}`
+  if (allowedClientOrigin !== null) {
+    const selected = new URL(allowedClientOrigin)
+    assert.equal(selected.origin, allowedClientOrigin, 'live Client origin must be an exact origin')
+    assert.ok(selected.protocol === 'https:'
+      || (selected.protocol === 'http:' && ['127.0.0.1', 'localhost'].includes(selected.hostname)),
+    'live acceptance Client requires HTTPS or local loopback HTTP')
+    assert.ok(['127.0.0.1', 'localhost', 'client.localhost'].includes(selected.hostname),
+      'live acceptance Client must remain on a fixture-owned loopback origin')
+  }
+  const origin = allowedClientOrigin ?? `https://api.localhost:${String(selectedPort)}`
   const started = spawnStandaloneServer({
     certificate,
     directory,
@@ -2096,6 +2116,7 @@ export async function runApiProductionVertical({
   includeStrongFlow = true,
   continueOnStrongFlowFailure = false,
   serverEnvironment = {},
+  allowedClientOrigin = null,
   deviceRoute = null,
   devicePrerequisites = true,
   wwcBinary = null,
@@ -2271,6 +2292,7 @@ export async function runApiProductionVertical({
       repositoryRoot: controlledRepository.repository,
       sourceRoot: controlledRepository.sourceRoot,
       serverEnvironment: effectiveServerEnvironment,
+      allowedClientOrigin,
       serverBinary: binary,
       timeoutMillis,
       port: stableServerPort,
@@ -2357,6 +2379,46 @@ export async function runApiProductionVertical({
     }
 
     if (scenario !== null) {
+      const restartServer = async ({ crash = false } = {}) => {
+        assert.equal(typeof crash, 'boolean')
+        const previous = started
+        const port = Number(new URL(previous.controlUrl).port)
+        await stopServer(previous.child, { crash })
+        serverOutput += previous.errors.join('')
+        started = null
+        const restartProof = randomBytes(32).toString('base64url')
+        proofs.push(restartProof)
+        started = await startServer({
+          root,
+          certificate,
+          directory: fixtureDirectory,
+          proof: restartProof,
+          checkoutRevision: baseline,
+          helperExecutable,
+          helperReleaseManifest,
+          repositoryRoot: controlledRepository.repository,
+          sourceRoot: controlledRepository.sourceRoot,
+          serverEnvironment: effectiveServerEnvironment,
+          allowedClientOrigin,
+          serverBinary: binary,
+          timeoutMillis,
+          port,
+        })
+        const restartedApi = new ApiClient(started.controlUrl, started.origin, 1_000_001)
+        await restartedApi.bootstrap(restartProof, { login: true })
+        // Device launch helpers retain this API object. Keep its identity while
+        // replacing only the authenticated connection after the real restart.
+        Object.assign(api, restartedApi)
+        report.health.afterRestart = started.health.status
+        return {
+          previousPid: previous.child.pid,
+          restartedPid: started.child.pid,
+          signal: previous.child.signalCode,
+          health: started.health.status,
+          controlUrl: started.controlUrl,
+          origin: started.origin,
+        }
+      }
       report.flow.scenario = await scenario.run({
         api,
         repository: controlledRepository.repository,
@@ -2364,6 +2426,8 @@ export async function runApiProductionVertical({
         modelRoute,
         devicePath,
         deviceProvider,
+        fixtureDirectory,
+        restartServer,
       })
       return report
     }
@@ -2539,13 +2603,14 @@ export async function runApiProductionVertical({
           modelRoute,
           Date.now,
           {
-          onActiveWorkRuns: async activeWorkRuns => {
-            for (const run of activeWorkRuns) {
-              await anchorWorkRun(run.id)
-            }
-          },
-          expectDeviceWorkRun: devicePath !== null,
-          pendingDeviceWorkRunIds: () => [...anchoredWorkRunIds],
+            onActiveWorkRuns: async activeWorkRuns => {
+              for (const run of activeWorkRuns) {
+                await anchorWorkRun(run.id)
+              }
+            },
+            expectDeviceWorkRun: devicePath !== null,
+            pendingDeviceWorkRunIds: () => [...new Set([...anchoredWorkRunIds,
+              ...pendingDeviceTaskWorkRuns(fixtureDirectory, IDS.delivery)])],
             onPendingDeviceWorkRuns: async pendingIds => {
               for (const workRunId of pendingIds) {
                 await anchorWorkRun(workRunId)
@@ -2649,6 +2714,7 @@ export async function runApiProductionVertical({
         repositoryRoot: controlledRepository.repository,
         sourceRoot: controlledRepository.sourceRoot,
         serverEnvironment: effectiveServerEnvironment,
+        allowedClientOrigin,
         serverBinary: binary,
         timeoutMillis,
         port: stableServerPort,

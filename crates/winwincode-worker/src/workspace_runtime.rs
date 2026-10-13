@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
+//! consumes terminal checkouts after their exact business acknowledgement.
+
 use std::{
     collections::{HashMap, HashSet},
     fmt, fs,
@@ -34,15 +36,16 @@ use winwincode_execution_port::generated::{
     ChangeBatchProgressEvent, ChangeBatchProgressState, ChangeBatchProposalEvent,
     ChangeBatchReceipt, ChangeBatchReceiptStatus, DiagnosticBaseline, DiagnosticCategory,
     DiagnosticChangeStatus, EncodedPayload, ExecutionJobReplacementAuthority,
-    ExecutionOutcomeUsage, ModelChunkMessage, ModelGatewayRoute, ModelOpenMessage,
-    ModelOpenMessageKind, ObservationAcceptanceCriterion, ObservationDataEgressPolicy,
-    ObservationDecision, ObservationDeltaSummary, ObservationFailedTestSummary, ObservationIntent,
-    ObservationPromptInjectionScan, ObservationPromptInjectionStatus, ObservationReasonCode,
-    ObservationReceipt, ObservationRequest, ObservationResponse, ObservationSecretScan,
-    ObservationSecretScanStatus, ObservationSource, ObservationUntrustedInput,
-    ObservationUntrustedInputTrustLevel, RepairLoopCounters, ValidationCheckStatus,
-    ValidationCheckSummary, ValidationCommandPhase, ValidationCommandSpec, ValidationProfileName,
-    ValidationProfileSelection, ValidationReceipt, ValidationReceiptStatus,
+    ExecutionOutcomeUsage, JobOutcomeAckMessage, JobOutcomeMessage, ModelChunkMessage,
+    ModelGatewayRoute, ModelOpenMessage, ModelOpenMessageKind, ObservationAcceptanceCriterion,
+    ObservationDataEgressPolicy, ObservationDecision, ObservationDeltaSummary,
+    ObservationFailedTestSummary, ObservationIntent, ObservationPromptInjectionScan,
+    ObservationPromptInjectionStatus, ObservationReasonCode, ObservationReceipt,
+    ObservationRequest, ObservationResponse, ObservationSecretScan, ObservationSecretScanStatus,
+    ObservationSource, ObservationUntrustedInput, ObservationUntrustedInputTrustLevel,
+    RepairLoopCounters, ValidationCheckStatus, ValidationCheckSummary, ValidationCommandPhase,
+    ValidationCommandSpec, ValidationProfileName, ValidationProfileSelection, ValidationReceipt,
+    ValidationReceiptStatus,
 };
 use winwincode_execution_port::observation_contract::{
     derive_observation_content_digest, derive_observation_id, derive_observation_input_digest,
@@ -828,6 +831,11 @@ pub struct JobWorkspaceRuntime {
     pending_validations: HashMap<String, PendingBatchValidation>,
     unconfirmed_validation_cleanup: HashSet<String>,
     #[cfg(feature = "test-support")]
+    validation_cancel_barrier: Option<(
+        tokio::sync::oneshot::Sender<()>,
+        tokio::sync::oneshot::Receiver<()>,
+    )>,
+    #[cfg(feature = "test-support")]
     force_next_validation_cleanup_failure: bool,
     #[cfg(feature = "test-support")]
     validation_cleanup_pending_barrier:
@@ -865,6 +873,8 @@ impl JobWorkspaceRuntime {
             validation_artifacts: Arc::new(Mutex::new(Box::new(UnavailableValidationArtifactPort))),
             pending_validations: HashMap::new(),
             unconfirmed_validation_cleanup: HashSet::new(),
+            #[cfg(feature = "test-support")]
+            validation_cancel_barrier: None,
             #[cfg(feature = "test-support")]
             force_next_validation_cleanup_failure: false,
             #[cfg(feature = "test-support")]
@@ -2064,6 +2074,11 @@ impl JobWorkspaceRuntime {
         now: &Instant,
     ) -> Result<(), JobWorkspaceError> {
         let clock = crate::driver_clock::DriverClock::new(now.clone(), std::time::Instant::now());
+        #[cfg(feature = "test-support")]
+        if let Some((arrived, release)) = self.validation_cancel_barrier.take() {
+            let _ = arrived.send(());
+            release.await.map_err(|_| validation_cleanup_error())?;
+        }
         self.require_live_validation_cleanup(job_id)?;
         if let Some(pending) = self.pending_validations.remove(&job_id.0) {
             pending.cancellation.cancel();
@@ -2159,6 +2174,15 @@ impl JobWorkspaceRuntime {
     #[cfg(feature = "test-support")]
     pub fn force_next_validation_cleanup_failure_for_test(&mut self) {
         self.force_next_validation_cleanup_failure = true;
+    }
+
+    #[cfg(feature = "test-support")]
+    pub fn validation_cancel_barrier_for_test(
+        &mut self,
+        arrived: tokio::sync::oneshot::Sender<()>,
+        release: tokio::sync::oneshot::Receiver<()>,
+    ) {
+        self.validation_cancel_barrier = Some((arrived, release));
     }
 
     #[cfg(feature = "test-support")]
@@ -2287,6 +2311,9 @@ impl JobWorkspaceRuntime {
         self.consume_workspace(job_id, reason)
     }
 
+    /// Prepares a terminal checkout for retention until its exact business ACK.
+    /// Unresolved failed or cancelled batches remain quarantined.
+    /// Successful Jobs require proven batch completion before terminal retention.
     pub fn prepare_terminal_job_close(
         &mut self,
         active: &ActiveJob,
@@ -2304,7 +2331,6 @@ impl JobWorkspaceRuntime {
         let workspace_id = workspace.id().to_owned();
         let binding = self.change_batch_store.workspace_binding(&workspace_id)?;
         let Some(binding) = binding.filter(|binding| binding.active_batch_id.is_some()) else {
-            self.prepare_close_job(&active.job.job_id, reason, now)?;
             return Ok(None);
         };
         if reason == WorkspaceCloseReason::Completed {
@@ -2353,6 +2379,57 @@ impl JobWorkspaceRuntime {
         )?;
         self.active.remove(&active.job.job_id.0);
         Ok(Some(terminal))
+    }
+
+    pub(crate) fn retain_terminal_cleanup(
+        &mut self,
+        active: &ActiveJob,
+        outcome: &JobOutcomeMessage,
+        reason: WorkspaceCloseReason,
+    ) -> Result<(), JobWorkspaceError> {
+        self.require_confirmed_validation_cleanup(&active.job.job_id)?;
+        let workspace = self
+            .active
+            .get(&active.job.job_id.0)
+            .ok_or_else(authority_error)?;
+        if !same_authority(workspace.provenance(), active) {
+            return Err(authority_error());
+        }
+        workspace.retain_terminal_cleanup(outcome, reason)?;
+        self.active.remove(&active.job.job_id.0);
+        Ok(())
+    }
+
+    /// Completes checkout cleanup after canonical outcome ACK validation.
+    pub(crate) fn close_acknowledged_terminal(
+        &mut self,
+        ack: &JobOutcomeAckMessage,
+    ) -> Result<(), JobWorkspaceError> {
+        self.require_confirmed_validation_cleanup(&ack.lease.job_id)?;
+        let Some((root, source)) = &self.partition else {
+            return self
+                .manager
+                .close_acknowledged_terminal(ack)
+                .map_err(Into::into);
+        };
+        if !winwincode_domain::is_canonical_prefixed_id(&ack.lease.job_id.0, "job_") {
+            return Err(authority_error());
+        }
+        for entry in fs::read_dir(root).map_err(|_| authority_error())? {
+            let entry = entry.map_err(|_| authority_error())?;
+            if !entry.file_type().map_err(|_| authority_error())?.is_dir() {
+                continue;
+            }
+            let path = entry.path().join(&ack.lease.job_id.0);
+            match fs::symlink_metadata(&path) {
+                Ok(metadata) if metadata.file_type().is_dir() => {
+                    WorkspaceManager::open(path, source)?.close_acknowledged_terminal(ack)?;
+                }
+                Err(error) if error.kind() == ErrorKind::NotFound => {}
+                _ => return Err(authority_error()),
+            }
+        }
+        Ok(())
     }
 
     #[must_use]
@@ -2474,7 +2551,7 @@ impl JobWorkspaceRuntime {
         &mut self,
         active: &ActiveJob,
         now: &Instant,
-    ) -> Result<Option<ModelOpenMessage>, JobWorkspaceError> {
+    ) -> Result<Option<(ModelOpenMessage, Instant)>, JobWorkspaceError> {
         let workspace = self
             .active
             .get(&active.job.job_id.0)
@@ -2510,11 +2587,10 @@ impl JobWorkspaceRuntime {
             .model_open
             .ok_or_else(|| change_batch_error("Observer model open is incomplete"))?;
         validate_observation_model_open_payload(&open, &record.request)?;
-        if record.terminal_status.is_none() {
-            self.change_batch_store
-                .cancel_observation_model(&record.request.intent.identity.batch_id, now)?;
-        }
-        Ok(Some(open))
+        let cancelled_at = self
+            .change_batch_store
+            .cancel_observation_model(&record.request.intent.identity.batch_id, now)?;
+        Ok(Some((open, cancelled_at)))
     }
 
     pub fn prepare_observation_model_open(

@@ -127,8 +127,7 @@ impl CodeModeExecuteHandler {
                     .await
                     .map(codex_code_mode::WaitOutcome::LiveCell)
             })
-            .await
-            .map_err(FunctionCallError::RespondToModel)?;
+            .await?;
         let response = response.into();
         // Record the raw runtime boundary. The model-visible custom-tool output
         // is produced by `handle_runtime_response` and later linked through

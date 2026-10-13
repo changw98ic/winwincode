@@ -70,7 +70,7 @@ fn isolated_case(exact: &str, kind: &str, crash: bool) {
         );
         assert!(
             recovery.status.success(),
-            "ordinary resolved {kind} response must reach the restored original waiter after crash"
+            "the old {kind} call fails after crash while its original response stays retained"
         );
     }
 }
@@ -267,25 +267,24 @@ async fn recover_response(root: &Fixture, kind: &str) {
     let body: serde_json::Value =
         serde_json::from_slice(&STANDARD.decode(&continuation.request.data_base64).unwrap())
             .unwrap();
-    let output = tool_output(
+    assert_failed_tool_call(
+        root,
         &body,
         if kind == "input" {
             "input-expiry-call"
         } else {
             "approval-expiry-call"
         },
-    )
-    .unwrap();
-    if kind == "input" {
-        assert!(output.to_string().contains("continue"));
-    } else {
-        assert!(is_rejected_tool_result(&body));
-        assert!(!saved.marker.as_ref().unwrap().exists());
+    );
+    if let Some(marker) = &saved.marker {
+        assert!(!marker.exists());
     }
     assert!(
-        root.0
+        !root
+            .0
             .join(format!("mechanism-barrier/{kind}.waiter.consumed"))
-            .exists()
+            .exists(),
+        "a failed old tool call cannot consume a replacement waiter"
     );
     Box::pin(worker.shutdown(at("00:02:02"))).await.unwrap();
 }
@@ -423,9 +422,9 @@ fn ra_c01_approval_resolved_precedes_real_waiter_consumption() {
     );
 }
 #[test]
-fn ra_c01_input_resolved_before_consumption_survives_crash() {
+fn ra_c01_input_resolution_survives_crash_while_old_tool_call_fails() {
     ordinary_boundary(
-        "mechanism_response_boundary::ra_c01_input_resolved_before_consumption_survives_crash",
+        "mechanism_response_boundary::ra_c01_input_resolution_survives_crash_while_old_tool_call_fails",
         "input",
         true,
     );

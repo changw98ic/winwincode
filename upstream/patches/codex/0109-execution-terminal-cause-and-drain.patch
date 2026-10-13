@@ -1,0 +1,169 @@
+diff --git a/codex-rs/core/src/session/turn.rs b/codex-rs/core/src/session/turn.rs
+--- a/codex-rs/core/src/session/turn.rs
++++ b/codex-rs/core/src/session/turn.rs
+@@ -2195,6 +2195,7 @@
+                 }
+                 response
+             }
++            Err(err) if matches!(err.details(), CodexErrorDetails::Fatal(_)) => return Err(err),
+             Err(err) => {
+                 error_or_panic(format!("in-flight tool future failed during drain: {err}"));
+                 continue;
+diff --git a/codex-rs/core/src/session/turn_tests.rs b/codex-rs/core/src/session/turn_tests.rs
+--- a/codex-rs/core/src/session/turn_tests.rs
++++ b/codex-rs/core/src/session/turn_tests.rs
+@@ -56,6 +56,28 @@
+             message
+         ));
+     });
++}
++
++#[tokio::test]
++async fn drain_preserves_required_tool_fact_failure() {
++    let (session, turn_context) = crate::session::tests::make_session_and_context().await;
++    let mut in_flight: FuturesOrdered<BoxFuture<'static, CodexResult<ToolCallCompletion>>> =
++        FuturesOrdered::new();
++    in_flight.push_back(Box::pin(async {
++        Err(CodexErr::Fatal(
++            "tool_fact_store_unavailable: execution and recovery require durable Core facts"
++                .to_string(),
++        ))
++    }));
++    let error = drain_in_flight(&mut in_flight, Arc::new(session), Arc::new(turn_context))
++        .await
++        .unwrap_err();
++    assert!(matches!(
++        error.details(),
++        CodexErrorDetails::Fatal(message)
++            if message == "tool_fact_store_unavailable: execution and recovery require durable Core facts"
++    ));
++    assert!(!error.is_retryable());
+ }
+ 
+ #[tokio::test]
+diff --git a/codex-rs/codex-api/src/error.rs b/codex-rs/codex-api/src/error.rs
+--- a/codex-rs/codex-api/src/error.rs
++++ b/codex-rs/codex-api/src/error.rs
+@@ -10,6 +10,9 @@
+     /// original semantic failure rather than start a second retry budget.
+     #[error(transparent)]
+     HostTerminal { source: Box<ApiError> },
++    /// The embedding host rejected work under the original expired execution lease.
++    #[error("execution lease expired")]
++    ExecutionLeaseExpired,
+     #[error(transparent)]
+     Transport(#[from] TransportError),
+     #[error("api error {status}: {message}")]
+diff --git a/codex-rs/codex-api/src/api_bridge.rs b/codex-rs/codex-api/src/api_bridge.rs
+--- a/codex-rs/codex-api/src/api_bridge.rs
++++ b/codex-rs/codex-api/src/api_bridge.rs
+@@ -20,6 +20,7 @@
+ pub fn map_api_error(err: ApiError) -> CodexErr {
+     match err {
+         ApiError::HostTerminal { source } => map_api_error(*source).without_retry(),
++        ApiError::ExecutionLeaseExpired => CodexErr::ExecutionLeaseExpired,
+         ApiError::ContextWindowExceeded => CodexErr::ContextWindowExceeded,
+         ApiError::QuotaExceeded => CodexErr::QuotaExceeded,
+         ApiError::UsageNotIncluded => CodexErr::UsageNotIncluded,
+diff --git a/codex-rs/protocol/src/error.rs b/codex-rs/protocol/src/error.rs
+--- a/codex-rs/protocol/src/error.rs
++++ b/codex-rs/protocol/src/error.rs
+@@ -85,6 +85,10 @@
+ 
+     #[error("shared rollout token budget exhausted")]
+     SessionBudgetExceeded,
++
++    /// The embedding host fenced the original execution because its lease expired.
++    #[error("execution lease expired")]
++    ExecutionLeaseExpired,
+ 
+     /// Returned by ResponsesClient when the SSE stream disconnects or errors out **after** the HTTP
+     /// handshake has succeeded but **before** it finished emitting `response.completed`.
+@@ -309,6 +313,7 @@
+     codex_err_unit_constructors!(
+         TurnAborted,
+         SessionBudgetExceeded,
++        ExecutionLeaseExpired,
+         ContextWindowExceeded,
+         SessionConfiguredNotFirstEvent,
+         Timeout,
+@@ -370,6 +375,7 @@
+         }
+         match self.details() {
+             CodexErrorDetails::TurnAborted
++            | CodexErrorDetails::ExecutionLeaseExpired
+             | CodexErrorDetails::SessionBudgetExceeded
+             | CodexErrorDetails::Interrupted
+             | CodexErrorDetails::EnvVar(_)
+@@ -436,6 +442,7 @@
+         match &self.details {
+             CodexErrorDetails::ContextWindowExceeded => CodexErrorInfo::ContextWindowExceeded,
+             CodexErrorDetails::SessionBudgetExceeded => CodexErrorInfo::SessionBudgetExceeded,
++            CodexErrorDetails::ExecutionLeaseExpired => CodexErrorInfo::ExecutionLeaseExpired,
+             CodexErrorDetails::UsageLimitReached(_)
+             | CodexErrorDetails::QuotaExceeded
+             | CodexErrorDetails::UsageNotIncluded => CodexErrorInfo::UsageLimitExceeded,
+diff --git a/codex-rs/protocol/src/protocol.rs b/codex-rs/protocol/src/protocol.rs
+--- a/codex-rs/protocol/src/protocol.rs
++++ b/codex-rs/protocol/src/protocol.rs
+@@ -1775,6 +1775,8 @@
+ pub enum CodexErrorInfo {
+     ContextWindowExceeded,
+     SessionBudgetExceeded,
++    /// The embedding host rejected the original expired execution lease.
++    ExecutionLeaseExpired,
+     UsageLimitExceeded,
+     ServerOverloaded,
+     CyberPolicy,
+@@ -1814,6 +1816,7 @@
+             Self::ThreadRollbackFailed | Self::ActiveTurnNotSteerable { .. } => false,
+             Self::ContextWindowExceeded
+             | Self::SessionBudgetExceeded
++            | Self::ExecutionLeaseExpired
+             | Self::UsageLimitExceeded
+             | Self::ServerOverloaded
+             | Self::CyberPolicy
+diff --git a/codex-rs/response-debug-context/src/lib.rs b/codex-rs/response-debug-context/src/lib.rs
+--- a/codex-rs/response-debug-context/src/lib.rs
++++ b/codex-rs/response-debug-context/src/lib.rs
+@@ -75,6 +75,7 @@
+ pub fn telemetry_api_error_message(error: &ApiError) -> String {
+     match error {
+         ApiError::HostTerminal { source } => telemetry_api_error_message(source),
++        ApiError::ExecutionLeaseExpired => "execution lease expired".to_string(),
+         ApiError::Transport(transport) => telemetry_transport_error_message(transport),
+         ApiError::Api { status, .. } => format!("api error {}", status.as_u16()),
+         ApiError::Stream(err) => err.to_string(),
+diff --git a/codex-rs/cli/src/doctor.rs b/codex-rs/cli/src/doctor.rs
+--- a/codex-rs/cli/src/doctor.rs
++++ b/codex-rs/cli/src/doctor.rs
+@@ -2476,6 +2476,7 @@
+         }
+         ApiError::Stream(message) => format!("handshake stream error: {message}"),
+         ApiError::ContextWindowExceeded
++        | ApiError::ExecutionLeaseExpired
+         | ApiError::QuotaExceeded
+         | ApiError::UsageNotIncluded
+         | ApiError::Retryable { .. }
+diff --git a/codex-rs/ext/guardian-v2/src/async_scorer/sampler.rs b/codex-rs/ext/guardian-v2/src/async_scorer/sampler.rs
+--- a/codex-rs/ext/guardian-v2/src/async_scorer/sampler.rs
++++ b/codex-rs/ext/guardian-v2/src/async_scorer/sampler.rs
+@@ -387,6 +387,7 @@
+             | LunaSamplerError::Superseded
+             | LunaSamplerError::Api(
+                 ApiError::HostTerminal { .. }
++                | ApiError::ExecutionLeaseExpired
+                 | ApiError::Transport(TransportError::Build(_))
+                 | ApiError::ContextWindowExceeded
+                 | ApiError::QuotaExceeded
+diff --git a/codex-rs/app-server-protocol/src/protocol/v2/shared.rs b/codex-rs/app-server-protocol/src/protocol/v2/shared.rs
+--- a/codex-rs/app-server-protocol/src/protocol/v2/shared.rs
++++ b/codex-rs/app-server-protocol/src/protocol/v2/shared.rs
+@@ -153,6 +153,7 @@
+                 }
+             }
+             CoreCodexErrorInfo::Other => CodexErrorInfo::Other,
++            CoreCodexErrorInfo::ExecutionLeaseExpired => CodexErrorInfo::Other,
+         }
+     }
+ }

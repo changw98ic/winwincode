@@ -60,12 +60,22 @@ impl CodexFailureDiagnostic {
         let cause = match info {
             Some(CodexErrorInfo::ContextWindowExceeded) => "CORE_CONTEXT_WINDOW_EXCEEDED",
             Some(CodexErrorInfo::SessionBudgetExceeded) => "CORE_SESSION_BUDGET_EXCEEDED",
+            Some(CodexErrorInfo::ExecutionLeaseExpired) => "LEASE_EXPIRED",
+            Some(CodexErrorInfo::ModelAuthorityExpired) => "MODEL_AUTHORITY_EXPIRED",
             Some(CodexErrorInfo::UsageLimitExceeded) => "CORE_USAGE_LIMIT_EXCEEDED",
             Some(CodexErrorInfo::ServerOverloaded) => "CORE_SERVER_OVERLOADED",
             Some(CodexErrorInfo::CyberPolicy) => "CORE_CYBER_POLICY",
             Some(CodexErrorInfo::MisalignmentPolicyViolation) => {
                 "CORE_MISALIGNMENT_POLICY_VIOLATION"
             }
+            Some(
+                CodexErrorInfo::HttpConnectionFailed {
+                    http_status_code: Some(429),
+                }
+                | CodexErrorInfo::ResponseTooManyFailedAttempts {
+                    http_status_code: Some(429),
+                },
+            ) => "CORE_RATE_LIMITED",
             Some(CodexErrorInfo::HttpConnectionFailed { .. }) => "CORE_HTTP_CONNECTION_FAILED",
             Some(CodexErrorInfo::ResponseStreamConnectionFailed { .. }) => {
                 "CORE_RESPONSE_STREAM_CONNECTION_FAILED"
@@ -86,6 +96,23 @@ impl CodexFailureDiagnostic {
             None => "CORE_ERROR_UNCLASSIFIED",
         };
         Self::new(stage, cause)
+    }
+
+    pub(crate) fn is_infrastructure(&self) -> bool {
+        matches!(
+            self.cause.as_str(),
+            "CORE_RATE_LIMITED"
+                | "CORE_HTTP_CONNECTION_FAILED"
+                | "CORE_RESPONSE_STREAM_CONNECTION_FAILED"
+                | "CORE_INTERNAL_SERVER_ERROR"
+                | "CORE_SERVER_OVERLOADED"
+                | "CORE_UNAUTHORIZED"
+                | "CORE_RESPONSE_STREAM_DISCONNECTED"
+                | "CORE_RESPONSE_TOO_MANY_FAILED_ATTEMPTS"
+                | "ACTION_ENFORCEMENT_UNAVAILABLE"
+                | "LEASE_EXPIRED"
+                | "MODEL_AUTHORITY_EXPIRED"
+        )
     }
 
     #[must_use]
@@ -148,6 +175,15 @@ const ALLOWED_CAUSES: &[&str] = &[
     "KERNEL_OPERATION_FAILED",
     "SUBMISSION_FAILED_UNCLASSIFIED",
     "ACTION_GATE_UNAVAILABLE",
+    "ACTION_ENFORCEMENT_UNAVAILABLE",
+    "ACTION_AUTHORITY_STALE",
+    "ACTION_REQUEST_INVALID",
+    "ACTION_CAPABILITY_UNKNOWN",
+    "ACTION_RECEIPT_UNKNOWN",
+    "ACTION_ENFORCEMENT_REJECTED",
+    "ACTION_RECEIPT_CONSUMED",
+    "ACTION_IDENTITY_CONFLICT",
+    "ACTION_CANCELLED",
     "APPROVAL_SUBMIT_FAILED",
     "AUTH_INITIALIZATION_FAILED",
     "CONFIG_FEATURE_FAILED",
@@ -193,11 +229,14 @@ const ALLOWED_CAUSES: &[&str] = &[
     "TURN_SUBMIT_FAILED",
     "CORE_CONTEXT_WINDOW_EXCEEDED",
     "CORE_SESSION_BUDGET_EXCEEDED",
+    "LEASE_EXPIRED",
+    "MODEL_AUTHORITY_EXPIRED",
     "CORE_USAGE_LIMIT_EXCEEDED",
     "CORE_SERVER_OVERLOADED",
     "CORE_CYBER_POLICY",
     "CORE_MISALIGNMENT_POLICY_VIOLATION",
     "CORE_HTTP_CONNECTION_FAILED",
+    "CORE_RATE_LIMITED",
     "CORE_RESPONSE_STREAM_CONNECTION_FAILED",
     "CORE_INTERNAL_SERVER_ERROR",
     "CORE_UNAUTHORIZED",
@@ -250,6 +289,97 @@ fn allowed_cause(cause: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{CodexFailureDiagnostic, CodexFailureStage};
+    use codex_protocol::protocol::CodexErrorInfo;
+
+    #[test]
+    fn execution_lease_expiry_retains_its_source_cause() {
+        for (info, cause) in [
+            (CodexErrorInfo::ExecutionLeaseExpired, "LEASE_EXPIRED"),
+            (
+                CodexErrorInfo::ModelAuthorityExpired,
+                "MODEL_AUTHORITY_EXPIRED",
+            ),
+        ] {
+            let diagnostic =
+                CodexFailureDiagnostic::core(CodexFailureStage::CoreEvent, Some(&info));
+            assert_eq!(
+                serde_json::to_value(&diagnostic).unwrap(),
+                serde_json::json!({"stage":"core_event","cause":cause})
+            );
+            assert!(diagnostic.is_infrastructure());
+            assert_eq!(
+                serde_json::from_value::<CodexFailureDiagnostic>(
+                    serde_json::to_value(&diagnostic).unwrap()
+                )
+                .unwrap(),
+                diagnostic
+            );
+        }
+    }
+
+    #[test]
+    fn host_exhaustion_and_runtime_failures_keep_infrastructure_classification() {
+        for info in [
+            CodexErrorInfo::HttpConnectionFailed {
+                http_status_code: Some(429),
+            },
+            CodexErrorInfo::ResponseTooManyFailedAttempts {
+                http_status_code: Some(429),
+            },
+        ] {
+            let diagnostic =
+                CodexFailureDiagnostic::core(CodexFailureStage::CoreEvent, Some(&info));
+            assert_eq!(diagnostic.cause, "CORE_RATE_LIMITED");
+            assert!(diagnostic.is_infrastructure());
+        }
+        for info in [
+            CodexErrorInfo::InternalServerError,
+            CodexErrorInfo::ResponseStreamConnectionFailed {
+                http_status_code: None,
+            },
+            CodexErrorInfo::ResponseStreamDisconnected {
+                http_status_code: None,
+            },
+            CodexErrorInfo::Unauthorized,
+        ] {
+            assert!(
+                CodexFailureDiagnostic::core(CodexFailureStage::TurnComplete, Some(&info))
+                    .is_infrastructure()
+            );
+        }
+        assert!(
+            CodexFailureDiagnostic::kernel(
+                CodexFailureStage::AdapterOperation,
+                "ACTION_ENFORCEMENT_UNAVAILABLE"
+            )
+            .is_infrastructure()
+        );
+    }
+
+    #[test]
+    fn tool_denial_and_invalid_request_are_not_infrastructure_failures() {
+        for code in [
+            "ACTION_ENFORCEMENT_REJECTED",
+            "ACTION_AUTHORITY_STALE",
+            "ACTION_CANCELLED",
+            "ACTION_REQUEST_INVALID",
+        ] {
+            assert!(
+                !CodexFailureDiagnostic::kernel(CodexFailureStage::AdapterOperation, code)
+                    .is_infrastructure()
+            );
+        }
+        for info in [
+            CodexErrorInfo::BadRequest,
+            CodexErrorInfo::SandboxError,
+            CodexErrorInfo::ContextWindowExceeded,
+        ] {
+            assert!(
+                !CodexFailureDiagnostic::core(CodexFailureStage::CoreEvent, Some(&info))
+                    .is_infrastructure()
+            );
+        }
+    }
 
     #[test]
     fn retained_classification_rejects_unknown_cause_and_detail_fields() {

@@ -1027,6 +1027,7 @@ async fn reopen_shell_and_check(root: &Fixture, after_resolution: bool) {
             serde_json::from_slice(&STANDARD.decode(&continuation.request.data_base64).unwrap())
                 .unwrap();
         assert_code_mode_recovery(&body, "approval-expiry-call");
+        assert_failed_tool_call(root, &body, "approval-expiry-call");
     }
     assert_timeout_audit(root, &saved.request);
     let operation: String = core_database(root)
@@ -1055,7 +1056,7 @@ async fn reopen_shell_and_check(root: &Fixture, after_resolution: bool) {
 }
 
 #[test]
-fn pending_approval_process_exit_keeps_original_deadline_and_converges() {
+fn pending_approval_process_exit_closes_original_tool_call_without_side_effects() {
     run_native(async {
         let root = Fixture::new();
         if std::env::var_os("WWC_APPROVAL_PREPARE_CHILD").is_some() {
@@ -1064,7 +1065,7 @@ fn pending_approval_process_exit_keeps_original_deadline_and_converges() {
         }
         run_crash_child(
             &root,
-            "pending_approval_process_exit_keeps_original_deadline_and_converges",
+            "pending_approval_process_exit_closes_original_tool_call_without_side_effects",
             false,
         );
         reopen_shell_and_check(&root, false).await;
@@ -1072,7 +1073,7 @@ fn pending_approval_process_exit_keeps_original_deadline_and_converges() {
 }
 
 #[test]
-fn resolved_timeout_process_exit_finishes_outbox_cleanup_without_cp_decision() {
+fn resolved_timeout_process_exit_keeps_original_receipt_and_failed_tool_call() {
     run_native(async {
         let root = Fixture::new();
         if std::env::var_os("WWC_APPROVAL_PREPARE_CHILD").is_some() {
@@ -1081,7 +1082,7 @@ fn resolved_timeout_process_exit_finishes_outbox_cleanup_without_cp_decision() {
         }
         run_crash_child(
             &root,
-            "resolved_timeout_process_exit_finishes_outbox_cleanup_without_cp_decision",
+            "resolved_timeout_process_exit_keeps_original_receipt_and_failed_tool_call",
             true,
         );
         reopen_shell_and_check(&root, true).await;
@@ -1372,25 +1373,55 @@ fn assert_code_mode_recovery(value: &serde_json::Value, call: &str) {
     assert_eq!(fact["type"], "tool_recovery");
     assert_eq!(fact["state"], "reconciled_execution_evidence");
     assert_eq!(fact["schema_version"], 1);
-    assert_eq!(fact["fact"]["attempt"]["execution"], "running");
+    assert_eq!(fact["fact"]["attempt"]["execution"], "uncertain");
+    assert_eq!(fact["fact"]["attempt"]["disposition"], "rejected");
+    assert_eq!(fact["fact"]["attempt"]["execution_result_retained"], true);
     assert_eq!(fact["fact"]["evidence"]["state"], "unavailable");
 }
 
-fn assert_interrupted_input_recovery(value: &serde_json::Value, call: &str) {
-    let output =
-        tool_output(value, call).expect("Core returned the original logical request result");
-    let fact: serde_json::Value =
-        serde_json::from_str(output.as_str().expect("Code Mode recovery JSON")).unwrap();
-    assert_eq!(fact["type"], "tool_recovery");
-    assert_eq!(fact["state"], "code_cell_interrupted");
-    assert_eq!(fact["schema_version"], 1);
-    assert_eq!(fact["continuationLost"], true);
-    assert_eq!(fact["inputConsumed"], true);
-    assert_eq!(fact["success"], false);
-    assert_eq!(
-        fact["answers"]["continue"]["answers"],
-        serde_json::json!([])
-    );
+fn pending_tool_requests(root: &Fixture) -> Vec<(i64, String, String, String)> {
+    let database = rusqlite::Connection::open_with_flags(
+        root.0.join("worker/kernel-home/state_5.sqlite"),
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )
+    .unwrap();
+    database
+        .prepare("SELECT sequence,request_json,original_input,request_owner FROM tool_requests WHERE call_status='pending' ORDER BY sequence")
+        .unwrap()
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)))
+        .unwrap()
+        .map(Result::unwrap)
+        .collect()
+}
+
+fn failed_tool_record(root: &Fixture, sequence: i64) -> (String, String, String, String) {
+    let database = rusqlite::Connection::open_with_flags(
+        root.0.join("worker/kernel-home/state_5.sqlite"),
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )
+    .unwrap();
+    let (request, input, owner, status, result): (String, String, String, String, String) = database
+        .query_row("SELECT request_json,original_input,request_owner,call_status,call_result FROM tool_requests WHERE sequence=?",
+            [sequence], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)))
+        .unwrap();
+    assert!(!input.is_empty());
+    assert!(!owner.is_empty());
+    assert_eq!(status, "failed");
+    let failure: serde_json::Value = serde_json::from_str(&result).unwrap();
+    assert_eq!(failure["status"], "failed");
+    assert_eq!(failure["code"], "tool_execution_interrupted");
+    assert!(matches!(
+        failure["effects"].as_str(),
+        Some("unknown" | "not_started")
+    ));
+    (request, input, owner, result)
+}
+
+fn assert_failed_tool_call(root: &Fixture, value: &serde_json::Value, call: &str) {
+    assert_code_mode_recovery(value, call);
+    let output = tool_output(value, call).unwrap();
+    let fact: serde_json::Value = serde_json::from_str(output.as_str().unwrap()).unwrap();
+    let _ = failed_tool_record(root, fact["fact"]["request_sequence"].as_i64().unwrap());
 }
 
 async fn assert_terminal_interactions_stay_retired(
@@ -1641,7 +1672,7 @@ async fn assert_new_recovery_waiter_remains_pending(
 }
 
 #[test]
-fn restarted_pending_input_converges_only_after_its_exact_core_event() {
+fn restarted_input_closes_old_call_and_only_new_input_waiter_can_complete() {
     run_native(async {
         let root = Fixture::new();
         if std::env::var_os("WWC_APPROVAL_PREPARE_CHILD").is_some() {
@@ -1650,7 +1681,7 @@ fn restarted_pending_input_converges_only_after_its_exact_core_event() {
         }
         run_crash_child(
             &root,
-            "restarted_pending_input_converges_only_after_its_exact_core_event",
+            "restarted_input_closes_old_call_and_only_new_input_waiter_can_complete",
             false,
         );
         let (mut worker, port, saved) = reopen_input(&root).await;
@@ -1710,12 +1741,12 @@ fn restarted_pending_input_converges_only_after_its_exact_core_event() {
         let body: serde_json::Value =
             serde_json::from_slice(&STANDARD.decode(&continuation.request.data_base64).unwrap())
                 .unwrap();
-        assert_interrupted_input_recovery(&body, "input-expiry-call");
+        assert_failed_tool_call(&root, &body, "input-expiry-call");
         assert_timeout_audit(&root, &saved.retained);
         assert_eq!(
             input_operation_state(&root, &saved.request.input_request_id.0).0,
-            "resolved",
-            "the replayed original cell consumes its timeout answer"
+            "pending",
+            "the failed old call cannot reinstall or consume its original waiter"
         );
         assert_eq!(port.messages().iter().filter(|message| matches!(message,
             wire::ExecutionPortMessage::InputRequestMessage(request) if request.input_request_id == saved.request.input_request_id)).count(), 0,

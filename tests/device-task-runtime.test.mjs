@@ -10,8 +10,8 @@ import { join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import { deviceTaskIdentities, prepareDeviceTaskBaseline,
   prepareDeviceBenchmarkProviderSlots, ensureBenchmarkDeviceOccupancy } from '../scripts/device-task-runtime.mjs'
-import { deviceProviderSecretValues, pendingDeviceTaskWorkRuns } from '../scripts/run-device-task-vertical.mjs'
-import { assertDeviceSecretsNeverOnServer, deviceTaskLaunchResult } from '../scripts/device-production-fixture.mjs'
+import { deviceProviderSecretValues } from '../scripts/run-device-task-vertical.mjs'
+import { assertDeviceSecretsNeverOnServer, deviceTaskLaunchResult, pendingDeviceTaskWorkRuns } from '../scripts/device-production-fixture.mjs'
 
 test('public Responses Lite header does not make a public Server log path a Provider secret', () => {
   const provider = Object.freeze({ protocol: 'openai_responses', apiKey: 'fixture-private-key',

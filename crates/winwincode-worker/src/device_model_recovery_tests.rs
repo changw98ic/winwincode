@@ -26,6 +26,8 @@ use winwincode_provider::{DeviceModelAdmission, DeviceModelPermit, DeviceProvide
 const CHILD_DIRECTORY: &str = "WWC_WORKER_MODEL_RECOVERY_TEST_DIRECTORY";
 const CHILD_ENDPOINT: &str = "WWC_WORKER_MODEL_RECOVERY_TEST_ENDPOINT";
 const TEST_NAME: &str = "device_model::concurrency_tests::recovery_tests::worker_retry_releases_backoff_slot_and_reacquires_without_repeating_completed_tools";
+const RESTART_TEST: &str = "device_model::concurrency_tests::recovery_tests::worker_restart_retry_reacquires_real_slots_before_another_http_attempt";
+const CHILD_PHASE: &str = "WWC_WORKER_MODEL_RECOVERY_TEST_PHASE";
 
 #[test]
 fn worker_retry_releases_backoff_slot_and_reacquires_without_repeating_completed_tools() {
@@ -36,6 +38,25 @@ fn worker_retry_releases_backoff_slot_and_reacquires_without_repeating_completed
         );
         return;
     }
+    run_retry_fixture(TEST_NAME);
+}
+
+#[test]
+fn worker_restart_retry_reacquires_real_slots_before_another_http_attempt() {
+    if let Some(directory) = std::env::var_os(CHILD_DIRECTORY) {
+        if std::env::var(CHILD_PHASE).as_deref() == Ok("crash_after_retry") {
+            crash_after_retained_retry(
+                Path::new(&directory),
+                &std::env::var(CHILD_ENDPOINT).unwrap(),
+            );
+        }
+        run_reopened_retry(Path::new(&directory));
+        return;
+    }
+    run_retry_fixture(RESTART_TEST);
+}
+
+fn run_retry_fixture(test_name: &str) {
     let directory = tempfile::tempdir().unwrap();
     let providers = directory.path().join("providers");
     let _ = tokio_rustls::rustls::crypto::aws_lc_rs::default_provider().install_default();
@@ -60,21 +81,42 @@ fn worker_retry_releases_backoff_slot_and_reacquires_without_repeating_completed
     );
     let server_directory = providers.clone();
     let server = thread::spawn(move || serve_retry(&listener, &config, &server_directory));
+    if test_name == RESTART_TEST {
+        let first = Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", test_name, "--nocapture"])
+            .env(CHILD_DIRECTORY, &providers)
+            .env(CHILD_ENDPOINT, &endpoint)
+            .env(CHILD_PHASE, "crash_after_retry")
+            .env("WWC_DEVICE_PROVIDER_TLS_ROOT_DER_FILE", &certificate)
+            .env_remove("WWC_DEVICE_PROVIDER_HTTPS_PROXY")
+            .output()
+            .unwrap();
+        assert!(
+            first.status.success(),
+            "first process: {}",
+            String::from_utf8_lossy(&first.stderr)
+        );
+    }
     let output = Command::new(std::env::current_exe().unwrap())
-        .args(["--exact", TEST_NAME, "--nocapture"])
-        .env(CHILD_DIRECTORY, providers)
-        .env(CHILD_ENDPOINT, endpoint)
+        .args(["--exact", test_name, "--nocapture"])
+        .env(CHILD_DIRECTORY, &providers)
+        .env(CHILD_ENDPOINT, &endpoint)
         .env("WWC_DEVICE_PROVIDER_TLS_ROOT_DER_FILE", certificate)
         .env_remove("WWC_DEVICE_PROVIDER_HTTPS_PROXY")
         .output()
         .unwrap();
-    let requests = server.join().unwrap();
-    assert!(
-        output.status.success(),
-        "Worker recovery fixture: {} {}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr),
-    );
+    let server_result = server.join();
+    if !output.status.success() || server_result.is_err() {
+        let retained = directory.keep();
+        panic!(
+            "Worker recovery fixture retained at {} (server completed={}): {} {}",
+            retained.display(),
+            server_result.is_ok(),
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr),
+        );
+    }
+    let requests = server_result.unwrap();
     assert_eq!(requests.len(), 2, "only two actual model attempts");
     assert_eq!(requests[0], requests[1], "retry preserves the model step");
     let messages = requests[1]["messages"].as_array().unwrap();
@@ -137,14 +179,7 @@ fn serve_retry(
 fn run_worker_retry(directory: &Path, endpoint: &str) {
     let mut models = DeviceModels::open(directory).unwrap();
     let database = rusqlite::Connection::open(directory.join("providers.sqlite3")).unwrap();
-    let config = serde_json::json!({"providerId":"qwen","displayName":"fixture", "endpoint":endpoint,
-        "protocol":"openai_chat_completions","modelIds":["qwen-model"],"enabled":true});
-    database
-        .execute(
-            "INSERT INTO providers VALUES (?1,?2,?3)",
-            rusqlite::params!["qwen", config.to_string(), b"fixture-only-key".as_slice()],
-        )
-        .unwrap();
+    configure_retry_provider(&database, endpoint);
     let open = completed_tool_history_open();
     let store = DeviceProviderStore::open(directory).unwrap();
     let held = (0..2).map(|_| acquire(&store, &open)).collect::<Vec<_>>();
@@ -159,25 +194,34 @@ fn run_worker_retry(directory: &Path, endpoint: &str) {
         DeviceModelSendOutcome::Handled,
     );
     wait_until(|| {
+        assert!(models.next_chunk().unwrap().is_none());
         attempts(&database)
             .first()
             .is_some_and(|state| state == "failed")
     });
     let mut backoff_slot = None;
     wait_until(|| match store.try_model_attempt_permit(&open).unwrap() {
-        DeviceModelAdmission::Ready(permit) => {
+        DeviceModelAdmission::InvokeAttempt(permit) => {
             backoff_slot = Some(permit);
             true
         }
         DeviceModelAdmission::Deferred => false,
+        _ => panic!("expected physical invocation admission"),
     });
     assert_eq!(held.len(), 2);
     assert_full(&store, &open);
-    thread::sleep(Duration::from_millis(1250));
+    let occupied_since = Instant::now();
+    while occupied_since.elapsed() < Duration::from_millis(1250) {
+        assert!(models.next_chunk().unwrap().is_none());
+        thread::sleep(Duration::from_millis(1));
+    }
     assert_eq!(attempts(&database), vec!["failed"]);
     assert!(!directory.join("second-request-observed").exists());
     drop(backoff_slot);
-    wait_until(|| directory.join("second-request-observed").exists());
+    wait_until(|| {
+        assert!(models.next_chunk().unwrap().is_none());
+        directory.join("second-request-observed").exists()
+    });
     assert_eq!(attempts(&database), vec!["failed", "invoking"]);
     assert_full(&store, &open);
     std::fs::write(directory.join("release-second-answer"), b"release").unwrap();
@@ -206,6 +250,101 @@ fn run_worker_retry(directory: &Path, endpoint: &str) {
     );
     drop(replay_slot);
     drop(held);
+}
+
+fn configure_retry_provider(database: &rusqlite::Connection, endpoint: &str) {
+    let config = serde_json::json!({"providerId":"qwen","displayName":"fixture", "endpoint":endpoint,
+        "protocol":"openai_chat_completions","modelIds":["qwen-model"],"enabled":true});
+    database
+        .execute(
+            "INSERT INTO providers VALUES (?1,?2,?3)",
+            rusqlite::params!["qwen", config.to_string(), b"fixture-only-key".as_slice()],
+        )
+        .unwrap();
+}
+
+fn crash_after_retained_retry(directory: &Path, endpoint: &str) -> ! {
+    let mut models = DeviceModels::open(directory).unwrap();
+    let database = rusqlite::Connection::open(directory.join("providers.sqlite3")).unwrap();
+    configure_retry_provider(&database, endpoint);
+    let open = completed_tool_history_open();
+    assert_eq!(
+        models
+            .send(
+                &ExecutionPortMessage::ModelOpenMessage(open),
+                Some(Instant::now() + WAIT),
+                None
+            )
+            .unwrap(),
+        DeviceModelSendOutcome::Handled
+    );
+    wait_until(|| {
+        database
+            .query_row("SELECT COUNT(*) FROM model_retry_state", [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .unwrap()
+            == 1
+    });
+    assert_eq!(attempts(&database), vec!["failed"]);
+    // Abrupt process termination intentionally skips every Rust destructor.
+    std::process::exit(0);
+}
+
+fn run_reopened_retry(directory: &Path) {
+    let database = rusqlite::Connection::open(directory.join("providers.sqlite3")).unwrap();
+    let store = DeviceProviderStore::open(directory).unwrap();
+    let open = completed_tool_history_open();
+    assert!(matches!(
+        store.try_model_permit(&open).unwrap(),
+        DeviceModelAdmission::RecoverExchange
+    ));
+    let mut held = (0..3).map(|_| acquire(&store, &open)).collect::<Vec<_>>();
+    let mut models = DeviceModels::open(directory).unwrap();
+    assert_eq!(
+        models
+            .send(
+                &ExecutionPortMessage::ModelOpenMessage(open.clone()),
+                Some(Instant::now() + WAIT),
+                None
+            )
+            .unwrap(),
+        DeviceModelSendOutcome::Handled
+    );
+    thread::sleep(Duration::from_millis(1250));
+    assert_eq!(attempts(&database), vec!["failed"]);
+    assert!(
+        !directory.join("second-request-observed").exists(),
+        "durable recovery owns no implicit slot"
+    );
+    drop(held.pop());
+    wait_until(|| directory.join("second-request-observed").exists());
+    assert_eq!(attempts(&database), vec!["failed", "invoking"]);
+    assert_full(&store, &open);
+    std::fs::write(directory.join("release-second-answer"), b"release").unwrap();
+    let chunks = completed_chunks(&mut models);
+    assert!(chunks.iter().all(|chunk| chunk.error.is_none()));
+    assert_eq!(attempts(&database), vec!["failed", "completed"]);
+    held.push(acquire(&store, &open));
+    assert_full(&store, &open);
+    drop(models);
+    let mut replay = DeviceModels::open(directory).unwrap();
+    assert_eq!(
+        replay
+            .send(
+                &ExecutionPortMessage::ModelOpenMessage(open),
+                Some(Instant::now().checked_sub(Duration::from_secs(1)).unwrap()),
+                None
+            )
+            .unwrap(),
+        DeviceModelSendOutcome::Handled
+    );
+    assert_eq!(
+        completed_chunks(&mut replay),
+        chunks,
+        "expired completed replay starts no attempt and occupies no slot"
+    );
+    assert_eq!(attempts(&database), vec!["failed", "completed"]);
 }
 
 fn completed_tool_history_open() -> ModelOpenMessage {
@@ -239,8 +378,9 @@ fn completed_tool_history_open() -> ModelOpenMessage {
 
 fn acquire(store: &DeviceProviderStore, open: &ModelOpenMessage) -> DeviceModelPermit {
     match store.try_model_attempt_permit(open).unwrap() {
-        DeviceModelAdmission::Ready(permit) => permit,
+        DeviceModelAdmission::InvokeAttempt(permit) => permit,
         DeviceModelAdmission::Deferred => panic!("expected an available actual-invocation slot"),
+        _ => panic!("expected physical invocation admission"),
     }
 }
 

@@ -1,0 +1,722 @@
+diff --git a/codex-rs/core/src/tools/control_input_recovery_tests.rs b/codex-rs/core/src/tools/control_input_recovery_tests.rs
+index 2ec0e9f4..f0e9053e 100644
+--- a/codex-rs/core/src/tools/control_input_recovery_tests.rs
++++ b/codex-rs/core/src/tools/control_input_recovery_tests.rs
+@@ -15,16 +15,19 @@ use crate::tools::execution_facts::operation_digest;
+ use crate::tools::execution_facts::payload_value;
+ use crate::tools::handlers::request_user_input_result::RequestUserInputResultHandler;
+ use codex_protocol::config_types::ModeKind;
+-use codex_protocol::protocol::EventMsg;
+ use codex_protocol::request_user_input::RequestUserInputAnswer;
+ use codex_protocol::request_user_input::RequestUserInputResponse;
++use codex_state::ControlInputRecovery;
+ use codex_state::ToolAttemptClaim;
++use codex_state::ToolExecutionStatus;
++use codex_state::ToolOutputDisposition;
+ use codex_state::ToolRequestIdentity;
+ use codex_state::ToolRequestObservation;
+ use codex_tools::ResponsesApiTool;
+ use codex_tools::ToolName;
+ use codex_tools::ToolSpec;
+ use futures::future::BoxFuture;
++use sqlx::Row;
+ use std::collections::HashMap;
+ use std::sync::Mutex;
+ use std::sync::atomic::AtomicBool;
+@@ -32,7 +35,6 @@ use std::sync::atomic::AtomicUsize;
+ use std::sync::atomic::Ordering;
+ use std::time::Duration;
+ use std::time::Instant;
+-use tokio::sync::Notify;
+ use tokio_util::sync::CancellationToken;
+ 
+ struct ReadGate {
+@@ -41,7 +43,6 @@ struct ReadGate {
+     expected: Mutex<Vec<ToolResultReadRequest>>,
+     revalidations: AtomicUsize,
+     revoke_at: AtomicUsize,
+-    checked: Notify,
+ }
+ 
+ impl ReadGate {
+@@ -52,7 +53,6 @@ impl ReadGate {
+             expected: Mutex::new(Vec::new()),
+             revalidations: AtomicUsize::new(0),
+             revoke_at: AtomicUsize::new(0),
+-            checked: Notify::new(),
+         }
+     }
+ 
+@@ -72,20 +72,6 @@ impl ReadGate {
+             ))
+         }
+     }
+-
+-    async fn wait_for_revalidations(&self, count: usize) {
+-        tokio::time::timeout(Duration::from_secs(5), async {
+-            loop {
+-                let notified = self.checked.notified();
+-                if self.revalidations.load(Ordering::SeqCst) >= count {
+-                    break;
+-                }
+-                notified.await;
+-            }
+-        })
+-        .await
+-        .expect("recovery reached the exact read gate");
+-    }
+ }
+ 
+ impl ToolCallGate for ReadGate {
+@@ -121,7 +107,6 @@ impl ToolCallGate for ReadGate {
+             self.allowed.store(false, Ordering::SeqCst);
+         }
+         let result = self.check(&request);
+-        self.checked.notify_one();
+         Box::pin(async move { result })
+     }
+ }
+@@ -151,6 +136,16 @@ impl CoreToolRuntime for OldExec {
+     }
+ }
+ 
++struct SeedFixture {
++    _home: tempfile::TempDir,
++    invocation: ToolInvocation,
++    store: Arc<StateRuntime>,
++    parent: ToolExecutionFact,
++    input: ToolExecutionFact,
++    events: async_channel::Receiver<codex_protocol::protocol::Event>,
++    gate: Arc<ReadGate>,
++}
++
+ struct Fixture {
+     _home: tempfile::TempDir,
+     invocation: ToolInvocation,
+@@ -160,7 +155,7 @@ struct Fixture {
+     gate: Arc<ReadGate>,
+ }
+ 
+-async fn fixture(enabled: bool, same_owner: bool) -> Fixture {
++async fn seed_fixture(enabled: bool, same_owner: bool) -> SeedFixture {
+     let home = tempfile::tempdir().unwrap();
+     let sqlite = codex_state::SqliteConfig::new_for_testing(
+         codex_utils_absolute_path::AbsolutePathBuf::try_from(home.path()).unwrap(),
+@@ -211,7 +206,11 @@ async fn fixture(enabled: bool, same_owner: bool) -> Fixture {
+         binding: digest(payload_value(&invocation.payload)),
+     };
+     let ToolRequestObservation::New(parent_observed) = store
+-        .observe_tool_request(&parent_request, "test-owner", "{}")
++        .observe_tool_request(
++            &parent_request,
++            old_owner,
++            &payload_value(&invocation.payload).to_string(),
++        )
+         .await
+         .unwrap()
+     else {
+@@ -270,7 +269,11 @@ async fn fixture(enabled: bool, same_owner: bool) -> Fixture {
+         binding: digest(payload_value(&control.payload)),
+     };
+     let ToolRequestObservation::New(input_observed) = store
+-        .observe_tool_request(&input_request, "test-owner", "{}")
++        .observe_tool_request(
++            &input_request,
++            old_owner,
++            &payload_value(&control.payload).to_string(),
++        )
+         .await
+         .unwrap()
+     else {
+@@ -289,73 +292,130 @@ async fn fixture(enabled: bool, same_owner: bool) -> Fixture {
+     else {
+         panic!("claimed input")
+     };
+-    let ToolFactAdmission::Replay(replay) = ToolFactRecord::begin(&invocation).await.unwrap()
+-    else {
+-        panic!("original parent replay")
+-    };
+     let gate = Arc::new(ReadGate::new());
+-    *gate.expected.lock().unwrap() = vec![
+-        read_request(&parent, &invocation.call_id).unwrap(),
+-        read_request(&input, &input.request.logical_id).unwrap(),
+-    ];
+     session
+         .services
+         .thread_extension_data
+         .insert(ToolCallGateAttachment::new(gate.clone()));
+-    Fixture {
++    SeedFixture {
+         _home: home,
+         invocation,
+-        replay: Arc::new(replay),
++        store,
++        parent,
+         input,
+         events,
+         gate,
+     }
+ }
+ 
+-fn start_recovery(
+-    fixture: &Fixture,
+-) -> tokio::task::JoinHandle<Result<Option<FunctionCallError>, FunctionCallError>> {
+-    let replay = Arc::clone(&fixture.replay);
+-    let invocation = fixture.invocation.clone();
+-    tokio::spawn(async move { recover(&replay, &invocation, Some(&OldExec)).await })
+-}
+-
+-async fn answer(fixture: &Fixture, value: &str) {
+-    let event = tokio::time::timeout(Duration::from_secs(5), fixture.events.recv())
++async fn admit_fixture(seed: SeedFixture) -> Fixture {
++    let ToolFactAdmission::Replay(replay) = ToolFactRecord::begin(&seed.invocation).await.unwrap()
++    else {
++        panic!("original parent replay")
++    };
++    let input = seed
++        .store
++        .tool_execution_fact(seed.input.request_sequence)
+         .await
+-        .unwrap()
+         .unwrap();
+-    let EventMsg::RequestUserInput(request) = event.msg else {
+-        panic!("only the original input waiter event")
+-    };
+-    assert_eq!(request.turn_id, fixture.input.request.turn_id);
+-    assert_eq!(request.call_id, fixture.input.request.logical_id);
+-    assert!(
+-        fixture
+-            .invocation
+-            .session
+-            .notify_user_input_response(
+-                &request.turn_id,
+-                &request.call_id,
+-                RequestUserInputResponse {
+-                    answers: HashMap::from([(
+-                        "answer".into(),
+-                        RequestUserInputAnswer {
+-                            answers: vec![value.into()]
+-                        }
+-                    )])
+-                }
+-            )
+-            .await
+-    );
++    *seed.gate.expected.lock().unwrap() = vec![
++        read_request(&replay.fact, &seed.invocation.call_id).unwrap(),
++        read_request(&input, &input.request.logical_id).unwrap(),
++    ];
++    Fixture {
++        _home: seed._home,
++        invocation: seed.invocation,
++        replay: Arc::new(replay),
++        input,
++        events: seed.events,
++        gate: seed.gate,
++    }
++}
++
++async fn fixture(enabled: bool, same_owner: bool) -> Fixture {
++    admit_fixture(seed_fixture(enabled, same_owner).await).await
+ }
+ 
+ async fn recovered_fixture() -> Fixture {
+-    let fixture = fixture(true, false).await;
+-    let recovery = start_recovery(&fixture);
+-    answer(&fixture, "private original answer").await;
+-    let output = recovery.await.unwrap().unwrap().unwrap().to_string();
+-    assert!(output.contains("inputConsumed"));
++    // The private reader exercises an already completed answer. It never
++    // reconstructs a waiter belonging to an abandoned Core.
++    let seed = seed_fixture(true, false).await;
++    let response_json =
++        json!({"answers":{"answer":{"answers":["private original answer"]}}}).to_string();
++    for (fact, execution, disposition, body) in [
++        (
++            &seed.input,
++            ToolExecutionStatus::Completed,
++            ToolOutputDisposition::Accepted,
++            response_json.as_str(),
++        ),
++        (
++            &seed.parent,
++            ToolExecutionStatus::Uncertain,
++            ToolOutputDisposition::Rejected,
++            "{\"success\":false,\"state\":\"code_cell_interrupted\"}",
++        ),
++    ] {
++        let attempt = fact.attempt.as_ref().unwrap();
++        seed.store
++            .complete_tool_attempt(
++                fact.request_sequence,
++                &attempt.attempt_id,
++                &attempt.owner_id,
++                execution,
++                Some(body),
++            )
++            .await
++            .unwrap();
++        seed.store
++            .decide_tool_output(
++                fact.request_sequence,
++                &attempt.attempt_id,
++                &attempt.owner_id,
++                disposition,
++                Some(body),
++            )
++            .await
++            .unwrap();
++    }
++    let fixture = admit_fixture(seed).await;
++    let record = ControlInputRecovery {
++        result_ref: result_ref(&fixture.replay.fact, &fixture.input),
++        parent: (*fixture.replay.fact).clone(),
++        input: fixture.input.clone(),
++        response_digest: digest(json!(response_json)),
++        response_json,
++    };
++    let fact = ToolReconciliationFact {
++        schema_version: 1,
++        request_sequence: record.parent.request_sequence,
++        thread_id: record.parent.request.thread_id.clone(),
++        observer_id: fixture.replay.owner_id.clone(),
++        attempt: record.parent.attempt.clone().unwrap(),
++        evidence: ToolRecoveryEvidence::ControlInputResolved {
++            input_request_sequence: record.input.request_sequence,
++            input_operation_digest: record
++                .input
++                .attempt
++                .as_ref()
++                .unwrap()
++                .operation_digest
++                .clone(),
++            response_digest: record.response_digest.clone(),
++            result_ref: record.result_ref.clone(),
++            continuation_lost: true,
++        },
++    };
++    fixture
++        .replay
++        .store
++        .record_control_input_recovery(
++            &record,
++            &super::super::handlers::request_user_input_result::prepare_pages(&record).unwrap(),
++            &fact,
++        )
++        .await
++        .unwrap();
+     fixture
+ }
+ 
+@@ -410,168 +470,164 @@ async fn control_input_recovery_same_owner_never_recreates_live_waiter() {
+ }
+ 
+ #[tokio::test]
+-async fn control_input_recovery_concurrent_parent_claim_consumes_one_waiter_and_publishes_once() {
++async fn abandoned_control_input_fails_once_and_rejects_late_answer_without_writes() {
+     let fixture = fixture(true, false).await;
+-    let first = start_recovery(&fixture);
+-    fixture.gate.wait_for_revalidations(2).await;
+-    assert!(
+-        recover(&fixture.replay, &fixture.invocation, Some(&OldExec))
+-            .await
+-            .unwrap()
+-            .is_none()
+-    );
+-    answer(&fixture, "one exact answer").await;
+-    assert!(
+-        first
+-            .await
+-            .unwrap()
+-            .unwrap()
+-            .unwrap()
+-            .to_string()
+-            .contains("inputConsumed")
+-    );
+-    assert!(fixture.events.try_recv().is_err());
+-    let events = fixture
+-        .replay
+-        .store
+-        .list_tool_runtime_events(&fixture.input.request.thread_id, 0, 100)
++    for fact in [&*fixture.replay.fact, &fixture.input] {
++        let attempt = fact.attempt.as_ref().unwrap();
++        assert_eq!(attempt.execution, ToolExecutionStatus::Uncertain);
++        assert_eq!(attempt.disposition, ToolOutputDisposition::Rejected);
++        assert!(attempt.execution_result_retained);
++    }
++    let store = &fixture.replay.store;
++    let thread = &fixture.input.request.thread_id;
++    let before = store
++        .list_tool_runtime_events(thread, 0, 100)
+         .await
+         .unwrap();
+-    let publications = events
+-        .iter()
+-        .filter(|event| {
+-            matches!(&event.fact, codex_state::ToolRuntimeFact::Reconciliation(fact)
+-        if matches!(&fact.evidence, ToolRecoveryEvidence::ControlInputResolved { .. }))
+-        })
+-        .count();
+-    assert_eq!(publications, 1);
+-    assert_eq!(
+-        fixture
+-            .replay
+-            .store
+-            .tool_execution_fact(fixture.input.request_sequence)
+-            .await
+-            .unwrap(),
+-        fixture.input
+-    );
+-    assert_eq!(
+-        fixture
+-            .replay
+-            .store
+-            .tool_execution_fact(fixture.replay.fact.request_sequence)
+-            .await
+-            .unwrap(),
+-        *fixture.replay.fact
+-    );
+-}
+-
+-#[tokio::test]
+-async fn control_input_recovery_sqlite_writer_wait_crosses_deadline_retains_history_and_denies_delivery()
+- {
+-    for answer_bytes in [32, 20_000] {
+-        let fixture = fixture(true, false).await;
+-        let sqlite = fixture.replay.store.sqlite();
+-        let lock_pool = sqlite
+-            .open_read_write_pool(&sqlite.state_db_path())
+-            .await
+-            .unwrap();
+-        let lock = lock_pool.begin_with("BEGIN IMMEDIATE").await.unwrap();
+-        let recovery = start_recovery(&fixture);
+-        let private_answer = "X".repeat(answer_bytes);
+-        answer(&fixture, &private_answer).await;
+-        fixture.gate.wait_for_revalidations(4).await;
+-        *fixture.gate.deadline.lock().unwrap() = Some(Instant::now() + Duration::from_millis(100));
+-        tokio::time::sleep(Duration::from_millis(250)).await;
+-        assert!(
+-            !recovery.is_finished(),
+-            "real SQLite writer lock must keep COMMIT pending"
+-        );
+-        let reference = result_ref(&fixture.replay.fact, &fixture.input);
++    for _ in 0..2 {
+         assert!(
+-            fixture
+-                .replay
+-                .store
+-                .control_input_recovery_header(&fixture.input.request.thread_id, &reference)
++            recover(&fixture.replay, &fixture.invocation, Some(&OldExec))
+                 .await
+                 .unwrap()
+                 .is_none()
+         );
+-        lock.commit().await.unwrap();
+-        let denied = tokio::time::timeout(Duration::from_secs(5), recovery)
++    }
++    assert!(
++        !fixture
++            .invocation
++            .session
++            .notify_user_input_response(
++                &fixture.input.request.turn_id,
++                &fixture.input.request.logical_id,
++                RequestUserInputResponse {
++                    answers: HashMap::from([(
++                        "answer".into(),
++                        RequestUserInputAnswer {
++                            answers: vec!["late private answer".into()]
++                        }
++                    )])
++                }
++            )
+             .await
+-            .unwrap()
+-            .unwrap()
+-            .unwrap_err()
+-            .to_string();
+-        assert!(denied.contains("result_read_denied"));
++    );
++    for fact in [&*fixture.replay.fact, &fixture.input] {
++        let attempt = fact.attempt.as_ref().unwrap();
+         assert!(
+-            !denied.contains("input-result:")
+-                && !denied.contains("answers")
+-                && !denied.contains(&private_answer)
++            store
++                .complete_tool_attempt(
++                    fact.request_sequence,
++                    &attempt.attempt_id,
++                    &attempt.owner_id,
++                    ToolExecutionStatus::Completed,
++                    Some("late success")
++                )
++                .await
++                .is_err()
+         );
+-        let private = fixture
+-            .replay
+-            .store
+-            .control_input_recovery(&fixture.input.request.thread_id, &reference)
+-            .await
+-            .unwrap()
+-            .unwrap();
+-        let value: Value = serde_json::from_str(&private.response_json).unwrap();
+-        assert_eq!(value["answers"]["answer"]["answers"][0], private_answer);
+-        let header = fixture
+-            .replay
+-            .store
+-            .control_input_recovery_header(&fixture.input.request.thread_id, &reference)
+-            .await
+-            .unwrap()
+-            .unwrap();
+-        assert_eq!(header.total_bytes, private.response_json.len());
+-        assert!(header.page_count > 0);
+-        assert!(
+-            fixture
+-                .replay
+-                .store
+-                .control_input_result_page(&fixture.input.request.thread_id, &reference, "0")
++        assert_eq!(
++            store
++                .tool_execution_fact(fact.request_sequence)
+                 .await
+-                .unwrap()
+-                .is_some()
++                .unwrap(),
++            *fact
+         );
+-        let events = fixture
+-            .replay
+-            .store
+-            .list_tool_runtime_events(&fixture.input.request.thread_id, 0, 100)
++    }
++    assert_eq!(
++        store
++            .list_tool_runtime_events(thread, 0, 100)
+             .await
+-            .unwrap();
++            .unwrap(),
++        before
++    );
++    assert!(fixture.events.try_recv().is_err());
++    assert_eq!(fixture.gate.revalidations.load(Ordering::SeqCst), 0);
++    assert!(
++        store
++            .control_input_recovery_header(
++                thread,
++                &result_ref(&fixture.replay.fact, &fixture.input)
++            )
++            .await
++            .unwrap()
++            .is_none()
++    );
++}
++
++#[tokio::test]
++async fn abandoned_control_input_waits_for_sqlite_writer_and_atomically_fails_call_pairs() {
++    let seed = seed_fixture(true, false).await;
++    let thread = seed.input.request.thread_id.clone();
++    let store = Arc::clone(&seed.store);
++    let pool = store
++        .sqlite()
++        .open_read_write_pool(&store.sqlite().state_db_path())
++        .await
++        .unwrap();
++    let pairs = || {
++        sqlx::query("SELECT original_input,call_status,call_result FROM tool_requests WHERE thread_id=? ORDER BY sequence").bind(&thread)
++    };
++    let before = pairs().fetch_all(&pool).await.unwrap();
++    assert_eq!(before.len(), 2);
++    assert!(
++        before
++            .iter()
++            .all(|row| row.get::<String, _>("call_status") == "pending"
++                && row.get::<Option<String>, _>("call_result").is_none())
++    );
++    let lock = pool.begin_with("BEGIN IMMEDIATE").await.unwrap();
++    let admission = tokio::spawn(admit_fixture(seed));
++    tokio::time::timeout(Duration::from_secs(5), async {
++        loop {
++            if store.try_tool_owner_lock(&thread).unwrap().is_none() {
++                break;
++            }
++            tokio::task::yield_now().await;
++        }
++    })
++    .await
++    .expect("new Core acquired the exclusive owner lock");
++    assert!(
++        !admission.is_finished(),
++        "real SQLite writer lock holds startup settlement"
++    );
++    let blocked = pairs().fetch_all(&pool).await.unwrap();
++    assert!(
++        blocked
++            .iter()
++            .all(|row| row.get::<String, _>("call_status") == "pending"
++                && row.get::<Option<String>, _>("call_result").is_none())
++    );
++    lock.commit().await.unwrap();
++    let fixture = tokio::time::timeout(Duration::from_secs(5), admission)
++        .await
++        .unwrap()
++        .unwrap();
++    let after = pairs().fetch_all(&pool).await.unwrap();
++    assert_eq!(after.len(), 2);
++    for (original, failed) in before.iter().zip(&after) {
+         assert_eq!(
+-            events
+-                .iter()
+-                .filter(
+-                    |event| matches!(&event.fact, codex_state::ToolRuntimeFact::Reconciliation(fact)
+-            if matches!(&fact.evidence, ToolRecoveryEvidence::ControlInputResolved { .. }))
+-                )
+-                .count(),
+-            1
++            failed.get::<String, _>("original_input"),
++            original.get::<String, _>("original_input")
+         );
++        assert_eq!(failed.get::<String, _>("call_status"), "failed");
++        let result: Value = serde_json::from_str(&failed.get::<String, _>("call_result")).unwrap();
+         assert_eq!(
+-            fixture
+-                .replay
+-                .store
+-                .tool_execution_fact(fixture.input.request_sequence)
+-                .await
+-                .unwrap(),
+-            fixture.input
++            result,
++            json!({"status":"failed","code":"tool_execution_interrupted","effects":"unknown"})
+         );
+-        assert!(
+-            RequestUserInputResultHandler
+-                .handle(reader_invocation(&fixture))
+-                .await
+-                .err()
+-                .unwrap()
+-                .to_string()
+-                .contains("result_read_denied")
+-        );
+-        lock_pool.close().await;
+     }
++    assert!(
++        recover(&fixture.replay, &fixture.invocation, Some(&OldExec))
++            .await
++            .unwrap()
++            .is_none()
++    );
++    assert!(fixture.events.try_recv().is_err());
++    assert_eq!(
++        store.fail_pending_tool_calls(&thread, None).await.unwrap(),
++        0
++    );
++    pool.close().await;
+ }
+ 
+ #[tokio::test]
+@@ -624,3 +680,19 @@ async fn control_input_result_reader_authority_revoked_after_private_read_reject
+             .is_some()
+     );
+ }
++
++#[tokio::test]
++async fn control_input_result_reader_expired_authority_rejects_private_answer() {
++    let fixture = recovered_fixture().await;
++    *fixture.gate.deadline.lock().unwrap() = Some(Instant::now());
++    let before = fixture.gate.revalidations.load(Ordering::SeqCst);
++    let denied = RequestUserInputResultHandler
++        .handle(reader_invocation(&fixture))
++        .await
++        .err()
++        .unwrap()
++        .to_string();
++    assert!(denied.contains("result_read_denied"));
++    assert!(!denied.contains("private original answer"));
++    assert_eq!(fixture.gate.revalidations.load(Ordering::SeqCst), before);
++}
+diff --git a/codex-rs/core/tests/suite/current_time_reminder.rs b/codex-rs/core/tests/suite/current_time_reminder.rs
+index 2cdac3c7..a480506c 100644
+--- a/codex-rs/core/tests/suite/current_time_reminder.rs
++++ b/codex-rs/core/tests/suite/current_time_reminder.rs
+@@ -448,7 +448,10 @@ async fn time_provider_failure_stops_before_inference() -> Result<()> {
+         error.message,
+         "Fatal error: failed to read current time: test clock unavailable"
+     );
+-    assert_eq!(error.codex_error_info, Some(CodexErrorInfo::Other));
++    assert_eq!(
++        error.codex_error_info,
++        Some(CodexErrorInfo::InternalServerError)
++    );
+ 
+     wait_for_event(&test.codex, |event| {
+         matches!(event, EventMsg::TurnComplete(_))
+diff --git a/codex-rs/core/tests/suite/retry_after.rs b/codex-rs/core/tests/suite/retry_after.rs
+index 32f9d362..79aa69e8 100644
+--- a/codex-rs/core/tests/suite/retry_after.rs
++++ b/codex-rs/core/tests/suite/retry_after.rs
+@@ -587,14 +587,21 @@ async fn compact_v2_stream_failure_without_retry_after_exhausts_stream_retries()
+         match wait_for_event(&test.codex, |_| true).await {
+             EventMsg::Error(error) => {
+                 error_events += 1;
+-                assert_eq!(error.codex_error_info, Some(CodexErrorInfo::Other));
++                assert_eq!(
++                    error.codex_error_info,
++                    Some(CodexErrorInfo::ResponseStreamDisconnected {
++                        http_status_code: None
++                    })
++                );
+                 assert!(error.message.contains("Rate limit exceeded."));
+             }
+             EventMsg::StreamError(_) => stream_error_events += 1,
+             EventMsg::TurnComplete(event) => {
+                 assert_eq!(
+                     event.error.and_then(|error| error.codex_error_info),
+-                    Some(CodexErrorInfo::Other)
++                    Some(CodexErrorInfo::ResponseStreamDisconnected {
++                        http_status_code: None
++                    })
+                 );
+                 break;
+             }
+@@ -1001,14 +1008,21 @@ async fn sse_failure_without_retry_after_exhausts_stream_retries() -> Result<()>
+         match wait_for_event(&test.codex, |_| true).await {
+             EventMsg::Error(error) => {
+                 error_events += 1;
+-                assert_eq!(error.codex_error_info, Some(CodexErrorInfo::Other));
++                assert_eq!(
++                    error.codex_error_info,
++                    Some(CodexErrorInfo::ResponseStreamDisconnected {
++                        http_status_code: None
++                    })
++                );
+                 assert!(error.message.contains("Rate limit exceeded."));
+             }
+             EventMsg::StreamError(_) => stream_error_events += 1,
+             EventMsg::TurnComplete(event) => {
+                 assert_eq!(
+                     event.error.and_then(|error| error.codex_error_info),
+-                    Some(CodexErrorInfo::Other)
++                    Some(CodexErrorInfo::ResponseStreamDisconnected {
++                        http_status_code: None
++                    })
+                 );
+                 break;
+             }
+diff --git a/codex-rs/core/tests/suite/rollout_budget.rs b/codex-rs/core/tests/suite/rollout_budget.rs
+index cd216816..7bb47576 100644
+--- a/codex-rs/core/tests/suite/rollout_budget.rs
++++ b/codex-rs/core/tests/suite/rollout_budget.rs
+@@ -157,7 +157,10 @@ async fn invalid_provider_rollout_budget_units_fail_without_retry() -> Result<()
+         error.message,
+         "Fatal error: response.completed usage.codex_rollout_budget_units must be finite and non-negative"
+     );
+-    assert_eq!(error.codex_error_info, Some(CodexErrorInfo::Other));
++    assert_eq!(
++        error.codex_error_info,
++        Some(CodexErrorInfo::InternalServerError)
++    );
+     wait_for_event(&test.codex, |event| {
+         matches!(event, EventMsg::TurnComplete(_))
+     })

@@ -4,7 +4,7 @@
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use sha2::{Digest as _, Sha256};
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{HashMap, HashSet, VecDeque},
     fs,
     os::unix::fs::PermissionsExt,
     path::Path,
@@ -449,10 +449,24 @@ async fn scenario(chunks: usize) {
         .await
         .unwrap();
     handle.confirm(id).unwrap();
-    let mut parked = std::collections::VecDeque::new();
+    Box::pin(worker.flush_durable_outbox()).await.unwrap();
+    assert!(
+        handle.has_pending_controls(),
+        "the actual exchange delivered a control"
+    );
+    let after_control_delivery = metrics.lock().unwrap().backlog.len();
+    Box::pin(worker.flush_durable_outbox()).await.unwrap();
+    assert_eq!(
+        metrics.lock().unwrap().backlog.len(),
+        after_control_delivery,
+        "the driver yields before further I/O while validated controls await intake"
+    );
+    // Hold real, claimed controls without consuming or confirming them. This
+    // slow consumer fills the Server queue while preserving control priority.
+    let mut delayed_controls = VecDeque::new();
     for _ in 0..512 {
-        while let Some((id, message)) = handle.next_control().unwrap() {
-            parked.push_back((id, message));
+        while let Some(control) = handle.next_control().unwrap() {
+            delayed_controls.push_back(control);
         }
         let requests_before = metrics.lock().unwrap().backlog.len();
         match Box::pin(worker.flush_durable_outbox()).await {
@@ -487,9 +501,9 @@ async fn scenario(chunks: usize) {
     let mut final_confirmed = false;
     let mut artifact_confirmed = 0;
     for _ in 0..1024 {
-        while let Some((id, message)) = parked
+        while let Some((id, message)) = delayed_controls
             .pop_front()
-            .map_or_else(|| handle.next_control().unwrap(), Some)
+            .or_else(|| handle.next_control().unwrap())
         {
             let before = metrics.lock().unwrap().backlog.len();
             Box::pin(worker.accept_control(&message, now.clone()))

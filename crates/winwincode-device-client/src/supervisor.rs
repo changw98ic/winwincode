@@ -11,6 +11,8 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 #[cfg(unix)]
+use std::os::unix::fs::OpenOptionsExt;
+#[cfg(unix)]
 use std::os::unix::process::CommandExt;
 
 use time::OffsetDateTime;
@@ -276,6 +278,66 @@ impl SessionSupervisor {
     #[must_use]
     pub fn config(&self) -> &SupervisorConfig {
         &self.inner.config
+    }
+
+    /// Required request/result recovery before reporting a confirmed process
+    /// closure. The shipped Worker delegates model and tool writes to their owners.
+    pub(crate) fn recover_terminated_calls(
+        &self,
+        record: &WorkerProcessRecord,
+    ) -> Result<(), SupervisorError> {
+        if !matches!(
+            record.state.as_str(),
+            WORKER_STATE_EXITED | WORKER_STATE_CRASHED | WORKER_STATE_MISSING
+        ) {
+            return Err(SupervisorError::InvalidInput(
+                "call recovery requires a terminated process".into(),
+            ));
+        }
+        let config_path = Path::new(&record.data_directory).join(MANAGED_SESSION_CONFIG_FILE);
+        let config: serde_json::Value = serde_json::from_slice(
+            &fs::read(&config_path)
+                .map_err(|error| SupervisorError::InvalidInput(error.to_string()))?,
+        )
+        .map_err(|error| SupervisorError::InvalidInput(error.to_string()))?;
+        if config["workerSessionId"] != record.worker_session_id
+            || config["workerInstanceId"] != record.worker_instance_id
+        {
+            return Err(SupervisorError::InvalidInput(
+                "call recovery process identity mismatch".into(),
+            ));
+        }
+        let has_core = Path::new(&record.data_directory)
+            .join("codex-runtime/kernel-home")
+            .is_dir();
+        let has_model = config["providerDirectory"]
+            .as_str()
+            .is_some_and(|path| Path::new(path).join("providers.sqlite3").is_file());
+        if !has_core && !has_model {
+            return Ok(());
+        }
+        let recovery_stderr = fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .mode(0o600)
+            .open(Path::new(&record.data_directory).join("call-recovery.log"))
+            .map_or_else(|_| Stdio::null(), Stdio::from);
+        let status = Command::new(self.resolve_worker_binary()?)
+            .arg("--recover-interrupted-calls")
+            .arg(&config_path)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(recovery_stderr)
+            .status()
+            .map_err(|error| SupervisorError::Spawn {
+                reason: error.to_string(),
+            })?;
+        if !status.success() {
+            return Err(SupervisorError::InvalidInput(
+                "terminated call recovery failed".into(),
+            ));
+        }
+        Ok(())
     }
 
     pub fn worker_process(
@@ -2185,6 +2247,56 @@ mod tests {
                 .expect("count"),
             0
         );
+    }
+
+    #[test]
+    fn review_recovery_log_failure_does_not_block_required_recovery() {
+        let bin_root = temp_root("recovery-bin");
+        let binary = bin_root.join("winwincode-worker");
+        write_executable_script(
+            &binary,
+            "if [ \"$1\" = --recover-interrupted-calls ]; then \
+             echo recovered > \"$(dirname \"$2\")/recovered\"; exit 0; fi; exit 3",
+        );
+        let (supervisor, root) = supervisor_with_mirror("recovery", &binary, LEASE, 7);
+        let data = root.join("data");
+        supervisor
+            .spawn(spawn_request(
+                "wss_RECOVERY",
+                WORKER_INSTANCE,
+                &root.join("repo"),
+                &data,
+                &root.join("worker-root"),
+            ))
+            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(30);
+        let record = loop {
+            if let Some(record) = supervisor.reap().unwrap().into_iter().next() {
+                break supervisor
+                    .worker_process(&record.worker_session_id)
+                    .unwrap()
+                    .unwrap();
+            }
+            assert!(Instant::now() < deadline);
+            thread::sleep(Duration::from_millis(10));
+        };
+        fs::create_dir_all(data.join("codex-runtime/kernel-home")).unwrap();
+        fs::create_dir(data.join("call-recovery.log")).unwrap();
+        supervisor
+            .recover_terminated_calls(&record)
+            .expect("optional log must not gate recovery");
+        assert_eq!(
+            fs::read_to_string(data.join("recovered")).unwrap(),
+            "recovered\n"
+        );
+        write_executable_script(&binary, "exit 1");
+        assert!(
+            supervisor.recover_terminated_calls(&record).is_err(),
+            "required recovery failure must remain a failure"
+        );
+        drop(supervisor);
+        fs::remove_dir_all(root).unwrap();
+        fs::remove_dir_all(bin_root).unwrap();
     }
 
     #[test]

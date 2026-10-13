@@ -17,7 +17,7 @@ use std::{
 };
 use winwincode_execution_port::generated::{ExecutionPortMessage, ModelChunkMessage};
 use winwincode_provider::{
-    DeviceModelAdmission, DeviceModelPermit, DeviceProviderError, DeviceProviderStore,
+    DeviceModelAdmission, DeviceModelStepOutcome, DeviceProviderError, DeviceProviderStore,
     model_failure,
 };
 
@@ -32,9 +32,9 @@ pub(crate) struct DeviceModels {
     directory: PathBuf,
     recovery_store: DeviceProviderStore,
     recovery_version: Option<i64>,
-    pending: HashMap<String, String>,
-    sender: mpsc::Sender<(String, Vec<ModelChunkMessage>)>,
-    receiver: mpsc::Receiver<(String, Vec<ModelChunkMessage>)>,
+    pending: HashMap<String, PendingModelOpen>,
+    sender: mpsc::Sender<(String, DeviceModelStepOutcome)>,
+    receiver: mpsc::Receiver<(String, DeviceModelStepOutcome)>,
     chunks: VecDeque<ModelChunkMessage>,
     delivered_high_water: HashMap<String, i64>,
     owned_exchanges: HashSet<String>,
@@ -43,6 +43,27 @@ pub(crate) struct DeviceModels {
     intake_log: Option<PathBuf>,
     #[cfg(any(test, feature = "test-support"))]
     fail_next_start: bool,
+}
+
+struct PendingModelOpen {
+    digest: String,
+    open: winwincode_execution_port::generated::ModelOpenMessage,
+    start_deadline: Option<std::time::Instant>,
+    start_guard: Option<winwincode_codex::LocalModelStartGuard>,
+    thread: Option<std::thread::JoinHandle<()>>,
+    retry_wake_millis: Option<u64>,
+}
+
+impl PendingModelOpen {
+    fn can_start(&self) -> bool {
+        self.start_guard.as_ref().map_or_else(
+            || {
+                self.start_deadline
+                    .is_some_and(|deadline| std::time::Instant::now() < deadline)
+            },
+            |check| check(),
+        )
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -133,10 +154,10 @@ impl DeviceModels {
                 let digest = format!("{:x}", Sha256::digest(serde_json::to_vec(open)?));
                 self.note_open_identity(open);
                 if let Some(previous) = self.pending.get(&id) {
-                    return if previous == &digest {
+                    return if previous.digest == digest {
                         Ok(DeviceModelSendOutcome::Handled)
                     } else {
-                        Err(DeviceProviderError)
+                        Err(DeviceProviderError::StateInvalid)
                     };
                 }
                 let store = DeviceProviderStore::open(&self.directory);
@@ -144,8 +165,15 @@ impl DeviceModels {
                     .as_ref()
                     .map_err(|error| *error)
                     .and_then(|store| store.try_model_permit(open));
-                let permit = match admission {
-                    Ok(DeviceModelAdmission::Ready(permit)) => permit,
+                match admission {
+                    // This is a non-blocking queue probe. Every physical request
+                    // acquires its own slot after inline context preparation.
+                    Ok(DeviceModelAdmission::InvokeAttempt(permit)) => drop(permit),
+                    Ok(
+                        DeviceModelAdmission::ReplayStoredResult
+                        | DeviceModelAdmission::RecoverExchange
+                        | DeviceModelAdmission::RejectRequest,
+                    ) => {}
                     Ok(DeviceModelAdmission::Deferred) => {
                         return Ok(DeviceModelSendOutcome::NotStarted);
                     }
@@ -160,15 +188,24 @@ impl DeviceModels {
                         self.chunks.extend(chunks);
                         return Ok(DeviceModelSendOutcome::Handled);
                     }
-                };
-                self.pending.insert(id.clone(), digest);
-                if self
-                    .start_provider(open, start_deadline, start_guard, permit)
-                    .is_err()
-                {
-                    self.pending.remove(&id);
-                    return Ok(DeviceModelSendOutcome::NotStarted);
                 }
+                // Each physical attempt runs outside the Worker poll loop.
+                let Ok(thread) =
+                    self.start_provider(open, start_deadline, start_guard.clone(), false)
+                else {
+                    return Ok(DeviceModelSendOutcome::NotStarted);
+                };
+                self.pending.insert(
+                    id,
+                    PendingModelOpen {
+                        digest,
+                        open: open.clone(),
+                        start_deadline,
+                        start_guard,
+                        thread: Some(thread),
+                        retry_wake_millis: None,
+                    },
+                );
                 Ok(DeviceModelSendOutcome::Handled)
             }
             ExecutionPortMessage::ModelAckMessage(ack) => {
@@ -192,8 +229,8 @@ impl DeviceModels {
         open: &winwincode_execution_port::generated::ModelOpenMessage,
         start_deadline: Option<std::time::Instant>,
         start_guard: Option<winwincode_codex::LocalModelStartGuard>,
-        permit: DeviceModelPermit,
-    ) -> std::io::Result<()> {
+        retry_entry: bool,
+    ) -> std::io::Result<std::thread::JoinHandle<()>> {
         #[cfg(any(test, feature = "test-support"))]
         if std::mem::take(&mut self.fail_next_start) {
             return Err(std::io::Error::other("injected thread start refusal"));
@@ -201,12 +238,29 @@ impl DeviceModels {
         let directory = self.directory.clone();
         let sender = self.sender.clone();
         let open = open.clone();
+        let intake_log = self.intake_log.clone();
         std::thread::Builder::new()
             .name("device-provider".to_owned())
             .spawn(move || {
-                let permit = std::cell::RefCell::new(Some(permit));
-                let chunks = DeviceProviderStore::open(&directory)
+                let outcome = DeviceProviderStore::open(&directory)
                     .and_then(|store| {
+                        let detail = format!(
+                            "request_id={} provider_thread={:?} retry_entry={retry_entry}",
+                            open.request_id.0,
+                            std::thread::current().id(),
+                        );
+                        write_intake_log(
+                            intake_log.as_deref(),
+                            IntakeLogLine {
+                                stage: "provider_store_opened",
+                                code: "DEVICE_PROVIDER_STORE_OPENED",
+                                exchange_id: &open.model_exchange_id.0,
+                                sequence: 0,
+                                worker_session_id: &open.worker_session_id.0,
+                                thread_id: &open.session_identity.codex_thread_id.0,
+                                detail: &detail,
+                            },
+                        );
                         let can_start = || {
                             start_guard.as_ref().map_or_else(
                                 || {
@@ -217,46 +271,21 @@ impl DeviceModels {
                                 |check| check(),
                             )
                         };
-                        let before_attempt = || {
-                            if permit.borrow().is_some() {
-                                return Ok(());
-                            }
-                            loop {
-                                if !can_start()
-                                    || store.model_cancelled(&open.model_exchange_id.0)?
-                                {
-                                    return Err(DeviceProviderError);
-                                }
-                                match store.try_model_attempt_permit(&open)? {
-                                    DeviceModelAdmission::Ready(acquired) => {
-                                        *permit.borrow_mut() = Some(acquired);
-                                        return Ok(());
-                                    }
-                                    DeviceModelAdmission::Deferred => {
-                                        std::thread::sleep(std::time::Duration::from_millis(25));
-                                    }
-                                }
-                            }
-                        };
-                        let after_attempt = || {
-                            permit.borrow_mut().take();
-                        };
-                        store.execute_model_recovering_authorized(
+                        let before_attempt = || store.wait_model_attempt_permit(&open, &can_start);
+                        let after_attempt = || {};
+                        store.execute_model_recovering_step_authorized(
                             &open,
                             can_start,
                             before_attempt,
                             after_attempt,
                         )
                     })
-                    .unwrap_or_else(|_| {
-                        vec![model_failure(
-                            &open,
-                            "DEVICE_MODEL_FAILED: local request could not complete",
-                        )]
+                    .unwrap_or_else(|error| {
+                        DeviceModelStepOutcome::Complete(vec![model_failure(&open, error.code())])
                     });
-                let _ = sender.send((open.model_exchange_id.0, chunks));
+                // The store, exchange owner and registration have all closed.
+                let _ = sender.send((open.model_exchange_id.0, outcome));
             })
-            .map(|_| ())
     }
 
     pub(crate) fn start_recorded(
@@ -277,8 +306,30 @@ impl DeviceModels {
     }
 
     pub(crate) fn next_chunk(&mut self) -> Result<Option<ModelChunkMessage>, DeviceProviderError> {
-        while let Ok((id, chunks)) = self.receiver.try_recv() {
-            self.pending.remove(&id);
+        while let Ok((id, outcome)) = self.receiver.try_recv() {
+            let Some(mut pending) = self.pending.remove(&id) else {
+                return Err(DeviceProviderError::StateInvalid);
+            };
+            if let Some(thread) = pending.thread.take() {
+                thread
+                    .join()
+                    .map_err(|_| DeviceProviderError::StateInvalid)?;
+            }
+            let chunks = match outcome {
+                DeviceModelStepOutcome::Complete(chunks) => chunks,
+                DeviceModelStepOutcome::DeferredRetry { wake_millis } => {
+                    pending.retry_wake_millis = Some(wake_millis);
+                    self.log_intake(IntakeLogLine {
+                        stage: "provider_retry_deferred", code: "DEVICE_PROVIDER_RETRY_DEFERRED",
+                        exchange_id: &id, sequence: 0,
+                        worker_session_id: &pending.open.worker_session_id.0,
+                        thread_id: &pending.open.session_identity.codex_thread_id.0,
+                        detail: &format!("request_id={} wake_millis={wake_millis} old_thread_joined=true old_store_closed=true", pending.open.request_id.0),
+                    });
+                    self.pending.insert(id, pending);
+                    continue;
+                }
+            };
             if !DeviceProviderStore::open(&self.directory)?.model_cancelled(&id)? {
                 self.owned_exchanges.insert(id.clone());
                 if let Some(first) = chunks.first() {
@@ -294,6 +345,7 @@ impl DeviceModels {
                 self.chunks.extend(chunks);
             }
         }
+        self.resume_deferred_models()?;
         if self.chunks.is_empty() {
             self.recover_from_durable_store()?;
         }
@@ -308,6 +360,37 @@ impl DeviceModels {
             *high_water = chunk.sequence.0;
         }
         Ok(Some(chunk))
+    }
+
+    fn resume_deferred_models(&mut self) -> Result<(), DeviceProviderError> {
+        let now = winwincode_network::journal::now_millis();
+        let mut ready = Vec::new();
+        for (id, pending) in &self.pending {
+            if pending.thread.is_some() {
+                continue;
+            }
+            if pending.retry_wake_millis.is_none_or(|wake| now >= wake)
+                || !pending.can_start()
+                || self.recovery_store.model_cancelled(id)?
+            {
+                ready.push((
+                    id.clone(),
+                    pending.open.clone(),
+                    pending.start_deadline,
+                    pending.start_guard.clone(),
+                ));
+            }
+        }
+        for (id, open, deadline, guard) in ready {
+            if let Ok(thread) = self.start_provider(&open, deadline, guard, true) {
+                let pending = self
+                    .pending
+                    .get_mut(&id)
+                    .ok_or(DeviceProviderError::StateInvalid)?;
+                pending.thread = Some(thread);
+            }
+        }
+        Ok(())
     }
 
     fn recover_from_durable_store(&mut self) -> Result<(), DeviceProviderError> {
@@ -351,35 +434,39 @@ impl DeviceModels {
     }
 
     pub(crate) fn log_intake(&self, line: IntakeLogLine<'_>) {
-        let Some(path) = self.intake_log.as_deref() else {
-            return;
-        };
-        if let Some(parent) = path.parent() {
-            let _ = std::fs::create_dir_all(parent);
-        }
-        let Ok(mut file) = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(path)
-        else {
-            return;
-        };
-        let ts = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|duration| duration.as_secs())
-            .unwrap_or_default();
-        let _ = writeln!(
-            file,
-            "ts={ts} component=device_models stage={} code={} exchange={} seq={} wsn={} thr={} detail={}",
-            line.stage,
-            line.code,
-            line.exchange_id,
-            line.sequence,
-            line.worker_session_id,
-            line.thread_id,
-            line.detail
-        );
+        write_intake_log(self.intake_log.as_deref(), line);
     }
+}
+
+fn write_intake_log(path: Option<&Path>, line: IntakeLogLine<'_>) {
+    let Some(path) = path else {
+        return;
+    };
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let Ok(mut file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+    else {
+        return;
+    };
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_secs())
+        .unwrap_or_default();
+    let _ = writeln!(
+        file,
+        "ts={ts} component=device_models stage={} code={} exchange={} seq={} wsn={} thr={} detail={}",
+        line.stage,
+        line.code,
+        line.exchange_id,
+        line.sequence,
+        line.worker_session_id,
+        line.thread_id,
+        line.detail
+    );
 }
 
 #[cfg(test)]
@@ -451,6 +538,34 @@ mod tests {
         }
     }
 
+    fn retained_open(
+        exchange: &str,
+        session: &str,
+        instance: &str,
+    ) -> winwincode_execution_port::generated::ModelOpenMessage {
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../tests/fixtures/contracts/execution-port.valid.json"
+        ))
+        .unwrap();
+        let mut open: winwincode_execution_port::generated::ModelOpenMessage =
+            serde_json::from_value(
+                fixture["messages"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .find(|message| message["kind"] == "model.open")
+                    .unwrap()
+                    .clone(),
+            )
+            .unwrap();
+        let frame = chunk(exchange, 1, false, session, instance);
+        open.model_exchange_id = frame.model_exchange_id;
+        open.lease = frame.lease;
+        open.session_identity = frame.session_identity;
+        open.worker_session_id = frame.worker_session_id;
+        open
+    }
+
     fn temp_root(label: &str) -> PathBuf {
         std::env::temp_dir().join(format!(
             "winwincode-device-models-{label}-{}-{}",
@@ -492,8 +607,9 @@ mod tests {
         };
         let permits = (0..3)
             .map(|_| match store.try_model_permit(request).unwrap() {
-                DeviceModelAdmission::Ready(permit) => permit,
+                DeviceModelAdmission::InvokeAttempt(permit) => permit,
                 DeviceModelAdmission::Deferred => panic!("expected a free Provider slot"),
+                _ => panic!("expected physical invocation admission"),
             })
             .collect::<Vec<_>>();
         assert_eq!(
@@ -551,6 +667,9 @@ mod tests {
             .receiver
             .recv_timeout(std::time::Duration::from_secs(5))
             .unwrap();
+        let DeviceModelStepOutcome::Complete(chunks) = chunks else {
+            panic!("unconfigured provider cannot defer a physical retry");
+        };
         assert_eq!(chunks.len(), 1);
         assert!(chunks[0].is_final);
         drop(models);
@@ -571,7 +690,7 @@ mod tests {
                 chunk(&exchange, 3, true, &wsn, &wki),
             ];
             store
-                .retain_stored_model_exchange_chunks(&exchange, &chunks)
+                .retain_stored_model_exchange_chunks(&retained_open(&exchange, &wsn, &wki), &chunks)
                 .expect("seed durable provider exchange");
         }
         let mut models = DeviceModels::open(&root).expect("open device models");
@@ -605,7 +724,7 @@ mod tests {
             let store = DeviceProviderStore::open(&root).expect("open device provider store");
             store
                 .retain_stored_model_exchange_chunks(
-                    &foreign_exchange,
+                    &retained_open(&foreign_exchange, &foreign_wsn, &foreign_wki),
                     &[
                         chunk(&foreign_exchange, 1, false, &foreign_wsn, &foreign_wki),
                         chunk(&foreign_exchange, 2, true, &foreign_wsn, &foreign_wki),
@@ -614,7 +733,7 @@ mod tests {
                 .expect("seed foreign exchange");
             store
                 .retain_stored_model_exchange_chunks(
-                    &owned_exchange,
+                    &retained_open(&owned_exchange, &owned_wsn, &owned_wki),
                     &[
                         chunk(&owned_exchange, 1, false, &owned_wsn, &owned_wki),
                         chunk(&owned_exchange, 2, false, &owned_wsn, &owned_wki),
@@ -660,7 +779,7 @@ mod tests {
             let store = DeviceProviderStore::open(&root).expect("open device provider store");
             store
                 .retain_stored_model_exchange_chunks(
-                    &exchange,
+                    &retained_open(&exchange, &wsn, &wki),
                     &[
                         chunk(&exchange, 1, false, &wsn, &wki),
                         chunk(&exchange, 2, true, &wsn, &wki),

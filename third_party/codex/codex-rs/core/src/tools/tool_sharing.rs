@@ -53,11 +53,36 @@ struct SharingPoolState {
 }
 struct Flight {
     source_sequence: i64,
-    result: watch::Receiver<Option<Result<String, String>>>,
+    result: watch::Receiver<Option<Result<String, SharedExecutionError>>>,
     ready: watch::Receiver<Option<()>>,
     waiters: AtomicUsize,
     cancellation: CancellationToken,
 }
+/// The shared execution transports the required-fact error category to every waiter.
+#[derive(Clone)]
+enum SharedExecutionError {
+    RespondToModel(String),
+    Fatal(String),
+}
+
+impl From<FunctionCallError> for SharedExecutionError {
+    fn from(error: FunctionCallError) -> Self {
+        match error {
+            FunctionCallError::RespondToModel(message) => Self::RespondToModel(message),
+            FunctionCallError::Fatal(message) => Self::Fatal(message),
+        }
+    }
+}
+
+impl From<SharedExecutionError> for FunctionCallError {
+    fn from(error: SharedExecutionError) -> Self {
+        match error {
+            SharedExecutionError::RespondToModel(message) => Self::RespondToModel(message),
+            SharedExecutionError::Fatal(message) => Self::Fatal(message),
+        }
+    }
+}
+
 struct Waiter {
     flight: Arc<Flight>,
     facts: Arc<ToolFactRecord>,
@@ -232,11 +257,13 @@ impl ToolDispatch {
             let output = tokio::select! {
                 result = actual.execute_actual(execution, tool) => result.and_then(|result| snapshot(&result)),
                 _ = execution_cancel.cancelled() => {
-                    actual.facts.completed(None).await.ok();
-                    Err(sharing_error("all_shared_waiters_cancelled"))
+                    match actual.facts.completed(None).await {
+                        Ok(()) => Err(sharing_error("all_shared_waiters_cancelled")),
+                        Err(error) => Err(error),
+                    }
                 }
             };
-            sender.send_replace(Some(output.map_err(|error| error.to_string())));
+            sender.send_replace(Some(output.map_err(SharedExecutionError::from)));
         });
         // The lease is owned by this logical caller. The spawned execution owns
         // only the actual attempt, not an implicit extra waiter.
@@ -262,7 +289,7 @@ impl ToolDispatch {
                 let raw = loop {
                     if let Some(result) = receiver.borrow().clone() {
                         lease.finished = true;
-                        break result.map_err(sharing_error)?;
+                        break result.map_err(FunctionCallError::from)?;
                     }
                     tokio::select! {
                         changed = receiver.changed() => changed.map_err(|_| sharing_error("shared_execution_unavailable"))?,
@@ -298,9 +325,10 @@ impl ToolDispatch {
         tool: Arc<dyn CoreToolRuntime>,
     ) -> Result<AnyToolResult, FunctionCallError> {
         let result = handle_any_tool(tool.as_ref(), invocation).await;
-        self.facts
-            .completed(result.as_ref().ok().map(snapshot).transpose()?)
-            .await?;
+        match &result {
+            Ok(output) => self.facts.completed(Some(snapshot(output)?)).await?,
+            Err(error) => self.facts.failed(&error.to_string()).await?,
+        }
         if let Some((gate, context, input)) = &self.trusted
             && let Ok(result) = &result
         {

@@ -20,14 +20,17 @@ async fn retained_terminal_cannot_overtake_a_durable_core_fact() {
     let session = record.kernel_session_id.clone();
     let thread = binding.canonical_thread_id.clone();
     let now = Instant("2026-08-28T00:00:02.000Z".into());
-    record.terminal = Some(super::super::StoredTerminal::Cancelled {
-        artifacts: Vec::new(),
-    });
     let mut adapter = ProductionCodexAdapter::open(diagnostic_adapter_config(&root)).unwrap();
     adapter
         .install_active_run(&key, record, binding.clone(), false, false)
         .unwrap();
     adapter.bridge.authority().update_now(&now).unwrap();
+    adapter.runs.get_mut(&key).unwrap().record.terminal =
+        Some(super::super::StoredTerminal::Cancelled {
+            artifacts: Vec::new(),
+        });
+    adapter.persist_run(&key).unwrap();
+    adapter.fence_thread(&thread, &now).unwrap();
     let message = adapter
         .prepare_tool_fact(
             &key,
@@ -58,7 +61,10 @@ async fn retained_terminal_cannot_overtake_a_durable_core_fact() {
         crate::CodexCoreAdapter::poll(&mut adapter, &thread, &now)
             .await
             .unwrap(),
-        CodexPoll::Cancelled { .. }
+        CodexPoll::Terminal(crate::CodexExecutionResult {
+            outcome: crate::CodexExecutionOutcome::Cancelled(_),
+            ..
+        })
     ));
     let record = load_stored_run(&adapter.store, &key).unwrap().unwrap();
     assert_eq!(record.core_tool_final_cursor, Some(17));
@@ -80,7 +86,10 @@ async fn retained_terminal_cannot_overtake_a_durable_core_fact() {
         crate::CodexCoreAdapter::poll(&mut restarted, &thread, &now)
             .await
             .unwrap(),
-        CodexPoll::Cancelled { .. }
+        CodexPoll::Terminal(crate::CodexExecutionResult {
+            outcome: crate::CodexExecutionOutcome::Cancelled(_),
+            ..
+        })
     ));
     drop(restarted);
     std::fs::remove_dir_all(root).unwrap();
@@ -204,6 +213,12 @@ async fn direct_outcome_retention_drains_core_before_close_and_replays_after_ack
         let session = record.kernel_session_id.clone();
         let thread = binding.canonical_thread_id.clone();
         let now = Instant("2026-08-28T00:00:02.000Z".into());
+        let mut adapter = ProductionCodexAdapter::open(diagnostic_adapter_config(&root)).unwrap();
+        adapter
+            .install_active_run(&key, record, binding.clone(), false, false)
+            .unwrap();
+        adapter.bridge.authority().update_now(&now).unwrap();
+        let record = &mut adapter.runs.get_mut(&key).unwrap().record;
         if delegated_stop {
             record.delegated_stop = Some(crate::DelegatedLoopStopFact {
                 batch_id: ChangeBatchId(format!("sha256:{}", "b".repeat(64))),
@@ -225,11 +240,8 @@ async fn direct_outcome_retention_drains_core_before_close_and_replays_after_ack
                 artifacts: Vec::new(),
             });
         }
-        let mut adapter = ProductionCodexAdapter::open(diagnostic_adapter_config(&root)).unwrap();
-        adapter
-            .install_active_run(&key, record, binding.clone(), false, false)
-            .unwrap();
-        adapter.bridge.authority().update_now(&now).unwrap();
+        adapter.persist_run(&key).unwrap();
+        adapter.fence_thread(&thread, &now).unwrap();
         let fact_json = serde_json::json!({
             "kind": "cell", "fact": {
                 "schema_version": 1, "sequence": 17, "thread_id": session,
@@ -493,9 +505,6 @@ async fn retained_outcome_renewal_preserves_original_frame_across_restart_and_ac
     let (mut record, mut binding) = delegated_record_and_binding();
     record.workspace = root.join("workspace");
     std::fs::create_dir_all(&record.workspace).unwrap();
-    record.terminal = Some(super::super::StoredTerminal::Cancelled {
-        artifacts: Vec::new(),
-    });
     binding.authority.lease.fencing_token = FencingToken("1".into());
     binding.authority.lease.lease_id = LeaseId("lse_00000000000000000000000001".into());
     binding.authority.lease.issued_at = Instant("2026-08-28T00:00:00.000Z".into());
@@ -526,6 +535,12 @@ async fn retained_outcome_renewal_preserves_original_frame_across_restart_and_ac
     adapter
         .install_active_run(&key, record, binding.clone(), false, false)
         .unwrap();
+    adapter.runs.get_mut(&key).unwrap().record.terminal =
+        Some(super::super::StoredTerminal::Cancelled {
+            artifacts: Vec::new(),
+        });
+    adapter.persist_run(&key).unwrap();
+    adapter.fence_thread(&thread, &now).unwrap();
     let original = adapter.retain_job_outcome(&thread, &outcome).await.unwrap();
     drop(adapter);
 

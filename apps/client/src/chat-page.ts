@@ -96,6 +96,14 @@ export function chatComposerKeyAction(key: ChatComposerKey, sendKey: 'enter' | '
   return 'submit'
 }
 
+function chatOutputPreparing(state: ChatViewModelState): boolean {
+  const latest = state.messages.at(-1)
+  return state.session?.state === 'running'
+    && latest?.role === 'assistant'
+    && latest.state === 'streaming'
+    && latest.outputPreparation === 'preparing'
+}
+
 function stateLabel(state: ChatViewModelState): string {
   if (state.status === 'loading') return '正在加载对话…'
   if (state.status === 'refreshing') return '正在更新对话…'
@@ -118,7 +126,7 @@ function stateLabel(state: ChatViewModelState): string {
     ? '选择一个模型路由'
     : '可以开始新对话'
   const sessionState = state.session?.state
-  if (sessionState === 'running') return '运行中'
+  if (sessionState === 'running') return chatOutputPreparing(state) ? '项目文件准备中' : '运行中'
   if (sessionState === 'waiting_for_input') return '等待输入'
   if (sessionState === 'waiting_for_approval') return '等待批准'
   if (sessionState === 'cancelled') return '已取消'
@@ -225,7 +233,8 @@ function modelRouteEmptyText(state: ChatViewModelState): string {
 
 export function chatPagePresentation(state: ChatViewModelState): ChatPagePresentation {
   const error = state.interaction.error ?? state.messagePagination.error ?? state.error
-  const running = state.session?.state === 'running'
+  const preparing = chatOutputPreparing(state)
+  const running = state.session?.state === 'running' && !preparing
   const continuing = state.session?.state === 'waiting_for_input'
   const mutationBusy = ['submitting', 'cancelling'].includes(state.interaction.status)
   return Object.freeze({
@@ -248,11 +257,11 @@ export function chatPagePresentation(state: ChatViewModelState): ChatPagePresent
     messageListBusy: state.status === 'loading'
       || state.status === 'refreshing'
       || state.realtime === 'reloading',
-    composerDisabled: mutationBusy
+    composerDisabled: mutationBusy || preparing
       || state.status === 'authentication-required'
       || state.status === 'authorization-denied'
       || state.status === 'closed',
-    cancelVisible: running,
+    cancelVisible: state.session?.state === 'running',
   })
 }
 
@@ -770,16 +779,17 @@ export function mountChatPage(options: ChatPageOptions): ChatPage {
     update(item, message: ChatViewModelState['messages'][number]) {
       const row = messageRows.get(item)
       if (row === undefined) return
-      const stateText = messageStateText(message.state)
+      const outputPreparing = message.state === 'streaming' && message.outputPreparation === 'preparing'
+      const stateText = outputPreparing ? '执行已结束，项目文件准备中' : messageStateText(message.state)
       row.article.dataset.role = message.role
       row.article.dataset.state = message.state
-      row.article.setAttribute('aria-busy', String(message.state === 'streaming'))
+      row.article.setAttribute('aria-busy', String(message.state === 'streaming' && !outputPreparing))
       row.role.textContent = message.role === 'user' ? readPreferences(document.defaultView).displayName || '你' : 'WinWinCode'
       const text = message.content.length === 0 && message.state === 'streaming'
-        ? '正在回复…'
+        ? (outputPreparing ? '项目文件准备中…' : '正在回复…')
         : message.content
       if (row.markdown === null) row.content.textContent = text
-      else row.markdown.update(text, message.state === 'streaming')
+      else row.markdown.update(text, message.state === 'streaming' && !outputPreparing)
       row.badge.hidden = stateText === null
       row.badge.textContent = stateText ?? ''
       row.artifacts.replaceChildren(...(message.artifactRefs ?? []).map(artifact => {

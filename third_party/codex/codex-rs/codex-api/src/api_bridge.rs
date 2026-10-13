@@ -19,6 +19,9 @@ use serde_json::Value;
 
 pub fn map_api_error(err: ApiError) -> CodexErr {
     match err {
+        ApiError::HostTerminal { source } => map_api_error(*source).without_retry(),
+        ApiError::ExecutionLeaseExpired => CodexErr::ExecutionLeaseExpired,
+        ApiError::ModelAuthorityExpired => CodexErr::ModelAuthorityExpired,
         ApiError::ContextWindowExceeded => CodexErr::ContextWindowExceeded,
         ApiError::QuotaExceeded => CodexErr::QuotaExceeded,
         ApiError::UsageNotIncluded => CodexErr::UsageNotIncluded,
@@ -199,6 +202,60 @@ const CLOUDFLARE_BLOCKED_MESSAGE: &str =
 #[cfg(test)]
 #[path = "api_bridge_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+mod host_terminal_retry_tests {
+    use super::*;
+    use std::time::Duration;
+
+    #[test]
+    fn exhausted_host_http_attempt_preserves_status_request_id_and_category() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "x-request-id",
+            http::HeaderValue::from_static("upstream-42"),
+        );
+        let error = map_api_error(
+            ApiError::Transport(TransportError::Http {
+                status: http::StatusCode::TOO_MANY_REQUESTS,
+                url: None,
+                headers: Some(headers),
+                body: Some("safe host summary".to_owned()),
+            })
+            .without_retry(),
+        );
+        assert!(!error.is_retryable());
+        assert!(
+            matches!(error.details(), CodexErrorDetails::RetryLimit(details) if details.status.as_u16() == 429 && details.request_id.as_deref() == Some("upstream-42"))
+        );
+        assert_eq!(
+            error.to_codex_protocol_error(),
+            codex_protocol::protocol::CodexErrorInfo::ResponseTooManyFailedAttempts {
+                http_status_code: Some(429)
+            }
+        );
+    }
+
+    #[test]
+    fn host_terminal_retains_original_transport_timeout_and_retry_delay() {
+        let timeout = map_api_error(ApiError::Transport(TransportError::Timeout).without_retry());
+        assert!(!timeout.is_retryable());
+        assert!(matches!(
+            timeout.details(),
+            CodexErrorDetails::RequestTimeout
+        ));
+        let delayed = map_api_error(
+            ApiError::Retryable {
+                message: "host stream failed".to_owned(),
+                delay: Some(Duration::from_millis(750)),
+            }
+            .without_retry(),
+        );
+        assert!(!delayed.is_retryable());
+        assert!(matches!(delayed.details(), CodexErrorDetails::Stream(_)));
+        assert_eq!(delayed.retry_delay(), Some(Duration::from_millis(750)));
+    }
+}
 
 fn extract_request_tracking_id(headers: Option<&HeaderMap>) -> Option<String> {
     extract_request_id(headers).or_else(|| extract_header(headers, CF_RAY_HEADER))

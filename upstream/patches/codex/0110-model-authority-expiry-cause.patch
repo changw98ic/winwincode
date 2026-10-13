@@ -1,0 +1,126 @@
+diff --git a/codex-rs/codex-api/src/error.rs b/codex-rs/codex-api/src/error.rs
+--- a/codex-rs/codex-api/src/error.rs
++++ b/codex-rs/codex-api/src/error.rs
+@@ -13,6 +13,9 @@
+     /// The embedding host rejected work under the original expired execution lease.
+     #[error("execution lease expired")]
+     ExecutionLeaseExpired,
++    /// The host refused a model call because its original execution authority expired.
++    #[error("model call authority expired")]
++    ModelAuthorityExpired,
+     #[error(transparent)]
+     Transport(#[from] TransportError),
+     #[error("api error {status}: {message}")]
+diff --git a/codex-rs/codex-api/src/api_bridge.rs b/codex-rs/codex-api/src/api_bridge.rs
+--- a/codex-rs/codex-api/src/api_bridge.rs
++++ b/codex-rs/codex-api/src/api_bridge.rs
+@@ -21,6 +21,7 @@
+     match err {
+         ApiError::HostTerminal { source } => map_api_error(*source).without_retry(),
+         ApiError::ExecutionLeaseExpired => CodexErr::ExecutionLeaseExpired,
++        ApiError::ModelAuthorityExpired => CodexErr::ModelAuthorityExpired,
+         ApiError::ContextWindowExceeded => CodexErr::ContextWindowExceeded,
+         ApiError::QuotaExceeded => CodexErr::QuotaExceeded,
+         ApiError::UsageNotIncluded => CodexErr::UsageNotIncluded,
+diff --git a/codex-rs/protocol/src/error.rs b/codex-rs/protocol/src/error.rs
+--- a/codex-rs/protocol/src/error.rs
++++ b/codex-rs/protocol/src/error.rs
+@@ -89,6 +89,10 @@
+     /// The embedding host fenced the original execution because its lease expired.
+     #[error("execution lease expired")]
+     ExecutionLeaseExpired,
++
++    /// The host refused a model call under an expired execution authority.
++    #[error("model call authority expired")]
++    ModelAuthorityExpired,
+ 
+     /// Returned by ResponsesClient when the SSE stream disconnects or errors out **after** the HTTP
+     /// handshake has succeeded but **before** it finished emitting `response.completed`.
+@@ -314,6 +318,7 @@
+         TurnAborted,
+         SessionBudgetExceeded,
+         ExecutionLeaseExpired,
++        ModelAuthorityExpired,
+         ContextWindowExceeded,
+         SessionConfiguredNotFirstEvent,
+         Timeout,
+@@ -376,6 +381,7 @@
+         match self.details() {
+             CodexErrorDetails::TurnAborted
+             | CodexErrorDetails::ExecutionLeaseExpired
++            | CodexErrorDetails::ModelAuthorityExpired
+             | CodexErrorDetails::SessionBudgetExceeded
+             | CodexErrorDetails::Interrupted
+             | CodexErrorDetails::EnvVar(_)
+@@ -443,6 +449,7 @@
+             CodexErrorDetails::ContextWindowExceeded => CodexErrorInfo::ContextWindowExceeded,
+             CodexErrorDetails::SessionBudgetExceeded => CodexErrorInfo::SessionBudgetExceeded,
+             CodexErrorDetails::ExecutionLeaseExpired => CodexErrorInfo::ExecutionLeaseExpired,
++            CodexErrorDetails::ModelAuthorityExpired => CodexErrorInfo::ModelAuthorityExpired,
+             CodexErrorDetails::UsageLimitReached(_)
+             | CodexErrorDetails::QuotaExceeded
+             | CodexErrorDetails::UsageNotIncluded => CodexErrorInfo::UsageLimitExceeded,
+diff --git a/codex-rs/protocol/src/protocol.rs b/codex-rs/protocol/src/protocol.rs
+--- a/codex-rs/protocol/src/protocol.rs
++++ b/codex-rs/protocol/src/protocol.rs
+@@ -1777,6 +1777,8 @@
+     SessionBudgetExceeded,
+     /// The embedding host rejected the original expired execution lease.
+     ExecutionLeaseExpired,
++    /// The host refused a model call under an expired execution authority.
++    ModelAuthorityExpired,
+     UsageLimitExceeded,
+     ServerOverloaded,
+     CyberPolicy,
+@@ -1817,6 +1819,7 @@
+             Self::ContextWindowExceeded
+             | Self::SessionBudgetExceeded
+             | Self::ExecutionLeaseExpired
++            | Self::ModelAuthorityExpired
+             | Self::UsageLimitExceeded
+             | Self::ServerOverloaded
+             | Self::CyberPolicy
+diff --git a/codex-rs/response-debug-context/src/lib.rs b/codex-rs/response-debug-context/src/lib.rs
+--- a/codex-rs/response-debug-context/src/lib.rs
++++ b/codex-rs/response-debug-context/src/lib.rs
+@@ -76,6 +76,7 @@
+     match error {
+         ApiError::HostTerminal { source } => telemetry_api_error_message(source),
+         ApiError::ExecutionLeaseExpired => "execution lease expired".to_string(),
++        ApiError::ModelAuthorityExpired => "model call authority expired".to_string(),
+         ApiError::Transport(transport) => telemetry_transport_error_message(transport),
+         ApiError::Api { status, .. } => format!("api error {}", status.as_u16()),
+         ApiError::Stream(err) => err.to_string(),
+diff --git a/codex-rs/cli/src/doctor.rs b/codex-rs/cli/src/doctor.rs
+--- a/codex-rs/cli/src/doctor.rs
++++ b/codex-rs/cli/src/doctor.rs
+@@ -2477,6 +2477,7 @@
+         ApiError::Stream(message) => format!("handshake stream error: {message}"),
+         ApiError::ContextWindowExceeded
+         | ApiError::ExecutionLeaseExpired
++        | ApiError::ModelAuthorityExpired
+         | ApiError::QuotaExceeded
+         | ApiError::UsageNotIncluded
+         | ApiError::Retryable { .. }
+diff --git a/codex-rs/ext/guardian-v2/src/async_scorer/sampler.rs b/codex-rs/ext/guardian-v2/src/async_scorer/sampler.rs
+--- a/codex-rs/ext/guardian-v2/src/async_scorer/sampler.rs
++++ b/codex-rs/ext/guardian-v2/src/async_scorer/sampler.rs
+@@ -388,6 +388,7 @@
+             | LunaSamplerError::Api(
+                 ApiError::HostTerminal { .. }
+                 | ApiError::ExecutionLeaseExpired
++                | ApiError::ModelAuthorityExpired
+                 | ApiError::Transport(TransportError::Build(_))
+                 | ApiError::ContextWindowExceeded
+                 | ApiError::QuotaExceeded
+diff --git a/codex-rs/app-server-protocol/src/protocol/v2/shared.rs b/codex-rs/app-server-protocol/src/protocol/v2/shared.rs
+--- a/codex-rs/app-server-protocol/src/protocol/v2/shared.rs
++++ b/codex-rs/app-server-protocol/src/protocol/v2/shared.rs
+@@ -154,6 +154,7 @@
+             }
+             CoreCodexErrorInfo::Other => CodexErrorInfo::Other,
+             CoreCodexErrorInfo::ExecutionLeaseExpired => CodexErrorInfo::Other,
++            CoreCodexErrorInfo::ModelAuthorityExpired => CodexErrorInfo::Other,
+         }
+     }
+ }

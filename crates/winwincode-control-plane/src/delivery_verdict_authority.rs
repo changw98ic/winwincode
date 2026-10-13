@@ -26,7 +26,8 @@ use winwincode_storage::{
 };
 
 use crate::runtime_event_transaction::{
-    RuntimeLedgerState, hydrate_runtime_ledger, load_ledger, runtime_stream_id_for_projection,
+    RuntimeLedgerState, decode_runtime_ledger_state, hydrate_runtime_ledger,
+    runtime_stream_id_for_projection,
 };
 use crate::session_binding_transaction::instant_millis;
 use crate::{
@@ -542,9 +543,12 @@ fn runtime_events(
 ) -> Result<Vec<ProductionRuntimeEvent>, DeliveryAuthorityError> {
     let scope_key = repository_scope_key(scope).map_err(|error| storage_error(&error))?;
     let stream_id = runtime_stream_id_for_projection(&scope_key, &binding.execution_job_id);
-    let mut ledger = load_ledger(storage, &stream_id)
+    let stored = storage
+        .load_state(&stream_id)
         .map_err(|error| storage_error(&error))?
         .ok_or_else(|| DeliveryAuthorityError::new("verification runtime ledger is missing"))?;
+    let mut ledger =
+        decode_runtime_ledger_state(&stored, &stream_id).map_err(|error| storage_error(&error))?;
     hydrate_runtime_ledger(storage, &mut ledger).map_err(|error| storage_error(&error))?;
     validate_runtime_identity(&ledger, delivery, binding, terminal)?;
     ledger

@@ -51,3 +51,33 @@ fn no_global_deadline_keeps_the_progress_idle_timeout() {
         Duration::from_millis(250)
     );
 }
+
+#[test]
+fn actual_blocking_socket_deadlines_preserve_timeout_cause_after_opening_and_body_start() {
+    use ureq::unversioned::transport::Transport as _;
+
+    for body_started in [false, true] {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let socket = std::net::TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let (_peer, _) = listener.accept().unwrap();
+        let io = ExchangeIo::new(Duration::from_millis(10), Duration::from_millis(30));
+        if body_started {
+            io.body_started();
+        }
+        let mut transport = super::ExchangeTransport {
+            socket,
+            buffers: ureq::unversioned::transport::LazyBuffers::new(1024, 1024),
+            io,
+        };
+        let error = transport
+            .await_input(NextTimeout {
+                after: TransportDuration::NotHappening,
+                reason: Timeout::Global,
+            })
+            .unwrap_err();
+        let failure = crate::classify_ureq(&error, false, crate::Phase::ResponseHeaders);
+        assert_eq!(failure.kind, crate::ErrorKind::Timeout);
+        assert_eq!(failure.acceptance, crate::Acceptance::Unknown);
+        assert_eq!(failure.phase, crate::Phase::ResponseHeaders);
+    }
+}

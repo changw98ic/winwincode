@@ -243,15 +243,37 @@ pub enum CodexPoll {
     ChangeBatchProposed(Box<ChangeBatchProposalEvent>),
     ChangeBatchProgress(Box<ChangeBatchProgressEvent>),
     RepairRequired(Box<RepairEnvelope>),
+    Terminal(CodexExecutionResult),
+}
+
+/// The original Core conclusion with separately retained diagnostic references.
+/// Diagnostics never select another execution lifecycle path.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CodexExecutionResult {
+    pub outcome: CodexExecutionOutcome,
+    pub diagnostics: Vec<ArtifactReference>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum CodexExecutionOutcome {
     Completed(CodexTurnCompletion),
-    CompletedWithDiagnostics(CodexTurnCompletion, Vec<ArtifactReference>),
-    Inconclusive(SecretSafeTraceSummary),
     Failed(SecretSafeTraceSummary),
-    FailedWithDiagnostics(SecretSafeTraceSummary, Vec<ArtifactReference>),
     Cancelled(SecretSafeTraceSummary),
-    CancelledWithDiagnostics(SecretSafeTraceSummary, Vec<ArtifactReference>),
     InfrastructureFailed(SecretSafeTraceSummary),
-    InfrastructureFailedWithDiagnostics(SecretSafeTraceSummary, Vec<ArtifactReference>),
+    Inconclusive(SecretSafeTraceSummary),
+}
+
+impl CodexPoll {
+    #[must_use]
+    pub const fn terminal(
+        outcome: CodexExecutionOutcome,
+        diagnostics: Vec<ArtifactReference>,
+    ) -> Self {
+        Self::Terminal(CodexExecutionResult {
+            outcome,
+            diagnostics,
+        })
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -306,6 +328,12 @@ pub trait CodexCoreAdapter {
 
     fn error_diagnostic(&self, _error: &Self::Error) -> Option<CodexFailureDiagnostic> {
         None
+    }
+
+    /// Distinguishes unavailable required storage from a rejected control.
+    /// Retrying the original control must not authorize another operation.
+    fn durable_state_unavailable(&self, _error: &Self::Error) -> bool {
+        false
     }
 
     fn ensure_thread(
@@ -379,6 +407,13 @@ pub trait CodexCoreAdapter {
         _thread_id: &CodexThreadId,
     ) -> Result<Option<DelegatedLoopStopFact>, Self::Error> {
         Ok(None)
+    }
+
+    /// Requests consecutive runtime-fact polls before yielding the Worker tick.
+    /// The Worker caps this budget and yields immediately for pending controls
+    /// or any non-runtime result. Each fact retains its own durable identity.
+    fn runtime_trace_batch_limit(&self) -> usize {
+        1
     }
 
     fn poll(
@@ -580,6 +615,17 @@ pub trait CodexCoreAdapter {
     ) -> impl Future<Output = Result<DurableExecutionDelivery, Self::Error>> + Send;
 
     fn take_execution_messages(&mut self) -> Result<Vec<ExecutionPortMessage>, Self::Error>;
+
+    /// Fences new model attempts and tool effects before cancellation cleanup
+    /// can yield. Original result and acknowledgement receipts remain valid.
+    /// Returns an unavailable authority or durable cancellation store error.
+    fn fence_thread(
+        &mut self,
+        _thread_id: &CodexThreadId,
+        _interrupted_at: &Instant,
+    ) -> Result<(), Self::Error> {
+        Ok(())
+    }
 
     fn interrupt(
         &mut self,

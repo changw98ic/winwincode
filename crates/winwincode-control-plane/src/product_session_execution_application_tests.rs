@@ -10,25 +10,26 @@ use serde_json::Value;
 use winwincode_api::generated::ModelRoute;
 use winwincode_domain::{
     CodexThreadId, ControlPlaneEventId, CredentialReferenceId, ExecutionEventId, ExecutionJobId,
-    ExecutionMessageId, ExecutionSequence, FencingToken, Instant, LeaseId, ModelExchangeId,
-    OrganizationId, ProductSessionId, ProjectId, RepositoryId, RequestId, SessionIdentity,
-    Sha256Digest, UserId, WorkerId, WorkerInstanceId, WorkerSessionId, WorkspaceId,
+    ExecutionMessageId, ExecutionSequence, Instant, ModelExchangeId, OrganizationId,
+    ProductSessionId, ProjectId, RepositoryId, RequestId, SessionIdentity, Sha256Digest, UserId,
+    WorkerId, WorkerInstanceId, WorkerSessionId, WorkspaceId,
 };
 use winwincode_domain::{RepositoryScope, RepositoryScopeKind};
 use winwincode_execution_port::generated::{
     EncodedPayload, ExecutionEventCategory, ExecutionEventRecord, ExecutionJob,
-    ExecutionLeaseStamp, ModelChunkMessage, ModelChunkMessageKind, RuntimeEventMessage,
+    ExecutionLeaseStamp, JobDispatchResultMessage, JobDispatchResultMessageKind,
+    JobDispatchResultMessageStatus, ModelChunkMessage, ModelChunkMessageKind, RuntimeEventMessage,
     RuntimeEventMessageKind,
 };
 use winwincode_session::SessionBindingIdentity;
 use winwincode_storage::{
     EXECUTION_PROTOCOL_VERSION, ExecutionAdmissionBoundary, ExecutionAdmissionLimits,
-    ExecutionAdmissionPolicy, ExecutionLeaseClaim, ExecutionQueueScope, ExecutionRepositoryAccess,
+    ExecutionAdmissionPolicy, ExecutionQueueScope, ExecutionRepositoryAccess,
     ExecutionReservationRequest, ExecutionReservationStart, ProductStateStorage, PublicEventActor,
-    ReceiptScopeKey, SqliteStorage, StateCommit, WorkerAuthenticationIdentity,
-    WorkerHeartbeatRequest, WorkerPlatform, WorkerPoolId, WorkerRegistrationRequest,
-    WorkerSlotAuthority, WorkerSlotOpenRequest, WorkerSlotResourceLimits, WorkerSlotResources,
-    public_receipt_identity, receipt_scope_key,
+    ReceiptScopeKey, RepositorySchedulerClaimRequest, RepositorySchedulerScope, SqliteStorage,
+    StateCommit, WorkerAuthenticationIdentity, WorkerHeartbeatRequest, WorkerPlatform,
+    WorkerPoolId, WorkerRegistrationRequest, WorkerSlotAuthority, WorkerSlotOpenRequest,
+    WorkerSlotResourceLimits, WorkerSlotResources, public_receipt_identity, receipt_scope_key,
 };
 
 use super::*;
@@ -70,6 +71,7 @@ struct ProjectionFixture {
     model_exchange_id: ModelExchangeId,
     authority: WorkerSlotAuthority,
     lease: ExecutionLeaseStamp,
+    dispatch_request_id: RequestId,
 }
 
 impl ProjectionFixture {
@@ -90,7 +92,7 @@ impl ProjectionFixture {
         );
         let execution_scope = execution_scope(&repository_scope, &product_session_id);
         seed_worker(&mut storage, seed);
-        let (authority, lease) =
+        let (authority, lease, dispatch_request_id) =
             seed_runtime(&mut storage, &execution_scope, &execution_job_id, seed);
         bind_product_session(
             &mut storage,
@@ -119,6 +121,7 @@ impl ProjectionFixture {
             model_exchange_id,
             authority,
             lease,
+            dispatch_request_id,
         }
     }
 
@@ -237,6 +240,7 @@ fn command_context(
     repository_scope: &RepositoryScope,
     request_seed: u64,
     expected_revision: u64,
+    occurred_second: u64,
 ) -> ProductSessionCommandContext {
     let actor = PublicEventActor::User {
         id: UserId(id("usr", 1)),
@@ -251,7 +255,7 @@ fn command_context(
         .expect("receipt identity"),
         expected_revision,
         event_id: ControlPlaneEventId(id("evt", request_seed)),
-        occurred_at: at(request_seed),
+        occurred_at: at(occurred_second),
         public_actor: actor,
         public_scope,
     }
@@ -267,7 +271,7 @@ fn seed_product_session(
     let mut service = ProductSessionService::new(storage);
     service
         .create(&CreateProductSessionCommand {
-            context: command_context(repository_scope, seed * 100, 0),
+            context: command_context(repository_scope, seed * 100, 0, 0),
             product_session_id: product_session_id.clone(),
             project_id: repository_scope.project_id.clone(),
             repository_id: repository_scope.repository_id.clone(),
@@ -290,7 +294,7 @@ fn seed_product_session(
     let receipt = service
         .submit_chat(&SubmitChatMessageCommand {
             attachments: Vec::new(),
-            context: command_context(repository_scope, seed * 100 + 1, 1),
+            context: command_context(repository_scope, seed * 100 + 1, 1, 1),
             product_session_id: product_session_id.clone(),
             message: "project canonical Provider output".to_owned(),
             execution_config,
@@ -398,33 +402,27 @@ fn seed_runtime(
     scope: &ExecutionQueueScope,
     job_id: &ExecutionJobId,
     seed: u64,
-) -> (WorkerSlotAuthority, ExecutionLeaseStamp) {
+) -> (WorkerSlotAuthority, ExecutionLeaseStamp, RequestId) {
     seed_execution_admission(storage, scope, job_id, seed);
-    let record = storage
-        .execution_queue()
-        .expect("queue")
-        .load_job(scope, job_id)
-        .expect("load Job")
-        .expect("Job");
-    let job: ExecutionJob = serde_json::from_slice(&record.dispatch_payload).expect("ExecutionJob");
-    let claim = ExecutionLeaseClaim {
-        expires_at: at(50),
-        fencing_token: FencingToken(seed.to_string()),
-        issued_at: at(5),
-        job_id: job_id.clone(),
-        lease_id: LeaseId(id("lse", seed)),
-        message_id: ExecutionMessageId(id("xmsg", seed * 100 + 6)),
-        payload_digest: job.payload_digest,
-        request_id: RequestId(id("req", seed * 100 + 6)),
-        worker_id: WorkerId(id("wrk", seed)),
-        worker_instance_id: WorkerInstanceId(id("wki", seed)),
-        attempt: 1,
-    };
-    storage
-        .execution_registry()
-        .expect("registry")
-        .claim_execution_job(&claim)
-        .expect("claim execution");
+    let dispatch = crate::RepositoryExecutionScheduler::new(storage)
+        .claim_next(&RepositorySchedulerClaimRequest {
+            scope: RepositorySchedulerScope {
+                organization_id: scope.organization_id.clone(),
+                workspace_id: scope.workspace_id.clone(),
+                project_id: scope.project_id.clone(),
+                repository_id: scope.repository_id.clone(),
+            },
+            request_id: RequestId(id("req", seed * 100 + 6)),
+            scheduler_generation: "projection-fixture".into(),
+            worker_id: WorkerId(id("wrk", seed)),
+            worker_instance_id: WorkerInstanceId(id("wki", seed)),
+            issued_at: at(5),
+            expires_at: at(50),
+        })
+        .expect("claim execution")
+        .expect("scheduler dispatch");
+    assert_eq!(dispatch.job.job_id, *job_id);
+    let claim = &dispatch.lease;
     let authority = WorkerSlotAuthority {
         worker_id: claim.worker_id.clone(),
         worker_instance_id: claim.worker_instance_id.clone(),
@@ -459,17 +457,7 @@ fn seed_runtime(
             opened_at: at(6),
         })
         .expect("open slot");
-    let lease = ExecutionLeaseStamp {
-        attempt: 1,
-        expires_at: claim.expires_at,
-        fencing_token: claim.fencing_token,
-        issued_at: claim.issued_at,
-        job_id: claim.job_id,
-        lease_id: claim.lease_id,
-        worker_id: claim.worker_id,
-        worker_instance_id: claim.worker_instance_id,
-    };
-    (authority, lease)
+    (authority, dispatch.lease, dispatch.request_id)
 }
 
 fn seed_execution_admission(
@@ -530,7 +518,7 @@ fn bind_product_session(
     seed: u64,
 ) {
     let command = ContinueProductSessionCommand {
-        context: command_context(repository_scope, seed * 100 + 8, 2),
+        context: command_context(repository_scope, seed * 100 + 8, 2, 8),
         product_session_id: product_session_id.clone(),
         binding_identity: SessionBindingIdentity::product_session(
             product_session_id.clone(),
@@ -761,29 +749,27 @@ fn cancelled_chat_retains_and_acknowledges_late_public_frames_without_rebinding(
         .expect("load Job")
         .expect("Job");
     let job: ExecutionJob = serde_json::from_slice(&job.dispatch_payload).expect("Job payload");
-    fixture
-        .storage
-        .execution_registry()
-        .expect("registry")
-        .record_dispatch_result(&winwincode_storage::DispatchResultRequest {
-            checked_at: at(6),
-            expires_at: fixture.lease.expires_at.clone(),
-            fencing_token: fixture.lease.fencing_token.clone(),
-            issued_at: fixture.lease.issued_at.clone(),
-            job_id: fixture.execution_job_id.clone(),
-            lease_id: fixture.lease.lease_id.clone(),
-            message_id: ExecutionMessageId(id("xmsg", 16_001)),
-            payload_digest: job.payload_digest,
-            request_id: RequestId(id("req", 16 * 100 + 6)),
-            sent_at: at(6),
-            status: winwincode_storage::DispatchResultStatus::Accepted,
-            attempt: 1,
-            error: None,
-            worker_id: fixture.authority.worker_id.clone(),
-            worker_instance_id: fixture.authority.worker_instance_id.clone(),
-            worker_session_id: Some(fixture.authority.worker_session_id.clone()),
-        })
+    let accepted = crate::RepositoryExecutionScheduler::new(&mut fixture.storage)
+        .record_dispatch_result(
+            &fixture.repository_scope,
+            &JobDispatchResultMessage {
+                job_id: fixture.execution_job_id.clone(),
+                kind: JobDispatchResultMessageKind::JobDispatchResult,
+                lease: fixture.lease.clone(),
+                message_id: ExecutionMessageId(id("xmsg", 16_001)),
+                payload_digest: job.payload_digest,
+                request_id: fixture.dispatch_request_id.clone(),
+                schema_version: winwincode_domain::SchemaVersion::WinwincodeV1,
+                sent_at: at(6),
+                status: JobDispatchResultMessageStatus::Accepted,
+                error: None,
+                worker_session_id: Some(fixture.authority.worker_session_id.clone()),
+            },
+            &at(6),
+        )
         .expect("accept dispatch");
+    assert!(accepted.accepted);
+    assert_eq!(accepted.job.state, ExecutionJobState::Running);
     let mut control_plane = crate::ControlPlane::start_local(
         crate::ControlPlaneConfig::local(&fixture.directory.0),
         Box::new(Publisher),
@@ -803,8 +789,7 @@ fn cancelled_chat_retains_and_acknowledges_late_public_frames_without_rebinding(
     .handle(&ExecutionPortMessage::ModelChunkMessage(initial))
     .expect("project the running Chat frame");
     assert_eq!(fixture.assistant_content(), "before cancellation");
-    let mut cancel_context = command_context(&fixture.repository_scope, 16_030, 2);
-    cancel_context.occurred_at = at(45);
+    let cancel_context = command_context(&fixture.repository_scope, 16_030, 2, 45);
     ProductSessionService::new(&mut fixture.storage)
         .cancel_session(&crate::CancelProductSessionCommand {
             context: cancel_context,

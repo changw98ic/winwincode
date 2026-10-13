@@ -2935,6 +2935,14 @@ pub enum ExecutionPortErrorCode {
     CandidateUnchanged,
     #[serde(rename = "CANDIDATE_PREPARATION_FAILED")]
     CandidatePreparationFailed,
+    #[serde(rename = "DEVICE_PROVIDER_STATE_INVALID")]
+    DeviceProviderStateInvalid,
+    #[serde(rename = "DEVICE_PROVIDER_STORAGE_UNAVAILABLE")]
+    DeviceProviderStorageUnavailable,
+    #[serde(rename = "DEVICE_PROVIDER_FILESYSTEM_UNAVAILABLE")]
+    DeviceProviderFilesystemUnavailable,
+    #[serde(rename = "DEVICE_PROVIDER_ENCODING_INVALID")]
+    DeviceProviderEncodingInvalid,
 }
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -3555,6 +3563,116 @@ pub struct ModelChunkMessage {
     pub worker_session_id: winwincode_domain::WorkerSessionId,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+pub enum ModelFailureAcceptance {
+    #[serde(rename = "not_sent")]
+    NotSent,
+    #[serde(rename = "unknown")]
+    Unknown,
+    #[serde(rename = "response_received")]
+    ResponseReceived,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+pub enum ModelFailureCause {
+    #[serde(rename = "connection_unavailable")]
+    ConnectionUnavailable,
+    #[serde(rename = "transport_interrupted")]
+    TransportInterrupted,
+    #[serde(rename = "timeout")]
+    Timeout,
+    #[serde(rename = "rate_limited")]
+    RateLimited,
+    #[serde(rename = "server_transient")]
+    ServerTransient,
+    #[serde(rename = "authentication")]
+    Authentication,
+    #[serde(rename = "authorization")]
+    Authorization,
+    #[serde(rename = "request_invalid")]
+    RequestInvalid,
+    #[serde(rename = "protocol_invalid")]
+    ProtocolInvalid,
+    #[serde(rename = "integrity_invalid")]
+    IntegrityInvalid,
+    #[serde(rename = "tls_invalid")]
+    TlsInvalid,
+    #[serde(rename = "stream_incomplete")]
+    StreamIncomplete,
+    #[serde(rename = "empty_response")]
+    EmptyResponse,
+    #[serde(rename = "cancelled")]
+    Cancelled,
+    #[serde(rename = "authority_expired")]
+    AuthorityExpired,
+    #[serde(rename = "storage_unavailable")]
+    StorageUnavailable,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+pub enum ModelFailureFactsScope {
+    #[serde(rename = "model_attempt")]
+    ModelAttempt,
+}
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ModelFailureFacts {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(rename = "acceptance")]
+    pub acceptance: Option<ModelFailureAcceptance>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(rename = "attemptId")]
+    pub attempt_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(rename = "cause")]
+    pub cause: Option<ModelFailureCause>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(rename = "networkDiagnosticCode")]
+    pub network_diagnostic_code: Option<ModelNetworkDiagnosticCode>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(rename = "parserDiagnostic")]
+    pub parser_diagnostic: Option<ProviderModelFailureDiagnostic>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(rename = "phase")]
+    pub phase: Option<ModelFailurePhase>,
+    #[serde(rename = "scope")]
+    pub scope: ModelFailureFactsScope,
+    #[serde(rename = "sourceCode")]
+    pub source_code: ExecutionPortErrorCode,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(rename = "stopReason")]
+    pub stop_reason: Option<ModelFailureStopReason>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+pub enum ModelFailurePhase {
+    #[serde(rename = "connect")]
+    Connect,
+    #[serde(rename = "response_headers")]
+    ResponseHeaders,
+    #[serde(rename = "response_body")]
+    ResponseBody,
+    #[serde(rename = "stream")]
+    Stream,
+    #[serde(rename = "decode")]
+    Decode,
+    #[serde(rename = "persist")]
+    Persist,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+pub enum ModelFailureStopReason {
+    #[serde(rename = "permanent_failure")]
+    PermanentFailure,
+    #[serde(rename = "recovery_disabled")]
+    RecoveryDisabled,
+    #[serde(rename = "reconcile_required")]
+    ReconcileRequired,
+    #[serde(rename = "retry_budget_exhausted")]
+    RetryBudgetExhausted,
+}
+
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ModelGatewayRoute {
@@ -3562,6 +3680,70 @@ pub struct ModelGatewayRoute {
     pub capability: String,
     #[serde(rename = "route")]
     pub route: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+pub enum ModelNetworkDiagnosticCode {
+    #[serde(rename = "http_status")]
+    HttpStatus,
+    #[serde(rename = "dns")]
+    Dns,
+    #[serde(rename = "connect")]
+    Connect,
+    #[serde(rename = "io")]
+    Io,
+    #[serde(rename = "timeout")]
+    Timeout,
+    #[serde(rename = "tls")]
+    Tls,
+    #[serde(rename = "tls_certificate")]
+    TlsCertificate,
+    #[serde(rename = "http_protocol")]
+    HttpProtocol,
+    #[serde(rename = "request_uri")]
+    RequestUri,
+    #[serde(rename = "request_headers")]
+    RequestHeaders,
+    #[serde(rename = "proxy")]
+    Proxy,
+    #[serde(rename = "redirect")]
+    Redirect,
+    #[serde(rename = "response_headers_too_large")]
+    ResponseHeadersTooLarge,
+    #[serde(rename = "body_too_large")]
+    BodyTooLarge,
+    #[serde(rename = "content_type")]
+    ContentType,
+    #[serde(rename = "transport_other")]
+    TransportOther,
+    #[serde(rename = "json_syntax")]
+    JsonSyntax,
+    #[serde(rename = "json_schema")]
+    JsonSchema,
+    #[serde(rename = "response_invariant")]
+    ResponseInvariant,
+    #[serde(rename = "schema_version")]
+    SchemaVersion,
+    #[serde(rename = "sse_framing")]
+    SseFraming,
+    #[serde(rename = "sse_event")]
+    SseEvent,
+    #[serde(rename = "stream_conversion")]
+    StreamConversion,
+    #[serde(rename = "stream_incomplete")]
+    StreamIncomplete,
+    #[serde(rename = "empty_response")]
+    EmptyResponse,
+    #[serde(rename = "identity_conflict")]
+    IdentityConflict,
+    #[serde(rename = "credential_blocked")]
+    CredentialBlocked,
+    #[serde(rename = "storage")]
+    Storage,
+    #[serde(rename = "configuration")]
+    Configuration,
+    #[serde(rename = "authority_ended")]
+    AuthorityEnded,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
@@ -6433,6 +6615,20 @@ pub struct ProductSessionExecutionScope {
     pub kind: ProductSessionExecutionScopeKind,
     #[serde(rename = "productSessionId")]
     pub product_session_id: winwincode_domain::ProductSessionId,
+}
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProviderModelFailureDiagnostic {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(rename = "eventType")]
+    pub event_type: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(rename = "fieldPath")]
+    pub field_path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(rename = "stage")]
+    pub stage: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]

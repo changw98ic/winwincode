@@ -56,6 +56,7 @@ pub use types::{
     ProviderStreamControlAction, ResolvedSecret, SecretStoreError, SecretStoreErrorKind,
 };
 
+mod device_call_records;
 mod device_store;
 pub use device_store::{DeviceProviderError, DeviceProviderStore, valid_device_provider_config};
 
@@ -63,9 +64,10 @@ mod device_jev_context;
 pub use device_jev_context::{DeviceJevReceipt, StoredJevContext};
 
 mod device_accounting;
+pub use device_accounting::DevicePrimaryModelUsage;
 mod device_model;
 mod model_response_store;
-pub use device_model::{model_failure, public_model_chunk};
+pub use device_model::{DeviceModelStepOutcome, model_failure, public_model_chunk};
 
 mod device_model_concurrency;
 pub use device_model_concurrency::{DeviceModelAdmission, DeviceModelPermit};

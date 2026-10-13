@@ -225,6 +225,10 @@ pub enum RuntimeReplayAckError {
     UnsupportedSchema,
     EmptyIdentity,
     InvalidAttempt,
+    /// The acknowledgement message identifier is not canonical.
+    InvalidMessageId,
+    /// The acknowledgement time is malformed or predates its original frame.
+    InvalidTime,
     InvalidFencingToken,
     NegativeSequence,
     SequenceOutOfRange,
@@ -241,6 +245,8 @@ impl fmt::Display for RuntimeReplayAckError {
             Self::UnsupportedSchema => "runtime acknowledgement schema is unsupported",
             Self::EmptyIdentity => "runtime acknowledgement identity is empty",
             Self::InvalidAttempt => "runtime acknowledgement attempt is invalid",
+            Self::InvalidTime => "runtime acknowledgement time is invalid",
+            Self::InvalidMessageId => "runtime acknowledgement message identity is invalid",
             Self::InvalidFencingToken => "runtime acknowledgement fencing token is invalid",
             Self::NegativeSequence => "runtime acknowledgement sequence is negative",
             Self::SequenceOutOfRange => {
@@ -423,6 +429,82 @@ impl RuntimeReplayResponder {
             highest_sequence,
             events,
         })
+    }
+
+    /// Reads a previously acknowledged original frame without requiring live
+    /// execution authority. This only proves transport cleanup; it cannot
+    /// advance a watermark or authorize execution. The caller must use the
+    /// normal acknowledgement path when no exact retained proof exists.
+    /// Returns malformed acknowledgement, corrupt original frame or storage
+    /// failures before any mutation.
+    pub fn retained_acknowledgement<S, A>(
+        &self,
+        store: &mut S,
+        message: &RuntimeAckMessage,
+    ) -> Result<Option<RuntimeReplayAckReceipt>, RuntimeReplayError<A::Error, S::Error>>
+    where
+        S: ReplayAcknowledgementStore,
+        A: ReplayAuthority<Context = RuntimeReplayIdentity>,
+    {
+        let validated = validate_ack(message).map_err(RuntimeReplayError::Acknowledgement)?;
+        if !matches!(
+            message.status,
+            LeaseWriteStatus::Accepted | LeaseWriteStatus::Duplicate
+        ) || validated.ack_sequence == 0
+        {
+            return Ok(None);
+        }
+        let identity = RuntimeReplayIdentity::from_ack(message);
+        let stream = runtime_ack_stream_key(message);
+        let durable = store
+            .load_watermarks(&stream)
+            .map_err(|error| RuntimeReplayError::Replay(ReplayError::Store(error)))?;
+        if durable.ack_sequence > durable.highest_sequence {
+            return Err(RuntimeReplayError::AckOutOfRange);
+        }
+        if validated.ack_sequence > durable.ack_sequence {
+            return Ok(None);
+        }
+        let query = crate::replay::ReplayReadQuery::After {
+            sequence: validated.ack_sequence - 1,
+            max_events: 1,
+        };
+        let original = store
+            .load_indexed(&stream, query)
+            .map_err(|error| RuntimeReplayError::Replay(ReplayError::Store(error)))?;
+        let original = if let Some(original) = original {
+            original
+        } else {
+            store
+                .load(&stream)
+                .map_err(|error| RuntimeReplayError::Replay(ReplayError::Store(error)))?
+                .unwrap_or_default()
+        };
+        let Some(frame) = original
+            .events
+            .iter()
+            .find(|frame| frame.sequence == validated.ack_sequence)
+        else {
+            return Ok(None);
+        };
+        // Stream keys omit renewal timestamps, so only the complete original
+        // identity and canonical bytes can prove an already accepted receipt.
+        let original = decode_frame::<A::Error, S::Error>(&identity, frame)?;
+        if !crate::execution_identity::canonical_instant(&message.sent_at)
+            || !crate::execution_identity::canonical_instant(&original.sent_at)
+            || message.sent_at.0 < original.sent_at.0
+        {
+            return Err(RuntimeReplayError::Acknowledgement(
+                RuntimeReplayAckError::InvalidTime,
+            ));
+        }
+        Ok(Some(RuntimeReplayAckReceipt {
+            status: message.status.clone(),
+            ack_sequence: to_ack_sequence(durable.ack_sequence)?,
+            highest_sequence: to_ack_sequence(durable.highest_sequence)?,
+            replay_from_sequence: None,
+            replay: None,
+        }))
     }
 
     pub fn acknowledge<S, A>(
@@ -641,6 +723,22 @@ fn validate_ack(message: &RuntimeAckMessage) -> Result<ValidatedAck, RuntimeRepl
     }
     if message.message_id.0.is_empty() {
         return Err(RuntimeReplayAckError::EmptyIdentity);
+    }
+    if message.message_id.0.len() != 31
+        || !message.message_id.0.starts_with("xmsg_")
+        || !message.message_id.0[5..]
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric())
+    {
+        return Err(RuntimeReplayAckError::InvalidMessageId);
+    }
+    if !crate::execution_identity::canonical_instant(&message.sent_at)
+        || !crate::execution_identity::canonical_instant(&message.lease.issued_at)
+        || !crate::execution_identity::canonical_instant(&message.lease.expires_at)
+        || message.lease.issued_at.0 >= message.lease.expires_at.0
+        || message.sent_at.0 < message.lease.issued_at.0
+    {
+        return Err(RuntimeReplayAckError::InvalidTime);
     }
     validate_identity(
         &message.lease,

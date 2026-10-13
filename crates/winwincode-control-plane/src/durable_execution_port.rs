@@ -8,16 +8,16 @@ use winwincode_delivery::application::workrun_execution::{
     WorkerTerminalOutcomeReport, seal_dispatch_terminal_outcome, seal_session_binding_authority,
 };
 use winwincode_domain::RepositoryScope;
-use winwincode_domain::{DeliveryId, ExecutionMessageId, Instant, SchemaVersion};
+use winwincode_domain::{ExecutionMessageId, Instant, SchemaVersion};
 use winwincode_execution_port::generated::{
     ExecutionJob, ExecutionLeaseStamp, ExecutionOutcomeStatus, ExecutionPortError,
     ExecutionPortErrorCode, ExecutionPortMessage, ExecutionScope, JobOutcomeAckMessage,
-    JobOutcomeAckMessageKind, JobOutcomeAckMessageStatus, JobOutcomeMessage, SessionBindingMessage,
+    JobOutcomeAckMessageKind, JobOutcomeAckMessageStatus, JobOutcomeMessage, LeaseWriteStatus,
+    SessionBindingMessage,
 };
 use winwincode_execution_port::transport::ExecutionPortCore;
 use winwincode_storage::{
-    DurableOutboxEvent, ExecutionDispatchAuthority, ExecutionQueueScope, ProductStateStorage,
-    SqliteStorage, StorageError, StorageErrorKind, public_actor_from_receipt_key,
+    ExecutionDispatchAuthority, ProductStateStorage, SqliteStorage, StorageError, StorageErrorKind,
 };
 
 use crate::delivery_transaction::load_durable_execution_job;
@@ -36,11 +36,15 @@ pub enum DurableExecutionPortError {
     Configuration,
     Service(ExecutionPortServiceError),
     Storage(StorageError),
+    /// Authenticated Worker resource completion retains its typed cause.
+    WorkerLifecycle(crate::WorkerExecutionLifecycleError),
     SessionBinding(DeliverySessionBindingCommitError),
     Controller(DeliveryApplicationError),
     Runtime(RuntimeMessageError),
     Artifact(ArtifactMessageError),
     Terminal(DeliveryTerminalOutcomeCommitError),
+    /// Required accepted-outcome publication remains pending.
+    Publication(crate::OutboxError),
     ActionPolicy(ActionPolicyEnforcementError),
     UnsupportedMessage,
 }
@@ -52,11 +56,13 @@ impl fmt::Display for DurableExecutionPortError {
                 .write_str("Control Plane and Execution Registry do not share one local database"),
             Self::Service(error) => write!(formatter, "{error}"),
             Self::Storage(error) => write!(formatter, "ExecutionPort authority failed: {error}"),
+            Self::WorkerLifecycle(error) => write!(formatter, "{error}"),
             Self::SessionBinding(error) => write!(formatter, "{error}"),
             Self::Controller(error) => write!(formatter, "{error}"),
             Self::Runtime(error) => write!(formatter, "{error}"),
             Self::Artifact(error) => write!(formatter, "{error}"),
             Self::Terminal(error) => write!(formatter, "{error}"),
+            Self::Publication(error) => write!(formatter, "{error}"),
             Self::ActionPolicy(error) => write!(formatter, "{error}"),
             Self::UnsupportedMessage => {
                 formatter.write_str("ExecutionPort message belongs to another production seam")
@@ -70,11 +76,13 @@ impl std::error::Error for DurableExecutionPortError {
         match self {
             Self::Service(error) => Some(error),
             Self::Storage(error) => Some(error),
+            Self::WorkerLifecycle(error) => Some(error),
             Self::SessionBinding(error) => Some(error),
             Self::Controller(error) => Some(error),
             Self::Runtime(error) => Some(error),
             Self::Artifact(error) => Some(error),
             Self::Terminal(error) => Some(error),
+            Self::Publication(error) => Some(error),
             Self::ActionPolicy(error) => Some(error),
             Self::Configuration | Self::UnsupportedMessage => None,
         }
@@ -82,6 +90,8 @@ impl std::error::Error for DurableExecutionPortError {
 }
 
 impl DurableExecutionPortError {
+    /// settlement remains pending. The frozen continuation resumes only after
+    /// required resource cleanup and publication complete.
     #[must_use]
     pub fn committed_terminal_receipt(
         &self,
@@ -331,6 +341,22 @@ impl<'application> DurableExecutionPortIngress<'application> {
                     .control_plane
                     .accept_artifact_open(self.repository_scope, artifact, &authority)
                     .map_err(DurableExecutionPortError::Artifact)?;
+                if matches!(
+                    acknowledgement.status,
+                    LeaseWriteStatus::Accepted | LeaseWriteStatus::Duplicate
+                ) && crate::product_session_execution_application::project_chat_output_preparation(
+                        self.storage,
+                        self.repository_scope,
+                        &self.server_time,
+                        artifact,
+                    )
+                    .is_err()
+                {
+                        // The canonical Artifact fact and its ACK are already
+                        // accepted. This display projection can be recovered
+                        // from an exact replay and must not strand the upload.
+                        eprintln!("diagnostic_loss code=chat_output_preparation_failed");
+                }
                 Ok(vec![ExecutionPortMessage::ArtifactAckMessage(
                     acknowledgement,
                 )])
@@ -364,7 +390,13 @@ impl<'application> DurableExecutionPortIngress<'application> {
                 self.delegate_job_scoped(&request.lease.job_id, message)
             }
             ExecutionPortMessage::JobCancelAckMessage(acknowledgement) => {
-                self.delegate_job_scoped(&acknowledgement.lease.job_id, message)
+                crate::execution_cancellation_receipt::accept(
+                    self.storage,
+                    self.repository_scope,
+                    acknowledgement,
+                )
+                .map_err(DurableExecutionPortError::Storage)?;
+                Ok(Vec::new())
             }
             ExecutionPortMessage::ActionEnforcementRequestMessage(request) => {
                 self.delegate_job_scoped(&request.lease.job_id, message)
@@ -513,10 +545,67 @@ impl<'application> DurableExecutionPortIngress<'application> {
         )
     }
 
+    #[allow(
+        clippy::too_many_lines,
+        reason = "Receipt replay and new terminal acceptance share one bounded ingress path"
+    )]
     fn accept_terminal_outcome(
         &mut self,
         message: &JobOutcomeMessage,
     ) -> Result<Vec<ExecutionPortMessage>, DurableExecutionPortError> {
+        let retained = match crate::execution_outcome_commit::outcome_replay(self.storage, message)
+            .map_err(DurableExecutionPortError::Storage)?
+        {
+            crate::execution_outcome_commit::OutcomeReplay::Missing => None,
+            crate::execution_outcome_commit::OutcomeReplay::Exact(retained) => Some(retained),
+            crate::execution_outcome_commit::OutcomeReplay::FrameConflict => {
+                return Ok(outcome_output(outcome_rejection(
+                    message,
+                    JobOutcomeAckMessageStatus::RejectedConflict,
+                    ExecutionPortErrorCode::MessageConflict,
+                    "job.outcome differs from its accepted original frame",
+                )));
+            }
+            crate::execution_outcome_commit::OutcomeReplay::AuthorityConflict => {
+                return Ok(outcome_output(outcome_rejection(
+                    message,
+                    JobOutcomeAckMessageStatus::RejectedConflict,
+                    ExecutionPortErrorCode::JobDispatchConflict,
+                    "job.outcome differs from accepted execution authority",
+                )));
+            }
+        };
+        if let Some(retained) = retained {
+            if retained.follow_up.is_some() {
+                let commit = crate::terminal_outcome_transaction::replay_accepted_receipt(
+                    self.storage,
+                    self.repository_scope,
+                    message,
+                )
+                .map_err(DurableExecutionPortError::Terminal)?;
+                self.control_plane
+                    .finish_accepted_execution_outcome(
+                        self.repository_scope,
+                        &retained.message,
+                        true,
+                    )
+                    .map_err(|source| {
+                        DurableExecutionPortError::Terminal(
+                            DeliveryTerminalOutcomeCommitError::CompletionPending {
+                                commit: Box::new(commit),
+                                source: Box::new(source),
+                            },
+                        )
+                    })?;
+            } else {
+                self.control_plane.finish_accepted_execution_outcome(
+                    self.repository_scope,
+                    &retained.message,
+                    false,
+                )?;
+            }
+            return Ok(outcome_output(outcome_success(message, true)));
+        }
         let authority = match self.dispatch_authority(&message.lease.job_id) {
             Ok(authority) => authority,
             Err(DurableExecutionPortError::Storage(error))
@@ -534,7 +623,7 @@ impl<'application> DurableExecutionPortIngress<'application> {
         if let Some(rejection) = outcome_authority_rejection(message, &authority, self.storage)? {
             return Ok(outcome_output(rejection));
         }
-        let (durable, job) = load_durable_execution_job(self.storage, &message.lease.job_id)
+        let (_, job) = load_durable_execution_job(self.storage, &message.lease.job_id)
             .map_err(DurableExecutionPortError::Storage)?;
         if matches!(job.scope, ExecutionScope::ProductSessionExecutionScope(_)) {
             return self.delegate_supplement(
@@ -546,192 +635,12 @@ impl<'application> DurableExecutionPortIngress<'application> {
             );
         }
         let facts = Self::terminal_facts(message, &authority, &job)?;
-        let (replayed, terminal_revision) = match self.commit_terminal(message, &facts) {
-            Ok(Ok(committed)) => committed,
-            Ok(Err(rejection)) => {
-                if facts.status() == TerminalOutcomeStatus::Succeeded
-                    || message.outcome.error.as_ref().is_some_and(|error| {
-                        error.code == ExecutionPortErrorCode::CandidateUnchanged
-                    })
-                {
-                    self.continue_delivery_controller_follow_up(&durable, &job, None)?;
-                }
-                return Ok(outcome_output(rejection));
-            }
-            Err(error) => {
-                if (facts.status() == TerminalOutcomeStatus::Succeeded
-                    || message.outcome.error.as_ref().is_some_and(|error| {
-                        error.code == ExecutionPortErrorCode::CandidateUnchanged
-                    }))
-                    && let Some(receipt) = error.committed_terminal_receipt()
-                {
-                    self.continue_delivery_controller_follow_up(
-                        &durable,
-                        &job,
-                        Some(receipt.revision()),
-                    )?;
-                }
-                return Err(error);
-            }
+        let replayed = match self.commit_terminal(message, &facts) {
+            Ok(Ok((replayed, _))) => replayed,
+            Ok(Err(rejection)) => return Ok(outcome_output(rejection)),
+            Err(error) => return Err(error),
         };
-        self.finish_delivery_execution_resources(message, &job, &authority, &durable)?;
-        if facts.status() == TerminalOutcomeStatus::Succeeded
-            || message
-                .outcome
-                .error
-                .as_ref()
-                .is_some_and(|error| error.code == ExecutionPortErrorCode::CandidateUnchanged)
-        {
-            self.continue_delivery_controller_follow_up(&durable, &job, Some(terminal_revision))?;
-        }
         Ok(outcome_output(outcome_success(message, replayed)))
-    }
-
-    fn continue_delivery_controller_follow_up(
-        &mut self,
-        durable: &DurableOutboxEvent,
-        job: &ExecutionJob,
-        terminal_revision: Option<u64>,
-    ) -> Result<(), DurableExecutionPortError> {
-        let initiating_actor =
-            public_actor_from_receipt_key(durable.receipt_identity().actor_key())
-                .map_err(DurableExecutionPortError::Storage)?;
-        let delivery_id = DeliveryId(
-            durable
-                .stream_id()
-                .strip_prefix("delivery:")
-                .ok_or_else(|| {
-                    DurableExecutionPortError::Storage(StorageError::invalid_input(
-                        "Delivery terminal intent has no Delivery stream",
-                    ))
-                })?
-                .to_owned(),
-        );
-        let revision = if let Some(revision) = terminal_revision {
-            revision
-        } else {
-            let delivery = self
-                .storage
-                .load_state(&format!("delivery:{}", delivery_id.0))
-                .map_err(DurableExecutionPortError::Storage)?
-                .ok_or_else(|| {
-                    DurableExecutionPortError::Storage(StorageError::invalid_input(
-                        "Delivery state is missing for Controller follow-up",
-                    ))
-                })?;
-            delivery.revision
-        };
-        self.control_plane
-            .continue_delivery_after_terminal(
-                self.repository_scope,
-                &delivery_id,
-                &job.execution_profile,
-                &job.job_id,
-                revision,
-                &initiating_actor,
-            )
-            .map_err(DurableExecutionPortError::Controller)
-    }
-
-    fn finish_delivery_execution_resources(
-        &mut self,
-        message: &JobOutcomeMessage,
-        job: &ExecutionJob,
-        dispatch: &ExecutionDispatchAuthority,
-        durable: &DurableOutboxEvent,
-    ) -> Result<(), DurableExecutionPortError> {
-        let ExecutionScope::WorkRunExecutionScope(job_scope) = &job.scope else {
-            return Err(DurableExecutionPortError::Storage(
-                StorageError::invalid_input("Delivery terminal owner received another Job scope"),
-            ));
-        };
-        let execution_scope = ExecutionQueueScope {
-            organization_id: self.repository_scope.organization_id.clone(),
-            workspace_id: self.repository_scope.workspace_id.clone(),
-            project_id: self.repository_scope.project_id.clone(),
-            repository_id: self.repository_scope.repository_id.clone(),
-            product_session_id: job_scope.product_session_id.clone(),
-            delivery_id: Some(DeliveryId(
-                durable
-                    .stream_id()
-                    .strip_prefix("delivery:")
-                    .ok_or_else(|| {
-                        DurableExecutionPortError::Storage(StorageError::invalid_input(
-                            "Delivery terminal intent has no Delivery stream",
-                        ))
-                    })?
-                    .to_owned(),
-            )),
-        };
-        let reservation = self
-            .storage
-            .execution_admission()
-            .map_err(|_| {
-                DurableExecutionPortError::Storage(StorageError::invalid_input(
-                    "Delivery terminal admission cannot be opened",
-                ))
-            })?
-            .load_reservation_by_job(&message.lease.job_id)
-            .map_err(|_| {
-                DurableExecutionPortError::Storage(StorageError::invalid_input(
-                    "Delivery terminal admission cannot be read",
-                ))
-            })?
-            .ok_or_else(|| {
-                DurableExecutionPortError::Storage(StorageError::invalid_input(
-                    "Delivery terminal admission is missing",
-                ))
-            })?;
-        if reservation.scope != execution_scope {
-            return Err(DurableExecutionPortError::Storage(
-                StorageError::invalid_input("Delivery terminal admission scope differs"),
-            ));
-        }
-        let slot = self
-            .storage
-            .worker_session_slots()
-            .map_err(|_| {
-                DurableExecutionPortError::Storage(StorageError::invalid_input(
-                    "Delivery terminal Worker slot cannot be opened",
-                ))
-            })?
-            .load(dispatch.worker_session_id())
-            .map_err(|_| {
-                DurableExecutionPortError::Storage(StorageError::invalid_input(
-                    "Delivery terminal Worker slot cannot be read",
-                ))
-            })?
-            .ok_or_else(|| {
-                DurableExecutionPortError::Storage(StorageError::invalid_input(
-                    "Delivery terminal Worker slot is missing",
-                ))
-            })?;
-        let lease = dispatch.lease();
-        let slot_authority = &slot.authority;
-        if slot_authority.worker_id != lease.worker_id
-            || slot_authority.worker_instance_id != lease.worker_instance_id
-            || slot_authority.worker_session_id != *dispatch.worker_session_id()
-            || slot_authority.job_id != lease.job_id
-            || slot_authority.lease_id != lease.lease_id
-            || slot_authority.attempt != lease.attempt
-            || slot_authority.fencing_token != lease.fencing_token
-            || message
-                .outcome
-                .codex_thread_id
-                .as_ref()
-                .is_some_and(|thread_id| thread_id != &slot_authority.codex_thread_id)
-        {
-            return Err(DurableExecutionPortError::Storage(
-                StorageError::invalid_input("Delivery terminal Worker slot authority differs"),
-            ));
-        }
-        crate::product_session_execution_application::finish_execution_resources(
-            self.storage,
-            message,
-            &execution_scope,
-            &reservation.worker_pool_id,
-            slot_authority,
-        )
     }
 
     fn terminal_facts(
@@ -779,6 +688,7 @@ impl<'application> DurableExecutionPortIngress<'application> {
                 facts,
                 &self.server_time,
                 &message.lease.expires_at,
+                true,
             ) {
             Ok(commit) => commit,
             Err(DeliveryTerminalOutcomeCommitError::Storage(error))

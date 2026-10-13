@@ -67,7 +67,7 @@ impl Fixture {
                 ready.send(()).unwrap();
                 released
                     .recv_timeout(Duration::from_secs(5))
-                    .map_err(|_| DeviceProviderError)?;
+                    .map_err(|_| DeviceProviderError::StateInvalid)?;
                 Ok(())
             })
         });
@@ -198,7 +198,7 @@ fn preserves_rotation(change: impl FnOnce(&mut DeviceProviderConfig)) {
     let (next, _, _) = store
         .resolve_chatgpt_connection(&config.provider_id, |_| {
             calls.set(calls.get() + 1);
-            Err(DeviceProviderError)
+            Err(DeviceProviderError::StateInvalid)
         })
         .expect("the next resolve reuses the rotated credential");
     assert_eq!(calls.get(), 0);

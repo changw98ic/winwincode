@@ -2195,6 +2195,7 @@ async fn drain_in_flight(
                 }
                 response
             }
+            Err(err) if matches!(err.details(), CodexErrorDetails::Fatal(_)) => return Err(err),
             Err(err) => {
                 error_or_panic(format!("in-flight tool future failed during drain: {err}"));
                 continue;

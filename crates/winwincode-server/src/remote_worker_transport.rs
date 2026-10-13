@@ -37,6 +37,11 @@ pub struct RemoteWorkerTransportError {
 }
 
 impl RemoteWorkerTransportError {
+    #[must_use]
+    pub const fn unavailable() -> Self {
+        Self::new("remote Worker transport is unavailable")
+    }
+
     const fn new(message: &'static str) -> Self {
         Self {
             message,
@@ -99,6 +104,8 @@ impl fmt::Display for RemoteWorkerTransportError {
 impl std::error::Error for RemoteWorkerTransportError {}
 
 pub trait RemoteWorkerExchangePort: Send + Sync {
+    /// Advances Server-owned cleanup without accepting an incoming Worker frame.
+    fn recover_accepted_outcomes(&self) -> Result<usize, RemoteWorkerTransportError>;
     fn accounting(
         &self,
         _token: &str,
@@ -755,6 +762,17 @@ where
     Core: ExecutionPortCore<Output = Vec<ExecutionPortMessage>> + Send,
     Core::Error: Send + fmt::Display,
 {
+    fn recover_accepted_outcomes(&self) -> Result<usize, RemoteWorkerTransportError> {
+        let _gate = self.exchange_gate.lock().map_err(|_| {
+            RemoteWorkerTransportError::new("remote Worker exchange is unavailable")
+        })?;
+        self.scheduler
+            .lock()
+            .map_err(|_| RemoteWorkerTransportError::new("remote Worker scheduler is unavailable"))?
+            .recover_accepted_outcomes()
+            .map_err(|_| RemoteWorkerTransportError::new("accepted outcome recovery failed"))
+    }
+
     fn accounting(
         &self,
         token: &str,

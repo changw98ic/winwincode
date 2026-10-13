@@ -26,44 +26,44 @@ impl DeviceProviderStore {
     ) -> Result<(), DeviceProviderError> {
         let judge = request
             .as_object_mut()
-            .ok_or(DeviceProviderError)?
+            .ok_or(DeviceProviderError::StateInvalid)?
             .remove("winwincodeJevJudge");
         if session.profile.source.settings.jev_judge.is_none() {
             return if judge.is_none() {
                 Ok(())
             } else {
-                Err(DeviceProviderError)
+                Err(DeviceProviderError::StateInvalid)
             };
         }
-        let judge = judge.ok_or(DeviceProviderError)?;
-        let inputs = judge.as_array().ok_or(DeviceProviderError)?;
+        let judge = judge.ok_or(DeviceProviderError::StateInvalid)?;
+        let inputs = judge.as_array().ok_or(DeviceProviderError::StateInvalid)?;
         let provider = session
             .profile
             .source
             .settings
             .jev_judge
             .as_ref()
-            .ok_or(DeviceProviderError)?;
+            .ok_or(DeviceProviderError::StateInvalid)?;
         let settings = self.resolve_jev_settings(provider)?;
         let configuration_digest =
             crate::device_jev_context::configured_context_digest(session, &settings)?;
         let mut feedback = Vec::new();
         for (index, item) in inputs.iter().enumerate() {
             if self.model_cancelled(&open.model_exchange_id.0)? {
-                return Err(DeviceProviderError);
+                return Err(DeviceProviderError::StateInvalid);
             }
             let premise = item
                 .get("premise")
                 .and_then(serde_json::Value::as_str)
-                .ok_or(DeviceProviderError)?;
+                .ok_or(DeviceProviderError::StateInvalid)?;
             let hypothesis = item
                 .get("hypothesis")
                 .and_then(serde_json::Value::as_str)
-                .ok_or(DeviceProviderError)?;
+                .ok_or(DeviceProviderError::StateInvalid)?;
             let claim = item
                 .get("claimKey")
                 .and_then(serde_json::Value::as_str)
-                .ok_or(DeviceProviderError)?;
+                .ok_or(DeviceProviderError::StateInvalid)?;
             let request_bytes = serde_json::to_vec(&(
                 "jev-judge.v1",
                 &configuration_digest,
@@ -104,7 +104,7 @@ impl DeviceProviderStore {
                 serde_json::to_string(&feedback)?
             );
             request.pointer_mut("/request/input").and_then(serde_json::Value::as_array_mut)
-                .ok_or(DeviceProviderError)?.push(serde_json::json!({
+                .ok_or(DeviceProviderError::StateInvalid)?.push(serde_json::json!({
                     "type":"message","role":"developer","content":[{"type":"input_text","text":text}]
                 }));
         }
@@ -136,7 +136,7 @@ impl DeviceProviderStore {
                 run.as_ref().and_then(|run| run.value)
             {
                 JevScores::try_new(entailment, contradiction, neutral)
-                    .map_err(|_| DeviceProviderError)?;
+                    .map_err(|_| DeviceProviderError::StateInvalid)?;
             }
             Ok(crate::DeviceJevReceipt {
                 operation_id,
@@ -166,21 +166,20 @@ impl DeviceProviderStore {
     ) -> Result<StoredJevJudge, DeviceProviderError> {
         use std::sync::Arc;
         winwincode_execution_port::agent_config::validate_agent_session_config(session)
-            .map_err(|_| DeviceProviderError)?;
+            .map_err(|_| DeviceProviderError::StateInvalid)?;
         let provider = session
             .profile
             .source
             .settings
             .jev_judge
             .as_ref()
-            .ok_or(DeviceProviderError)?;
+            .ok_or(DeviceProviderError::StateInvalid)?;
         let settings = self.resolve_jev_settings(provider)?;
         let (config, retry) = settings
             .to_config_and_runtime()
-            .map_err(|_| DeviceProviderError)?;
+            .map_err(|_| DeviceProviderError::StateInvalid)?;
         let cancellation = self.jev_cancellation(operation_id)?;
-        let transport = crate::HttpsJevRemoteTransport::try_new_system_one(&config)
-            .map_err(|_| DeviceProviderError)?
+        let transport = crate::device_store::device_jev_transport(&config)?
             .with_cancellation(cancellation.clone());
         let digest = crate::device_jev_context::configured_context_digest(session, &settings)?;
         let runtime = JevRuntime::new(
@@ -235,7 +234,7 @@ impl DeviceProviderStore {
     ) -> Result<StoredJevJudge, DeviceProviderError> {
         let hash = configuration_digest
             .strip_prefix("sha256:")
-            .ok_or(DeviceProviderError)?;
+            .ok_or(DeviceProviderError::StateInvalid)?;
         if operation_id.trim().is_empty()
             || operation_id.len() > 256
             || operation_id.contains(['\0', '\n', '\r'])
@@ -244,7 +243,7 @@ impl DeviceProviderStore {
             || input.premise.trim().is_empty()
             || input.hypothesis.trim().is_empty()
         {
-            return Err(DeviceProviderError);
+            return Err(DeviceProviderError::StateInvalid);
         }
         let request = serde_json::to_string(&(
             "jev-judge.v1",
@@ -265,15 +264,15 @@ impl DeviceProviderStore {
                 |row| Ok((row.get(0)?, row.get(1)?)),
             )
             .optional()?
-            .ok_or(DeviceProviderError)?;
+            .ok_or(DeviceProviderError::StateInvalid)?;
         if saved != request {
-            return Err(DeviceProviderError);
+            return Err(DeviceProviderError::StateInvalid);
         }
         if let Some(result) = result {
             let run: JevRun<[f32; 3]> = serde_json::from_str(&result)?;
             if let Some([entailment, contradiction, neutral]) = run.value {
                 JevScores::try_new(entailment, contradiction, neutral)
-                    .map_err(|_| DeviceProviderError)?;
+                    .map_err(|_| DeviceProviderError::StateInvalid)?;
             }
             return Ok(StoredJevJudge::Completed {
                 run: Box::new(run),
@@ -284,7 +283,9 @@ impl DeviceProviderStore {
             return Ok(StoredJevJudge::Incomplete);
         }
         let runtime = runtime.clone().with_attempt_journal(
-            self.connection.path().ok_or(DeviceProviderError)?,
+            self.connection
+                .path()
+                .ok_or(DeviceProviderError::StateInvalid)?,
             operation_id,
             "judge",
         );
@@ -301,11 +302,11 @@ impl DeviceProviderStore {
             failures: evaluated.failures,
         };
         let changed = self.connection.execute(
-            "UPDATE jev_judge_exchanges SET result=?1 WHERE operation_id=?2 AND request_json=?3 AND result IS NULL",
-            params![serde_json::to_string(&run)?, operation_id, request],
+            "UPDATE jev_judge_exchanges SET result=?1,call_status=?4 WHERE operation_id=?2 AND request_json=?3 AND result IS NULL",
+            params![serde_json::to_string(&run)?, operation_id, request, if run.value.is_some() {"succeeded"} else {"failed"}],
         )?;
         if changed != 1 {
-            return Err(DeviceProviderError);
+            return Err(DeviceProviderError::StateInvalid);
         }
         Ok(StoredJevJudge::Completed {
             run: Box::new(run),
@@ -398,7 +399,7 @@ mod tests {
             let rows: i64 = store.connection.query_row("SELECT count(*) FROM jev_judge_exchanges", [], |row| row.get(0)).unwrap();
             assert_eq!(rows, 1, "the real Judge preparation entry must forward the live guard");
             assert_eq!(request,replay);
-            store.connection.execute("UPDATE jev_judge_exchanges SET result=NULL WHERE operation_id=?1",[operation]).unwrap();
+            store.connection.execute("UPDATE jev_judge_exchanges SET result=NULL,call_status='pending' WHERE operation_id=?1",[operation]).unwrap();
             let mut pending = original;
             store.prepare_jev_judge_request(&open,&session,&mut pending, &|| true).await.unwrap();
             let text = pending["request"]["input"][1]["content"][0]["text"].as_str().unwrap();
@@ -540,7 +541,7 @@ mod tests {
             store
                 .connection
                 .execute(
-                    "UPDATE jev_judge_exchanges SET result=NULL WHERE operation_id='judge:first'",
+                    "UPDATE jev_judge_exchanges SET result=NULL,call_status='pending' WHERE operation_id='judge:first'",
                     [],
                 )
                 .unwrap();
@@ -575,9 +576,7 @@ mod tests {
                 .as_nanos()
         ));
         let store = DeviceProviderStore::open(&root).unwrap();
-        store.connection.execute_batch("DROP TABLE model_attempt_diagnostics; DROP TABLE jev_attempt_diagnostics; DROP TABLE jev_judge_exchanges; DROP TABLE accounting_closed_attempts; ALTER TABLE exchanges DROP COLUMN accounting_chunks;
-            PRAGMA user_version=7;
-            INSERT INTO jev_context_exchanges(operation_id,digest,request_json) VALUES('retained','digest','input');").unwrap();
+        store.connection.execute("INSERT INTO jev_context_exchanges(operation_id,digest,request_json) VALUES('retained','digest','input')",[]).unwrap();
         drop(store);
         let store = DeviceProviderStore::open(&root).unwrap();
         assert_eq!(
@@ -644,7 +643,10 @@ mod tests {
         assert!(evaluate(&store, changed).is_err());
         store
             .connection
-            .execute("UPDATE jev_judge_exchanges SET result=NULL", [])
+            .execute(
+                "UPDATE jev_judge_exchanges SET result=NULL,call_status='pending'",
+                [],
+            )
             .unwrap();
         assert_eq!(evaluate(&store, input).unwrap(), StoredJevJudge::Incomplete);
         assert_eq!(provider.calls(), 1);
