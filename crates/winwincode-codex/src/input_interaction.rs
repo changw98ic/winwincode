@@ -44,12 +44,6 @@ struct InputCallIntent {
     applied_incarnation_id: Option<String>,
 }
 
-#[derive(Clone, Copy)]
-enum InputCallSettlement {
-    UserAnswer,
-    DeadlineTimeout,
-}
-
 impl ProductionCodexAdapter {
     pub(super) fn accept_input_request_event(
         &mut self,
@@ -335,15 +329,13 @@ impl ProductionCodexAdapter {
         run_key: &str,
         digest: &str,
     ) -> Result<(), ProductionCodexError> {
-        self.apply_input_call(run_key, digest, InputCallSettlement::UserAnswer)
-            .await
+        self.apply_input_call(run_key, digest).await
     }
 
     async fn apply_input_call(
         &mut self,
         run_key: &str,
         digest: &str,
-        settlement: InputCallSettlement,
     ) -> Result<(), ProductionCodexError> {
         let mut call: InputCallIntent = self
             .store
@@ -365,12 +357,13 @@ impl ProductionCodexAdapter {
             .observed_now()
             .map_err(map_bridge_error)?
             .ok_or_else(conflict)?;
+        // Answer admission enforces the immutable input deadline. Once accepted,
+        // the settlement remains deliverable to this exact live waiter after it.
         if binding.run_key != run_key
             || binding.kernel_session_id != run.record.kernel_session_id
             || binding.authority != run.binding.authority
             || now.0 < binding.authority.lease.issued_at.0
             || now.0 >= binding.authority.lease.expires_at.0
-            || (matches!(settlement, InputCallSettlement::UserAnswer) && now.0 >= call.expires_at.0)
         {
             return Ok(());
         }
@@ -454,14 +447,9 @@ impl ProductionCodexAdapter {
         self.store
             .resolve_input_call_answer(operation, resolution_digest, &previous, &call)
             .map_err(map_store_error)?;
-        // The original immutable deadline authorizes this empty timeout answer.
-        // User answers keep their deadline fence; both paths still require the
-        // live renewed lease and the exact current Core waiter incarnation.
-        self.apply_input_call(
-            &operation.run_key,
-            &operation.request_digest,
-            InputCallSettlement::DeadlineTimeout,
-        )
-        .await
+        // The original deadline authorizes timeout acceptance. Delivery of any
+        // accepted settlement still requires the exact live waiter and lease.
+        self.apply_input_call(&operation.run_key, &operation.request_digest)
+            .await
     }
 }

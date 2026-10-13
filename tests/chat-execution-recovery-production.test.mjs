@@ -14,7 +14,8 @@ import { crc32, inflateRawSync } from 'node:zlib'
 import { runApiProductionVertical } from '../scripts/run-api-production-vertical.mjs'
 import { deterministicDeviceProvider, waitFor } from '../scripts/device-production-fixture.mjs'
 import { readDeviceExecutionReceipts } from '../scripts/export-device-candidate.mjs'
-import { readRetainedOutcomes } from './fixtures/chat-execution-transport-probe.mjs'
+import { assertSuccessfulRetainedCommands, completedCommandScript, readRetainedCoreCommandResults,
+  readRetainedOutcomes, readWorkerTransport } from './fixtures/chat-execution-transport-probe.mjs'
 
 function sealedBinaries() {
   const installed = process.env.WWC_CODE_MODE_ACCEPTANCE_BIN_DIR
@@ -62,33 +63,23 @@ function coreExecution(run, deviceData) {
       || (event.type === 'item_completed' && event.item?.type === 'UserMessage')).length,
     // ExecCommandBegin is transient. The Core-owned receipt records the one
     // handler attempt even when rollout history uses paginated TurnItems.
-    commands: globSync('**/state_5.sqlite', { cwd: deviceData }).flatMap(path => {
-      const store = new DatabaseSync(join(deviceData, path), { readOnly: true })
-      try {
-        store.exec('PRAGMA busy_timeout=5000')
-        return store.prepare(`SELECT r.sequence,r.request_json,r.resolution,
-          a.attempt_id,a.operation_digest,a.execution,a.disposition,a.delivery,a.execution_result,a.accepted_result
-          FROM tool_requests r LEFT JOIN tool_attempts a ON a.request_sequence=r.sequence
-          WHERE r.thread_id=? ORDER BY r.sequence`).all(run.kernelSessionId).flatMap(row => {
-          const request = JSON.parse(row.request_json)
-          return request.tool_name.endsWith('exec_command') ? [{
-            requestSequence: row.sequence, logicalId: request.logical_id, turnId: request.turn_id,
-            attemptId: row.attempt_id, operationDigest: row.operation_digest,
-            resolution: row.resolution, execution: row.execution,
-            disposition: row.disposition, delivery: row.delivery,
-            executionResult: row.execution_result, acceptedResult: row.accepted_result,
-          }] : []
-        })
-      } finally { store.close() }
+    commands: readRetainedCoreCommandResults(deviceData, run.kernelSessionId).map(row => {
+      const request = JSON.parse(row.request_json)
+      return {
+        requestSequence: row.sequence, logicalId: request.logical_id, turnId: request.turn_id,
+        attemptId: row.attempt_id, operationDigest: row.operation_digest,
+        resolution: row.resolution, execution: row.execution,
+        disposition: row.disposition, delivery: row.delivery,
+        executionResult: row.execution_result, acceptedResult: row.accepted_result,
+        polls: row.polls,
+      }
     }),
   }
 }
 
 function assertSuccessfulCoreCommand(command) {
-  for (const field of ['executionResult', 'acceptedResult']) {
-    assert.equal(JSON.parse(command[field]).code_mode_result?.exit_code, 0,
-      `the original Core ${field} proves successful OS command completion`)
-  }
+  assertSuccessfulRetainedCommands([{ execution: command.execution, disposition: command.disposition,
+    execution_result: command.executionResult, accepted_result: command.acceptedResult, polls: command.polls }], 1)
 }
 
 function leaseRecord(authority) {
@@ -604,7 +595,7 @@ test('Chat recovers its committed original Job before dispatch after a real Serv
   const report = await runApiProductionVertical({
     directory, restart: false, repeat: false, includeStrongFlow: false, ...sealedBinaries(),
     deviceProvider: { ...deterministicDeviceProvider(), nativeCellScripts: {
-      'native-cell-A': 'const command=ALL_TOOLS.find(tool=>tool.name.endsWith("exec_command")); if(!command) throw new Error("command tool missing"); const result=await tools[command.name]({cmd:"git rev-parse --verify HEAD",yield_time_ms:1000}); if(result.exit_code!==0) throw new Error("original git command did not exit successfully"); text(result);',
+      'native-cell-A': completedCommandScript('git rev-parse --verify HEAD'),
     } },
     scenario: { async run({ api, modelRoute, devicePath, restartServer }) {
       await api.command('session.create', 0, { productSessionId,
@@ -689,7 +680,7 @@ test('Chat recovers its committed original Job before dispatch after a real Serv
   complete = true
 })
 
-for (const [point, suffix] of [['terminal-retained', '61'], ['cp-commit-before-ack', '62']]) {
+for (const [point, suffix] of [['terminal-retained', '61'], ['cp-commit-before-ack', '62'], ['cp-commit-worker-exit', '64']]) {
   test(`Chat recovers ${point} after a real Server crash without duplicate Core execution or accounting`, async t => {
     const directory = mkdtempSync(join(tmpdir(), `wwc-chat-recovery-${point}-`))
     let complete = false
@@ -702,7 +693,7 @@ for (const [point, suffix] of [['terminal-retained', '61'], ['cp-commit-before-a
     const report = await runApiProductionVertical({
       directory, restart: false, repeat: false, includeStrongFlow: false, ...sealedBinaries(),
       deviceProvider: { ...deterministicDeviceProvider(), nativeCellScripts: {
-      'native-cell-A': 'const command=ALL_TOOLS.find(tool=>tool.name.endsWith("exec_command")); if(!command) throw new Error("command tool missing"); const result=await tools[command.name]({cmd:"git rev-parse --verify HEAD",yield_time_ms:1000}); if(result.exit_code!==0) throw new Error("original git command did not exit successfully"); text(result);',
+      'native-cell-A': completedCommandScript('git rev-parse --verify HEAD'),
       } },
       scenario: { async run({ api, modelRoute, devicePath, fixtureDirectory, restartServer }) {
         assert.equal(fixtureDirectory, directory)
@@ -761,6 +752,9 @@ for (const [point, suffix] of [['terminal-retained', '61'], ['cp-commit-before-a
           assert.ok(calls.every(call => call.providerAttempts.length === 1 && call.providerAttempts[0].state === 'completed'))
           const httpCount = devicePath.modelServer.requests.length
           const endpoint = api.baseUrl
+          const deadWorker = point === 'cp-commit-worker-exit'
+          const authority = database.prepare('SELECT * FROM execution_dispatch_authorities WHERE job_id=?').get(job.job_id)
+          const probe = deadWorker ? readWorkerTransport(devicePath.deviceData, authority) : null
           const restarted = await restartServer({ crash: true })
           assert.equal(restarted.signal, 'SIGKILL')
           assert.notEqual(restarted.previousPid, restarted.restartedPid)
@@ -774,6 +768,20 @@ for (const [point, suffix] of [['terminal-retained', '61'], ['cp-commit-before-a
           assert.deepEqual(acceptedOutcome(database, job.job_id), cut.accepted)
           assert.deepEqual(settlementSources(database, job.job_id), originalSettlementSources)
           assert.equal(devicePath.modelServer.requests.length, httpCount)
+          if (deadWorker) {
+            assert.equal(Number(execFileSync('ps', ['-p', String(probe.pid), '-o', 'pgid='], { encoding: 'utf8' }).trim()), probe.pid)
+            globalThis.process.kill(-probe.pid, 'SIGKILL')
+            await waitFor(() => database.prepare('SELECT 1 FROM worker_launch_grant_exits WHERE worker_session_id=? AND worker_instance_id=?')
+              .get(probe.launchWorkerSessionId, probe.workerInstanceId), 'the actual Device reaps the old Worker and publishes its trusted exit', 30_000)
+            const pending = acceptedOutcome(database, job.job_id)
+            assert.equal(pending.revision, 1)
+            assert.equal(pending.payload.acknowledgementReady, false)
+            assert.equal(database.prepare('SELECT state FROM worker_session_slots WHERE job_id=?').get(job.job_id).state, 'running')
+            const denied = await probe.postRetainedMessage(cut.worker.bytes, { ca: readFileSync(join(directory, 'fixture-cert.pem')) })
+            assert.equal(denied.status, 401)
+            assert.equal(denied.acknowledgement, null)
+            assert.deepEqual(acceptedOutcome(database, job.job_id), pending, 'old credentials cannot consume the retained CP result')
+          }
           database.exec('DROP TRIGGER pause_chat_recovery')
           database.exec('DROP TRIGGER IF EXISTS pause_chat_recovery_settlement')
           const settled = await waitFor(async () => {
@@ -785,10 +793,12 @@ for (const [point, suffix] of [['terminal-retained', '61'], ['cp-commit-before-a
             const messages = (await api.query('session.messages.list', { productSessionId })).result.items
             return accepted?.revision === 2 && accepted.payload.acknowledgementReady
               && terminal?.outcome === 'completed' && reservation?.state === 'settled' && slot?.state === 'completed'
-              && worker && !worker.delivery && worker.receipt?.length === 1
+              && worker && (deadWorker ? worker.delivery?.acknowledgement_required === 1 && worker.receipt === null
+                : !worker.delivery && worker.receipt?.length === 1)
               && messages.some(message => message.role === 'assistant' && message.state === 'completed')
               ? { accepted, terminal, reservation, slot, worker, messages } : false
-          }, 'exact terminal replay completes cleanup and durable Worker business ACK', 120_000, 50)
+          }, deadWorker ? 'Server-owned recovery finishes accepted cleanup after the original Worker exits'
+            : 'exact terminal replay completes cleanup and durable Worker business ACK', 120_000, 50)
           assert.deepEqual(settled.accepted.payload.message, cut.worker.frame)
           if (cut.accepted) assert.deepEqual(settled.accepted.payload.decision, cut.accepted.payload.decision)
           assert.deepEqual(settled.worker.bytes, cut.worker.bytes)
@@ -816,7 +826,8 @@ for (const [point, suffix] of [['terminal-retained', '61'], ['cp-commit-before-a
           return { point, jobId: job.job_id, attempt: 1, codexThreadId: originalCore.codexThreadId,
             turnId: originalCore.submissionId, toolCalls: originalCore.commands.length, physicalAttempts: httpCount,
             terminalDigest: cut.worker.digest, beforeRevision: cut.accepted?.revision ?? 0, afterRevision: 2,
-            signal: restarted.signal, businessAcknowledged: true }
+            signal: restarted.signal, businessAcknowledged: !deadWorker, serverCleanupRecovered: true,
+            exitedCredentialStatus: deadWorker ? 401 : null }
         } finally {
           database.exec('DROP TRIGGER IF EXISTS pause_chat_recovery')
           database.exec('DROP TRIGGER IF EXISTS pause_chat_recovery_settlement')
@@ -825,7 +836,8 @@ for (const [point, suffix] of [['terminal-retained', '61'], ['cp-commit-before-a
       } },
     })
     assert.equal(report.health.afterRestart, 'ready')
-    assert.equal(report.flow.scenario.businessAcknowledged, true)
+    assert.equal(report.flow.scenario.businessAcknowledged, point !== 'cp-commit-worker-exit')
+    assert.equal(report.flow.scenario.serverCleanupRecovered, true)
     t.diagnostic(JSON.stringify(report.flow.scenario))
     complete = true
   })
@@ -845,7 +857,7 @@ test('Chat preserves its accepted real Core turn and original physical model req
     directory, restart: false, repeat: false, includeStrongFlow: false, ...sealedBinaries(),
     serverEnvironment: { WWC_SERVER_EXECUTION_LEASE_SECONDS: '30' },
     deviceProvider: { ...deterministicDeviceProvider(), responseGateMarkers: [marker], nativeCellScripts: {
-      'native-cell-A': 'const command=ALL_TOOLS.find(tool=>tool.name.endsWith("exec_command")); if(!command) throw new Error("command tool missing"); const result=await tools[command.name]({cmd:"git rev-parse --verify HEAD",yield_time_ms:1000}); if(result.exit_code!==0) throw new Error("original git command did not exit successfully"); text(result);',
+      'native-cell-A': completedCommandScript('git rev-parse --verify HEAD'),
     } },
     scenario: { async run({ api, modelRoute, devicePath, restartServer }) {
       await api.command('session.create', 0, { productSessionId,

@@ -1,0 +1,129 @@
+diff --git a/codex-rs/core/src/tools/tool_sharing.rs b/codex-rs/core/src/tools/tool_sharing.rs
+index 5545da23..a06148c5 100644
+--- a/codex-rs/core/src/tools/tool_sharing.rs
++++ b/codex-rs/core/src/tools/tool_sharing.rs
+@@ -53,11 +53,36 @@ struct SharingPoolState {
+ }
+ struct Flight {
+     source_sequence: i64,
+-    result: watch::Receiver<Option<Result<String, String>>>,
++    result: watch::Receiver<Option<Result<String, SharedExecutionError>>>,
+     ready: watch::Receiver<Option<()>>,
+     waiters: AtomicUsize,
+     cancellation: CancellationToken,
+ }
++/// The shared execution transports the required-fact error category to every waiter.
++#[derive(Clone)]
++enum SharedExecutionError {
++    RespondToModel(String),
++    Fatal(String),
++}
++
++impl From<FunctionCallError> for SharedExecutionError {
++    fn from(error: FunctionCallError) -> Self {
++        match error {
++            FunctionCallError::RespondToModel(message) => Self::RespondToModel(message),
++            FunctionCallError::Fatal(message) => Self::Fatal(message),
++        }
++    }
++}
++
++impl From<SharedExecutionError> for FunctionCallError {
++    fn from(error: SharedExecutionError) -> Self {
++        match error {
++            SharedExecutionError::RespondToModel(message) => Self::RespondToModel(message),
++            SharedExecutionError::Fatal(message) => Self::Fatal(message),
++        }
++    }
++}
++
+ struct Waiter {
+     flight: Arc<Flight>,
+     facts: Arc<ToolFactRecord>,
+@@ -232,11 +257,13 @@ impl ToolDispatch {
+             let output = tokio::select! {
+                 result = actual.execute_actual(execution, tool) => result.and_then(|result| snapshot(&result)),
+                 _ = execution_cancel.cancelled() => {
+-                    actual.facts.completed(None).await.ok();
+-                    Err(sharing_error("all_shared_waiters_cancelled"))
++                    match actual.facts.completed(None).await {
++                        Ok(()) => Err(sharing_error("all_shared_waiters_cancelled")),
++                        Err(error) => Err(error),
++                    }
+                 }
+             };
+-            sender.send_replace(Some(output.map_err(|error| error.to_string())));
++            sender.send_replace(Some(output.map_err(SharedExecutionError::from)));
+         });
+         // The lease is owned by this logical caller. The spawned execution owns
+         // only the actual attempt, not an implicit extra waiter.
+@@ -262,7 +289,7 @@ impl ToolDispatch {
+                 let raw = loop {
+                     if let Some(result) = receiver.borrow().clone() {
+                         lease.finished = true;
+-                        break result.map_err(sharing_error)?;
++                        break result.map_err(FunctionCallError::from)?;
+                     }
+                     tokio::select! {
+                         changed = receiver.changed() => changed.map_err(|_| sharing_error("shared_execution_unavailable"))?,
+diff --git a/codex-rs/core/src/tools/tool_sharing_tests.rs b/codex-rs/core/src/tools/tool_sharing_tests.rs
+index 19228709..f7f37e65 100644
+--- a/codex-rs/core/src/tools/tool_sharing_tests.rs
++++ b/codex-rs/core/src/tools/tool_sharing_tests.rs
+@@ -468,3 +468,56 @@ async fn reuse_rebinds_protocol_id_and_account_changes_require_new_actual_execut
+         1
+     );
+ }
++
++#[tokio::test]
++async fn review_shared_required_validation_failure_remains_fatal_for_every_waiter() {
++    for merge in [false, true] {
++        let first = invocation(gate(false, merge)).await;
++        let first_facts = begin(&first).await;
++        let store = &first_facts.store;
++        let pool = store
++            .sqlite()
++            .open_read_write_pool(&store.sqlite().state_db_path())
++            .await
++            .unwrap();
++        sqlx::query(
++            "CREATE TRIGGER fail_shared_validation BEFORE UPDATE ON tool_input_bindings
++            WHEN NEW.validation_json IS NOT NULL
++            BEGIN SELECT RAISE(ABORT, 'private validation fault'); END",
++        )
++        .execute(&pool)
++        .await
++        .unwrap();
++        let runtime = tool(true);
++        let mut leader = ToolDispatch::prepare(&first, runtime.clone(), first_facts.clone())
++            .await
++            .unwrap();
++        let follower = if merge {
++            runtime.started.notified().await;
++            let mut second = first.clone();
++            second.call_id = "required-fatal-follower".into();
++            second.cancellation_token = CancellationToken::new();
++            let facts = begin(&second).await;
++            let dispatch = ToolDispatch::prepare(&second, runtime.clone(), facts)
++                .await
++                .unwrap();
++            Some((second, dispatch))
++        } else {
++            None
++        };
++        runtime.release.notify_one();
++        let error = match leader.run(first, runtime.clone()).await {
++            Err(error) => error,
++            Ok(_) => panic!("required validation failure cannot become tool output"),
++        };
++        assert!(matches!(error, FunctionCallError::Fatal(_)), "{error:?}");
++        assert!(!error.to_string().contains("private validation fault"));
++        if let Some((second, mut follower)) = follower {
++            assert!(matches!(
++                follower.run(second, runtime.clone()).await,
++                Err(FunctionCallError::Fatal(_))
++            ));
++        }
++        assert_eq!(runtime.calls.load(Ordering::SeqCst), 1);
++    }
++}

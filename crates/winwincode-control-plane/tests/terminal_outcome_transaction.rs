@@ -4301,6 +4301,8 @@ fn assert_controller_completion_cut(seed: u64, fail_resources: bool) {
         original_receipt.events
     );
     assert_accepted_outcome_state(&root, &message, false);
+    assert_eq!(manual.recover_accepted_execution_outcomes().unwrap(), 0);
+    assert_accepted_outcome_state(&root, &message, false);
     assert_eq!(execution_job_counts(&root), before_dispatch);
     manual.shutdown().unwrap();
     let mut restored = ControlPlane::start_local_with_delivery_adapters(
@@ -4309,6 +4311,7 @@ fn assert_controller_completion_cut(seed: u64, fail_resources: bool) {
         LocalDeliveryAdapterConfig::new(&repository, scope.clone()),
     )
     .unwrap();
+    assert_eq!(restored.recover_accepted_execution_outcomes().unwrap(), 1);
     let replay = restored
         .commit_delivery_terminal_outcome(
             &scope,
@@ -4316,7 +4319,7 @@ fn assert_controller_completion_cut(seed: u64, fail_resources: bool) {
             &facts,
             &Instant("2027-01-15T08:10:00.000Z".into()),
         )
-        .expect("configured production Controller completes original accepted follow-up");
+        .expect("configured production Controller retains the recovered original follow-up");
     assert!(replay.receipt().idempotent_replay);
     assert_eq!(replay.receipt().events, original_receipt.events);
     assert_accepted_outcome_state(&root, &message, true);
@@ -4614,6 +4617,10 @@ fn delivery_cancel_ack_counts(connection: &rusqlite::Connection) -> (i64, i64, i
     connection.query_row("SELECT (SELECT COUNT(*) FROM command_receipts), (SELECT COUNT(*) FROM outbox), (SELECT COUNT(*) FROM execution_lease_terminals)", [], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?))).unwrap()
 }
 
+#[allow(
+    clippy::too_many_lines,
+    reason = "one accepted receipt crosses startup cleanup, audit corruption and exact replay in the same fixture"
+)]
 fn assert_exact_ingress_preserves_corrupt_accepted_audit(
     root: &Path,
     scope: &RepositoryScope,
@@ -4627,6 +4634,19 @@ fn assert_exact_ingress_preserves_corrupt_accepted_audit(
     )
     .unwrap();
     let mut storage = SqliteStorage::open(root).unwrap();
+    let recovered = storage
+        .load_state(&original_state.stream_id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        recovered.revision, 2,
+        "startup finishes the already accepted cleanup"
+    );
+    let before: serde_json::Value = serde_json::from_slice(&original_state.payload).unwrap();
+    let after: serde_json::Value = serde_json::from_slice(&recovered.payload).unwrap();
+    assert_eq!(after["message"], before["message"]);
+    assert_eq!(after["decision"], before["decision"]);
+    assert_eq!(after["acknowledgementReady"], true);
     let connection = rusqlite::Connection::open(storage.database_path()).unwrap();
     let (event_id, payload): (String, Vec<u8>) = connection
         .query_row(
@@ -4683,7 +4703,7 @@ fn assert_exact_ingress_preserves_corrupt_accepted_audit(
             .load_state(&original_state.stream_id)
             .unwrap()
             .unwrap(),
-        *original_state
+        recovered
     );
     connection
         .execute(

@@ -151,24 +151,41 @@ export async function closeServer(server) {
   await new Promise(resolvePromise => server.close(resolvePromise))
 }
 
+const browserProcessGroups = new WeakSet()
+
 export async function stopChild(child, signal) {
   const exited = new Promise(resolvePromise => {
     if (child.exitCode !== null || child.signalCode !== null) resolvePromise()
     else child.once('exit', resolvePromise)
   })
-  if (child.exitCode !== null || child.signalCode !== null) return
-  signalChild(child, signal)
-  const graceful = await Promise.race([
-    exited.then(() => true),
-    new Promise(resolvePromise => setTimeout(() => resolvePromise(false), 5_000)),
-  ])
-  if (graceful) return
-  signalChild(child, 'SIGKILL')
-  const forced = await Promise.race([
-    exited.then(() => true),
-    new Promise(resolvePromise => setTimeout(() => resolvePromise(false), 5_000)),
-  ])
-  assert.equal(forced, true, `child ${String(child.pid)} did not exit after SIGKILL`)
+  try {
+    if (child.exitCode !== null || child.signalCode !== null) return
+    signalChild(child, signal)
+    if (await waitForChildExit(exited)) return
+    signalChild(child, 'SIGKILL')
+    assert.equal(await waitForChildExit(exited), true,
+      `child ${String(child.pid)} did not exit after SIGKILL`)
+  } finally {
+    // A detached browser group can outlive its leader while retaining the
+    // diagnostic pipe. Only this launch's still-open group is owned here.
+    if (browserProcessGroups.has(child) && !child.stderr?.readableEnded
+        && !child.stderr?.destroyed) signalChild(child, 'SIGKILL')
+    child.stdout?.destroy()
+    child.stderr?.destroy()
+    browserProcessGroups.delete(child)
+  }
+}
+
+async function waitForChildExit(exited) {
+  let timer
+  try {
+    return await Promise.race([
+      exited.then(() => true),
+      new Promise(resolvePromise => {
+        timer = setTimeout(() => resolvePromise(false), 5_000)
+      }),
+    ])
+  } finally { clearTimeout(timer) }
 }
 
 function signalChild(child, signal) {
@@ -432,6 +449,7 @@ export class DevTools {
       `--user-data-dir=${resolve(directory, 'chrome-profile')}`,
       'about:blank',
     ], { detached: process.platform !== 'win32', stdio: ['ignore', 'ignore', 'pipe'] })
+    if (process.platform !== 'win32') browserProcessGroups.add(chrome)
     let startupError = null
     let diagnostics = ''
     chrome.on('error', error => { startupError = error })
@@ -460,7 +478,7 @@ export class DevTools {
       return { chrome, devtools: new DevTools(socket) }
     } catch (error) {
       socket?.close()
-      if (chrome.pid !== undefined) await stopChild(chrome, 'SIGTERM')
+      await stopChild(chrome, 'SIGTERM')
       throw new Error(`${error.message}\n${diagnostics}`, { cause: error })
     }
   }

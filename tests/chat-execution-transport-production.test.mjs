@@ -2,17 +2,17 @@
 
 // Production acceptance replays original Worker bytes through real HTTPS.
 import assert from 'node:assert/strict'
-import { execFileSync } from 'node:child_process'
 import { globSync, mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import test from 'node:test'
 
+import { pauseManagedProcess } from './fixtures/managed-process-pause.mjs'
 import { runApiProductionVertical } from '../scripts/run-api-production-vertical.mjs'
 import { deterministicDeviceProvider, waitFor } from '../scripts/device-production-fixture.mjs'
 import {
-  assertSuccessfulRetainedCommands, readRetainedCoreCommandResults,
+  assertSuccessfulRetainedCommands, completedCommandScript, readRetainedCoreCommandResults,
   readRetainedOutcomes, readRetainedRuntime, readWorkerTransport, runtimeLedgerSnapshot,
   signalIfPresent,
 } from './fixtures/chat-execution-transport-probe.mjs'
@@ -91,7 +91,7 @@ for (const variant of ['completed-replay', 'genuine-gap']) {
       directory, restart: false, repeat: false, includeStrongFlow: false, ...sealedBinaries(),
       serverEnvironment: { WWC_SERVER_EXECUTION_LEASE_SECONDS: '30' },
       deviceProvider: { ...deterministicDeviceProvider(), responseGateMarkers: [marker], nativeCellScripts: {
-        'native-cell-A': 'const command=ALL_TOOLS.find(tool=>tool.name.endsWith("exec_command")); if(!command) throw new Error("command tool missing"); for(let index=0;index<16;index++) { const result=await tools[command.name]({cmd:"true",yield_time_ms:1000}); if(result.exit_code!==0) throw new Error("original command did not exit successfully"); } text("sixteen real commands completed");',
+        'native-cell-A': completedCommandScript('true', 16),
       } },
       scenario: { async run({ api, modelRoute, devicePath }) {
         const database = new DatabaseSync(join(directory, 'server-data/control-plane.sqlite3'))
@@ -109,6 +109,13 @@ for (const variant of ['completed-replay', 'genuine-gap']) {
           const authority = database.prepare('SELECT * FROM execution_dispatch_authorities WHERE job_id=?').get(job.job_id)
           probe = readWorkerTransport(devicePath.deviceData, authority)
           const ca = readFileSync(join(directory, 'fixture-cert.pem'))
+          const outcomeStream = `execution-outcome:${job.job_id}:1`
+          // Hold the actual terminal commit until the original process is stopped.
+          // This preserves a live credential for the duplicate/conflict cutpoint.
+          database.exec(`CREATE TRIGGER pause_chat_outcome_insert BEFORE INSERT ON product_state
+            WHEN NEW.stream_id='${outcomeStream}' BEGIN SELECT RAISE(ABORT,'pause original terminal commit'); END`)
+          database.exec(`CREATE TRIGGER pause_chat_outcome_update BEFORE UPDATE ON product_state
+            WHEN NEW.stream_id='${outcomeStream}' BEGIN SELECT RAISE(ABORT,'pause original terminal commit'); END`)
           let gap = null
           if (variant === 'genuine-gap') {
             const stream = `product-session:${productSessionId}`
@@ -125,10 +132,7 @@ for (const variant of ['completed-replay', 'genuine-gap']) {
             }, 'at least two original Core runtime frames are retained without business ACK', 60_000)
             // Freeze the actual Worker, including its embedded Core, so its
             // automatic retry cannot race the deliberate transport order.
-            const stopped = await waitFor(() => {
-              process.kill(probe.pid, 'SIGSTOP')
-              paused = probe.pid
-              const status = execFileSync('ps', ['-p', String(probe.pid), '-o', 'stat='], { encoding: 'utf8' }).trim()
+            const stopped = await pauseManagedProcess(probe.pid, () => {
               const journal = new DatabaseSync(probe.networkJournalPath, { readOnly: true })
               let inFlight
               try {
@@ -136,13 +140,9 @@ for (const variant of ['completed-replay', 'genuine-gap']) {
                 inFlight = journal.prepare('SELECT state_json FROM network_queue_state').all()
                   .some(row => JSON.parse(row.state_json).in_flight)
               } finally { journal.close() }
-              if (!status.startsWith('T') || inFlight) {
-                process.kill(probe.pid, 'SIGCONT')
-                paused = null
-                return false
-              }
-              return { ledger: runtimeLedgerSnapshot(database, productSessionId) }
-            }, 'the actual original Worker is stopped with no in-flight exchange before Gap injection', 30_000, 10)
+              return inFlight ? false : { ledger: runtimeLedgerSnapshot(database, productSessionId) }
+            }, { timeoutMillis: 30_000 })
+            paused = probe.pid
             const before = stopped.ledger
             const expected = before ? JSON.parse(before.bytes.toString('utf8')).highestSequence + 1 : 1
             const first = pending.find(row => row.message.event.sequence === expected)
@@ -167,15 +167,25 @@ for (const variant of ['completed-replay', 'genuine-gap']) {
             process.kill(probe.pid, 'SIGCONT')
             paused = null
           } else devicePath.modelServer.releaseResponseGate(marker)
-          await waitCompleted(database, job.job_id, devicePath.deviceData)
-          // Acknowledged managed Workers may already have drained and exited.
-          if (signalIfPresent(probe.pid, 'SIGSTOP')) paused = probe.pid
-          const before = { terminal: terminalSnapshot(database, job.job_id),
+          const outcome = await waitFor(() => readRetainedOutcomes(devicePath.deviceData, job.job_id)[0],
+            'the original Worker retains its terminal while the real CP commit is held', 120_000)
+          assert.equal(outcome.workerAcknowledged, false)
+          await pauseManagedProcess(probe.pid, () => {
+            const journal = new DatabaseSync(probe.networkJournalPath, { readOnly: true })
+            try {
+              journal.exec('PRAGMA busy_timeout=5000')
+              return !journal.prepare('SELECT state_json FROM network_queue_state').all()
+                .some(row => JSON.parse(row.state_json).in_flight)
+            } finally { journal.close() }
+          }, { timeoutMillis: 30_000 })
+          paused = probe.pid
+          assert.equal(database.prepare('SELECT count(*) AS count FROM worker_launch_grant_exits WHERE worker_instance_id=?')
+            .get(probe.workerInstanceId).count, 0, 'the original instance remains live at the replay cutpoint')
+          const beforeRuntimeReplay = { terminal: terminalSnapshot(database, job.job_id),
             runtime: runtimeLedgerSnapshot(database, productSessionId), core: coreSnapshot(devicePath.deviceData, job.job_id) }
           const runtime = readRetainedRuntime(devicePath.deviceData, job.job_id)
           assert.ok(runtime.length > 0)
           assert.ok(runtime.every(row => row.sequence <= row.ack_sequence), 'the original runtime history has real ACKs')
-          const [outcome] = readRetainedOutcomes(devicePath.deviceData, job.job_id)
           const count = devicePath.modelServer.requests.length
           const duplicate = await probe.postRetainedMessage(runtime[0].bytes, { ca })
           assert.equal(duplicate.status, 200)
@@ -185,32 +195,25 @@ for (const variant of ['completed-replay', 'genuine-gap']) {
           const conflict = await probe.postRetainedMessage(Buffer.from(JSON.stringify(changed)), { ca })
           assert.equal(conflict.status, 200, 'a content conflict reaches the authenticated shared Core')
           assert.equal(conflict.acknowledgement?.status, 'rejected_conflict')
-          let terminalReplay = await probe.postRetainedMessage(outcome.bytes, { ca })
+          assert.deepEqual({ terminal: terminalSnapshot(database, job.job_id),
+            runtime: runtimeLedgerSnapshot(database, productSessionId), core: coreSnapshot(devicePath.deviceData, job.job_id) }, beforeRuntimeReplay)
+          database.exec('DROP TRIGGER pause_chat_outcome_insert')
+          database.exec('DROP TRIGGER pause_chat_outcome_update')
+          const terminalAccepted = await probe.postRetainedMessage(outcome.bytes, { ca })
+          assert.equal(terminalAccepted.status, 200)
+          assert.equal(terminalAccepted.acknowledgement?.status, 'accepted')
+          const before = { terminal: terminalSnapshot(database, job.job_id),
+            runtime: runtimeLedgerSnapshot(database, productSessionId), core: coreSnapshot(devicePath.deviceData, job.job_id) }
+          const terminalReplay = await probe.postRetainedMessage(outcome.bytes, { ca })
           assert.equal(terminalReplay.status, 200)
-          let originalAckTransportPending = false
-          if (terminalReplay.acknowledgement?.status === 'accepted') {
-            // The real Worker has applied its original business ACK, but may
-            // not yet have returned that delivery's transport confirmation.
-            // The probe confirms only the exact ACK it actually received.
-            originalAckTransportPending = true
-            terminalReplay = await probe.postRetainedMessage(outcome.bytes, { ca })
-            assert.equal(terminalReplay.status, 200)
-          }
           assert.equal(terminalReplay.acknowledgement?.status, 'duplicate')
           assert.deepEqual({ terminal: terminalSnapshot(database, job.job_id),
             runtime: runtimeLedgerSnapshot(database, productSessionId), core: coreSnapshot(devicePath.deviceData, job.job_id) }, before)
           assert.equal(devicePath.modelServer.requests.length, count)
-          const heartbeat = database.prepare('SELECT heartbeat_sequence FROM execution_workers WHERE worker_id=?')
-            .get(probe.workerId)
-          signalIfPresent(probe.pid, 'SIGCONT')
+          assert.equal(signalIfPresent(probe.pid, 'SIGCONT'), true)
           paused = null
+          await waitCompleted(database, job.job_id, devicePath.deviceData)
           const workerPostProbe = await waitFor(() => {
-            const current = database.prepare('SELECT worker_instance_id,heartbeat_sequence FROM execution_workers WHERE worker_id=?')
-              .get(probe.workerId)
-            if (current?.worker_instance_id === probe.workerInstanceId
-                && current.heartbeat_sequence >= heartbeat.heartbeat_sequence + 2) {
-              return { kind: 'heartbeats', count: current.heartbeat_sequence - heartbeat.heartbeat_sequence }
-            }
             const exits = database.prepare('SELECT * FROM worker_launch_grant_exits WHERE worker_session_id=? AND worker_instance_id=?')
               .all(probe.launchWorkerSessionId, probe.workerInstanceId)
             assert.ok(exits.length <= 1, 'the original managed launch has one actual exit receipt')
@@ -227,17 +230,28 @@ for (const variant of ['completed-replay', 'genuine-gap']) {
               assert.equal(process.exit_code, 0, 'the acknowledged managed Worker drains and exits successfully')
             } finally { device.close() }
             return { kind: 'process-exit', observedAt: exit.observed_at, exitCode: 0 }
-          }, 'the actual original Worker resumes formal heartbeats or completes its acknowledged managed execution', 30_000)
+          }, 'the actual original Worker applies the terminal ACK, drains and exits', 30_000)
           assert.deepEqual({ terminal: terminalSnapshot(database, job.job_id),
             runtime: runtimeLedgerSnapshot(database, productSessionId), core: coreSnapshot(devicePath.deviceData, job.job_id) }, before)
           assert.equal(devicePath.modelServer.requests.length, count)
-          return { jobId: job.job_id, workerInstanceId: probe.workerInstanceId, gap, originalAckTransportPending,
+          for (const bytes of [runtime[0].bytes, outcome.bytes]) {
+            const rejected = await probe.postRetainedMessage(bytes, { ca })
+            assert.equal(rejected.status, 401, 'the trusted exit revokes the original credential')
+            assert.equal(rejected.acknowledgement, null, 'a dead Worker receives no business ACK')
+            assert.equal(rejected.rejectionBoundary, 'http-authentication')
+          }
+          assert.deepEqual({ terminal: terminalSnapshot(database, job.job_id),
+            runtime: runtimeLedgerSnapshot(database, productSessionId), core: coreSnapshot(devicePath.deviceData, job.job_id) }, before)
+          assert.equal(devicePath.modelServer.requests.length, count)
+          return { jobId: job.job_id, workerInstanceId: probe.workerInstanceId, gap,
             runtimeDuplicate: 'duplicate', changedPayload: 'rejected_conflict', terminalDuplicate: 'duplicate',
             businessStateUnchanged: true, originalCoreHistoryUnchanged: true, realCommands: 16,
-            workerPostProbe, resumedWorkerHeartbeatObserved: workerPostProbe.kind === 'heartbeats', extraHttp: 0 }
+            workerPostProbe, exitedCredentialStatus: 401, exitedBusinessAck: false, extraHttp: 0 }
         } finally {
           database.exec('DROP TRIGGER IF EXISTS pause_chat_runtime_insert')
           database.exec('DROP TRIGGER IF EXISTS pause_chat_runtime_update')
+          database.exec('DROP TRIGGER IF EXISTS pause_chat_outcome_insert')
+          database.exec('DROP TRIGGER IF EXISTS pause_chat_outcome_update')
           devicePath.modelServer.releaseResponseGate(marker)
           if (paused !== null) { signalIfPresent(paused, 'SIGCONT'); paused = null }
           database.close()

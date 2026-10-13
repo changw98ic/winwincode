@@ -468,3 +468,56 @@ async fn reuse_rebinds_protocol_id_and_account_changes_require_new_actual_execut
         1
     );
 }
+
+#[tokio::test]
+async fn review_shared_required_validation_failure_remains_fatal_for_every_waiter() {
+    for merge in [false, true] {
+        let first = invocation(gate(false, merge)).await;
+        let first_facts = begin(&first).await;
+        let store = &first_facts.store;
+        let pool = store
+            .sqlite()
+            .open_read_write_pool(&store.sqlite().state_db_path())
+            .await
+            .unwrap();
+        sqlx::query(
+            "CREATE TRIGGER fail_shared_validation BEFORE UPDATE ON tool_input_bindings
+            WHEN NEW.validation_json IS NOT NULL
+            BEGIN SELECT RAISE(ABORT, 'private validation fault'); END",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        let runtime = tool(true);
+        let mut leader = ToolDispatch::prepare(&first, runtime.clone(), first_facts.clone())
+            .await
+            .unwrap();
+        let follower = if merge {
+            runtime.started.notified().await;
+            let mut second = first.clone();
+            second.call_id = "required-fatal-follower".into();
+            second.cancellation_token = CancellationToken::new();
+            let facts = begin(&second).await;
+            let dispatch = ToolDispatch::prepare(&second, runtime.clone(), facts)
+                .await
+                .unwrap();
+            Some((second, dispatch))
+        } else {
+            None
+        };
+        runtime.release.notify_one();
+        let error = match leader.run(first, runtime.clone()).await {
+            Err(error) => error,
+            Ok(_) => panic!("required validation failure cannot become tool output"),
+        };
+        assert!(matches!(error, FunctionCallError::Fatal(_)), "{error:?}");
+        assert!(!error.to_string().contains("private validation fault"));
+        if let Some((second, mut follower)) = follower {
+            assert!(matches!(
+                follower.run(second, runtime.clone()).await,
+                Err(FunctionCallError::Fatal(_))
+            ));
+        }
+        assert_eq!(runtime.calls.load(Ordering::SeqCst), 1);
+    }
+}

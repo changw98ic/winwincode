@@ -60,6 +60,7 @@ impl ControlPlane {
         }
         Ok(StrongFlowReadSnapshot {
             context: ControlPlane {
+                outcome_recovery_cursor: String::new(),
                 storage: Some(Box::new(storage)),
                 local_database_path: Some(path.clone()),
                 audit_store: None,

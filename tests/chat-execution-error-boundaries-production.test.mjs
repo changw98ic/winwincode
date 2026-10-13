@@ -361,7 +361,7 @@ async function waitAcknowledgedTerminal(cp, api, deviceData, productSessionId, j
           delivery: value.delivery,
         })),
         runs: retainedRuns(deviceData, jobId, authority.attempt).map(({ run }) => ({
-          terminal: Boolean(run.terminal), terminalStatus: run.terminal?.status,
+          terminal: Boolean(run.terminal), terminalKind: run.terminal?.kind,
           canonicalThreadId: run.canonicalThreadId,
           phase: run.phase, failureDiagnostic: run.failureDiagnostic,
           infrastructureFailureCode: run.infrastructureFailureCode,

@@ -192,6 +192,7 @@ jobs:
         if: ${{ matrix.lane == 'test' }}
         shell: bash
         env:
+          WWC_RUST_E2E: "0"
           WWC_WORKER_HELPER_EXECUTABLE: ${{ github.workspace }}/target/debug/winwincode-kernel-helper
         run: |
           corepack enable

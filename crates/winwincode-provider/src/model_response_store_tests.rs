@@ -83,7 +83,7 @@ fn concurrent_first_open_uses_one_current_schema_and_identity() {
                         .connection
                         .query_row("PRAGMA user_version", [], |row| row.get(0))
                         .unwrap();
-                    assert_eq!(version, 15);
+                    assert_eq!(version, 16);
                     store
                         .snapshot("current-schema-test")
                         .unwrap()

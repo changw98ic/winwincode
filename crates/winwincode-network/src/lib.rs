@@ -78,6 +78,10 @@ impl RequestRetryState {
         self.attempt
     }
 
+    pub fn connection_attempt(&self) -> u32 {
+        self.connections
+    }
+
     pub fn delay_after(&mut self, error: &impl RetryFailure) -> Option<Duration> {
         self.decision_after(error).immediate_delay()
     }
@@ -121,10 +125,14 @@ impl RequestRetry {
     }
 
     pub fn state_at(self, attempt: u32) -> RequestRetryState {
+        self.state_at_with_connections(attempt, 0)
+    }
+
+    pub fn state_at_with_connections(self, attempt: u32, connections: u32) -> RequestRetryState {
         RequestRetryState {
             policy: self,
             attempt: attempt.clamp(1, self.max_attempts),
-            connections: 0,
+            connections,
         }
     }
 
@@ -383,6 +391,40 @@ mod tests {
                 Duration::from_secs(seconds)
             );
         }
+    }
+
+    #[test]
+    fn restored_connection_backoff_caps_and_sent_failure_resets_it() {
+        let policy = RequestRetry::new(4, b"durable connection recovery");
+        let not_sent = NetworkFailure::new(
+            ErrorKind::ConnectionUnavailable,
+            Acceptance::NotSent,
+            Phase::Connect,
+        );
+        let mut state = policy.state();
+        for seconds in [5, 10, 20, 40, 60, 60] {
+            let RetryDecision::RetryAfter(delay) = state.decision_after(&not_sent) else {
+                panic!("connection failure must remain retryable");
+            };
+            assert!(delay >= Duration::from_secs(seconds));
+            assert!(delay <= Duration::from_secs(seconds) + Duration::from_millis(255));
+            assert_eq!(state.attempt(), 1);
+            state = policy.state_at_with_connections(state.attempt(), state.connection_attempt());
+        }
+        assert!(matches!(
+            state.decision_after(&NetworkFailure::http(503, None)),
+            RetryDecision::RetryAfter(_)
+        ));
+        state = policy.state_at_with_connections(state.attempt(), state.connection_attempt());
+        assert_eq!(state.attempt(), 2);
+        assert_eq!(state.connection_attempt(), 0);
+        let RetryDecision::RetryAfter(delay) = state.decision_after(&not_sent) else {
+            panic!("connection recovery resumes after the sent attempt");
+        };
+        assert!(delay >= Duration::from_secs(5));
+        assert!(delay <= Duration::from_secs(5) + Duration::from_millis(255));
+        assert_eq!(state.attempt(), 2);
+        assert_eq!(state.connection_attempt(), 1);
     }
 
     #[test]

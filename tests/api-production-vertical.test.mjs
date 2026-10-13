@@ -17,6 +17,8 @@ import { deviceTaskIdentities, withDeviceTaskRuntime } from '../scripts/device-t
 import { benchmarkConfiguration } from '../scripts/run-real-task-benchmark.mjs'
 import { deterministicDeviceProvider, installDevicePublicSmoke, waitFor } from '../scripts/device-production-fixture.mjs'
 import { cancellationEvidence } from './fixtures/code-mode-cancellation-evidence.mjs'
+import { assertSuccessfulRetainedCommands, completedCommandScript,
+  readRetainedCoreCommandResults } from './fixtures/chat-execution-transport-probe.mjs'
 
 test('a scenario propagates its Device cleanup failure', async () => {
   await assert.rejects(runApiProductionVertical({
@@ -621,6 +623,7 @@ function retainedInputCalls(deviceData) {
   return globSync('**/worker-codex.sqlite3', { cwd: deviceData }).flatMap(path => {
     const store = new DatabaseSync(join(deviceData, path), { readOnly: true })
     try {
+      store.exec('PRAGMA busy_timeout=5000')
       if (!store.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='input_call'").get()) return []
       return store.prepare('SELECT record_json FROM input_call').all()
         .map(row => JSON.parse(Buffer.from(row.record_json).toString('utf8')))
@@ -632,6 +635,7 @@ function retainedCodexRuns(deviceData, jobId) {
   return globSync('**/worker-codex.sqlite3', { cwd: deviceData }).flatMap(path => {
     const store = new DatabaseSync(join(deviceData, path), { readOnly: true })
     try {
+      store.exec('PRAGMA busy_timeout=5000')
       if (!store.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='codex_run'").get()) return []
       return store.prepare('SELECT record_json FROM codex_run').all()
         .map(row => JSON.parse(Buffer.from(row.record_json).toString('utf8')))
@@ -680,7 +684,7 @@ function coreCommandAttempts(deviceData, jobId) {
     const store = new DatabaseSync(join(deviceData, path), { readOnly: true })
     try {
       store.exec('PRAGMA busy_timeout=5000')
-      return store.prepare(`SELECT r.request_json,a.execution,a.disposition,a.effective_input,a.execution_result,a.accepted_result
+      return store.prepare(`SELECT r.sequence,r.request_json,a.execution,a.disposition,a.effective_input,a.execution_result,a.accepted_result
         FROM tool_requests r JOIN tool_attempts a ON a.request_sequence=r.sequence WHERE r.thread_id=?`)
         .all(runs[0].kernelSessionId).filter(row => JSON.parse(row.request_json).tool_name.endsWith('exec_command'))
         .map(row => ({ ...row, command: JSON.parse(JSON.parse(row.effective_input).input).cmd }))
@@ -694,10 +698,10 @@ function assertSuccessfulCoreCommand(deviceData, jobId, command) {
   assert.equal(rows.length, 1, 'the exact original Core shell command has one actual attempt')
   assert.equal(rows[0].execution, 'completed')
   assert.equal(rows[0].disposition, 'accepted')
-  for (const field of ['execution_result', 'accepted_result']) {
-    assert.equal(JSON.parse(rows[0][field]).code_mode_result?.exit_code, 0,
-      `the original ${field} proves successful OS command completion`)
-  }
+  const [run] = retainedCodexRuns(deviceData, jobId)
+  const retained = readRetainedCoreCommandResults(deviceData, run.kernelSessionId)
+    .filter(row => row.sequence === rows[0].sequence)
+  assertSuccessfulRetainedCommands(retained, 1)
 }
 
 function frozenZipFile(bytes, fileName) {
@@ -761,6 +765,7 @@ function retainedInteractionRequests(deviceData, jobId) {
   return globSync('**/worker-codex.sqlite3', { cwd: deviceData }).flatMap(path => {
     const store = new DatabaseSync(join(deviceData, path), { readOnly: true })
     try {
+      store.exec('PRAGMA busy_timeout=5000')
       if (!store.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='execution_outbox'").get()) return []
       return store.prepare("SELECT frame_json FROM execution_outbox WHERE family IN ('input_request','approval_request')").all()
         .map(row => JSON.parse(Buffer.from(row.frame_json).toString('utf8')))
@@ -780,9 +785,7 @@ test('Chat answers every real Core question once and retains sensitive values on
       {id:"private_first",header:"First",question:"First private choice?",options:[{label:"continue",description:"Continue."},{label:"revise",description:"Revise."}]},
       {id:"private_second",header:"Second",question:"Second private choice?",options:[{label:"continue",description:"Continue."},{label:"revise",description:"Revise."}]}
     ]});
-    const command=ALL_TOOLS.find(tool=>tool.name.endsWith("exec_command"));
-    if(!command) throw new Error("command tool missing");
-    text(await tools[command.name]({cmd:"printf '%s' 'complete' > CHAT-INPUT-CONSUMED.txt",yield_time_ms:1000}));`
+    { ${completedCommandScript("printf '%s' 'complete' > CHAT-INPUT-CONSUMED.txt")} }`
   const report = await runApiProductionVertical({
     directory, restart: false, repeat: false, ...apiProductionScenarioBinaries(),
     deviceProvider: { ...deterministicDeviceProvider(), nativeCellScripts: { 'native-cell-A': script } },
@@ -876,9 +879,7 @@ test('Chat expires its original real Core input deadline after heartbeat renewal
     text(await tools[input.name]({questions:[{id:"original_deadline",header:"Deadline",
       question:"Wait for this original deadline?",options:[{label:"continue",description:"Continue."},
       {label:"revise",description:"Revise."}]}]}));
-    const command=ALL_TOOLS.find(tool=>tool.name.endsWith("exec_command"));
-    if(!command) throw new Error("command tool missing");
-    text(await tools[command.name]({cmd:"printf '%s' 'consumed' > CHAT-INPUT-EXPIRED.txt",yield_time_ms:1000}));`
+    { ${completedCommandScript("printf '%s' 'consumed' > CHAT-INPUT-EXPIRED.txt")} }`
   const report = await runApiProductionVertical({
     directory, restart: false, repeat: false, ...apiProductionScenarioBinaries(),
     serverEnvironment: { WWC_SERVER_EXECUTION_LEASE_SECONDS: '30' },
@@ -964,24 +965,21 @@ test('Chat resolves real Core approval only through its public decision and fenc
   assert.equal(statSync(observations).mode & 0o777, 0o700)
   const blockedMarker = join(observations, 'blocked-operation.txt')
   const continuationCommand = "printf '%s' 'continued' > CHAT-APPROVAL-CONTINUED.txt"
-  const commandLookup = `const command=ALL_TOOLS.find(tool=>tool.name.endsWith("exec_command"));
-    if(!command) throw new Error("command tool missing");`
-  const source = marker => `text(await tools[command.name]({cmd:${JSON.stringify(`printf '%s' 'approved' > '${marker.replaceAll("'", "'\\''")}'`)},
-      sandbox_permissions:"require_escalated",justification:"Exercise the temporary Chat approval fixture.",yield_time_ms:1000}));`
+  const source = marker => completedCommandScript(`printf '%s' 'approved' > '${marker.replaceAll("'", "'\\''")}'`, 1,
+    { sandbox_permissions: 'require_escalated', justification: 'Exercise the temporary Chat approval fixture.' })
   const report = await runApiProductionVertical({
     directory, restart: false, repeat: false, ...apiProductionScenarioBinaries(),
     serverEnvironment: { WWC_SERVER_EXECUTION_LEASE_SECONDS: '30' },
     deviceProvider: { ...deterministicDeviceProvider(), nativeCellScripts: {
-      'native-cell-A': `${commandLookup}
-${source('CHAT-APPROVAL-EXECUTED.txt')}`,
-      'native-cell-B': `${commandLookup}
+      'native-cell-A': source('CHAT-APPROVAL-EXECUTED.txt'),
+      'native-cell-B': `
         try { ${source(blockedMarker)} } catch (error) {
           const reason = String(error?.message ?? error);
           const expired = "INTERACTION_DEADLINE_EXPIRED: approval expired; continue within the existing permissions";
           if (!reason.includes(expired)) throw error;
           text({ approvalExpired: expired });
         }
-        text(await tools[command.name]({cmd:${JSON.stringify(continuationCommand)},yield_time_ms:1000}));`,
+        { ${completedCommandScript(continuationCommand)} }`,
     } },
     scenario: { async run(context) {
       const { api, devicePath } = context

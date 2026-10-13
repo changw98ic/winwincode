@@ -994,6 +994,41 @@ impl ProductSessionService<'_> {
         assistant_receipt(mutation, &command.model_exchange_id)
     }
 
+    fn replaced_exchange_for_unstarted_terminal(
+        &mut self,
+        persisted: &PersistedProductSession,
+        job_id: &ExecutionJobId,
+        execution: &crate::execution_outcome_commit::ExecutionOutcomeCommit<'_>,
+    ) -> Result<Option<ModelExchangeId>, ProductSessionServiceError> {
+        let replacement = self
+            .storage
+            .load_execution_scope_replacement_authority(job_id)
+            .map_err(|error| storage_error(&error))?;
+        let predecessor = persisted.bindings.iter().find(|binding| {
+            binding
+                .identity
+                .to_domain()
+                .is_ok_and(|identity| identity.execution_job_id() == job_id)
+        });
+        Ok(replacement
+            .as_ref()
+            .zip(predecessor)
+            .filter(|(seal, binding)| {
+                let lease = seal.replacement_lease();
+                let authority = execution.authority;
+                seal.predecessor_slot() == Some(&binding.slot.authority)
+                    && seal.scope() == execution.scope
+                    && &binding.reservation.worker_pool_id == execution.worker_pool_id
+                    && seal.replacement_attempt() == authority.attempt
+                    && lease.job_id == authority.job_id
+                    && lease.lease_id == authority.lease_id
+                    && lease.worker_id == authority.worker_id
+                    && lease.worker_instance_id == authority.worker_instance_id
+                    && lease.fencing_token == authority.fencing_token
+            })
+            .map(|(_, binding)| binding.model_exchange_id.clone()))
+    }
+
     /// Records an accepted failed/cancelled turn before its first public model reply.
     pub(crate) fn record_unstarted_terminal(
         &mut self,
@@ -1025,36 +1060,13 @@ impl ProductSessionService<'_> {
             .get_mut(&session_id.0)
             .ok_or_else(not_found)?;
         require_execution_revision(persisted, job_id, context.expected_revision)?;
-        let turn = persisted
-            .turn_intents
-            .iter_mut()
-            .find(|turn| &turn.execution_job_id == job_id)
-            .ok_or_else(|| binding_mismatch("unstarted execution has no Chat turn"))?;
-        if turn.model_exchange_id.is_some()
-            || !matches!(
-                turn.state,
-                PersistedTurnState::Pending | PersistedTurnState::Cancelled
-            )
-        {
-            return Err(binding_mismatch(
-                "unstarted terminal differs from its Chat turn",
-            ));
+        let successor =
+            self.replaced_exchange_for_unstarted_terminal(persisted, job_id, execution)?;
+        if let Some(exchange) = &successor {
+            fail_replaced_assistant_output(persisted, exchange, &context.occurred_at);
         }
-        if (turn.state == PersistedTurnState::Cancelled
-            || persisted.session.state() == ProductSessionState::Cancelled)
-            && outcome.status != ExecutionOutcomeStatus::Cancelled
-        {
-            return Err(binding_mismatch(
-                "cancelled Chat turn requires its cancellation outcome",
-            ));
-        }
+        finish_unstarted_terminal_turn(persisted, job_id, outcome, successor.as_ref())?;
         let cancelled = outcome.status == ExecutionOutcomeStatus::Cancelled;
-        turn.state = if cancelled {
-            PersistedTurnState::Cancelled
-        } else {
-            PersistedTurnState::Failed
-        };
-        turn.terminal_outcome = Some(outcome.clone());
         let message_id = deterministic_message_id("assistant", job_id.0.as_bytes());
         if persisted
             .messages
@@ -1428,6 +1440,20 @@ impl ProductSessionService<'_> {
         let Some(binding) = binding else {
             return Ok(Vec::new());
         };
+        let replacement = self
+            .storage
+            .load_execution_scope_replacement_authority(&binding.slot.authority.job_id)
+            .map_err(|error| storage_error(&error))?;
+        if replacement.as_ref().is_some_and(|seal| {
+            seal.predecessor_slot() == Some(&binding.slot.authority)
+                && seal.scope() == &binding.reservation.scope
+                && seal.replacement_attempt() > binding.slot.authority.attempt
+        }) {
+            // The successor has not produced its first model binding. Cancel
+            // the canonical queued Job so the scheduler routes to its current
+            // attempt, without borrowing the predecessor's runtime or model.
+            return self.queued_cancellation_route(persisted, public_scope);
+        }
         let current = self
             .storage
             .load_worker_binding_source(
@@ -1466,12 +1492,12 @@ impl ProductSessionService<'_> {
         persisted: &PersistedProductSession,
         public_scope: &PublicEventScope,
     ) -> Result<Vec<ExecutionRoute>, ProductSessionServiceError> {
-        let Some(turn) = persisted
-            .turn_intents
-            .iter()
-            .rev()
-            .find(|turn| turn.state == PersistedTurnState::Pending)
-        else {
+        let Some(turn) = persisted.turn_intents.iter().rev().find(|turn| {
+            matches!(
+                turn.state,
+                PersistedTurnState::Pending | PersistedTurnState::Bound
+            )
+        }) else {
             return Ok(Vec::new());
         };
         let PublicEventScope::Repository {
@@ -2220,4 +2246,69 @@ fn stream_conflict() -> ProductSessionServiceError {
         ProductSessionServiceErrorCode::StreamSequenceConflict,
         "ProductSession assistant stream sequence is stale or contains a gap",
     )
+}
+
+fn finish_unstarted_terminal_turn(
+    persisted: &mut PersistedProductSession,
+    job_id: &ExecutionJobId,
+    outcome: &ProductSessionTurnTerminalOutcome,
+    successor: Option<&ModelExchangeId>,
+) -> Result<(), ProductSessionServiceError> {
+    let turn = persisted
+        .turn_intents
+        .iter_mut()
+        .find(|turn| &turn.execution_job_id == job_id)
+        .ok_or_else(|| binding_mismatch("unstarted execution has no Chat turn"))?;
+    let pending = turn.model_exchange_id.is_none()
+        && matches!(
+            turn.state,
+            PersistedTurnState::Pending | PersistedTurnState::Cancelled
+        );
+    let replaced_before_model = successor.is_some_and(|exchange| {
+        turn.model_exchange_id.as_ref() == Some(exchange)
+            && matches!(
+                turn.state,
+                PersistedTurnState::Bound | PersistedTurnState::Cancelled
+            )
+    });
+    if !pending && !replaced_before_model {
+        return Err(binding_mismatch(
+            "unstarted terminal differs from its Chat turn",
+        ));
+    }
+    if replaced_before_model {
+        turn.model_exchange_id = None;
+    }
+    if (turn.state == PersistedTurnState::Cancelled
+        || persisted.session.state() == ProductSessionState::Cancelled)
+        && outcome.status != ExecutionOutcomeStatus::Cancelled
+    {
+        return Err(binding_mismatch(
+            "cancelled Chat turn requires its cancellation outcome",
+        ));
+    }
+    turn.state = if outcome.status == ExecutionOutcomeStatus::Cancelled {
+        PersistedTurnState::Cancelled
+    } else {
+        PersistedTurnState::Failed
+    };
+    turn.terminal_outcome = Some(outcome.clone());
+    Ok(())
+}
+
+pub(super) fn fail_replaced_assistant_output(
+    persisted: &mut PersistedProductSession,
+    exchange: &ModelExchangeId,
+    now: &Instant,
+) {
+    for message in &mut persisted.messages {
+        if message.model_exchange_id.as_ref() == Some(exchange)
+            && message.projection.role == "assistant"
+            && message.projection.state == "streaming"
+        {
+            "failed".clone_into(&mut message.projection.state);
+            message.projection.output_preparation = None;
+            message.projection.updated_at = now.clone();
+        }
+    }
 }

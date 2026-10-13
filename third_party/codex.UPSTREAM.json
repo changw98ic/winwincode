@@ -122,6 +122,7 @@
     "upstream/patches/codex/0113-tool-review-shutdown-owner-release.patch",
     "upstream/patches/codex/0114-tool-review-call-pair-regressions.patch",
     "upstream/patches/codex/0115-app-server-internal-error-schema.patch",
-    "upstream/patches/codex/0116-tool-review-output-result-reference.patch"
+    "upstream/patches/codex/0116-tool-review-output-result-reference.patch",
+    "upstream/patches/codex/0117-shared-tool-fatal-storage.patch"
   ]
 }

@@ -54,6 +54,7 @@ pub use execution_admission::{
 mod execution_cancellation_receipt;
 mod execution_lease_period;
 mod execution_outcome_commit;
+mod execution_outcome_recovery;
 pub mod execution_port_service;
 pub mod fusion_adjudication_host;
 pub use winwincode_fusion::analysis as fusion_analysis;
@@ -922,6 +923,7 @@ impl fmt::Display for ShutdownError {
 impl std::error::Error for ShutdownError {}
 
 pub struct ControlPlane {
+    outcome_recovery_cursor: String,
     storage: Option<Box<dyn ProductStateStorage>>,
     local_database_path: Option<PathBuf>,
     audit_store: Option<AuditStore>,
@@ -1153,6 +1155,7 @@ impl ControlPlane {
         temporary_root: OwnedTemporaryRoot,
     ) -> Result<Self, StartError> {
         let mut control_plane = Self {
+            outcome_recovery_cursor: String::new(),
             storage: Some(storage),
             local_database_path,
             audit_store,
@@ -1178,6 +1181,21 @@ impl ControlPlane {
             return Err(StartError::new(format!(
                 "failed to replay the durable outbox before startup: {error}{cleanup}"
             )));
+        }
+        if control_plane.local_database_path.is_some() {
+            // Adapters may be installed after this constructor. Controller-owned
+            // rows remain pending until the normal Server recovery tick.
+            if let Err(error) = control_plane.recover_accepted_execution_outcomes() {
+                let cleanup_failures = control_plane.close_resources();
+                let cleanup = if cleanup_failures.is_empty() {
+                    String::new()
+                } else {
+                    format!("; cleanup also failed: {}", cleanup_failures.join("; "))
+                };
+                return Err(StartError::new(format!(
+                    "accepted outcome recovery failed: {error}{cleanup}"
+                )));
+            }
         }
         Ok(control_plane)
     }

@@ -1494,17 +1494,48 @@ fn failed_terminal_retry_dispatch_rebinds_product_session_and_fences_old_ingress
 
 #[test]
 fn running_scheduler_replacement_rotates_one_product_session_binding_and_replays_exactly() {
-    replacement_continues_react_model_exchanges(true);
+    replacement_continues_react_model_exchanges(ReplacementStart::ModelBound);
 }
 
 #[test]
 fn replacement_after_session_binding_before_first_model_exchange_starts_original_chat_turn() {
-    replacement_continues_react_model_exchanges(false);
+    replacement_continues_react_model_exchanges(ReplacementStart::Unbound);
+}
+
+#[test]
+fn review_successor_after_output_preparation_continues_multiple_model_exchanges() {
+    replacement_continues_react_model_exchanges(ReplacementStart::OutputPreparing);
+}
+
+#[test]
+fn review_successor_failure_before_model_uses_its_own_terminal_authority() {
+    replacement_continues_react_model_exchanges(ReplacementStart::TerminalBeforeModel);
+}
+
+#[test]
+fn review_successor_cancellation_before_model_preserves_cancellation_authority() {
+    replacement_continues_react_model_exchanges(ReplacementStart::CancelledBeforeModel);
+}
+
+#[derive(Clone, Copy)]
+enum ReplacementStart {
+    ModelBound,
+    Unbound,
+    OutputPreparing,
+    TerminalBeforeModel,
+    CancelledBeforeModel,
 }
 
 #[allow(clippy::too_many_lines)]
-fn replacement_continues_react_model_exchanges(original_model_bound: bool) {
-    let seed = if original_model_bound { 61 } else { 62 };
+fn replacement_continues_react_model_exchanges(start: ReplacementStart) {
+    let original_model_bound = !matches!(start, ReplacementStart::Unbound);
+    let seed = match start {
+        ReplacementStart::ModelBound => 61,
+        ReplacementStart::Unbound => 62,
+        ReplacementStart::OutputPreparing => 161,
+        ReplacementStart::TerminalBeforeModel => 162,
+        ReplacementStart::CancelledBeforeModel => 163,
+    };
     let mut fixture = Fixture::open(seed);
     let job = create_chat_job(&mut fixture, seed);
     let scope = execution_scope(&fixture);
@@ -1537,7 +1568,21 @@ fn replacement_continues_react_model_exchanges(original_model_bound: bool) {
             .expect("original ProductSession ModelOpen");
     }
 
-    register_worker_process(&mut fixture.storage, seed, seed + 1, 6_108, 11);
+    if matches!(start, ReplacementStart::OutputPreparing) {
+        let (open, _) = chat_project_artifact_messages(&fixture, &original_runtime);
+        fixture
+            .accept(&open, at(13))
+            .expect("original ZIP preparing");
+        assert!(
+            fixture
+                .record()
+                .messages()
+                .iter()
+                .any(|message| message.output_preparation.as_deref() == Some("preparing"))
+        );
+    }
+
+    register_worker_process(&mut fixture.storage, seed, seed + 1, 6_108, 14);
     let replacement_dispatch = scheduler_claim(&mut fixture, seed, seed + 1, 6_110, "boot-new", 25);
     assert_eq!(replacement_dispatch.job.job_id, job.job_id);
     assert_eq!(replacement_dispatch.job.attempt, 2);
@@ -1561,6 +1606,89 @@ fn replacement_continues_react_model_exchanges(original_model_bound: bool) {
             at(27),
         )
         .expect("replacement ProductSession binding");
+    if matches!(
+        start,
+        ReplacementStart::TerminalBeforeModel | ReplacementStart::CancelledBeforeModel
+    ) {
+        assert_product_predecessor_is_fenced(
+            &mut fixture,
+            &job,
+            &original_runtime,
+            &replacement_runtime,
+            6_117,
+        );
+        let cancelled = matches!(start, ReplacementStart::CancelledBeforeModel);
+        if cancelled {
+            cancel_bound_chat_at(&mut fixture, 27);
+        }
+        let mut outcome = successful_outcome(&fixture, &replacement_runtime, seed);
+        outcome.outcome.status = ExecutionOutcomeStatus::InfrastructureError;
+        outcome.outcome.error = Some(winwincode_execution_port::generated::ExecutionPortError {
+            code: ExecutionPortErrorCode::InfrastructureError,
+            message: "successor could not start Core".into(),
+            retryable: true,
+        });
+        if cancelled {
+            outcome.outcome.status = ExecutionOutcomeStatus::Cancelled;
+            outcome.outcome.error = None;
+        }
+        outcome.outcome.finished_at = at(28);
+        outcome.sent_at = at(28);
+        let mut foreign = outcome.clone();
+        foreign.session_identity.codex_thread_id = original_runtime.slot.codex_thread_id.clone();
+        foreign.outcome.codex_thread_id = Some(original_runtime.slot.codex_thread_id.clone());
+        assert_rejected_without_authority_write(
+            &mut fixture,
+            &job,
+            &[
+                &original_runtime.slot.worker_session_id,
+                &replacement_runtime.slot.worker_session_id,
+            ],
+            &ExecutionPortMessage::JobOutcomeMessage(foreign),
+        );
+        let accepted = fixture
+            .accept(
+                &ExecutionPortMessage::JobOutcomeMessage(outcome.clone()),
+                at(28),
+            )
+            .expect("successor terminal must use its own staged authority");
+        assert_eq!(
+            outcome_status(&accepted),
+            JobOutcomeAckMessageStatus::Accepted
+        );
+        assert_slot_state(
+            &mut fixture,
+            &replacement_runtime,
+            if cancelled {
+                WorkerSlotState::Cancelled
+            } else {
+                WorkerSlotState::Failed
+            },
+        );
+        assert_queue_state(&fixture, &job.job_id, ExecutionJobState::Failed);
+        assert_eq!(
+            fixture.record().turn_intents()[0]
+                .terminal_outcome
+                .as_ref()
+                .unwrap()
+                .status,
+            if cancelled {
+                ExecutionOutcomeStatus::Cancelled
+            } else {
+                ExecutionOutcomeStatus::InfrastructureError
+            }
+        );
+        fixture = fixture.restart();
+        let duplicate = fixture
+            .accept(&ExecutionPortMessage::JobOutcomeMessage(outcome), expired())
+            .unwrap();
+        assert_eq!(
+            outcome_status(&duplicate),
+            JobOutcomeAckMessageStatus::Duplicate
+        );
+        fixture.close();
+        return;
+    }
     let mut replacement_open = model_open_message(&fixture, &replacement_runtime, 6_116);
     replacement_open.sent_at = at(28);
     fixture
@@ -1605,6 +1733,12 @@ fn replacement_continues_react_model_exchanges(original_model_bound: bool) {
     assert_eq!(
         continued.bindings()[0].model_exchange_id(),
         &second_open.model_exchange_id
+    );
+    assert!(
+        continued
+            .messages()
+            .iter()
+            .all(|message| message.state == "streaming" || message.output_preparation.is_none())
     );
     assert!(continued.bindings()[0].includes_model_exchange(&replacement_open.model_exchange_id));
     assert_eq!(continued.turn_intents().len(), 1);
@@ -1747,13 +1881,17 @@ fn assert_outcome_revision(fixture: &Fixture, stream: &str, revision: u64) {
 }
 
 fn cancel_bound_chat(fixture: &mut Fixture) {
+    cancel_bound_chat_at(fixture, 21);
+}
+
+fn cancel_bound_chat_at(fixture: &mut Fixture, second: u64) {
     let current = fixture.record();
     let mut context = command_context(
         &fixture.repository_scope,
         93_201,
         current.session().revision(),
     );
-    context.occurred_at = at(21);
+    context.occurred_at = at(second);
     ProductSessionService::new(&mut fixture.storage)
         .cancel_session(&CancelProductSessionCommand {
             context,
@@ -2218,6 +2356,185 @@ fn accepted_failed_outcome_blocks_retry_until_cleanup_is_acknowledgement_ready()
     assert_eq!(
         successor_resources[2],
         serde_json::to_value(&settled).unwrap()
+    );
+    fixture.close();
+}
+
+#[test]
+#[allow(clippy::too_many_lines)]
+fn review_outcome_recovery_pages_retry_failed_cleanup_without_worker_replay() {
+    let mut fixture = Fixture::open(180);
+    fixture.storage.worker_session_slots().unwrap();
+    let connection = rusqlite::Connection::open(fixture.storage.database_path()).unwrap();
+    connection.execute_batch("CREATE TRIGGER fail_page_cleanup BEFORE UPDATE ON worker_session_slots
+        WHEN NEW.state='completed' BEGIN SELECT RAISE(ABORT, 'cleanup temporarily unavailable'); END;").unwrap();
+    let mut originals = Vec::new();
+    for seed in 180..245 {
+        fixture.repository_scope.organization_id = OrganizationId(id("org", seed));
+        fixture.repository_scope.workspace_id = WorkspaceId(id("wsp", seed));
+        fixture.repository_scope.project_id = ProjectId(id("prj", seed));
+        fixture.repository_scope.repository_id = RepositoryId(id("rep", seed));
+        fixture.receipt_scope =
+            receipt_scope_key(&public_repository_scope(&fixture.repository_scope)).unwrap();
+        fixture.product_session_id = ProductSessionId(id("psn", seed));
+        let job = create_chat_job(&mut fixture, seed);
+        let scope = execution_scope(&fixture);
+        register_worker(&mut fixture.storage, seed);
+        reserve_execution(&mut fixture.storage, &scope, &job, seed);
+        let BoundSchedulerFixture {
+            fixture: bound,
+            job,
+            runtime,
+            ..
+        } = finish_bound_scheduler_fixture(fixture, job, seed);
+        fixture = bound;
+        let outcome = successful_outcome(&fixture, &runtime, seed);
+        assert!(
+            fixture
+                .accept(
+                    &ExecutionPortMessage::JobOutcomeMessage(outcome.clone()),
+                    at(20)
+                )
+                .is_err()
+        );
+        let stream = format!("execution-outcome:{}:1", job.job_id.0);
+        assert_outcome_revision(&fixture, &stream, 1);
+        originals.push((stream, outcome, runtime.slot.worker_session_id));
+    }
+    // A failing row cannot starve later pages or manufacture a ready receipt.
+    assert_eq!(
+        fixture
+            .control_plane
+            .recover_accepted_execution_outcomes()
+            .unwrap(),
+        0
+    );
+    assert_eq!(
+        fixture
+            .control_plane
+            .recover_accepted_execution_outcomes()
+            .unwrap(),
+        0
+    );
+    for (stream, _, _) in &originals {
+        assert_outcome_revision(&fixture, stream, 1);
+    }
+    connection
+        .execute_batch("DROP TRIGGER fail_page_cleanup")
+        .unwrap();
+    let first = fixture
+        .control_plane
+        .recover_accepted_execution_outcomes()
+        .unwrap();
+    let second = fixture
+        .control_plane
+        .recover_accepted_execution_outcomes()
+        .unwrap();
+    assert_eq!((first, second), (64, 1));
+    let mut retained = Vec::new();
+    for (stream, outcome, worker_session_id) in originals {
+        assert_outcome_revision(&fixture, &stream, 2);
+        let stored = fixture.storage.load_state(&stream).unwrap().unwrap();
+        assert_eq!(
+            serde_json::from_slice::<Value>(&stored.payload).unwrap()["message"],
+            serde_json::to_value(outcome).unwrap()
+        );
+        assert_eq!(
+            fixture
+                .storage
+                .worker_session_slots()
+                .unwrap()
+                .load(&worker_session_id)
+                .unwrap()
+                .unwrap()
+                .state,
+            WorkerSlotState::Completed
+        );
+        retained.push((stream, stored));
+    }
+    assert_eq!(
+        fixture
+            .control_plane
+            .recover_accepted_execution_outcomes()
+            .unwrap(),
+        0
+    );
+    assert_eq!(
+        fixture
+            .control_plane
+            .recover_accepted_execution_outcomes()
+            .unwrap(),
+        0
+    );
+    for (stream, stored) in retained {
+        assert_eq!(fixture.storage.load_state(&stream).unwrap(), Some(stored));
+    }
+    drop(connection);
+    fixture.close();
+}
+
+#[test]
+fn review_startup_finishes_accepted_outcome_without_old_worker_replay() {
+    let seed = 174;
+    let BoundSchedulerFixture {
+        mut fixture,
+        job,
+        runtime,
+        ..
+    } = bound_scheduler_fixture(seed);
+    let outcome = successful_outcome(&fixture, &runtime, seed);
+    let connection = rusqlite::Connection::open(fixture.storage.database_path()).unwrap();
+    connection
+        .execute_batch(
+            "CREATE TRIGGER fail_cleanup BEFORE UPDATE ON worker_session_slots
+        WHEN NEW.state='completed' BEGIN SELECT RAISE(ABORT, 'cleanup fault'); END;",
+        )
+        .unwrap();
+    assert!(
+        fixture
+            .accept(
+                &ExecutionPortMessage::JobOutcomeMessage(outcome.clone()),
+                at(20)
+            )
+            .is_err()
+    );
+    let stream = format!("execution-outcome:{}:1", job.job_id.0);
+    assert_outcome_revision(&fixture, &stream, 1);
+    assert_slot_state(&mut fixture, &runtime, WorkerSlotState::Running);
+    register_worker_process(&mut fixture.storage, seed, seed + 1, 174_201, 22);
+    connection
+        .execute_batch("DROP TRIGGER fail_cleanup")
+        .unwrap();
+    drop(connection);
+    fixture = fixture.restart();
+    assert_outcome_revision(&fixture, &stream, 2);
+    assert_slot_state(&mut fixture, &runtime, WorkerSlotState::Completed);
+    let retained = fixture.storage.load_state(&stream).unwrap().unwrap();
+    assert_eq!(
+        serde_json::from_slice::<Value>(&retained.payload).unwrap()["message"],
+        serde_json::to_value(outcome).unwrap()
+    );
+    let before = execution_resource_snapshot(&mut fixture, &job.job_id);
+    let slot = fixture
+        .storage
+        .worker_session_slots()
+        .unwrap()
+        .load(&runtime.slot.worker_session_id)
+        .unwrap();
+    fixture = fixture.restart();
+    assert_eq!(fixture.storage.load_state(&stream).unwrap(), Some(retained));
+    assert_eq!(
+        execution_resource_snapshot(&mut fixture, &job.job_id),
+        before
+    );
+    assert_eq!(
+        fixture
+            .storage
+            .worker_session_slots()
+            .unwrap()
+            .load(&runtime.slot.worker_session_id)
+            .unwrap(),
+        slot
     );
     fixture.close();
 }

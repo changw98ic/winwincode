@@ -9,7 +9,7 @@ const root = resolve(import.meta.dirname, '..')
 const mainlineWorkflowPath = resolve(root, '.github/workflows/mainline.yml')
 const mainlineWorkflow = readFileSync(mainlineWorkflowPath, 'utf8')
 
-test('ordinary CI runs one exact-SHA aggregate over five independent lanes', () => {
+test('ordinary CI runs one exact-SHA aggregate over six independent lanes', () => {
   assert.match(mainlineWorkflow, /^name: Mainline verification$/mu)
   assert.match(mainlineWorkflow, /^  push:$/mu)
   assert.match(mainlineWorkflow, /^    branches:\n      - main$/mu)
@@ -18,7 +18,7 @@ test('ordinary CI runs one exact-SHA aggregate over five independent lanes', () 
   assert.match(mainlineWorkflow, /^  typescript:$/mu)
   assert.match(mainlineWorkflow, /^  rust:$/mu)
   assert.match(mainlineWorkflow, /^    name: rust-\$\{\{ matrix\.lane \}\}$/mu)
-  for (const lane of ['lint', 'test', 'runtime']) {
+  for (const lane of ['lint', 'test', 'e2e', 'runtime']) {
     assert.match(mainlineWorkflow, new RegExp(`^          - ${lane}$`, 'mu'))
   }
   assert.match(mainlineWorkflow, /^  verify:$/mu)
@@ -26,7 +26,9 @@ test('ordinary CI runs one exact-SHA aggregate over five independent lanes', () 
   assert.equal([...mainlineWorkflow.matchAll(/corepack pnpm verify:typescript$/gmu)].length, 1)
   assert.doesNotMatch(mainlineWorkflow, /corepack pnpm verify:rust$/mu)
   assert.equal([...mainlineWorkflow.matchAll(/corepack pnpm lint:rust$/gmu)].length, 1)
-  assert.equal([...mainlineWorkflow.matchAll(/corepack pnpm test:rust$/gmu)].length, 1)
+  assert.equal([...mainlineWorkflow.matchAll(/corepack pnpm test:rust$/gmu)].length, 2)
+  assert.match(mainlineWorkflow, /^          WWC_RUST_E2E: "0"$/mu)
+  assert.match(mainlineWorkflow, /^          WWC_RUST_E2E: "1"$/mu)
   assert.equal([...mainlineWorkflow.matchAll(/corepack pnpm build:rust$/gmu)].length, 1)
   assert.equal(
     [...mainlineWorkflow.matchAll(/corepack pnpm verify:api-production-vertical$/gmu)].length,

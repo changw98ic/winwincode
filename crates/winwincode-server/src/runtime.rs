@@ -1133,6 +1133,18 @@ impl RepositoryRuntimeScheduler {
 }
 
 impl RepositoryRuntimeScheduler {
+    pub fn recover_accepted_outcomes(&mut self) -> Result<usize, RuntimeSupervisorError> {
+        let mut guard = self.state.lock().map_err(|_| scheduler_failure())?;
+        let state = guard.as_mut().ok_or_else(scheduler_failure)?;
+        state
+            .control_plane
+            .recover_accepted_execution_outcomes()
+            .map_err(|error| {
+                debug_scheduler_error("recover accepted outcome cleanup", &error);
+                scheduler_failure()
+            })
+    }
+
     pub fn drive_remote(
         &mut self,
         now: &Instant,
@@ -1231,6 +1243,15 @@ impl RepositoryRuntimeScheduler {
                 "repository runtime scheduler application has stopped",
             )
         })?;
+        if !authenticated_remote {
+            state
+                .control_plane
+                .recover_accepted_execution_outcomes()
+                .map_err(|error| {
+                    debug_scheduler_error("recover accepted outcome cleanup", &error);
+                    scheduler_failure()
+                })?;
+        }
         self.retry_confirmed_interactions(
             state,
             &self.worker_id.clone(),

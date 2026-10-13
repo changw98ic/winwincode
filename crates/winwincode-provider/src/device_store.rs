@@ -145,7 +145,7 @@ impl DeviceProviderStore {
         enable_device_wal(&connection)?;
         connection.execute_batch("PRAGMA synchronous=FULL; PRAGMA secure_delete=ON;")?;
         let version: i64 = connection.query_row("PRAGMA user_version", [], |row| row.get(0))?;
-        let key = if version == 15 {
+        let key = if version == 16 {
             load_device_key(&connection)?
         } else if version == 0 {
             // Only initialization needs the writer lock. Current-schema readers
@@ -156,7 +156,7 @@ impl DeviceProviderStore {
                 transaction.query_row("PRAGMA user_version", [], |row| row.get(0))?;
             match locked_version {
                 0 => initialize_device_store(&transaction)?,
-                15 => {}
+                16 => {}
                 _ => return Err(DeviceProviderError::StateInvalid),
             }
             let key = load_device_key(&transaction)?;
@@ -1126,13 +1126,14 @@ fn initialize_device_store(
             PRIMARY KEY(operation_id,sequence));
          CREATE TABLE model_retry_state (exchange_id TEXT PRIMARY KEY REFERENCES exchanges(exchange_id),
             policy_attempt INTEGER NOT NULL CHECK(policy_attempt BETWEEN 1 AND 4),
+            connection_attempt INTEGER NOT NULL DEFAULT 0 CHECK(connection_attempt>=0),
             wake_ms INTEGER NOT NULL, decision TEXT NOT NULL CHECK(decision IN ('retry_after','deferred_until')));
          CREATE TABLE jev_invocation_attempts (
             operation_id TEXT NOT NULL, sequence INTEGER NOT NULL, request_json TEXT NOT NULL,
             status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','succeeded','failed','cancelled')),
             result_json TEXT, PRIMARY KEY(operation_id,sequence),
             CHECK((status='pending' AND result_json IS NULL) OR (status!='pending' AND result_json IS NOT NULL)));
-         PRAGMA user_version=15;",
+         PRAGMA user_version=16;",
     )?;
     let key = new_secret_key()?;
     transaction.execute(

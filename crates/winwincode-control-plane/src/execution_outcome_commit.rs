@@ -227,7 +227,7 @@ pub(crate) fn outcome_replay(
     Ok(OutcomeReplay::Exact(Box::new(retained)))
 }
 
-fn retained_outcome(
+pub(super) fn retained_outcome(
     storage: &dyn ProductStateStorage,
     message: &JobOutcomeMessage,
 ) -> Result<Option<AcceptedExecutionOutcome>, StorageError> {

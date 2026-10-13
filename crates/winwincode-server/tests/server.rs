@@ -260,6 +260,29 @@ fn config(bind_address: SocketAddr) -> ServerConfig {
     .expect("valid config")
 }
 
+fn cleanup_recovery_config() -> ServerConfig {
+    let directory = test_directory("accepted-cleanup-recovery");
+    fs::create_dir_all(&directory).unwrap();
+    let CertifiedKey { cert, signing_key } =
+        generate_simple_self_signed(vec!["localhost".into()]).unwrap();
+    let certificate_path = directory.join("certificate.pem");
+    let private_key_path = directory.join("private-key.pem");
+    fs::write(&certificate_path, cert.pem()).unwrap();
+    fs::write(&private_key_path, signing_key.serialize_pem()).unwrap();
+    ServerConfig::new(
+        "127.0.0.1:0".parse().unwrap(),
+        "https://control.example",
+        ServerTls::Pem {
+            certificate_path,
+            private_key_path,
+        },
+        BTreeSet::from(["https://client.example".to_owned()]),
+        directory.join("data"),
+        Duration::from_secs(2),
+    )
+    .unwrap()
+}
+
 fn auth() -> Arc<SqliteAuthSessionManager> {
     let directory = test_directory("winwincode-auth-test");
     let (_, sessions) = open_auth(&directory, BOOTSTRAP_PROOF, vec![fixture_scope(1)]);
@@ -273,6 +296,85 @@ async fn start_server(
 ) -> Result<RunningServer, ServerError> {
     let authenticator: Arc<dyn RequestAuthenticator> = sessions.clone();
     start_server_with_authenticator(config, sessions, authenticator, api).await
+}
+
+#[tokio::test]
+async fn accepted_cleanup_retries_without_worker_requests_and_drains_before_application_close() {
+    use std::sync::Condvar;
+    use winwincode_server::{
+        RemoteWorkerExchangePort, RemoteWorkerTransportError, start_server_with_remote_worker,
+    };
+    #[derive(Default)]
+    struct Recovery {
+        calls: AtomicU64,
+        entered: tokio::sync::Notify,
+        released: (Mutex<bool>, Condvar),
+    }
+    impl RemoteWorkerExchangePort for Recovery {
+        fn recover_accepted_outcomes(&self) -> Result<usize, RemoteWorkerTransportError> {
+            if self.calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                return Err(RemoteWorkerTransportError::unavailable());
+            }
+            self.entered.notify_one();
+            let (state, changed) = &self.released;
+            let mut released = state.lock().unwrap();
+            while !*released {
+                let (next, timeout) = changed
+                    .wait_timeout(released, Duration::from_secs(5))
+                    .unwrap();
+                released = next;
+                if timeout.timed_out() && !*released {
+                    return Err(RemoteWorkerTransportError::unavailable());
+                }
+            }
+            Ok(1)
+        }
+        fn exchange(
+            &self,
+            _: Vec<u8>,
+            _: &[u8],
+            _: Instant,
+        ) -> Result<Vec<u8>, RemoteWorkerTransportError> {
+            panic!("cleanup must run without an incoming Worker request")
+        }
+    }
+    let api = Arc::new(FakeApi::default());
+    let recovery = Arc::new(Recovery::default());
+    let sessions = auth();
+    let running = start_server_with_remote_worker(
+        cleanup_recovery_config(),
+        sessions.clone(),
+        sessions,
+        api.clone(),
+        Some(recovery.clone()),
+        None,
+    )
+    .await
+    .unwrap();
+    tokio::time::timeout(Duration::from_secs(5), recovery.entered.notified())
+        .await
+        .unwrap();
+    assert_eq!(recovery.calls.load(Ordering::SeqCst), 2);
+    let shutdown = tokio::spawn(running.shutdown());
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert_eq!(
+        api.shutdowns.load(Ordering::SeqCst),
+        0,
+        "CP stays open during owned cleanup"
+    );
+    *recovery.released.0.lock().unwrap() = true;
+    recovery.released.1.notify_all();
+    tokio::time::timeout(Duration::from_secs(5), shutdown)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert_eq!(api.shutdowns.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        recovery.calls.load(Ordering::SeqCst),
+        2,
+        "shutdown starts no further cleanup page"
+    );
 }
 
 async fn http_request(address: SocketAddr, request: &str) -> String {
@@ -1439,6 +1541,9 @@ async fn accounting_https_route_is_separate_and_preserves_query_and_receipt_byte
         execution_calls: AtomicU64,
     }
     impl RemoteWorkerExchangePort for FinancialBoundary {
+        fn recover_accepted_outcomes(&self) -> Result<usize, RemoteWorkerTransportError> {
+            Ok(0)
+        }
         fn accounting(
             &self,
             token: &str,
@@ -1636,6 +1741,9 @@ async fn assert_blocking_handler_preserves_other_route(blocked_route: &str) {
         slow: bool,
     }
     impl RemoteWorkerExchangePort for Boundary {
+        fn recover_accepted_outcomes(&self) -> Result<usize, RemoteWorkerTransportError> {
+            Ok(0)
+        }
         fn exchange(
             &self,
             credential: Vec<u8>,

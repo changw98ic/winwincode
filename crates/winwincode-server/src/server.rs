@@ -143,6 +143,10 @@ pub struct RunningServer {
     handle: Handle<SocketAddr>,
     task: Option<tokio::task::JoinHandle<Result<(), ServerError>>>,
     background_tasks: Vec<tokio::task::JoinHandle<()>>,
+    outcome_recovery: Option<(
+        tokio::sync::oneshot::Sender<()>,
+        tokio::task::JoinHandle<()>,
+    )>,
     api: Arc<dyn ControlPlaneApiPort>,
 }
 
@@ -158,15 +162,28 @@ impl RunningServer {
     }
 
     pub async fn shutdown_listener(&mut self) -> Result<(), ServerError> {
+        self.handle.graceful_shutdown(Some(self.shutdown_grace));
+        let recovery = self.outcome_recovery.take().map(|(stop, task)| {
+            let _ = stop.send(());
+            task
+        });
         for background in self.background_tasks.drain(..) {
             background.abort();
         }
-        let Some(task) = self.task.take() else {
-            return Ok(());
+        let listener = match self.task.take() {
+            Some(task) => task
+                .await
+                .map_err(|_| ServerError::new("server task did not shut down cleanly"))
+                .and_then(std::convert::identity),
+            None => Ok(()),
         };
-        self.handle.graceful_shutdown(Some(self.shutdown_grace));
-        task.await
-            .map_err(|_| ServerError::new("server task did not shut down cleanly"))?
+        let recovered = match recovery {
+            Some(task) => task
+                .await
+                .map_err(|_| ServerError::new("outcome recovery task did not stop cleanly")),
+            None => Ok(()),
+        };
+        listener.and(recovered)
     }
 
     pub fn shutdown_application(self) -> Result<(), ServerError> {
@@ -293,6 +310,7 @@ pub async fn start_server_with_remote_worker(
             }
         }));
     }
+    let recovery_exchange = remote_worker.clone();
     let state = ServerState {
         config: Arc::clone(&config),
         auth_sessions,
@@ -335,8 +353,35 @@ pub async fn start_server_with_remote_worker(
         handle,
         task: Some(task),
         background_tasks,
+        outcome_recovery: recovery_exchange.map(start_outcome_recovery),
         api,
     })
+}
+
+fn start_outcome_recovery(
+    exchange: Arc<dyn RemoteWorkerExchangePort>,
+) -> (
+    tokio::sync::oneshot::Sender<()>,
+    tokio::task::JoinHandle<()>,
+) {
+    let (stop, mut stopped) = tokio::sync::oneshot::channel();
+    let task = tokio::spawn(async move {
+        loop {
+            tokio::select! {
+                _ = &mut stopped => return,
+                () = tokio::time::sleep(Duration::from_secs(1)) => {}
+            }
+            let exchange = Arc::clone(&exchange);
+            // Await the bounded page before observing stop so application
+            // shutdown cannot close CP while its blocking cleanup is in flight.
+            let result =
+                tokio::task::spawn_blocking(move || exchange.recover_accepted_outcomes()).await;
+            if !matches!(result, Ok(Ok(_))) && std::env::var_os("WWC_DEBUG_RUNTIME").is_some() {
+                eprintln!("Server-owned accepted outcome recovery remains pending");
+            }
+        }
+    });
+    (stop, task)
 }
 
 async fn spawn_listener(

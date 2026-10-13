@@ -8,6 +8,7 @@ import { prepareCompactKernelHelper } from './compact-kernel-helper.mjs'
 
 const root = resolve(import.meta.dirname, '..')
 const e2eOnly = process.env.WWC_RUST_E2E === '1'
+const standardOnly = process.env.WWC_RUST_E2E === '0'
 const heavyBins = ['production_vertical', 'worker_lifecycle', 'code_mode_kernel']
 const heavyExpression = heavyBins.map(name => `binary(${name})`).join(' | ')
 
@@ -43,7 +44,7 @@ prepareCompactKernelHelper({
 })
 
 if (hasNextest()) {
-  const filter = e2eOnly ? heavyExpression : `not (${heavyExpression})`
+  const filter = e2eOnly ? heavyExpression : standardOnly ? `not (${heavyExpression})` : null
   run('cargo', [
     'nextest',
     'run',
@@ -52,8 +53,7 @@ if (hasNextest()) {
     '--workspace',
     '--exclude',
     'winwincode-kernel-helper',
-    '-E',
-    filter,
+    ...(filter === null ? [] : ['-E', filter]),
   ])
   process.exit(0)
 }
@@ -62,6 +62,11 @@ if (e2eOnly) {
   run('cargo', ['test', '--all-features', '--locked', '-p', 'winwincode-worker', '--test', 'production_vertical'])
   run('cargo', ['test', '--all-features', '--locked', '-p', 'winwincode-worker', '--test', 'worker_lifecycle'])
   run('cargo', ['test', '--all-features', '--locked', '-p', 'winwincode-kernel', '--test', 'code_mode_kernel'])
+  process.exit(0)
+}
+
+if (!standardOnly) {
+  run('cargo', ['test', '--all-features', '--locked', '--workspace', '--exclude', 'winwincode-kernel-helper'])
   process.exit(0)
 }
 

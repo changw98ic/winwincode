@@ -241,7 +241,8 @@ test('Chat honors live heartbeat and cancellation deadlines after real acknowled
     if(!command || !commandInput) throw new Error("command tools missing");
     for(let index=0;index<${COMMAND_HISTORY_SIZE};index++) {
       let result=await tools[command.name]({
-        cmd:index===0?"read -r gate; test $gate = ready":"true",tty:index===0,yield_time_ms:1000});
+        cmd:index===0?"read -r gate; test $gate = ready":"true",shell:"/bin/sh",login:false,
+        tty:index===0,yield_time_ms:1000});
       if(index===0 && result.session_id===undefined) throw new Error("interactive history command did not yield");
       let chars=index===0?"ready\\n":"";
       while(result.exit_code===undefined && result.session_id!==undefined) {
@@ -283,26 +284,29 @@ test('Chat honors live heartbeat and cancellation deadlines after real acknowled
           heldRequest = await waitFor(() => devicePath.modelServer.requests.find(request => request.gateMarker === holdMarker && request.active),
             'the same execution has its next actual HTTPS response held after the real command cell', 300_000)
         } catch (cause) {
-          const history = acknowledgedCoreHistory(worker, live.job_id)
-          const outcome = retainedOutcome(devicePath.deviceData, live.job_id, live.attempt)
-          const observation = {
-            job: database.prepare('SELECT state,attempt FROM scheduler_execution_jobs WHERE job_id=?').get(live.job_id),
-            completedCommands: history.completedCommands.length,
-            completedInputs: history.completedInputs.length, acknowledgedFrames: history.retained.length,
-            outcomeStatus: outcome?.outcome.status,
-            runs: worker.prepare('SELECT record_json FROM codex_run').all()
-              .map(row => JSON.parse(Buffer.from(row.record_json).toString('utf8')))
-              .filter(run => run.job.jobId === live.job_id).map(run => ({
-                phase: run.phase, terminal: Boolean(run.terminal),
-                failureDiagnostic: run.failureDiagnostic,
-                infrastructureFailureCode: run.infrastructureFailureCode,
+          let observation
+          try {
+            const history = acknowledgedCoreHistory(worker, live.job_id)
+            const outcome = retainedOutcome(devicePath.deviceData, live.job_id, live.attempt)
+            observation = {
+              job: database.prepare('SELECT state,attempt FROM scheduler_execution_jobs WHERE job_id=?').get(live.job_id),
+              completedCommands: history.completedCommands.length,
+              completedInputs: history.completedInputs.length, acknowledgedFrames: history.retained.length,
+              outcomeStatus: outcome?.outcome.status,
+              runs: worker.prepare('SELECT record_json FROM codex_run').all()
+                .map(row => JSON.parse(Buffer.from(row.record_json).toString('utf8')))
+                .filter(run => run.job.jobId === live.job_id).map(run => ({
+                  phase: run.phase, terminal: Boolean(run.terminal),
+                  failureDiagnostic: run.failureDiagnostic,
+                  infrastructureFailureCode: run.infrastructureFailureCode,
+                })),
+              pendingDeliveries: worker.prepare(
+                'SELECT family,state,COUNT(*) AS count FROM execution_outbox GROUP BY family,state').all(),
+              requests: devicePath.modelServer.requests.map(value => ({
+                active: value.active, gateMarker: value.gateMarker, hasToolOutput: value.hasToolOutput,
               })),
-            pendingDeliveries: worker.prepare(
-              'SELECT family,state,COUNT(*) AS count FROM execution_outbox GROUP BY family,state').all(),
-            requests: devicePath.modelServer.requests.map(value => ({
-              active: value.active, gateMarker: value.gateMarker, hasToolOutput: value.hasToolOutput,
-            })),
-          }
+            }
+          } catch (error) { observation = { diagnosticError: error.name } }
           throw new Error(`${cause.message}; history observation=${JSON.stringify(observation)}`, { cause })
         }
         assert.equal(devicePath.modelServer.requests[0].gateMarker, null,

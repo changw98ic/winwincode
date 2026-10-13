@@ -369,7 +369,7 @@ test('the tool runtime manifest and ordered patch digests describe the dispatch 
   assert.equal(sourceLock.patches.find(({ id }) => id === 'codex-seatbelt-explicit-literal-deny')?.file, 'upstream/patches/codex/0096-seatbelt-explicit-literal-deny.patch')
   assert.equal(sourceLock.patches.find(({ id }) => id === 'codex-zsh-parent-approval-context')?.file, 'upstream/patches/codex/0097-zsh-parent-approval-context.patch')
   assert.equal(sourceLock.patches.find(({ id }) => id === 'codex-mechanism-behavior-audit')?.file, 'upstream/patches/codex/0098-mechanism-behavior-audit.patch')
-  assert.equal(patches.length, 100)
+  assert.equal(patches.length, 101)
   assert.deepEqual([...new Set(patches.flatMap(({ targets }) => targets))].sort(), Object.keys(originalHashes).sort())
   for (const patch of patches) {
     assert.equal(digest(readFileSync(join(root, patch.file))), patch.patchSha256, patch.file)

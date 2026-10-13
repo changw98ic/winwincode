@@ -1674,6 +1674,16 @@
       "targets": [
         "codex-rs/state/src/runtime/tool_execution.rs"
       ]
+    },
+    {
+      "id": "codex-tool-review-shared-fatal-storage",
+      "file": "upstream/patches/codex/0117-shared-tool-fatal-storage.patch",
+      "planned": false,
+      "patchSha256": "9ff98d693042672a988808ab30e667308686ff8c211152eb8d82011663f18890",
+      "targets": [
+        "codex-rs/core/src/tools/tool_sharing.rs",
+        "codex-rs/core/src/tools/tool_sharing_tests.rs"
+      ]
     }
   ],
   "licenseObligations": {

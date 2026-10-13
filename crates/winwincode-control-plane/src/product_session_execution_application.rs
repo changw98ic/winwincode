@@ -1479,11 +1479,17 @@ fn accept_terminal(
         .iter()
         .find(|turn| turn.execution_job_id == job.job_id)
         .ok_or_else(|| storage_ingress("ProductSession outcome turn is missing"))?;
-    let Some(binding) = record
-        .bindings()
-        .iter()
-        .find(|binding| binding.binding().identity().execution_job_id() == &job.job_id)
-    else {
+    let Some(binding) = record.bindings().iter().find(|binding| {
+        let authority = &binding.slot().authority;
+        binding.binding().identity().execution_job_id() == &job.job_id
+            && authority.worker_session_id == message.worker_session_id
+            && authority.codex_thread_id == message.session_identity.codex_thread_id
+            && authority.lease_id == message.lease.lease_id
+            && authority.worker_id == message.lease.worker_id
+            && authority.worker_instance_id == message.lease.worker_instance_id
+            && Some(authority.attempt) == u64::try_from(message.lease.attempt).ok()
+            && authority.fencing_token == message.lease.fencing_token
+    }) else {
         return accept_unstarted_terminal(
             context,
             job,

@@ -11,6 +11,7 @@ import { DatabaseSync } from 'node:sqlite'
 import test from 'node:test'
 import { isDeepStrictEqual } from 'node:util'
 
+import { pauseManagedProcess } from './fixtures/managed-process-pause.mjs'
 import { runApiProductionVertical } from '../scripts/run-api-production-vertical.mjs'
 import { deterministicDeviceProvider, waitFor } from '../scripts/device-production-fixture.mjs'
 import { readDeviceExecutionReceipts } from '../scripts/export-device-candidate.mjs'
@@ -268,26 +269,17 @@ test('Chat consumes its real Gap control and automatically replays only the fini
         probe = readWorkerTransport(devicePath.deviceData, authority)
         // Install observation DDL while the actual Worker is stopped and its
         // journal has no held write transaction. Execution resumes immediately.
-        await waitFor(() => {
-          process.kill(probe.pid, 'SIGSTOP')
-          paused = probe.pid
-          const status = readFileSync(`/proc/${probe.pid}/status`, 'utf8')
-          if (!/^State:\s+T/mu.test(status)) {
-            process.kill(probe.pid, 'SIGCONT')
-            paused = null
-            return false
-          }
+        await pauseManagedProcess(probe.pid, () => {
           const checkpoint = new DatabaseSync(probe.networkJournalPath)
           try {
             checkpoint.exec('PRAGMA busy_timeout=0; BEGIN IMMEDIATE; COMMIT')
+            return true
           } catch (error) {
             if (![5, 6].includes(error.errcode & 0xff)) throw error
-            process.kill(probe.pid, 'SIGCONT')
-            paused = null
             return false
           } finally { checkpoint.close() }
-          return true
-        }, 'the stopped original Worker has no held journal writer transaction before observation DDL', 3000, 10)
+        })
+        paused = probe.pid
         stopObservation = observeCompletedEnvelopes(probe)
         process.kill(probe.pid, 'SIGCONT')
         paused = null

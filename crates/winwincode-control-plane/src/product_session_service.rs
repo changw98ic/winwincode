@@ -42,6 +42,7 @@ mod api;
 mod artifacts;
 #[path = "product_session_chat.rs"]
 mod chat;
+use chat::fail_replaced_assistant_output;
 #[path = "product_session_execution_job.rs"]
 mod execution_job;
 pub use api::{ProductSessionApiClock, ProductSessionApiService};
@@ -907,6 +908,7 @@ impl<'storage> ProductSessionService<'storage> {
         for message in &mut persisted.messages {
             if message.projection.role == "assistant" && message.projection.state == "streaming" {
                 "completed".clone_into(&mut message.projection.state);
+                message.projection.output_preparation = None;
             }
         }
         let turn = persisted
@@ -985,6 +987,12 @@ impl<'storage> ProductSessionService<'storage> {
         )?;
         let binding_index = replacement_binding_index(persisted, command)?;
         validate_replacement_predecessor(&persisted.bindings[binding_index], command)?;
+        let predecessor_exchange = persisted.bindings[binding_index].model_exchange_id.clone();
+        fail_replaced_assistant_output(
+            persisted,
+            &predecessor_exchange,
+            &command.context.occurred_at,
+        );
         persisted.bindings[binding_index] = PersistedSessionBinding {
             identity: PersistedBindingIdentity::from_domain(&command.binding_identity),
             slot,

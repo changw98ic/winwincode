@@ -285,11 +285,26 @@ export function readRetainedCoreCommandResults(deviceData, kernelSessionId) {
     const store = new DatabaseSync(join(deviceData, path), { readOnly: true })
     try {
       store.exec('PRAGMA busy_timeout=5000')
-      return store.prepare(`SELECT r.sequence,r.request_json,r.resolution,
+      const rows = store.prepare(`SELECT r.sequence,r.request_json,r.resolution,
         a.attempt_id,a.operation_digest,a.execution,a.disposition,a.delivery,a.execution_result,a.accepted_result
         FROM tool_requests r LEFT JOIN tool_attempts a ON a.request_sequence=r.sequence
         WHERE r.thread_id=? ORDER BY r.sequence`).all(kernelSessionId)
-        .filter(row => JSON.parse(row.request_json).tool_name.endsWith('exec_command'))
+      return rows.filter(row => JSON.parse(row.request_json).tool_name.endsWith('exec_command'))
+        .map(row => {
+          // Rejected attempts retain their original error text, which is not a
+          // code-mode command result. Keep the row for negative evidence.
+          const session = row.execution === 'completed' && row.disposition === 'accepted' && row.execution_result
+            ? JSON.parse(row.execution_result).code_mode_result?.session_id : undefined
+          const turn = JSON.parse(row.request_json).turn_id
+          const polls = session === undefined ? [] : rows.filter(candidate => {
+            const request = JSON.parse(candidate.request_json)
+            if (candidate.sequence <= row.sequence || request.turn_id !== turn
+              || !request.tool_name.endsWith('write_stdin') || !candidate.execution_result) return false
+            const input = JSON.parse(candidate.execution_result).effective_input?.input
+            return input !== undefined && JSON.parse(input).session_id === session
+          })
+          return { ...row, polls }
+        })
     } finally { store.close() }
   })
 }
@@ -297,16 +312,43 @@ export function readRetainedCoreCommandResults(deviceData, kernelSessionId) {
 export function assertSuccessfulRetainedCommands(commands, expectedCount) {
   assert.equal(commands.length, expectedCount, 'the original Core has the expected exact command request count')
   for (const row of commands) {
-    assert.equal(row.execution, 'completed')
-    assert.equal(row.disposition, 'accepted')
-    // A completed/accepted handler receipt can carry a failed OS command.
-    // The original retained result is the authority for the actual exit code.
+    const receipts = [row, ...(row.polls ?? [])]
+    for (const receipt of receipts) {
+      assert.equal(receipt.execution, 'completed')
+      assert.equal(receipt.disposition, 'accepted')
+    }
+    // exec_command can return a running session. The same session's retained
+    // write_stdin receipt, rather than handler acceptance, proves its OS exit.
     for (const field of ['execution_result', 'accepted_result']) {
       assert.ok(row[field], `the exact command has its real retained ${field}`)
-      assert.equal(JSON.parse(row[field]).code_mode_result?.exit_code, 0,
+      const initial = JSON.parse(row[field]).code_mode_result
+      if (initial?.exit_code === undefined) {
+        assert.ok(Number.isInteger(initial?.session_id), 'a running command has its original session identity')
+        assert.ok(row.polls?.length > 0, 'the running command has a retained completion poll')
+        for (const poll of row.polls) {
+          assert.equal(JSON.parse(JSON.parse(poll[field]).effective_input.input).session_id, initial.session_id,
+            'the completion poll belongs to the exact original command session')
+        }
+      }
+      assert.ok(receipts.at(-1)[field], `the exact command has its real retained ${field}`)
+      assert.equal(JSON.parse(receipts.at(-1)[field]).code_mode_result?.exit_code, 0,
         `the real retained ${field} proves successful OS command completion`)
     }
   }
+}
+
+export function completedCommandScript(command, count = 1, options = {}) {
+  return `const command=ALL_TOOLS.find(tool=>tool.name.endsWith("exec_command"));
+const input=ALL_TOOLS.find(tool=>tool.name.endsWith("write_stdin"));
+if(!command || !input) throw new Error("command tools missing");
+for(let index=0;index<${count};index++) {
+  let result=await tools[command.name](${JSON.stringify({ ...options, cmd: command, yield_time_ms: 1000 })});
+  while(result.exit_code===undefined && Number.isInteger(result.session_id)) {
+    result=await tools[input.name]({session_id:result.session_id,chars:"",yield_time_ms:1000});
+  }
+  if(result.exit_code!==0) throw new Error("original command did not exit successfully");
+  text(result);
+}`
 }
 
 export function readRetainedOutcomes(deviceData, jobId) {

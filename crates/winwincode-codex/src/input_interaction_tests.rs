@@ -429,7 +429,7 @@ async fn accepted_input_replay_after_fence_close_or_reopen_only_cleans_transport
     clippy::too_many_lines,
     reason = "complete retained answers, live lease renewal and the original input deadline share one fixture"
 )]
-async fn accepted_complete_input_replay_observes_expiry_before_rearming_core() {
+async fn review_accepted_complete_input_replay_delivers_after_acceptance_deadline() {
     let root = std::env::temp_dir().join(format!(
         "wwc-input-expired-history-{}",
         uuid::Uuid::new_v4()
@@ -490,10 +490,15 @@ async fn accepted_complete_input_replay_observes_expiry_before_rearming_core() {
     let response = closed_prompt_answer(&first, index);
     let received_at = Instant("2026-08-28T00:16:00.000Z".into());
     assert!(adapter.runs[&key].binding.authority.lease.expires_at.0 > received_at.0);
-    adapter
+    let error = adapter
         .accept_input_response_exact(&response, &received_at)
         .await
-        .unwrap();
+        .expect_err("the accepted settlement must reach the original Core waiter");
+    assert_eq!(
+        error,
+        kernel_error(),
+        "this fixture deliberately has no Core session"
+    );
     assert!(
         adapter
             .bridge
@@ -511,7 +516,7 @@ async fn accepted_complete_input_replay_observes_expiry_before_rearming_core() {
         .unwrap();
     assert_eq!(
         before, after,
-        "the stale Adapter observation must not rearm expired Core input"
+        "failed Core delivery keeps the exact accepted settlement retryable"
     );
     drop(adapter);
     std::fs::remove_dir_all(root).unwrap();

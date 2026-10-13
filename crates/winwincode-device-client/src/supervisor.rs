@@ -316,18 +316,18 @@ impl SessionSupervisor {
         if !has_core && !has_model {
             return Ok(());
         }
-        let log = fs::OpenOptions::new()
+        let recovery_stderr = fs::OpenOptions::new()
             .create(true)
             .append(true)
             .mode(0o600)
             .open(Path::new(&record.data_directory).join("call-recovery.log"))
-            .map_err(|error| SupervisorError::WorkerLogs(error.to_string()))?;
+            .map_or_else(|_| Stdio::null(), Stdio::from);
         let status = Command::new(self.resolve_worker_binary()?)
             .arg("--recover-interrupted-calls")
             .arg(&config_path)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
-            .stderr(Stdio::from(log))
+            .stderr(recovery_stderr)
             .status()
             .map_err(|error| SupervisorError::Spawn {
                 reason: error.to_string(),
@@ -2247,6 +2247,56 @@ mod tests {
                 .expect("count"),
             0
         );
+    }
+
+    #[test]
+    fn review_recovery_log_failure_does_not_block_required_recovery() {
+        let bin_root = temp_root("recovery-bin");
+        let binary = bin_root.join("winwincode-worker");
+        write_executable_script(
+            &binary,
+            "if [ \"$1\" = --recover-interrupted-calls ]; then \
+             echo recovered > \"$(dirname \"$2\")/recovered\"; exit 0; fi; exit 3",
+        );
+        let (supervisor, root) = supervisor_with_mirror("recovery", &binary, LEASE, 7);
+        let data = root.join("data");
+        supervisor
+            .spawn(spawn_request(
+                "wss_RECOVERY",
+                WORKER_INSTANCE,
+                &root.join("repo"),
+                &data,
+                &root.join("worker-root"),
+            ))
+            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(30);
+        let record = loop {
+            if let Some(record) = supervisor.reap().unwrap().into_iter().next() {
+                break supervisor
+                    .worker_process(&record.worker_session_id)
+                    .unwrap()
+                    .unwrap();
+            }
+            assert!(Instant::now() < deadline);
+            thread::sleep(Duration::from_millis(10));
+        };
+        fs::create_dir_all(data.join("codex-runtime/kernel-home")).unwrap();
+        fs::create_dir(data.join("call-recovery.log")).unwrap();
+        supervisor
+            .recover_terminated_calls(&record)
+            .expect("optional log must not gate recovery");
+        assert_eq!(
+            fs::read_to_string(data.join("recovered")).unwrap(),
+            "recovered\n"
+        );
+        write_executable_script(&binary, "exit 1");
+        assert!(
+            supervisor.recover_terminated_calls(&record).is_err(),
+            "required recovery failure must remain a failure"
+        );
+        drop(supervisor);
+        fs::remove_dir_all(root).unwrap();
+        fs::remove_dir_all(bin_root).unwrap();
     }
 
     #[test]

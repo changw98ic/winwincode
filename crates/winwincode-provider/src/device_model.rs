@@ -754,10 +754,11 @@ impl DeviceProviderStore {
         }
         let headers = self.custom_headers(&provider_id)?;
         let mut attempt_number: i64 = self.connection.query_row("SELECT COALESCE(MAX(attempt_number),0) FROM model_invocation_attempts WHERE exchange_id=?1",[&open.model_exchange_id.0],|row|row.get(0))?;
-        let next_policy_attempt = self.model_retry_state(open)?.map_or(1, |state| state.0);
+        let retained_retry = self.model_retry_state(open)?;
+        let (next_policy_attempt, _, connection_attempt) = retained_retry.unwrap_or((1, 0, 0));
         let mut retry =
             winwincode_network::RequestRetry::new(4, open.model_exchange_id.0.as_bytes())
-                .state_at(next_policy_attempt);
+                .state_at_with_connections(next_policy_attempt, connection_attempt);
         let sse_failure_log = self.sse_failure_log_directory()?;
         loop {
             if self.model_cancelled(&open.model_exchange_id.0)? {
@@ -774,7 +775,7 @@ impl DeviceProviderStore {
                 );
                 return Err(DeviceModelFailure::LeaseExpired);
             }
-            if let Some((_, wake_ms)) = self.model_retry_state(open)? {
+            if let Some((_, wake_ms, _)) = self.model_retry_state(open)? {
                 loop {
                     if self.model_cancelled(&open.model_exchange_id.0)? {
                         let _ = model_auxiliary(
@@ -1052,7 +1053,7 @@ impl DeviceProviderStore {
             let wake_ms = winwincode_network::journal::now_millis().saturating_add(
                 u64::try_from(duration.as_millis()).map_err(|_| DeviceModelFailure::Unavailable)?,
             );
-            self.connection.execute("INSERT INTO model_retry_state(exchange_id,policy_attempt,wake_ms,decision) VALUES(?1,?2,?3,?4) ON CONFLICT(exchange_id) DO UPDATE SET policy_attempt=excluded.policy_attempt,wake_ms=excluded.wake_ms,decision=excluded.decision",params![open.model_exchange_id.0,retry.attempt(),i64::try_from(wake_ms).map_err(|_|DeviceModelFailure::Unavailable)?,action])?;
+            self.connection.execute("INSERT INTO model_retry_state(exchange_id,policy_attempt,wake_ms,decision,connection_attempt) VALUES(?1,?2,?3,?4,?5) ON CONFLICT(exchange_id) DO UPDATE SET policy_attempt=excluded.policy_attempt,wake_ms=excluded.wake_ms,decision=excluded.decision,connection_attempt=excluded.connection_attempt",params![open.model_exchange_id.0,retry.attempt(),i64::try_from(wake_ms).map_err(|_|DeviceModelFailure::Unavailable)?,action,retry.connection_attempt()])?;
             if recovery.defer_retries {
                 return Ok(DeviceModelStepOutcome::DeferredRetry {
                     wake_millis: wake_ms,
@@ -1064,11 +1065,11 @@ impl DeviceProviderStore {
     fn model_retry_state(
         &self,
         open: &ModelOpenMessage,
-    ) -> Result<Option<(u32, u64)>, DeviceProviderError> {
+    ) -> Result<Option<(u32, u64, u32)>, DeviceProviderError> {
         Ok(self
             .connection
             .query_row(
-                "SELECT policy_attempt,wake_ms FROM model_retry_state WHERE exchange_id=?1",
+                "SELECT policy_attempt,wake_ms,connection_attempt FROM model_retry_state WHERE exchange_id=?1",
                 [&open.model_exchange_id.0],
                 |row| {
                     let wake: i64 = row.get(1)?;
@@ -1076,6 +1077,7 @@ impl DeviceProviderStore {
                         row.get(0)?,
                         u64::try_from(wake)
                             .map_err(|_| rusqlite::Error::IntegralValueOutOfRange(1, wake))?,
+                        row.get(2)?,
                     ))
                 },
             )
