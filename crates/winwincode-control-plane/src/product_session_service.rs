@@ -1750,13 +1750,6 @@ fn validate_replacement_shape(
             "ProductSession replacement successor differs from the running Worker slot",
         ));
     }
-    if command.replacement.predecessor_slot().is_none()
-        || command.replacement.previous_worker_session_id().is_none()
-    {
-        return Err(binding_mismatch(
-            "running ProductSession replacement has no sealed predecessor session",
-        ));
-    }
     Ok(())
 }
 
@@ -1885,7 +1878,7 @@ fn validate_replacement_predecessor(
 }
 
 /// Walks only sealed, consecutive attempts back to the complete public runtime.
-/// An attempt may have staged its binding without producing a model exchange.
+/// Intermediate attempts may exit before accepting dispatch or opening a slot.
 pub(super) fn replacement_reaches_binding(
     storage: &dyn ProductStateStorage,
     latest: &ExecutionScopeReplacementAuthority,
@@ -1904,12 +1897,10 @@ pub(super) fn replacement_reaches_binding(
         {
             return Ok(false);
         }
-        let Some(predecessor) = seal.predecessor_slot() else {
-            return Ok(false);
-        };
-        if predecessor == ancestor {
+        if seal.predecessor_slot() == Some(ancestor) {
             return Ok(true);
         }
+        let predecessor = seal.predecessor_lease();
         if predecessor.attempt <= ancestor.attempt {
             return Ok(false);
         }
@@ -1927,6 +1918,7 @@ pub(super) fn replacement_reaches_binding(
             || predecessor.worker_instance_id != lease.worker_instance_id
             || predecessor.attempt != lease.attempt
             || predecessor.fencing_token != lease.fencing_token
+            || predecessor.payload_digest != lease.payload_digest
         {
             return Ok(false);
         }

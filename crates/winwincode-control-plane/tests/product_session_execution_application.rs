@@ -1533,22 +1533,69 @@ fn review_successor_cancellation_before_model_preserves_cancellation_authority()
 
 #[test]
 fn review_consecutive_replacement_after_output_preparation_continues_model_exchanges() {
-    replacement_continues_react_model_exchanges_chain(ReplacementStart::OutputPreparing, true);
+    replacement_continues_react_model_exchanges_chain(
+        ReplacementStart::OutputPreparing,
+        IntermediateAttempt::BindingStaged,
+    );
 }
 
 #[test]
 fn review_consecutive_replacement_failure_before_model_uses_current_authority() {
-    replacement_continues_react_model_exchanges_chain(ReplacementStart::TerminalBeforeModel, true);
+    replacement_continues_react_model_exchanges_chain(
+        ReplacementStart::TerminalBeforeModel,
+        IntermediateAttempt::BindingStaged,
+    );
 }
 
 #[test]
 fn review_consecutive_replacement_failed_before_model_uses_current_authority() {
-    replacement_continues_react_model_exchanges_chain(ReplacementStart::FailedBeforeModel, true);
+    replacement_continues_react_model_exchanges_chain(
+        ReplacementStart::FailedBeforeModel,
+        IntermediateAttempt::BindingStaged,
+    );
 }
 
 #[test]
 fn review_consecutive_replacement_cancellation_before_model_routes_to_current_attempt() {
-    replacement_continues_react_model_exchanges_chain(ReplacementStart::CancelledBeforeModel, true);
+    replacement_continues_react_model_exchanges_chain(
+        ReplacementStart::CancelledBeforeModel,
+        IntermediateAttempt::BindingStaged,
+    );
+}
+
+#[test]
+fn review_intermediate_dispatch_without_acceptance_preserves_replacement_lineage() {
+    assert_intermediate_replacement_lifecycle(IntermediateAttempt::Dispatched);
+}
+
+#[test]
+fn review_intermediate_accepted_dispatch_without_slot_preserves_replacement_lineage() {
+    assert_intermediate_replacement_lifecycle(IntermediateAttempt::DispatchAccepted);
+}
+
+#[test]
+fn review_intermediate_slot_without_binding_preserves_replacement_lineage() {
+    assert_intermediate_replacement_lifecycle(IntermediateAttempt::SlotOpened);
+}
+
+fn assert_intermediate_replacement_lifecycle(intermediate: IntermediateAttempt) {
+    for start in [
+        ReplacementStart::OutputPreparing,
+        ReplacementStart::TerminalBeforeModel,
+        ReplacementStart::FailedBeforeModel,
+        ReplacementStart::CancelledBeforeModel,
+    ] {
+        replacement_continues_react_model_exchanges_chain(start, intermediate);
+    }
+}
+
+#[derive(Clone, Copy)]
+enum IntermediateAttempt {
+    Absent,
+    Dispatched,
+    DispatchAccepted,
+    SlotOpened,
+    BindingStaged,
 }
 
 #[derive(Clone, Copy)]
@@ -1562,11 +1609,15 @@ enum ReplacementStart {
 }
 
 fn replacement_continues_react_model_exchanges(start: ReplacementStart) {
-    replacement_continues_react_model_exchanges_chain(start, false);
+    replacement_continues_react_model_exchanges_chain(start, IntermediateAttempt::Absent);
 }
 
 #[allow(clippy::too_many_lines)]
-fn replacement_continues_react_model_exchanges_chain(start: ReplacementStart, skip_model: bool) {
+fn replacement_continues_react_model_exchanges_chain(
+    start: ReplacementStart,
+    intermediate: IntermediateAttempt,
+) {
+    let skip_model = !matches!(intermediate, IntermediateAttempt::Absent);
     let original_model_bound = !matches!(start, ReplacementStart::Unbound);
     let seed = match start {
         ReplacementStart::ModelBound => 61,
@@ -1625,44 +1676,67 @@ fn replacement_continues_react_model_exchanges_chain(start: ReplacementStart, sk
                 .any(|message| message.output_preparation.as_deref() == Some("preparing"))
         );
     }
+    let original_output_ids: Vec<_> = fixture
+        .record()
+        .messages()
+        .iter()
+        .filter(|message| message.state == "streaming")
+        .map(|message| message.id.clone())
+        .collect();
 
     register_worker_process(&mut fixture.storage, seed, seed + 1, 6_108, 14);
-    let intermediate_runtime = skip_model.then(|| {
-        let scheduler_scope = scheduler_scope(&fixture);
-        let dispatch = RepositoryExecutionScheduler::new(&mut fixture.storage)
-            .claim_next(&RepositorySchedulerClaimRequest {
-                scope: scheduler_scope,
-                request_id: RequestId(id("req", 6_120)),
-                scheduler_generation: "boot-intermediate".to_owned(),
-                worker_id: WorkerId(id("wrk", seed)),
-                worker_instance_id: WorkerInstanceId(id("wki", seed + 1)),
-                issued_at: at(25),
-                expires_at: at(26),
-            })
-            .expect("intermediate scheduler claim")
-            .expect("intermediate scheduler dispatch");
-        assert_eq!(dispatch.job.attempt, 2);
-        accept_scheduler_dispatch(
-            &mut fixture,
-            &dispatch,
-            &WorkerSessionId(id("wsn", 6_121)),
-            6_122,
-            25,
-        );
-        let runtime = open_scheduler_runtime(&mut fixture, &dispatch, 6_121, 6_123, 6_124, 25);
-        let mut binding = binding_message(&fixture, &runtime, 6_125);
-        binding.bound_at = at(25);
-        binding.sent_at = at(25);
-        predecessor_frames.push(ExecutionPortMessage::SessionBindingMessage(binding.clone()));
-        fixture
-            .accept(
-                &ExecutionPortMessage::SessionBindingMessage(binding),
-                at(25),
-            )
-            .expect("intermediate binding before any model frame");
-        register_worker_process(&mut fixture.storage, seed, seed + 2, 6_126, 26);
-        runtime
-    });
+    let intermediate_runtime = skip_model
+        .then(|| {
+            let scheduler_scope = scheduler_scope(&fixture);
+            let dispatch = RepositoryExecutionScheduler::new(&mut fixture.storage)
+                .claim_next(&RepositorySchedulerClaimRequest {
+                    scope: scheduler_scope,
+                    request_id: RequestId(id("req", 6_120)),
+                    scheduler_generation: "boot-intermediate".to_owned(),
+                    worker_id: WorkerId(id("wrk", seed)),
+                    worker_instance_id: WorkerInstanceId(id("wki", seed + 1)),
+                    issued_at: at(25),
+                    expires_at: at(26),
+                })
+                .expect("intermediate scheduler claim")
+                .expect("intermediate scheduler dispatch");
+            assert_eq!(dispatch.job.attempt, 2);
+            if !matches!(intermediate, IntermediateAttempt::Dispatched) {
+                accept_scheduler_dispatch(
+                    &mut fixture,
+                    &dispatch,
+                    &WorkerSessionId(id("wsn", 6_121)),
+                    6_122,
+                    25,
+                );
+            }
+            let runtime = if matches!(
+                intermediate,
+                IntermediateAttempt::SlotOpened | IntermediateAttempt::BindingStaged
+            ) {
+                let runtime =
+                    open_scheduler_runtime(&mut fixture, &dispatch, 6_121, 6_123, 6_124, 25);
+                let mut binding = binding_message(&fixture, &runtime, 6_125);
+                binding.bound_at = at(25);
+                binding.sent_at = at(25);
+                predecessor_frames
+                    .push(ExecutionPortMessage::SessionBindingMessage(binding.clone()));
+                if matches!(intermediate, IntermediateAttempt::BindingStaged) {
+                    fixture
+                        .accept(
+                            &ExecutionPortMessage::SessionBindingMessage(binding),
+                            at(25),
+                        )
+                        .expect("intermediate binding before any model frame");
+                }
+                Some(runtime)
+            } else {
+                None
+            };
+            register_worker_process(&mut fixture.storage, seed, seed + 2, 6_126, 26);
+            runtime
+        })
+        .flatten();
     let replacement_dispatch = scheduler_claim(
         &mut fixture,
         seed,
@@ -1795,6 +1869,7 @@ fn replacement_continues_react_model_exchanges_chain(start: ReplacementStart, sk
             outcome_status(&accepted),
             JobOutcomeAckMessageStatus::Accepted
         );
+        assert_replaced_output_is_failed(&mut fixture, &original_output_ids);
         assert_slot_state(
             &mut fixture,
             &replacement_runtime,
@@ -1883,6 +1958,7 @@ fn replacement_continues_react_model_exchanges_chain(start: ReplacementStart, sk
     );
     assert!(continued.bindings()[0].includes_model_exchange(&replacement_open.model_exchange_id));
     assert_eq!(continued.turn_intents().len(), 1);
+    assert_replaced_output_is_failed(&mut fixture, &original_output_ids);
 
     assert_product_predecessor_is_fenced(
         &mut fixture,
@@ -1906,6 +1982,22 @@ fn replacement_continues_react_model_exchanges_chain(start: ReplacementStart, sk
         replacement_open,
         &replacement_runtime,
     );
+}
+
+fn assert_replaced_output_is_failed(
+    fixture: &mut Fixture,
+    ids: &[winwincode_domain::ChatMessageId],
+) {
+    let record = fixture.record();
+    for id in ids {
+        let message = record
+            .messages()
+            .iter()
+            .find(|message| &message.id == id)
+            .unwrap();
+        assert_eq!(message.state, "failed");
+        assert!(message.output_preparation.is_none());
+    }
 }
 
 #[test]

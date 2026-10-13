@@ -2057,20 +2057,27 @@ fn concurrently_accept_terminal_message(
     message: &JobOutcomeMessage,
 ) -> Vec<JobOutcomeAckMessageStatus> {
     let barrier = Arc::new(Barrier::new(8));
+    let startup = Arc::new(Mutex::new(()));
     (0..8)
         .map(|_| {
             let root = Arc::clone(root);
             let barrier = Arc::clone(&barrier);
+            let startup = Arc::clone(&startup);
             let scope = scope.clone();
             let message = message.clone();
             thread::spawn(move || {
+                let (mut control_plane, mut storage) = {
+                    let _guard = startup.lock().expect("fixture initialization lock");
+                    let control_plane = ControlPlane::start_local(
+                        ControlPlaneConfig::local(root.as_path()),
+                        Box::new(RecordingPublisher),
+                    )
+                    .expect("Control Plane start");
+                    let storage = SqliteStorage::open(root.as_path()).expect("ingress storage");
+                    (control_plane, storage)
+                };
+                // Race the eight terminal requests after every CP is ready.
                 barrier.wait();
-                let mut control_plane = ControlPlane::start_local(
-                    ControlPlaneConfig::local(root.as_path()),
-                    Box::new(RecordingPublisher),
-                )
-                .expect("Control Plane start");
-                let mut storage = SqliteStorage::open(root.as_path()).expect("ingress storage");
                 let response = DurableExecutionPortIngress::new(
                     &mut control_plane,
                     &mut storage,
