@@ -1684,6 +1684,15 @@
         "codex-rs/core/src/tools/tool_sharing.rs",
         "codex-rs/core/src/tools/tool_sharing_tests.rs"
       ]
+    },
+    {
+      "id": "codex-guardian-transcript-test-registration",
+      "file": "upstream/patches/codex/0118-guardian-transcript-test-registration.patch",
+      "planned": false,
+      "patchSha256": "414965f023bbfc14b85e4b0436bdd954bef20638898240743a456c9e0045c05e",
+      "targets": [
+        "codex-rs/core/tests/suite/code_mode.rs"
+      ]
     }
   ],
   "licenseObligations": {

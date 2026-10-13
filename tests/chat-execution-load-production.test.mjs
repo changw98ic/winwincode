@@ -14,6 +14,8 @@ import { configuredDeviceModelRoute, deterministicDeviceProvider, seedDeviceLoca
   startDeterministicDeviceModelServer, waitFor } from '../scripts/device-production-fixture.mjs'
 
 const COMMAND_HISTORY_SIZE = 512
+// Preparing real command history has its own bound before product deadline measurement.
+const HISTORY_PREPARATION_TIMEOUT_MS = 600_000
 const LEASE_SECONDS = 30
 const CANCEL_DEADLINE_MS = 10_000
 
@@ -265,6 +267,7 @@ test('Chat honors live heartbeat and cancellation deadlines after real acknowled
       let worker
       try {
         await createChat(context, productSessionId, 'Real acknowledged tool history load')
+        const historyPreparationStarted = performance.now()
         await api.command('chat.submit', 1, { productSessionId, message: 'native-cell-A' }, historyRequestId)
         const live = await waitFor(() => database.prepare('SELECT * FROM scheduler_execution_jobs WHERE submission_request_id=?')
           .get(historyRequestId), 'the historical execution exists', 60_000)
@@ -282,7 +285,7 @@ test('Chat honors live heartbeat and cancellation deadlines after real acknowled
         let heldRequest
         try {
           heldRequest = await waitFor(() => devicePath.modelServer.requests.find(request => request.gateMarker === holdMarker && request.active),
-            'the same execution has its next actual HTTPS response held after the real command cell', 300_000)
+            'the same execution has its next actual HTTPS response held after the real command cell', HISTORY_PREPARATION_TIMEOUT_MS)
         } catch (cause) {
           let observation
           try {
@@ -334,6 +337,7 @@ test('Chat honors live heartbeat and cancellation deadlines after real acknowled
           'the measured execution uses the exact Worker database containing the historical facts')
         assert.equal(database.prepare('SELECT * FROM scheduler_execution_jobs WHERE job_id=?').get(live.job_id).state, 'running')
         const historyReadyAt = Date.now()
+        const historyPreparationMs = performance.now() - historyPreparationStarted
         const beforeMeasurement = currentExecutionLease(database, originalAuthority)
         assert.ok(beforeMeasurement)
         const starting = await waitFor(() => {
@@ -386,7 +390,7 @@ test('Chat honors live heartbeat and cancellation deadlines after real acknowled
           workerInstanceId: originalAuthority.worker_instance_id,
           acknowledgedCommands: history.completedCommands.length,
           acknowledgedCommandInputs: history.completedInputs.length, retainedCoreFacts: history.retained.length,
-          retainedHistoryFrames: original.rows, historyDigest: original.digest, historyReadyAt,
+          retainedHistoryFrames: original.rows, historyDigest: original.digest, historyReadyAt, historyPreparationMs,
           leaseSeconds: LEASE_SECONDS, heartbeatRenewals: observed.length - 1, measuredPeriods: observed,
           originalDeadline: claimed.expires_at, measuredDeadline: starting.lease.expires_at,
           lastDeadline: observed.at(-1).expiresAt, cancelDeadlineMs: CANCEL_DEADLINE_MS, cancelElapsedMs }
