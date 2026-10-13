@@ -2292,9 +2292,17 @@ impl ProductionCodexAdapter {
             .record
             .phase = StoredRunPhase::RuntimeStarted;
         self.persist_run(run_key)?;
-        Ok(stage.map_or(CodexPoll::RuntimeTrace(trace), |stage| {
-            CodexPoll::RuntimeTrace(Box::new(stage))
-        }))
+        if let Some(stage) = stage {
+            // Both start facts must reach the Worker before a later Core event.
+            self.runs
+                .get_mut(run_key)
+                .ok_or_else(unknown_thread)?
+                .replay
+                .push_back(*trace);
+            Ok(CodexPoll::RuntimeTrace(Box::new(stage)))
+        } else {
+            Ok(CodexPoll::RuntimeTrace(trace))
+        }
     }
 
     #[allow(
@@ -8333,6 +8341,7 @@ mod tests {
     include!("storage_post_action_regression.rs");
     include!("storage_task_context_hotpath_tests.rs");
     include!("device_primary_accounting_tests.rs");
+    include!("runtime_start_delivery_tests.rs");
     use super::{
         AdapterStore, ExecutionMode, HELPER_RELEASE_BINARY_MODE, MAX_HELPER_BYTES,
         ModelLeaseAuthority, ModelRunBinding, ProductionCodexAdapter, ProductionCodexConfig,
