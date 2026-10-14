@@ -211,6 +211,20 @@ globalThis.__WINWINCODE_CLIENT_CONFIG__ = Object.freeze({
 
 ## 接入 Device Client
 
+以下步骤只完成 Device Client 服务接入、设备连接、仓库注册和 Provider 配置。它们不能单独证明任务可执行。当前发布包缺少 `WWC_WORKER_EXECUTION_ENVELOPE_DIGEST` 的生产生成和可信下发流程。因此，当前文档不能给出完整的 managed Worker 生产装配。不要使用测试 fixture 的固定密钥或合成 digest 补齐生产配置。
+
+Device supervisor 启动 Worker 时会继承 Device Client 进程的环境。它只额外设置 `WWC_MANAGED_START_GATE=1`，并写入包含会话身份、仓库、目录、Server origin 和 Worker 凭据路径的 managed config。该 config 不包含下表中的 Worker 运行配置。
+
+| 变量 | 当前要求和来源 |
+| --- | --- |
+| `WWC_WORKER_TLS_ROOT_DER_FILE` | `run_worker` 必填。它应指向 Worker 连接 Server 时信任的 DER 根证书。`WWC_DEVICE_TLS_ROOT_DER_FILE` 不会自动映射到该变量。两条连接信任同一根证书时，部署者可以显式让两个变量指向同一文件。 |
+| `WWC_WORKER_ACTION_SIGNING_KEY_HEX` | `run_worker` 和 `production_codex` 必填。它从 Device Client 的环境继承，由部署者通过受保护的服务配置或部署环境提供。它必须与 Server 的 `WWC_SERVER_ACTION_SIGNING_KEY_HEX` 使用同一 32 字节动作签名密钥。不要把密钥写入仓库或日志。 |
+| `WWC_WORKER_HELPER_RELEASE_MANIFEST` | `production_codex` 必填。可信来源是已完成整包校验的发布包内 `bin/winwincode-kernel-helper.release.json`。Worker 会验证清单签名及绑定信息。 |
+| `WWC_WORKER_HELPER_EXECUTABLE` | `production_codex` 必填。可信来源是同一已校验发布包内与签名清单配对的 `bin/winwincode-kernel-helper`。使用绝对路径。 |
+| `WWC_WORKER_EXECUTION_ENVELOPE_DIGEST` | `production_codex` 必填。Worker 用固定版本 `1` 和该 SHA-256 digest 构造 execution-envelope 身份。发布包和当前 Device 启动配置未提供该值的生成与可信下发流程。 |
+
+同目录发现只为 Device supervisor 提供 `winwincode-worker` 的可执行文件路径。它不会提供 Worker TLS 根、动作签名密钥、helper 路径、helper 清单或 execution-envelope digest。
+
 Device Client 必须与目标 Server 建立 HTTPS 连接。自签名证书需要转换为 DER，再通过环境变量提供：
 
 ```sh
@@ -229,7 +243,7 @@ export WWC_DEVICE_SERVER_URL=https://localhost:8443
   --server-url "$WWC_DEVICE_SERVER_URL"
 ```
 
-`wwc device serve` 是前台进程。发布包中的 `service/` 模板可以交给 `launchd` 或用户级 `systemd`。模板中的占位符必须替换为绝对路径。Linux 模板还要求 `$HOME/.config/winwincode/device-client.env` 提供 `WWC_DEVICE_DATA_DIRECTORY` 和 `WWC_DEVICE_SERVER_URL`。
+`wwc device serve` 是前台进程。它会把自身环境传给后续 Worker。发布包中的 `service/` 模板可以交给 `launchd` 或用户级 `systemd`。模板中的占位符必须替换为绝对路径。Linux 模板还要求 `$HOME/.config/winwincode/device-client.env` 提供 `WWC_DEVICE_DATA_DIRECTORY` 和 `WWC_DEVICE_SERVER_URL`。该环境文件也可以作为受支持 Worker 变量的注入点。当前 macOS 模板未预置 Worker 环境变量。两个模板都没有补齐 execution-envelope 身份来源。
 
 另一个终端可以检查状态：
 
@@ -270,6 +284,8 @@ export WWC_DEVICE_SERVER_URL=https://localhost:8443
 ```
 
 Worker 会读取这个 Device 目录。不要在 Server 上设置 `OPENAI_API_KEY`、`ANTHROPIC_API_KEY` 或其他模型 Provider 密钥。`compose.yaml` 中名为 `model-secrets` 的 Server 卷不代表当前 Device Provider 凭据位置。
+
+实现依据：[`supervisor.rs`](../../crates/winwincode-device-client/src/supervisor.rs) 中的 `SessionSupervisor::launch_process`、`managed_session_config_json` 和 `SessionSupervisor::resolve_worker_binary`；[`main.rs`](../../crates/winwincode-worker/src/main.rs) 中的 `run_worker` 和 `production_codex`；[`device-production-fixture.mjs`](../../scripts/device-production-fixture.mjs) 中的 `establishDeviceOnlyExecutionPath`。fixture 会额外注入 Worker 环境。它不构成生产配置来源。
 
 ## 从源码构建
 
@@ -331,9 +347,9 @@ Device Client 的主要数据包括：
 - `providers/providers.sqlite3`。
 - `worker-sessions/`、`execution-workspaces/`、日志和临时运行状态。
 
-当前运行时只接受唯一当前 schema。新数据库在一个事务中初始化。`control-plane.sqlite3` 和 `device-client.sqlite3` 的 schema 版本不匹配时，程序会拒绝打开。
+`control-plane.sqlite3` 和 `device-client.sqlite3` 分别由 `SqliteStorage` 与 `DeviceStore` 的 `initialize_schema` 检查 `user_version`，在同一事务内初始化和校验。版本不匹配时拒绝打开。这个行为不能推广到其他产品数据库。
 
-仓库不为未发布的开发结构自动升级、回填或清空数据。这个开发策略不能定义已发布版本的用户数据升级行为。后续版本如何迁移 0.2.0 等已发布版本的数据，目前没有统一策略。发布说明必须逐次说明数据兼容范围。
+Worker 的 Codex 数据目录仍有迁移和回填路径。重开旧目录可能修改 schema、迁移标记或持久记录。打开前先保留原目录和匹配程序的备份。实际实现与已批准的开发目标见 [当前数据库 schema](../invariants.md#当前数据库-schema)。已发布用户数据的升级政策尚未定义，发布说明必须逐次说明兼容范围。
 
 升级前先备份。备份只提供与原 schema 匹配的恢复点。`wwc backup` 不转换 schema，恢复操作也不执行 schema 升级。不要把备份流程当作升级流程。降级时恢复旧程序及与它匹配的数据备份。不要让不同版本的 Server 或 Device Client 共享同一数据目录。
 
@@ -404,7 +420,9 @@ Device 恢复使用相同参数，并把 `--store` 改为 `device`。Device 快�
 - Device Client 拒绝 URL：它要求没有路径、查询和凭据的 `https://` origin。
 - Device Client 无法建立自签名 TLS：检查 `WWC_DEVICE_TLS_ROOT_DER_FILE` 是否为 DER 证书。
 - 任务提示没有 Provider：在 Web 设置页为该 Device 配置 Provider。不要把密钥放到 Server 环境。
-- Worker 无法启动：检查 `wwc`、`winwincode-worker`、`winwincode-kernel-helper` 和签名清单是否同目录且来自同一发布包。
+- Worker 在注册前退出：先用 `wwc device logs` 检查缺失的 `WWC_WORKER_*` 变量。`WWC_DEVICE_TLS_ROOT_DER_FILE` 不会设置 `WWC_WORKER_TLS_ROOT_DER_FILE`。当前产品仍缺少 execution-envelope digest 的生产装配来源。
+- Worker 找不到可执行文件：检查 `wwc` 与 `winwincode-worker` 是否位于同一 `bin` 目录。同目录发现只解决 Worker 可执行文件路径。
+- Worker 拒绝 helper：检查 `WWC_WORKER_HELPER_EXECUTABLE` 和 `WWC_WORKER_HELPER_RELEASE_MANIFEST` 是否指向同一已校验发布包中的配对文件。不要绕过签名、摘要、文件模式或 helper 身份校验。
 - 数据库提示 unsupported schema version：停止进程。恢复匹配版本的程序和备份。不要手改 `PRAGMA user_version`。
 
 ## 相关文档

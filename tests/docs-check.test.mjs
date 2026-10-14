@@ -29,6 +29,7 @@ test('CLI accepts local inline, image, and reference links', (t) => {
   writeFileSync(join(directory, 'README.md'), [
     '[inline](docs/target.md#section "title")',
     '![image](docs/target.md)',
+    '![](docs/target.md)',
     '[full][target]',
     '[collapsed][]',
     '[shortcut]',
@@ -59,13 +60,16 @@ test('CLI ignores links in code and remote or fragment-only targets', (t) => {
   const directory = fixture(t)
   writeFileSync(join(directory, 'README.md'), [
     '`[inline code](missing-inline.md)`',
+    '`![](missing-inline.png)`',
     '```md',
     '[sample](missing-backtick.md)',
+    '![](missing-backtick.png)',
     '```not-a-closing-fence',
     '[sample](still-missing-backtick.md)',
     '```',
     '~~~md',
     '[sample](missing-tilde.md)',
+    '![](missing-tilde.png)',
     '~~~',
     '[web](https://example.com/missing.md)',
     '[mail](mailto:docs@example.com)',
@@ -75,4 +79,42 @@ test('CLI ignores links in code and remote or fragment-only targets', (t) => {
 
   const result = run(directory)
   assert.equal(result.status, 0, result.stderr)
+})
+
+test('CLI rejects a missing image with an empty alt label', (t) => {
+  const directory = fixture(t)
+  writeFileSync(join(directory, 'README.md'), '![](missing.png)\n')
+
+  const result = run(directory)
+  assert.equal(result.status, 1, `${result.stdout}${result.stderr}`)
+  assert.match(result.stderr, /README\.md:1: missing local link target: missing\.png/)
+})
+
+test('CLI rejects the missing first target of duplicate reference definitions', (t) => {
+  const directory = fixture(t)
+  writeFileSync(join(directory, 'README.md'), [
+    '[guide][ref]',
+    '',
+    '[ref]: missing.md',
+    '[ REF ]: docs/target.md',
+    '',
+  ].join('\n'))
+
+  const result = run(directory)
+  assert.equal(result.status, 1, `${result.stdout}${result.stderr}`)
+  assert.match(result.stderr, /README\.md:1: missing local link target: missing\.md/)
+})
+
+test('CLI accepts the valid first target of duplicate reference definitions', (t) => {
+  const directory = fixture(t)
+  writeFileSync(join(directory, 'README.md'), [
+    '[guide][ref]',
+    '',
+    '[ref]: docs/target.md',
+    '[ REF ]: missing.md',
+    '',
+  ].join('\n'))
+
+  const result = run(directory)
+  assert.equal(result.status, 0, `${result.stdout}${result.stderr}`)
 })

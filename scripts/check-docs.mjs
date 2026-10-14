@@ -99,14 +99,15 @@ function definitions(lines) {
     const match = line.match(/^ {0,3}\[([^\]]+)\]:\s*(.+)$/u)
     if (match === null) return
     const target = destination(match[2])
-    if (target !== undefined) values.set(normalizeReference(match[1]), { target, line: index + 1 })
+    const label = normalizeReference(match[1])
+    if (target !== undefined && !values.has(label)) values.set(label, { target, line: index + 1 })
   })
   return values
 }
 
 function links(lines, references) {
   const found = []
-  const pattern = /!?\[([^\]]+)\](?:\(\s*(<[^>\n]*>|[^)\s]+)(?:\s+(?:"[^"]*"|'[^']*'|\([^)]*\)))?\s*\)|\[([^\]]*)\])?/gu
+  const pattern = /!?\[([^\]]*)\](?:\(\s*(<[^>\n]*>|[^)\s]+)(?:\s+(?:"[^"]*"|'[^']*'|\([^)]*\)))?\s*\)|\[([^\]]*)\])?/gu
   lines.forEach((line, index) => {
     if (/^ {0,3}\[[^\]]+\]:\s*/u.test(line)) return
     for (const match of line.matchAll(pattern)) {

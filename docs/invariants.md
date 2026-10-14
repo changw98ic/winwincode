@@ -146,14 +146,27 @@ Worker 凭据绑定 WorkerSession、Worker、Worker instance 和启动授权。�
 
 ## 当前数据库 schema
 
-运行时只接受唯一当前 schema。开发策略适用于未发布结构：不为这些旧结构添加自动升级、回填或兼容路径。已发布用户数据的升级政策尚未定义；此开发约束不能代替后续发布政策。
+已批准的开发目标适用于未发布结构。新改动不再为旧的未发布 schema 增加自动升级、回填或兼容路径。不兼容结构应拒绝打开。实现这个目标时必须保留已有数据和失败现场。不得为了启动而删除表、清空库或覆盖用户数据。处理现有迁移需要独立实施任务。
 
-新库原子初始化。当前存储入口在 `TransactionBehavior::Immediate` 事务中读取 SQLite `user_version`。值为 `0` 时创建当前结构并写入当前版本；值为当前常量时检查既有结构；其他值返回 `unsupported schema version <version>`。关键表、列、索引和触发器不符合规范时返回对应的 `... schema is not canonical` 错误。初始化、结构检查和版本写入在同一事务内完成。
+已发布用户数据的升级政策尚未定义。这个开发目标不能代替后续发布政策。备份只提供恢复点，不提供 schema 升级。操作见 [部署指南](operations/deploy.md#备份校验和恢复)。
 
-不得为了启动而删除表、清空库或覆盖用户数据。不兼容结构需要另用新的数据目录，并保留原数据与失败现场。运行时的 pending 调用闭合和新 attempt 遵循 [崩溃恢复](#崩溃恢复与新-attempt)，继续保留真实调用事实。
+本节核对的严格初始化和结构校验入口有两个：
 
-备份恢复要求数据与程序的当前结构相匹配。备份本身不提供 schema 升级，操作见 [部署指南](operations/deploy.md#备份校验和恢复)。
+- `crates/winwincode-storage/src/lib.rs` 的 `SqliteStorage::open` 及其调用的 `initialize_schema`。
+- `crates/winwincode-device-client/src/store.rs` 的 `DeviceStore::open` 及其调用的 `initialize_schema`。
 
-源码依据：`crates/winwincode-storage/src/lib.rs` 的 `initialize_schema`、`validate_journal_schema`；`crates/winwincode-device-client/src/store.rs` 的 `initialize_schema`、`validate_store_schema`、`validate_worker_report_schema`；各独立存储模块的 `create_schema` 与 `validate_schema`。
+这两个函数先取得 `TransactionBehavior::Immediate` 事务，再读取 SQLite `user_version`。值为 `0` 时，函数创建当前结构并写入当前版本。值为当前常量时，函数校验既有结构。其他值返回 `unsupported schema version <version>`。初始化、版本写入、结构校验和提交位于同一事务。`SqliteStorage` 调用 `validate_journal_schema` 等校验函数。`DeviceStore` 调用 `validate_store_schema` 和 `validate_worker_report_schema`。这些实现依据不能推广为所有产品数据库的保证。
 
-相关测试：`crates/winwincode-codex/src/storage_diagnostic_migration_tests.rs`、`crates/winwincode-storage` 的 schema 测试。
+`crates/winwincode-codex/src/adapter.rs` 的 `ProductionCodexAdapter::open` 调用 `AdapterStore::open`。`crates/winwincode-codex/src/store.rs` 的 `AdapterStore::open` 仍会初始化、迁移和回填旧结构。
+
+这里的 `initialize_schema` 不检查 `user_version`。例如，`migrate_mcp_approval_schema` 在旧约束缺少 `mcp` 时新建表，复制 `approval_operation` 记录，删除旧表，再重命名新表。打开流程还包含模型游标、outbox 索引、调用阶段和输入身份的迁移或补列，以及 `migrate_stored_run_role_policies_v1_to_v2`。
+
+工件存储也有迁移。`CandidateArtifactOutbox::open` 调用 `migrate_candidate_content`。`DiagnosticArtifactOutbox::open` 通过 `prepare_diagnostic_job_route` 迁移诊断路由。
+
+内嵌 Codex 也保留迁移路径。`crates/kernel/src/lib.rs` 的 `Kernel::initialize_runtime` 调用 `init_state_db`。`third_party/codex/codex-rs/state/src/runtime.rs` 的 `StateRuntime::init` 打开并迁移多个 SQLite 库。迁移集合包含子代理线程关系使用的 `0021_thread_spawn_edges.sql`，并创建回填状态记录。
+
+这些路径是已批准开发目标的现有例外。重新打开旧 Codex 数据目录可能在处理新业务命令前写入 schema、迁移标记、索引、回填字段或持久记录。部分迁移各自在事务中提交。后续打开步骤失败时，先前已经提交的迁移可能保留。因此，当前实现不提供一次打开覆盖全部 Codex 数据库的原子拒绝保证。迁移清理由对应实施任务处理。
+
+测试入口：`crates/winwincode-storage/tests/sqlite.rs` 的 `startup_rejects_a_database_from_a_newer_schema_version`、`unpublished_schema_versions_are_refused_without_rewriting_state_or_receipts` 和 `initial_schema_failure_rolls_back_before_serving`；`crates/winwincode-device-client/src/store.rs` 的 `initialization_reads_version_after_acquiring_the_database_lock`；`crates/winwincode-codex/src/store.rs` 的 `mcp_approval_migration_preserves_existing_pending_and_resolved_records`；`crates/winwincode-codex/src/storage_diagnostic_migration_tests.rs` 的 `diagnostic_job_route_migration_preserves_bytes_and_reopen_skips_history`、`diagnostic_job_route_legacy_fault_rolls_back_all_schema_and_bytes` 和 `diagnostic_job_route_marker_refuses_weakened_layout`。
+
+运行时的 pending 调用闭合和新 attempt 遵循 [崩溃恢复](#崩溃恢复与新-attempt)。它们继续保留真实调用事实。
