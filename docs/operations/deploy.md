@@ -1,5 +1,8 @@
 # 部署 WinWinCode
 
+> [!WARNING]
+> 0.2.0 只支持本机回环的 `local-open` 部署。Docker Compose（`compose.yaml`）**当前不可用**，原因见 [Docker Compose 现状](#docker-compose-现状)。发布包还不能执行任务，见 [接入 Device Client](#接入-device-client)。
+
 本文说明 WinWinCode 0.2.0 的实际部署边界。目标读者是自托管运维人员。
 
 WinWinCode 由浏览器 Client、Server、Device Client、Worker 和内核辅助进程组成。Server 保存产品状态。Device Client 连接用户机器。Device Client 在本机启动 Worker。Provider 凭据也保存在 Device Client 所在机器。
