@@ -39,7 +39,8 @@
     "test": "pnpm test:ts && pnpm test:rust",
     "test:rust:built": "node scripts/test-rust-workspace.mjs",
     "verify:products": "node scripts/verify-products.mjs",
-    "verify:source": "pnpm format:check && pnpm lint:source",
+    "verify:docs": "node scripts/check-format.mjs && node --test --test-concurrency=1 tests/docs-check.test.mjs && node scripts/check-docs.mjs",
+    "verify:source": "pnpm verify:docs && cargo fmt --all -- --check && pnpm lint:source",
     "verify:typescript": "pnpm test:ts && node scripts/verify-products.mjs --scope typescript",
     "verify:rust": "pnpm build:rust && pnpm lint:rust && pnpm test:rust:built && node scripts/verify-products.mjs --scope rust && pnpm verify:api-production-vertical && pnpm verify:api-production-sessions",
     "verify": "pnpm verify:source && pnpm verify:typescript && pnpm verify:rust"
