@@ -1,47 +1,67 @@
 # 参与开发
 
-环境与构建见 [部署指南](docs/operations/deploy.md#从源码构建)。Agent 的全局执行边界见 [AGENTS.md](AGENTS.md)。按 [文档索引](docs/README.md) 查找当前任务的领域规则。
+本文分两部分：第一部分写给人类贡献者，第二部分是 AI Agent 和维护者需要遵守的详细规则。
 
-## 协作与任务
+## 给贡献者：快速上手
 
-实施使用 Beads 记录任务差量：目标、范围、相关正文章节、任务特有验收、进度和实际结果。
+### 准备环境
 
-1. 用 `bd ready`、`bd search`、`bd show` 定位已有任务。
-2. 没有对应任务时，用 `bd create` 建立任务。
-3. 用 `bd update <id> --claim` 认领任务。
-4. 完成改动后，将实际检查结果和未验证项写入任务记录。
+工具版本和构建命令见 [README：从源码构建和测试](README.md#从源码构建和测试)。完整依赖（libclang、V8 构建等）见[部署指南](docs/operations/deploy.md#从源码构建)。
+
+### 提交改动
+
+1. 从 `main` 新建分支。
+2. 修改后，按[定向验证](docs/testing.md#定向验证)运行与改动相关的检查。只改文档时，至少运行 `corepack pnpm verify:docs`。
+3. 提交标题沿用现有格式，例如 `fix(scope): ...`、`docs: ...`。
+4. PR 描述写清：问题是什么、改后行为、跑了哪些检查、哪些没验证。
+5. 安全漏洞不要开公开 issue，按 [SECURITY.md](SECURITY.md#私密报告漏洞) 私密报告。
+
+### 文档写法
+
+中文用短句和明确主语。同一概念用同一名称（见[术语表](docs/glossary.md)）。路径、命令和代码标识符保持原样。写清当前实现和尚未实现的目标的区别。
+
+## 给 Agent 和维护者：详细规则
+
+Agent 的全局执行边界见 [AGENTS.md](AGENTS.md)。按[文档索引](docs/README.md)查找当前任务的领域规则。
+
+### 协作与任务
+
+本仓库用 [Beads](https://github.com/steveyegge/beads)（命令行工具 `bd`）跟踪任务。Beads 是一个基于 Git 的轻量 issue 跟踪器，任务数据保存在仓库的 `.beads/` 目录中。
+
+安装（任选其一，详见 Beads 官方安装文档）：
+
+```sh
+brew install beads
+npm install -g @beads/bd
+```
+
+人类贡献者提交一次性的小改动时可以不用 `bd`，在 PR 中说明即可。Agent 和持续维护者按以下流程：
+
+1. 用 `bd ready`、`bd search`、`bd show` 查找已有任务。
+2. 没有对应任务时，用 `bd create` 新建。
+3. 用 `bd update <id> --claim` 认领。
+4. 完成后，把实际检查结果和未验证项写入任务记录。
 5. 只关闭已满足验收条件的任务。
 
-任务引用领域规则，并补充本次工作差量。长期规范及必要设计理由直接维护在对应正文。历史任务和执行证据保留，不改写为新的验收结论。
+任务记录目标、范围、验收和结果；长期规则写进对应的领域文档，不写进任务。不要另建 Markdown 任务账本或 `MEMORY.md`，不要用 `bd remember` 复制文档正文，不要运行会打开编辑器的 `bd edit`。
 
-不要另建 Markdown 任务账本或 `MEMORY.md`。不要用 `bd remember` 复制领域正文。已有记忆需要对齐时，先保留独特约束，再补充现行正文入口。不要运行会打开编辑器的 `bd edit`。
+修改规则时更新它所属的文档并调整引用。协议改动见[契约](docs/contracts.md#生成文件规则)。第三方源码改动见[上游维护](docs/upstream.md#修改和升级规则)。
 
-修改规则时更新它所属的正文，并调整受影响的引用。协议改动见 [契约](docs/contracts.md#生成文件规则)。第三方源码改动见 [上游维护](docs/upstream.md#修改和升级规则)。
+### 源码与注释
 
-## 源码与注释
+**目标规则：** 第一方源码（Rust、TypeScript、JavaScript、CSS、Shell、配置，以及生成器和构建横幅产生的内容）不写注释。例外：SPDX 许可证头、shebang、第三方源码、vendored 依赖和上游补丁（保留上游注释和许可信息，见[上游维护](docs/upstream.md#许可证)）。模块职责和设计理由写进领域文档，跨模块约束写进[不变量](docs/invariants.md)。
 
-第一方源码不写注释。SPDX 许可证头是唯一豁免项。此规则覆盖 Rust、TypeScript、JavaScript、CSS、Shell 和配置源码，也覆盖生成器与构建横幅产生的注释。
+**现状：** 这条规则尚未完全落实。现有第一方源码里仍有注释，`pnpm lint:source` 也还不能检查所有语言的注释。因此：
 
-第三方源码、vendored 依赖和上游补丁豁免。维护它们时保留上游注释和许可信息，操作要求见 [上游维护](docs/upstream.md#许可证)。Shebang 是执行入口，保留。
+- 新增代码不要加注释。
+- 不强制你清理所改文件里已有的注释。要清理时，先把仍有效的约束迁到文档。
+- 编译器、测试或构建指令（例如 `tests/fixtures/browser-control-type-gate.ts` 中的 `@ts-expect-error`）不能直接删除，必须先替换为等价检查。
+- 全仓清理和检测器建设需要单独立项。检测器必须区分字符串、正则、shebang、SPDX 头和真实注释。
 
-模块职责与设计理由写入领域文档。跨模块运行约束写入 [不变量](docs/invariants.md)。统一阅读入口可以避免有效说明分散维护。
+更新生成器后，重新生成受影响文件，并按[生成文件规则](docs/contracts.md#生成文件规则)检查一致性。保留 SPDX 头、`LICENSE`、`NOTICE`、`THIRD_PARTY_NOTICES.md` 和第三方许可文件。
 
-删除说明性注释前，先迁移仍有效的约束。删除编译器、测试或构建指令前，先替换为等价实现和检查。例如 `tests/fixtures/browser-control-type-gate.ts` 使用 `@ts-expect-error` 检查错误调用，清理时必须保留错误诊断检查。
+相关实现：`scripts/lint-workspace.mjs`、`scripts/generate-contracts.mjs`、`scripts/generate-network-policy.mjs`、`apps/client/scripts/build.mjs`。
 
-更新生成器后，重新生成受影响文件，并按 [生成文件规则](docs/contracts.md#生成文件规则) 检查一致性。保留 SPDX 头、`LICENSE`、`NOTICE`、`THIRD_PARTY_NOTICES.md` 和第三方许可文件。
+### 验证与提交
 
-当前源码尚有其他注释。`pnpm lint:source` 尚未提供覆盖全部第一方语言的零注释检查。已有注释的清理和检测器建设需独立实施；检测器须区分字符串、正则、shebang、SPDX 头与实际注释。
-
-依据：`scripts/lint-workspace.mjs`、`scripts/generate-contracts.mjs`、`scripts/generate-network-policy.mjs`、`apps/client/scripts/build.mjs`、`tests/fixtures/browser-control-type-gate.ts`。
-
-## 文档
-
-中文使用短句和明确主语。同一概念使用同一名称。路径、命令和代码标识符保持原样。引用实现时写明文件路径和符号名。
-
-领域正文区分当前实现与已批准目标。尚未实现的目标说明已知差距。迁移顺序、进度和执行结果放入任务记录。设计理由只保留已知取舍；原资料没有记录时，不补写历史比较结论。
-
-## 验证与提交
-
-按 [定向验证](docs/testing.md#定向验证) 选择检查。具体环境、真实 Provider 证据和视觉检查方法由测试指南维护。
-
-提交标题沿用 `fix(scope): ...` 等现有格式。PR 描述说明问题、修改后的行为、本次检查结果和未验证范围。提交前检查 diff。漏洞报告使用 [私密渠道](SECURITY.md#私密报告漏洞)。
+按[定向验证](docs/testing.md#定向验证)选择检查。真实 Provider 证据和视觉检查方法见测试指南。提交前检查 diff。
