@@ -9,12 +9,17 @@ on:
         description: Existing release tag
         required: true
         type: string
+      candidate_run:
+        description: Reuse sealed executables from a previous run
+        required: false
+        type: string
 
 permissions:
   contents: read
+  actions: read
 
 concurrency:
-  group: product-release-${{ inputs.tag || github.ref_name }}
+  group: product-release-${{ inputs.tag || github.ref_name }}-${{ github.workflow_sha }}
   cancel-in-progress: false
 
 jobs:
@@ -44,6 +49,7 @@ jobs:
       WINWINCODE_HELPER_RELEASE_PUBLIC_KEY_HEX: ${{ vars.WINWINCODE_HELPER_RELEASE_PUBLIC_KEY_HEX }}
       RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
       RELEASE_TARGET: ${{ matrix.target }}
+      CANDIDATE_RUN: ${{ inputs.candidate_run }}
     steps:
       - name: Check out release tag
         uses: actions/checkout@v7
@@ -73,8 +79,24 @@ jobs:
         with:
           node-version-file: .node-version
 
+      - name: Restore sealed executables
+        id: candidate
+        if: ${{ inputs.candidate_run != '' }}
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          [[ "${CANDIDATE_RUN}" =~ ^[0-9]+$ ]]
+          mkdir -p .cache/restored-candidate "target/${RELEASE_TARGET}/release"
+          gh run download "${CANDIDATE_RUN}" -n "candidate-${RELEASE_TARGET}" -D .cache/restored-candidate
+          tar -xzf ".cache/restored-candidate/candidate-${RELEASE_TARGET}.tar.gz" -C .cache/restored-candidate
+          cp -f .cache/restored-candidate/bin/* "target/${RELEASE_TARGET}/release/"
+          cp -f .cache/restored-candidate/api-production.json .cache/release-api-report.json
+          printf 'restored=true\n' >> "${GITHUB_OUTPUT}"
+
       - name: Install Linux build dependencies
-        if: ${{ runner.os == 'Linux' }}
+        if: ${{ runner.os == 'Linux' && steps.candidate.outputs.restored != 'true' }}
         shell: bash
         run: |
           set -euo pipefail
@@ -92,7 +114,7 @@ jobs:
           bwrap --ro-bind / / --unshare-user --unshare-pid --unshare-net --as-pid-1 -- true
 
       - name: Install macOS bindgen dependencies
-        if: ${{ runner.os == 'macOS' }}
+        if: ${{ runner.os == 'macOS' && steps.candidate.outputs.restored != 'true' }}
         shell: bash
         run: |
           set -euo pipefail
@@ -101,6 +123,7 @@ jobs:
           printf 'CLANG_PATH=%s/bin/clang\n' "$(brew --prefix llvm@19)" >> "${GITHUB_ENV}"
 
       - name: Install pinned Rust
+        if: ${{ steps.candidate.outputs.restored != 'true' }}
         shell: bash
         run: |
           set -euo pipefail
@@ -108,11 +131,13 @@ jobs:
           rustup override set 1.95.0
 
       - name: Install Rust compiler cache
+        if: ${{ steps.candidate.outputs.restored != 'true' }}
         uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba
         with:
           version: v0.17.0
 
       - name: Wire C/C++ compiler cache
+        if: ${{ steps.candidate.outputs.restored != 'true' }}
         shell: bash
         run: |
           set -euo pipefail
@@ -121,12 +146,14 @@ jobs:
           printf 'CC=%s\nCXX=%s++\n' "${CLANG_PATH}" "${CLANG_PATH}" >> "${GITHUB_ENV}"
 
       - name: Cache pinned V8 source build
+        if: ${{ steps.candidate.outputs.restored != 'true' }}
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
         with:
           path: target/**/gn_out
           key: v8-gn-${{ matrix.target }}-release-${{ hashFiles('Cargo.lock', '.cargo/config.toml', 'rust-toolchain.toml', 'scripts/code-mode-ninja.mjs', 'scripts/install-code-mode-linux-build-deps.sh') }}
 
       - name: Configure release path remapping
+        if: ${{ steps.candidate.outputs.restored != 'true' }}
         shell: bash
         run: |
           node --input-type=module <<'NODE'
@@ -148,13 +175,19 @@ jobs:
           appendFileSync(process.env.GITHUB_ENV, `RUSTFLAGS=${environment.RUSTFLAGS}\n`)
           NODE
 
-      - name: Build Client and release executables
+      - name: Build Client
         shell: bash
         run: |
           set -euo pipefail
           corepack enable
           corepack pnpm install --frozen-lockfile
           corepack pnpm build:ts
+
+      - name: Build release executables
+        if: ${{ steps.candidate.outputs.restored != 'true' }}
+        shell: bash
+        run: |
+          set -euo pipefail
           cargo build --locked --release --target "${RELEASE_TARGET}" \
             -p winwincode-server --bin winwincode-server \
             -p winwincode-worker --bin winwincode-worker \
@@ -169,6 +202,7 @@ jobs:
           done
 
       - name: Sign helper and seal release executables
+        if: ${{ steps.candidate.outputs.restored != 'true' }}
         shell: bash
         env:
           WINWINCODE_HELPER_RELEASE_PRIVATE_KEY_HEX: ${{ secrets.WINWINCODE_HELPER_RELEASE_PRIVATE_KEY_HEX }}
@@ -186,6 +220,7 @@ jobs:
           NODE
 
       - name: Verify the release through the production API
+        if: ${{ steps.candidate.outputs.restored != 'true' }}
         shell: bash
         run: |
           set -euo pipefail
@@ -195,7 +230,28 @@ jobs:
             --wwc-binary "target/${RELEASE_TARGET}/release/wwc" \
             --output .cache/release-api-report.json
 
-      - name: Stage, scan and archive the release
+      - name: Preserve API-verified candidate
+        if: ${{ steps.candidate.outputs.restored != 'true' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p .cache/candidate/bin .cache/candidate-upload
+          for name in winwincode-server winwincode-worker winwincode-kernel-helper wwc winwincode-kernel-helper.release.json winwincode-api-production.source.json; do
+            cp -f "target/${RELEASE_TARGET}/release/${name}" .cache/candidate/bin/
+          done
+          cp -f .cache/release-api-report.json .cache/candidate/api-production.json
+          tar -czf ".cache/candidate-upload/candidate-${RELEASE_TARGET}.tar.gz" -C .cache/candidate bin api-production.json
+
+      - name: Retain candidate for packaging recovery
+        if: ${{ steps.candidate.outputs.restored != 'true' }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: candidate-${{ matrix.target }}
+          path: .cache/candidate-upload/*
+          if-no-files-found: error
+          retention-days: 1
+
+      - name: Check out release tooling
         uses: actions/checkout@v7
         with:
           ref: ${{ github.workflow_sha }}
@@ -203,6 +259,7 @@ jobs:
           sparse-checkout: |
             scripts
             packages/network-request
+            .github/release-notes
           persist-credentials: false
 
       - name: Stage, scan and archive the release
