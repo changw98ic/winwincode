@@ -196,12 +196,22 @@ jobs:
             --output .cache/release-api-report.json
 
       - name: Stage, scan and archive the release
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ github.workflow_sha }}
+          path: .cache/release-tooling
+          sparse-checkout: |
+            scripts
+            packages/network-request
+          persist-credentials: false
+
+      - name: Stage, scan and archive the release
         shell: bash
         run: |
           set -euo pipefail
           mkdir -p release-artifacts .cache/release-upload
           bundle="winwincode-${RELEASE_TAG#v}-${RELEASE_TARGET}"
-          node scripts/stage-product-release.mjs "${RELEASE_TARGET}" "release-artifacts/${bundle}"
+          node .cache/release-tooling/scripts/stage-product-release.mjs "${RELEASE_TARGET}" "release-artifacts/${bundle}"
           cd "release-artifacts/${bundle}"
           shasum -a 256 -c SHA256SUMS
           cd ../..

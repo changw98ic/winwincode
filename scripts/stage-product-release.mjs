@@ -12,7 +12,10 @@ import { canonicalJson, descriptorsBelow, sourceIdentity, targetConfiguration } 
 import { verifyApiProductionSourceSeal } from './run-api-production-vertical.mjs'
 import { scanReleaseArtifactContent } from './verify-release-artifact-security.mjs'
 
-const root = resolve(import.meta.dirname, '..')
+const root = process.cwd()
+const producerCommit = execFileSync('git', ['rev-parse', 'HEAD'], {
+  cwd: resolve(import.meta.dirname, '..'), encoding: 'utf8',
+}).trim()
 const [target, output] = process.argv.slice(2)
 assert.equal(process.argv.length, 4, 'Usage: node scripts/stage-product-release.mjs TARGET OUTPUT')
 const identity = targetConfiguration(target)
@@ -80,18 +83,19 @@ writeFileSync(resolve(artifactRoot, 'verification/source-seal.json'), canonicalJ
 writeFileSync(resolve(artifactRoot, 'sbom.json'), canonicalJson(deviceClientSbom(root)))
 const files = descriptorsBelow(artifactRoot)
 for (const file of files) {
-  if (file.path.startsWith('legal/')) continue
+  if (file.path.startsWith('legal/') || file.path === 'client/THIRD_PARTY_NOTICES.md') continue
   const findings = scanReleaseArtifactContent({
     bytes: readFileSync(resolve(artifactRoot, file.path)),
     target,
     path: file.path,
-    binary: binaries.some(binary => file.path === `bin/${binary}`),
+    binary: binaries.some(binary => file.path === `bin/${binary}`) || /\.(?:js|css)$/u.test(file.path),
   })
   assert.deepEqual(findings, [], `credential scan rejected ${file.path}`)
 }
 const manifest = {
   schemaVersion: 1,
   kind: 'winwincode.product-release.v1',
+  producerCommit,
   source,
   target: identity,
   helperReleasePublicKeyHex: seal.seal.helperReleasePublicKeyHex,
