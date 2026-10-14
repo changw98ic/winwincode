@@ -4,13 +4,14 @@
 import assert from 'node:assert/strict'
 import { execFileSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
-import { chmodSync, copyFileSync, cpSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs'
+import { chmodSync, copyFileSync, cpSync, existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs'
 import { resolve } from 'node:path'
 
 import { deviceClientSbom } from './build-device-client-release.mjs'
 import { canonicalJson, descriptorsBelow, sourceIdentity, targetConfiguration } from './release-artifact-contract.mjs'
 import { verifyApiProductionSourceSeal } from './run-api-production-vertical.mjs'
-import { scanReleaseArtifactContent } from './verify-release-artifact-security.mjs'
+import { dynamicLibraryAllowed, inspectExecutable, scanReleaseArtifactContent } from './verify-release-artifact-security.mjs'
+import { reviewReleaseFindings } from './review-release-findings.mjs'
 
 const root = process.cwd()
 const producerCommit = execFileSync('git', ['rev-parse', 'HEAD'], {
@@ -55,7 +56,10 @@ assert.equal(apiReport.flow?.strongflow?.verdictStatus, 'pass')
 assert.equal(apiReport.deterministic?.contentEqual, true)
 assert.equal(apiReport.restart?.messageBytesStable, true)
 assert.equal(apiReport.restart?.deliveryBytesStable, true)
-assert.equal(apiReport.artifacts?.sourceSeal?.serverBinarySha256, seal.seal.serverBinarySha256)
+assert.deepEqual(apiReport.artifacts?.sourceSeal, Object.fromEntries([
+  'gitHead', 'helperBinarySha256', 'helperReleaseManifestSha256',
+  'serverBinarySha256', 'sourceSha256', 'trackedDiffSha256',
+].map(key => [key, seal.seal[key]])), 'API report source seal must match the verified release source and executables')
 cpSync(resolve(root, 'apps/client/dist/public'), resolve(artifactRoot, 'client'), { recursive: true })
 const clientVersion = JSON.parse(readFileSync(resolve(artifactRoot, 'client/version.json'), 'utf8'))
 const source = sourceIdentity(root, sourceCommit, sourceDateEpoch)
@@ -82,24 +86,40 @@ writeFileSync(resolve(artifactRoot, 'verification/api-production.json'), canonic
 writeFileSync(resolve(artifactRoot, 'verification/source-seal.json'), canonicalJson(seal.seal))
 writeFileSync(resolve(artifactRoot, 'sbom.json'), canonicalJson(deviceClientSbom(root)))
 const files = descriptorsBelow(artifactRoot)
+const reviewPath = resolve(import.meta.dirname, '..', '.github/release-notes', `${source.version}-scan-exceptions.json`)
+const exceptions = existsSync(reviewPath) ? JSON.parse(readFileSync(reviewPath, 'utf8')) : []
+const reviewedCredentialFindings = []
 for (const file of files) {
   if (file.path.startsWith('legal/') || file.path === 'client/THIRD_PARTY_NOTICES.md') continue
+  const bytes = readFileSync(resolve(artifactRoot, file.path))
+  if (binaries.some(binary => file.path === `bin/${binary}`)) {
+    const executable = inspectExecutable(bytes, identity)
+    assert.equal(executable.arch, identity.arch, `wrong architecture in ${file.path}`)
+    assert.deepEqual(executable.dynamicLibraries.filter(library => !dynamicLibraryAllowed(identity, library, executable.interpreter)),
+      [], `unsupported runtime dependency in ${file.path}`)
+  }
   const findings = scanReleaseArtifactContent({
-    bytes: readFileSync(resolve(artifactRoot, file.path)),
+    bytes,
     target,
     path: file.path,
     binary: binaries.some(binary => file.path === `bin/${binary}`) || /\.(?:js|css)$/u.test(file.path),
   })
-  assert.deepEqual(findings, [], `credential scan rejected ${file.path}`)
+  const { pending, reviewed } = reviewReleaseFindings({ bytes, target, path: file.path, sourceCommit, findings, exceptions })
+  reviewedCredentialFindings.push(...reviewed)
+  assert.deepEqual(pending, [], `credential scan rejected ${file.path}; sha256=${file.sha256}`)
 }
 const manifest = {
   schemaVersion: 1,
   kind: 'winwincode.product-release.v1',
   producerCommit,
+  producerRunId: process.env.GITHUB_RUN_ID ?? null,
+  buildRunId: process.env.CANDIDATE_RUN || process.env.GITHUB_RUN_ID || null,
+  apiVerificationRunId: process.env.GITHUB_RUN_ID ?? null,
   source,
   target: identity,
   helperReleasePublicKeyHex: seal.seal.helperReleasePublicKeyHex,
-  checks: ['cargo-locked-release-build', 'api-production-vertical', 'credential-content-scan', 'sha256-file-inventory'],
+  reviewedCredentialFindings,
+  checks: ['cargo-locked-release-build', 'api-production-vertical', 'native-executable-identity', 'credential-content-scan', 'sha256-file-inventory'],
   files,
 }
 const manifestText = canonicalJson(manifest)

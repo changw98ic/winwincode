@@ -1,7 +1,9 @@
 import assert from 'node:assert/strict'
+import { createHash } from 'node:crypto'
 import { readFileSync } from 'node:fs'
 import test from 'node:test'
 
+import { reviewReleaseFindings } from '../scripts/review-release-findings.mjs'
 import {
   dynamicLibraryAllowed,
   inspectElf64,
@@ -262,6 +264,45 @@ test('binary content scan uses bounded printable strings and reports artifact by
     path: 'bin/winwincode-server',
     binary: true,
   }), [])
+})
+
+test('reviewed binary findings bind the complete bytes, source, target and path', () => {
+  const bytes = Buffer.from('api-key:sk-proj-AUTHtreeutf8dataargsopenwsc-wsc_BLOB')
+  const findings = scanReleaseArtifactContent({ bytes, target: 'aarch64-apple-darwin', path: 'bin/winwincode-worker', binary: true })
+  assert.equal(findings.length, 2)
+  const input = {
+    bytes,
+    target: 'aarch64-apple-darwin',
+    path: 'bin/winwincode-worker',
+    sourceCommit: 'a'.repeat(40),
+    findings,
+    exceptions: [{
+      sourceCommit: 'a'.repeat(40),
+      target: 'aarch64-apple-darwin',
+      path: 'bin/winwincode-worker',
+      binarySha256: createHash('sha256').update(bytes).digest('hex'),
+      findings: findings.map(({ rule, location }) => ({ rule, location })),
+      reason: 'Public redaction prefixes are adjacent to unrelated Rust string constants.',
+      sourcePaths: ['crates/winwincode-delivery/src/projection/redaction.rs'],
+    }],
+  }
+  assert.deepEqual(reviewReleaseFindings(input).pending, [])
+  assert.equal(reviewReleaseFindings(input).reviewed.length, 2)
+  for (const changed of [
+    { bytes: Buffer.concat([bytes, Buffer.from('sk-REAL1234567890ABCDEF')]) },
+    { sourceCommit: 'b'.repeat(40) },
+    { target: 'x86_64-apple-darwin' },
+    { path: 'bin/wwc' },
+  ]) {
+    assert.deepEqual(reviewReleaseFindings({ ...input, ...changed }).pending, findings)
+  }
+  const additional = { ...findings[0], rule: 'credential.text.private-key', location: 'byte:100' }
+  assert.deepEqual(reviewReleaseFindings({ ...input, findings: [...findings, additional] }).pending, [additional])
+  const otherTarget = { ...findings[0], target: 'x86_64-apple-darwin' }
+  assert.deepEqual(reviewReleaseFindings({ ...input, findings: [...findings, otherTarget] }).pending, [otherTarget])
+  const invalid = structuredClone(input)
+  invalid.exceptions[0].findings = [{ rule: 'credential.text.private-key', location: 'byte:0' }]
+  assert.throws(() => reviewReleaseFindings(invalid), /cannot be excepted/u)
 })
 
 test('Kernel production sources use only the canonical runtime namespace', () => {

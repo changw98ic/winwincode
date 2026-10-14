@@ -1,0 +1,105 @@
+[
+  {
+    "sourceCommit": "e2793daffead87491f3b669bca9acae6aba96820",
+    "target": "aarch64-unknown-linux-gnu",
+    "path": "bin/winwincode-worker",
+    "binarySha256": "c86d663ab48f7edf83d6eb425b5ffd1eaa6d60d9b19261fcbcd4fad2a2413c07",
+    "findings": [
+      {
+        "rule": "credential.text.assignment",
+        "location": "byte:4563424"
+      },
+      {
+        "rule": "credential.text.provider-token",
+        "location": "byte:4562136"
+      }
+    ],
+    "reason": "Reviewed native candidate from Actions run 38498971512. Rust string pooling joins public redaction prefixes with prepared/conflict and severity/deadlock/baseline state labels plus single digit constants. These bytes are program literals, not credential values.",
+    "sourcePaths": [
+      "crates/winwincode-delivery/src/projection/redaction.rs",
+      "crates/winwincode-device-client/src/worker_logs.rs",
+      "crates/winwincode-codex/src/diagnostic_artifact_outbox.rs",
+      "crates/winwincode-execution-port/src/diagnostic_parser.rs",
+      "crates/winwincode-fusion/src/context.rs",
+      "crates/winwincode-control-plane/src/debug_hypothesis_ledger.rs",
+      "crates/winwincode-codex/src/workrun_runtime_projection.rs",
+      "crates/winwincode-cli/src/cli.rs"
+    ]
+  },
+  {
+    "sourceCommit": "e2793daffead87491f3b669bca9acae6aba96820",
+    "target": "aarch64-unknown-linux-gnu",
+    "path": "bin/wwc",
+    "binarySha256": "1a70ff8d77a73925ba7951f5fac244ec0d70c42dee04346ed85ebdfe22977ad0",
+    "findings": [
+      {
+        "rule": "credential.text.assignment",
+        "location": "byte:1627040"
+      },
+      {
+        "rule": "credential.text.assignment",
+        "location": "byte:2710419"
+      }
+    ],
+    "reason": "Reviewed native candidate from Actions run 38498971512. Rust string pooling joins the API-key redaction marker with position and a digit, and joins backup redaction markers with the backup schema fields and status labels. These bytes are program literals, not credential values.",
+    "sourcePaths": [
+      "crates/winwincode-cli/src/backup.rs",
+      "crates/winwincode-device-client/src/worker_logs.rs",
+      "crates/winwincode-codex/src/durable_fusion.rs"
+    ]
+  },
+  {
+    "sourceCommit": "e2793daffead87491f3b669bca9acae6aba96820",
+    "target": "x86_64-unknown-linux-gnu",
+    "path": "bin/wwc",
+    "binarySha256": "d28eac1c060ef166c192e59606f34bbd25d3b058c424fabe3c9fd21d8ac1ecec",
+    "findings": [
+      {
+        "rule": "credential.text.assignment",
+        "location": "byte:2887501"
+      }
+    ],
+    "reason": "Reviewed native candidate from Actions run 38498971512. Its backup finding contains the same public redaction markers, schema fields and status labels as the reviewed ARM64 Linux candidate; all 294 bytes of this constant pool slice are identical. These bytes are program literals, not credential values.",
+    "sourcePaths": [
+      "crates/winwincode-cli/src/backup.rs"
+    ]
+  },
+  {
+    "sourceCommit": "e2793daffead87491f3b669bca9acae6aba96820",
+    "target": "aarch64-apple-darwin",
+    "path": "bin/wwc",
+    "binarySha256": "fb59100f83c6ef29a874d9151f26c612b6f5b5f235f63a40685fb54a50314d1f",
+    "findings": [
+      {
+        "rule": "credential.text.assignment",
+        "location": "byte:18352441"
+      }
+    ],
+    "reason": "Reviewed native candidate from Actions run 38498971512. Its backup finding contains the same public redaction markers, schema fields and status labels as the reviewed ARM64 Linux candidate; all 294 bytes of this constant pool slice are identical. These bytes are program literals, not credential values.",
+    "sourcePaths": [
+      "crates/winwincode-cli/src/backup.rs"
+    ]
+  },
+  {
+    "sourceCommit": "e2793daffead87491f3b669bca9acae6aba96820",
+    "target": "x86_64-apple-darwin",
+    "path": "bin/wwc",
+    "binarySha256": "e57abf7da6b0536a5140e0d2f98b2a855b6a41379e568108854c0a769e40e7fb",
+    "findings": [
+      {
+        "rule": "credential.text.assignment",
+        "location": "byte:22333344"
+      },
+      {
+        "rule": "credential.text.assignment",
+        "location": "byte:22342793"
+      }
+    ],
+    "reason": "Reviewed native candidate from Actions run 38498971512. Rust string pooling places a public authorization redaction prefix beside created_at_millis, the local-backup format and remoteConfigured labels. The second finding is the same 294-byte backup marker/schema/status pool reviewed on the other three platforms. These bytes are public program literals, not credential values.",
+    "sourcePaths": [
+      "crates/winwincode-cli/src/backup.rs",
+      "crates/winwincode-cli/src/cli.rs",
+      "crates/winwincode-cli/src/model.rs"
+    ]
+  }
+]
