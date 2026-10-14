@@ -16,7 +16,6 @@ use winwincode_codex::{
 };
 use winwincode_domain::{Instant, Sha256Digest, WorkerId, WorkerInstanceId};
 use winwincode_execution_port::action_enforcement::ActionEnforcementSigningKey;
-use winwincode_execution_port::action_gateway::ExecutionEnvelopeToken;
 use winwincode_execution_port::generated::{
     ModelGatewayRoute, WorkerCapabilityFeature, WorkerCapabilitySet, WorkerCapabilitySetPlatform,
 };
@@ -424,10 +423,6 @@ fn production_codex(
         action_signing_key: ActionEnforcementSigningKey::from_bytes(parse_hex_key(&required(
             "WWC_WORKER_ACTION_SIGNING_KEY_HEX",
         )?)?)?,
-        execution_envelope: ExecutionEnvelopeToken {
-            version: 1,
-            digest: Sha256Digest(required("WWC_WORKER_EXECUTION_ENVELOPE_DIGEST")?),
-        },
         execution_mode,
         observer_mode,
     };
@@ -751,10 +746,6 @@ mod tests {
                 registered_capabilities: register.capabilities.clone(),
                 discovered_capabilities: Vec::new(),
                 action_signing_key: ActionEnforcementSigningKey::from_bytes([31; 32]).unwrap(),
-                execution_envelope: ExecutionEnvelopeToken {
-                    version: 1,
-                    digest: Sha256Digest(format!("sha256:{}", "a".repeat(64))),
-                },
                 execution_mode: ExecutionMode::React,
                 observer_mode: ObserverMode::Off,
             })

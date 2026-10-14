@@ -1278,7 +1278,6 @@ export async function establishDeviceOnlyExecutionPath({
       WWC_WORKER_HELPER_EXECUTABLE: helperExecutable,
     }),
     WWC_WORKER_ACTION_SIGNING_KEY_HEX: '1f'.repeat(32),
-    WWC_WORKER_EXECUTION_ENVELOPE_DIGEST: `sha256:${'a'.repeat(64)}`,
     WWC_DEBUG_REMOTE_WORKER: '1',
     GIT_CONFIG_NOSYSTEM: '1',
     ...(process.env.WINWINCODE_HELPER_RELEASE_PUBLIC_KEY_HEX === undefined

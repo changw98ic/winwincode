@@ -14,9 +14,8 @@ use winwincode_execution_port::{
     },
     action_gateway::{
         ActionGatewayRejectionCode, ActiveWorkerAuthority, CodexToolExecutor,
-        DeterministicActionGate, ExecutionEnvelope, ExecutionEnvelopeToken, GateDecision,
-        GateInput, PreActionDecisionRecorder, WorkerActionAuthority, WorkerActionGateway,
-        WorkerActionRequest,
+        DeterministicActionGate, GateDecision, GateInput, PreActionDecisionRecorder,
+        WorkerActionAuthority, WorkerActionGateway, WorkerActionRequest,
     },
     action_normalizer::{
         ActionIntent, ActionObject, ActionOperation, ActionPurpose, ActionRisk, ActionScope,
@@ -107,10 +106,6 @@ fn action() -> WorkerActionRequest {
             lease: lease(),
             worker_session_id: WorkerSessionId(id("wsn", 'A')),
             session_identity: session(),
-            envelope: ExecutionEnvelopeToken {
-                version: 1,
-                digest: Sha256Digest(format!("sha256:{}", "a".repeat(64))),
-            },
         },
         intent: ActionIntent {
             object: ActionObject::ExternalResource,
@@ -139,13 +134,7 @@ fn gateway(executions: &Rc<Cell<u64>>) -> WorkerActionGateway<Policy, Gate, Jour
             worker_session_id: WorkerSessionId(id("wsn", 'A')),
             session_identity: session(),
         },
-        ExecutionEnvelope {
-            token: ExecutionEnvelopeToken {
-                version: 1,
-                digest: Sha256Digest(format!("sha256:{}", "a".repeat(64))),
-            },
-            policy: Policy,
-        },
+        Policy,
         Gate,
         Journal,
         Executor(Rc::clone(executions)),

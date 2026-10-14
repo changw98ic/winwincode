@@ -53,10 +53,6 @@ fn action() -> WorkerActionRequest {
                 work_run_id: Some(WorkRunId(id("wrn", 'A'))),
                 worker_session_id: WorkerSessionId(id("wsn", 'A')),
             },
-            envelope: winwincode_execution_port::action_gateway::ExecutionEnvelopeToken {
-                version: 1,
-                digest: Sha256Digest(format!("sha256:{}", "a".repeat(64))),
-            },
         },
         intent: ActionIntent {
             object: ActionObject::Test,

@@ -16,7 +16,7 @@ use winwincode_execution_port::{
         ActionEnforcementSigningKey, ActionEnforcementVerifier, ActionReceiptClaim,
         ActionReceiptUseStore, FileActionReceiptUseStore, prepare_action_enforcement_request,
     },
-    action_gateway::{ExecutionEnvelopeToken, WorkerActionAuthority, WorkerActionRequest},
+    action_gateway::{WorkerActionAuthority, WorkerActionRequest},
     action_normalizer::{
         ActionIntent, ActionPurpose, FileAnalysis, FileOperation, FileRequest, McpRequest,
         ObservedAction, ShellRequest, ToolRequest, canonical_mcp_capability_id, observe_action,
@@ -53,7 +53,6 @@ pub(super) struct ActionGateState {
             std::collections::BTreeMap<String, crate::public_smoke_adapter::PublicSmokeAdapter>,
         >,
     >,
-    envelope: ExecutionEnvelopeToken,
     verifier: ActionEnforcementVerifier,
     receipt_store: Mutex<FileActionReceiptUseStore>,
     authority: SharedAuthoritySource,
@@ -119,7 +118,6 @@ impl ExecutionPortActionGate {
     pub(crate) fn open(
         worker_data_root: &Path,
         catalog: WorkerCapabilityCatalog,
-        envelope: ExecutionEnvelopeToken,
         signing_key: ActionEnforcementSigningKey,
         authority: SharedAuthoritySource,
     ) -> Result<Self, ActionBridgeError> {
@@ -129,7 +127,6 @@ impl ExecutionPortActionGate {
             state: Arc::new(ActionGateState {
                 catalog: RwLock::new(catalog),
                 tool_dependencies: RwLock::new(HashMap::new()),
-                envelope,
                 verifier: signing_key.into_verifier(),
                 receipt_store: Mutex::new(receipt_store),
                 authority,
@@ -748,7 +745,6 @@ fn queue_action(
             lease: context.binding.authority.lease.clone(),
             worker_session_id: context.binding.authority.worker_session_id.clone(),
             session_identity: context.binding.authority.session_identity.clone(),
-            envelope: context.state.envelope.clone(),
         },
         intent,
         request,
@@ -1313,11 +1309,7 @@ fn authorize_capability(
             .catalog
             .read()
             .map_err(|_| ActionBridgeError::Unavailable)?
-            .authorize(
-                &capability_id,
-                binding.authority.worker_session_id.clone(),
-                state.envelope.clone(),
-            )
+            .authorize(&capability_id, binding.authority.worker_session_id.clone())
             .map_err(|_| ActionBridgeError::UnknownCapability)?;
     }
     Ok(())
@@ -1636,17 +1628,9 @@ pub(crate) mod tests {
         use sha2::Digest as _;
         let root = std::env::temp_dir().join(format!("wwc-action-expiry-{}", uuid::Uuid::new_v4()));
         let authority = SharedAuthoritySource::default();
-        let gate = ExecutionPortActionGate::open(
-            &root,
-            catalog(),
-            ExecutionEnvelopeToken {
-                version: 1,
-                digest: Sha256Digest(format!("sha256:{}", "c".repeat(64))),
-            },
-            signing_key(),
-            authority.clone(),
-        )
-        .unwrap();
+        let gate =
+            ExecutionPortActionGate::open(&root, catalog(), signing_key(), authority.clone())
+                .unwrap();
         let original = binding();
         gate.install_binding(&original, None).unwrap();
         let private_input = "private Provider credential and original JS bytes";
@@ -1785,7 +1769,6 @@ pub(crate) mod tests {
         action_enforcement::{
             ActionEnforcementIssuer, ActionEnforcementSigningKey, ActionReceiptUseStore as _,
         },
-        action_gateway::ExecutionEnvelopeToken,
         action_normalizer::{
             ActionObject, ActionOperation, ActionRisk, ToolRequest, observe_action,
         },
@@ -2173,17 +2156,8 @@ pub(crate) mod tests {
             SharedAuthoritySource::default(),
         );
         let gate = Arc::new(
-            ExecutionPortActionGate::open(
-                &root,
-                catalog(),
-                ExecutionEnvelopeToken {
-                    version: 1,
-                    digest: Sha256Digest(format!("sha256:{}", "c".repeat(64))),
-                },
-                signing_key(),
-                bridge.authority(),
-            )
-            .unwrap(),
+            ExecutionPortActionGate::open(&root, catalog(), signing_key(), bridge.authority())
+                .unwrap(),
         );
         bridge.attach_action_gate(gate.clone()).unwrap();
         let original = binding();
@@ -2326,10 +2300,6 @@ pub(crate) mod tests {
         let gate = ExecutionPortActionGate::open(
             &root,
             catalog,
-            ExecutionEnvelopeToken {
-                version: 1,
-                digest: Sha256Digest(format!("sha256:{}", "c".repeat(64))),
-            },
             signing_key(),
             SharedAuthoritySource::default(),
         )
@@ -2394,10 +2364,6 @@ pub(crate) mod tests {
             let gate = ExecutionPortActionGate::open(
                 &root,
                 catalog(),
-                ExecutionEnvelopeToken {
-                    version: 1,
-                    digest: Sha256Digest(format!("sha256:{}", "c".repeat(64))),
-                },
                 signing_key(),
                 SharedAuthoritySource::default(),
             )
@@ -2451,10 +2417,6 @@ pub(crate) mod tests {
         let gate = ExecutionPortActionGate::open(
             &root,
             catalog(),
-            ExecutionEnvelopeToken {
-                version: 1,
-                digest: Sha256Digest(format!("sha256:{}", "c".repeat(64))),
-            },
             signing_key(),
             SharedAuthoritySource::default(),
         )
@@ -2519,10 +2481,6 @@ pub(crate) mod tests {
         let gate = ExecutionPortActionGate::open(
             &root,
             catalog(),
-            ExecutionEnvelopeToken {
-                version: 1,
-                digest: Sha256Digest(format!("sha256:{}", "c".repeat(64))),
-            },
             signing_key(),
             SharedAuthoritySource::default(),
         )
@@ -2614,10 +2572,6 @@ pub(crate) mod tests {
         let gate = ExecutionPortActionGate::open(
             &root,
             catalog(),
-            ExecutionEnvelopeToken {
-                version: 1,
-                digest: Sha256Digest(format!("sha256:{}", "c".repeat(64))),
-            },
             signing_key(),
             SharedAuthoritySource::default(),
         )
@@ -2889,10 +2843,6 @@ pub(crate) mod tests {
         let gate = ExecutionPortActionGate::open(
             &root,
             catalog(),
-            ExecutionEnvelopeToken {
-                version: 1,
-                digest: Sha256Digest(format!("sha256:{}", "c".repeat(64))),
-            },
             signing_key(),
             SharedAuthoritySource::default(),
         )
@@ -2985,10 +2935,6 @@ pub(crate) mod tests {
         let gate = ExecutionPortActionGate::open(
             &root,
             catalog(),
-            ExecutionEnvelopeToken {
-                version: 1,
-                digest: Sha256Digest(format!("sha256:{}", "c".repeat(64))),
-            },
             signing_key(),
             SharedAuthoritySource::default(),
         )
@@ -3203,10 +3149,6 @@ pub(crate) mod tests {
         let gate = ExecutionPortActionGate::open(
             &root,
             catalog(),
-            ExecutionEnvelopeToken {
-                version: 1,
-                digest: Sha256Digest(format!("sha256:{}", "a".repeat(64))),
-            },
             signing_key(),
             SharedAuthoritySource::default(),
         )

@@ -2,7 +2,6 @@
 use super::super::ExecutionPortActionGate;
 use super::super::tests::{binding, catalog, signing_key};
 use winwincode_domain::Instant;
-use winwincode_execution_port::action_gateway::ExecutionEnvelopeToken;
 use winwincode_kernel::{KernelActionGate, KernelToolResultReadRequest};
 
 fn read_request() -> KernelToolResultReadRequest {
@@ -25,10 +24,6 @@ async fn stored_result_read_is_receipt_bound_and_current_lease_fenced() {
     let gate = ExecutionPortActionGate::open(
         home.as_path(),
         catalog(),
-        ExecutionEnvelopeToken {
-            version: 1,
-            digest: winwincode_domain::Sha256Digest(format!("sha256:{}", "c".repeat(64))),
-        },
         signing_key(),
         crate::model_bridge::SharedAuthoritySource::default(),
     )
@@ -64,10 +59,6 @@ async fn expired_unknown_and_delegated_result_reads_are_rejected() {
     let gate = ExecutionPortActionGate::open(
         home.as_path(),
         catalog(),
-        ExecutionEnvelopeToken {
-            version: 1,
-            digest: winwincode_domain::Sha256Digest(format!("sha256:{}", "c".repeat(64))),
-        },
         signing_key(),
         crate::model_bridge::SharedAuthoritySource::default(),
     )
@@ -94,10 +85,6 @@ async fn result_read_authority_expires_without_owner_clock_refresh() {
     let gate = ExecutionPortActionGate::open(
         &home,
         catalog(),
-        ExecutionEnvelopeToken {
-            version: 1,
-            digest: winwincode_domain::Sha256Digest(format!("sha256:{}", "c".repeat(64))),
-        },
         signing_key(),
         crate::model_bridge::SharedAuthoritySource::default(),
     )

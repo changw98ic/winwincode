@@ -16,9 +16,8 @@ use winwincode_execution_port::action_enforcement::{
 };
 use winwincode_execution_port::action_gateway::{
     ActionGatewayError, ActionGatewayRejectionCode, ActiveWorkerAuthority, CodexToolExecutor,
-    DeterministicActionGate, ExecutionEnvelope, ExecutionEnvelopeToken, GateDecision, GateInput,
-    PostActionHook, PostActionOutcome, PreActionDecisionRecorder, WorkerActionAuthority,
-    WorkerActionGateway, WorkerActionRequest,
+    DeterministicActionGate, GateDecision, GateInput, PostActionHook, PostActionOutcome,
+    PreActionDecisionRecorder, WorkerActionAuthority, WorkerActionGateway, WorkerActionRequest,
 };
 use winwincode_execution_port::action_normalizer::{
     ActionIntent, ActionObject, ActionOperation, ActionPurpose, ActionRisk, ActionScope,
@@ -50,7 +49,7 @@ impl DeterministicActionGate<Policy> for RecordingGate {
     fn decide(&mut self, input: GateInput<'_, Policy>) -> GateDecision {
         self.events.borrow_mut().push(format!(
             "gate:{}:{:?}",
-            input.envelope.policy.name, input.observed.source
+            input.policy.name, input.observed.source
         ));
         assert_eq!(input.intent.object, input.observed.objects[0]);
         self.decision.clone()
@@ -162,14 +161,8 @@ fn authority() -> ActiveWorkerAuthority {
     }
 }
 
-fn envelope(version: u64, digit: char) -> ExecutionEnvelope<Policy> {
-    ExecutionEnvelope {
-        token: ExecutionEnvelopeToken {
-            version,
-            digest: Sha256Digest(format!("sha256:{}", digit.to_string().repeat(64))),
-        },
-        policy: Policy { name: "fixture" },
-    }
+fn policy() -> Policy {
+    Policy { name: "fixture" }
 }
 
 fn intent_for(request: &ToolRequest) -> ActionIntent {
@@ -239,7 +232,6 @@ fn action(request: ToolRequest) -> WorkerActionRequest {
             lease: lease(),
             worker_session_id: WorkerSessionId(id("wsn", 'A')),
             session_identity: session_identity(),
-            envelope: envelope(1, 'a').token,
         },
         intent: intent_for(&request),
         request,
@@ -324,7 +316,7 @@ fn gateway(
 ) -> WorkerActionGateway<Policy, RecordingGate, RecordingDecisionRecorder, RecordingExecutor> {
     WorkerActionGateway::new(
         authority(),
-        envelope(1, 'a'),
+        policy(),
         RecordingGate {
             events: Rc::clone(events),
             decision,
@@ -409,7 +401,7 @@ fn an_intent_mismatch_never_reaches_the_gate_or_executor() {
 }
 
 #[test]
-fn stale_lease_worker_session_binding_and_envelope_fail_before_the_gate() {
+fn stale_lease_worker_session_and_binding_fail_before_the_gate() {
     let cases = [
         (
             ActionGatewayRejectionCode::StaleLease,
@@ -429,12 +421,6 @@ fn stale_lease_worker_session_binding_and_envelope_fail_before_the_gate() {
                 action.authority.session_identity.codex_thread_id = CodexThreadId(id("cdx", 'B'));
             }),
         ),
-        (
-            ActionGatewayRejectionCode::StaleExecutionEnvelope,
-            Box::new(|action: &mut WorkerActionRequest| {
-                action.authority.envelope = envelope(2, 'b').token;
-            }),
-        ),
     ];
 
     for (expected, mutate) in cases {
@@ -450,7 +436,7 @@ fn stale_lease_worker_session_binding_and_envelope_fail_before_the_gate() {
 }
 
 #[test]
-fn expired_lease_and_replaced_envelope_cannot_execute() {
+fn expired_lease_cannot_execute() {
     let events = Rc::new(RefCell::new(Vec::new()));
     let mut gateway = gateway(&events, GateDecision::Allow);
     let current_action = action(requests().remove(0));
@@ -463,14 +449,6 @@ fn expired_lease_and_replaced_envelope_cannot_execute() {
     assert_eq!(
         expired.rejection_code(),
         Some(ActionGatewayRejectionCode::ExpiredLease)
-    );
-
-    gateway.replace_authority(authority(), envelope(2, 'b'));
-    let stale = execute_action(&mut gateway, &Instant(NOW.to_owned()), &current_action)
-        .expect_err("old envelope token must stop immediately");
-    assert_eq!(
-        stale.rejection_code(),
-        Some(ActionGatewayRejectionCode::StaleExecutionEnvelope)
     );
     assert!(events.borrow().is_empty());
 }
@@ -532,7 +510,7 @@ fn failed_shell_execution_creates_a_machine_blocker_hook() {
     let events = Rc::new(RefCell::new(Vec::new()));
     let mut gateway = WorkerActionGateway::new(
         authority(),
-        envelope(1, 'a'),
+        policy(),
         RecordingGate {
             events: Rc::clone(&events),
             decision: GateDecision::Allow,
@@ -594,7 +572,7 @@ fn an_outbox_failure_stops_an_allowed_action_before_the_executor() {
     let events = Rc::new(RefCell::new(Vec::new()));
     let mut gateway = WorkerActionGateway::new(
         authority(),
-        envelope(1, 'a'),
+        policy(),
         RecordingGate {
             events: Rc::clone(&events),
             decision: GateDecision::Allow,

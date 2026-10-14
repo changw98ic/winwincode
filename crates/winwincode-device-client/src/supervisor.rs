@@ -540,6 +540,9 @@ impl SessionSupervisor {
     ) -> Result<Child, SupervisorError> {
         let binary = self.resolve_worker_binary()?;
         let mut command = Command::new(&binary);
+        for (name, value) in default_worker_environment(&binary, |name| std::env::var_os(name)) {
+            command.env(name, value);
+        }
         command
             .arg(MANAGED_SESSION_ARG)
             .arg(config_path)
@@ -994,6 +997,33 @@ impl SessionSupervisor {
                 .to_owned(),
         })
     }
+}
+
+const HELPER_BINARY_NAME: &str = "winwincode-kernel-helper";
+const HELPER_MANIFEST_NAME: &str = "winwincode-kernel-helper.release.json";
+
+fn default_worker_environment(
+    worker_binary: &Path,
+    lookup: impl Fn(&str) -> Option<std::ffi::OsString>,
+) -> Vec<(&'static str, std::ffi::OsString)> {
+    let mut defaults = Vec::new();
+    if lookup("WWC_WORKER_TLS_ROOT_DER_FILE").is_none()
+        && let Some(root) = lookup("WWC_DEVICE_TLS_ROOT_DER_FILE")
+    {
+        defaults.push(("WWC_WORKER_TLS_ROOT_DER_FILE", root));
+    }
+    if let Some(directory) = worker_binary.parent() {
+        for (name, file) in [
+            ("WWC_WORKER_HELPER_EXECUTABLE", HELPER_BINARY_NAME),
+            ("WWC_WORKER_HELPER_RELEASE_MANIFEST", HELPER_MANIFEST_NAME),
+        ] {
+            let candidate = directory.join(file);
+            if lookup(name).is_none() && candidate.is_file() {
+                defaults.push((name, candidate.into_os_string()));
+            }
+        }
+    }
+    defaults
 }
 
 impl WorkerCapacitySource for SessionSupervisor {
@@ -1545,6 +1575,43 @@ fn stop_tracked_child(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn worker_environment_defaults_come_from_device_and_release_layout() {
+        let root = std::env::temp_dir().join(format!("wwc-worker-env-{}", std::process::id()));
+        fs::create_dir_all(&root).unwrap();
+        let worker = root.join(WORKER_BINARY_NAME);
+        fs::write(root.join(HELPER_BINARY_NAME), b"helper").unwrap();
+        fs::write(root.join(HELPER_MANIFEST_NAME), b"{}").unwrap();
+        let defaults = default_worker_environment(&worker, |name| {
+            (name == "WWC_DEVICE_TLS_ROOT_DER_FILE").then(|| "/device/root.der".into())
+        });
+        assert_eq!(
+            defaults,
+            vec![
+                ("WWC_WORKER_TLS_ROOT_DER_FILE", "/device/root.der".into()),
+                (
+                    "WWC_WORKER_HELPER_EXECUTABLE",
+                    root.join(HELPER_BINARY_NAME).into_os_string()
+                ),
+                (
+                    "WWC_WORKER_HELPER_RELEASE_MANIFEST",
+                    root.join(HELPER_MANIFEST_NAME).into_os_string()
+                ),
+            ]
+        );
+        let overridden = default_worker_environment(&worker, |name| match name {
+            "WWC_DEVICE_TLS_ROOT_DER_FILE"
+            | "WWC_WORKER_TLS_ROOT_DER_FILE"
+            | "WWC_WORKER_HELPER_EXECUTABLE"
+            | "WWC_WORKER_HELPER_RELEASE_MANIFEST" => Some("/explicit".into()),
+            _ => None,
+        });
+        assert!(overridden.is_empty());
+        fs::remove_dir_all(&root).unwrap();
+        let absent = default_worker_environment(&worker, |_| None);
+        assert!(absent.is_empty());
+    }
 
     use std::os::unix::fs::PermissionsExt;
     use std::sync::atomic::{AtomicU64, Ordering};

@@ -1531,7 +1531,6 @@ mod heartbeat_gap {
         provider: "fixture-provider".into(), model: "fixture-model".into(), gateway_route: ModelGatewayRoute { capability: "reasoning".into(), route: "fixture".into() },
         registered_capabilities: capabilities.clone(), discovered_capabilities: vec![],
         action_signing_key: winwincode_execution_port::action_enforcement::ActionEnforcementSigningKey::from_bytes([31;32]).unwrap(),
-        execution_envelope: winwincode_execution_port::action_gateway::ExecutionEnvelopeToken { version:1, digest: winwincode_domain::Sha256Digest(format!("sha256:{}", "a".repeat(64))) },
         execution_mode: winwincode_codex::ExecutionMode::React, observer_mode: winwincode_codex::ObserverMode::Off,
     }).unwrap()).unwrap();
         let config = winwincode_worker::WorkerConfig {

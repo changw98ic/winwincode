@@ -2,7 +2,7 @@
 
 use std::fmt;
 
-use winwincode_domain::{Instant, RequestId, Sha256Digest, WorkerSessionId};
+use winwincode_domain::{Instant, RequestId, WorkerSessionId};
 
 use crate::action_enforcement::{
     ActionEnforcementError, ActionEnforcementVerifier, ActionReceiptClaim, ActionReceiptUseError,
@@ -19,18 +19,6 @@ use crate::repository_rule_pack::{
 };
 use winwincode_domain::SessionIdentity;
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct ExecutionEnvelopeToken {
-    pub version: u64,
-    pub digest: Sha256Digest,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ExecutionEnvelope<Policy> {
-    pub token: ExecutionEnvelopeToken,
-    pub policy: Policy,
-}
-
 #[derive(Debug, Clone, PartialEq)]
 pub struct ActiveWorkerAuthority {
     pub lease: ExecutionLeaseStamp,
@@ -43,7 +31,6 @@ pub struct WorkerActionAuthority {
     pub lease: ExecutionLeaseStamp,
     pub worker_session_id: WorkerSessionId,
     pub session_identity: SessionIdentity,
-    pub envelope: ExecutionEnvelopeToken,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -72,7 +59,7 @@ impl GateDecision {
 
 #[derive(Debug, Clone, Copy)]
 pub struct GateInput<'action, Policy> {
-    pub envelope: &'action ExecutionEnvelope<Policy>,
+    pub policy: &'action Policy,
     pub intent: &'action ActionIntent,
     pub observed: &'action ObservedAction,
 }
@@ -173,7 +160,6 @@ pub enum ActionGatewayRejectionCode {
     ExpiredLease,
     StaleWorkerSession,
     StaleSessionIdentity,
-    StaleExecutionEnvelope,
     IntentMismatch,
     ActionNotApproved,
     InvalidActionReceipt,
@@ -263,7 +249,7 @@ where
 
 pub struct WorkerActionGateway<Policy, Gate, Recorder, Executor> {
     authority: ActiveWorkerAuthority,
-    envelope: ExecutionEnvelope<Policy>,
+    policy: Policy,
     gate: Gate,
     recorder: Recorder,
     executor: Executor,
@@ -279,14 +265,14 @@ where
     #[must_use]
     pub fn new(
         authority: ActiveWorkerAuthority,
-        envelope: ExecutionEnvelope<Policy>,
+        policy: Policy,
         gate: Gate,
         recorder: Recorder,
         executor: Executor,
     ) -> Self {
         Self {
             authority,
-            envelope,
+            policy,
             gate,
             recorder,
             executor,
@@ -302,13 +288,9 @@ where
         Ok(self)
     }
 
-    pub fn replace_authority(
-        &mut self,
-        authority: ActiveWorkerAuthority,
-        envelope: ExecutionEnvelope<Policy>,
-    ) {
+    pub fn replace_authority(&mut self, authority: ActiveWorkerAuthority, policy: Policy) {
         self.authority = authority;
-        self.envelope = envelope;
+        self.policy = policy;
     }
 
     pub fn execute(
@@ -319,12 +301,7 @@ where
         verifier: &ActionEnforcementVerifier,
         receipt_store: &mut dyn ActionReceiptUseStore,
     ) -> ActionGatewayResult<Executor::Output, Recorder::Error, Executor::Error> {
-        validate_authority(
-            now,
-            &self.authority,
-            &self.envelope.token,
-            &action.authority,
-        )?;
+        validate_authority(now, &self.authority, &action.authority)?;
 
         let local_normalization = normalize_action(&action.intent, &action.request)
             .map_err(ActionGatewayError::Normalization)?;
@@ -338,14 +315,14 @@ where
             .map_err(ActionGatewayError::ActionEnforcement)?;
 
         let decision = self.gate.decide(GateInput {
-            envelope: &self.envelope,
+            policy: &self.policy,
             intent: &normalization.intent,
             observed: &normalization.observed,
         });
         self.recorder
             .record(
                 GateInput {
-                    envelope: &self.envelope,
+                    policy: &self.policy,
                     intent: &normalization.intent,
                     observed: &normalization.observed,
                 },
@@ -369,7 +346,7 @@ where
             }
         }
         let input = GateInput {
-            envelope: &self.envelope,
+            policy: &self.policy,
             intent: &normalization.intent,
             observed: &normalization.observed,
         };
@@ -408,15 +385,12 @@ where
 fn validate_authority<RecorderError, ExecutorError>(
     now: &Instant,
     active: &ActiveWorkerAuthority,
-    current_envelope: &ExecutionEnvelopeToken,
     presented: &WorkerActionAuthority,
 ) -> Result<(), ActionGatewayError<RecorderError, ExecutorError>> {
     if active.worker_session_id != active.session_identity.worker_session_id
         || active.lease.attempt < 1
         || active.lease.attempt > 1_000
         || active.lease.issued_at.0 >= active.lease.expires_at.0
-        || current_envelope.version == 0
-        || !is_sha256_digest(&current_envelope.digest.0)
         || !is_canonical_instant(&active.lease.issued_at.0)
         || !is_canonical_instant(&active.lease.expires_at.0)
         || !is_canonical_instant(&now.0)
@@ -452,12 +426,6 @@ fn validate_authority<RecorderError, ExecutorError>(
             "presented session binding is stale",
         ));
     }
-    if presented.envelope != *current_envelope {
-        return Err(rejected(
-            ActionGatewayRejectionCode::StaleExecutionEnvelope,
-            "presented Execution Envelope token is stale",
-        ));
-    }
     Ok(())
 }
 
@@ -469,14 +437,6 @@ fn rejected<RecorderError, ExecutorError>(
         code,
         reason: reason.to_owned(),
     }
-}
-
-fn is_sha256_digest(value: &str) -> bool {
-    value.len() == 71
-        && value.starts_with("sha256:")
-        && value[7..]
-            .bytes()
-            .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
 }
 
 fn is_canonical_instant(value: &str) -> bool {

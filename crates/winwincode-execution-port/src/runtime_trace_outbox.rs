@@ -10,8 +10,7 @@ use winwincode_domain::{
 };
 
 use crate::action_gateway::{
-    ExecutionEnvelopeToken, GateDecision, GateInput, PostActionHook, PostActionOutcome,
-    PreActionDecisionRecorder,
+    GateDecision, GateInput, PostActionHook, PostActionOutcome, PreActionDecisionRecorder,
 };
 use crate::action_normalizer::{
     ActionObject, ActionOperation, ActionRisk, ActionScope, ActionSource,
@@ -227,6 +226,15 @@ impl TraceGateOutcome {
     }
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct IgnoredLegacyField;
+
+impl<'de> Deserialize<'de> for IgnoredLegacyField {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        serde::de::IgnoredAny::deserialize(deserializer).map(|_| Self)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum RuntimeTraceFact {
@@ -244,8 +252,10 @@ pub enum RuntimeTraceFact {
         source: ActionSource,
         operation: ActionOperation,
         decision: TraceGateOutcome,
-        envelope_version: u64,
-        envelope_digest: Sha256Digest,
+        #[serde(default, skip_serializing, rename = "envelope_version")]
+        legacy_envelope_version: IgnoredLegacyField,
+        #[serde(default, skip_serializing, rename = "envelope_digest")]
+        legacy_envelope_digest: IgnoredLegacyField,
     },
     Tool {
         source: ActionSource,
@@ -341,8 +351,8 @@ impl RuntimeTraceDraft {
                 source: input.observed.source,
                 operation: input.observed.operation,
                 decision: outcome,
-                envelope_version: input.envelope.token.version,
-                envelope_digest: input.envelope.token.digest.clone(),
+                legacy_envelope_version: IgnoredLegacyField,
+                legacy_envelope_digest: IgnoredLegacyField,
             },
             artifacts: Vec::new(),
         })
@@ -626,13 +636,6 @@ fn validate_trace_identity(identity: &RuntimeTraceIdentity) -> Result<(), Runtim
 fn validate_trace_fact(fact: &RuntimeTraceFact) -> Result<(), RuntimeTraceInputError> {
     match fact {
         RuntimeTraceFact::Action { objects, .. } if objects.is_empty() => {
-            return Err(RuntimeTraceInputError::InvalidIdentity);
-        }
-        RuntimeTraceFact::Gate {
-            envelope_version,
-            envelope_digest,
-            ..
-        } if *envelope_version == 0 || !sha256_digest(&envelope_digest.0) => {
             return Err(RuntimeTraceInputError::InvalidIdentity);
         }
         RuntimeTraceFact::Candidate { digest } if !sha256_digest(&digest.0) => {
@@ -991,20 +994,5 @@ fn require_durably_ready<IdentityError, AuthorityError, StoreError>(
         RuntimeTraceRetention::Gap { .. } | RuntimeTraceRetention::Conflict { .. } => {
             Err(RuntimeTraceActionJournalError::NotDurablyReady)
         }
-    }
-}
-
-#[must_use]
-pub fn traced_envelope_token(fact: &RuntimeTraceFact) -> Option<ExecutionEnvelopeToken> {
-    match fact {
-        RuntimeTraceFact::Gate {
-            envelope_version,
-            envelope_digest,
-            ..
-        } => Some(ExecutionEnvelopeToken {
-            version: *envelope_version,
-            digest: envelope_digest.clone(),
-        }),
-        _ => None,
     }
 }

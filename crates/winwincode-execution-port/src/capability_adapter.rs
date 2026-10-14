@@ -9,7 +9,7 @@ use winwincode_domain::{Instant, Sha256Digest, WorkerSessionId};
 use crate::action_enforcement::{ActionEnforcementVerifier, ActionReceiptUseStore};
 use crate::action_gateway::{
     ActionGatewayError, CodexToolExecutor, DeterministicActionGate, ExecutedAction,
-    ExecutionEnvelopeToken, PreActionDecisionRecorder, WorkerActionGateway, WorkerActionRequest,
+    PreActionDecisionRecorder, WorkerActionGateway, WorkerActionRequest,
 };
 use crate::action_normalizer::{ToolRequest, canonical_mcp_capability_id};
 use crate::generated::{
@@ -226,7 +226,6 @@ impl WorkerCapabilityCatalog {
         &self,
         capability_id: &str,
         worker_session_id: WorkerSessionId,
-        envelope: ExecutionEnvelopeToken,
     ) -> Result<CapabilityGrant, CapabilityCatalogError> {
         let descriptor = self
             .capabilities
@@ -243,7 +242,6 @@ impl WorkerCapabilityCatalog {
             capability_version: descriptor.version.clone(),
             catalog_digest: self.catalog_digest.clone(),
             worker_session_id,
-            envelope,
         })
     }
 }
@@ -254,7 +252,6 @@ pub struct CapabilityGrant {
     capability_version: String,
     catalog_digest: Sha256Digest,
     worker_session_id: WorkerSessionId,
-    envelope: ExecutionEnvelopeToken,
 }
 
 impl CapabilityGrant {
@@ -271,11 +268,6 @@ impl CapabilityGrant {
     #[must_use]
     pub const fn worker_session_id(&self) -> &WorkerSessionId {
         &self.worker_session_id
-    }
-
-    #[must_use]
-    pub const fn envelope(&self) -> &ExecutionEnvelopeToken {
-        &self.envelope
     }
 }
 
@@ -309,7 +301,6 @@ pub enum CapabilityRejectionCode {
     UnmanagedCapabilityDenied,
     CapabilityNotAuthorized,
     StaleWorkerSession,
-    StaleExecutionEnvelope,
     StaleCapabilityCatalog,
 }
 
@@ -505,17 +496,7 @@ fn validate_grant<RecorderError, ExecutorError>(
             "capability authorization belongs to another WorkerSession",
         ));
     }
-    let envelope_grants: Vec<&CapabilityGrant> = session_grants
-        .into_iter()
-        .filter(|grant| grant.envelope == action.authority.envelope)
-        .collect();
-    if envelope_grants.is_empty() {
-        return Err(capability_rejection(
-            CapabilityRejectionCode::StaleExecutionEnvelope,
-            "capability authorization belongs to another Execution Envelope",
-        ));
-    }
-    if !envelope_grants.iter().any(|grant| {
+    if !session_grants.iter().any(|grant| {
         grant.catalog_digest == catalog.catalog_digest
             && grant.capability_version == descriptor.version
     }) {

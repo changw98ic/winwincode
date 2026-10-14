@@ -346,10 +346,6 @@ fn native_config(root: &TestDirectory) -> winwincode_codex::ProductionCodexConfi
             .unwrap(),
         ],
         action_signing_key: action_signing_key(),
-        execution_envelope: winwincode_execution_port::action_gateway::ExecutionEnvelopeToken {
-            version: 1,
-            digest: digest('a'),
-        },
         execution_mode: winwincode_codex::ExecutionMode::React,
         observer_mode: winwincode_codex::ObserverMode::Off,
     })

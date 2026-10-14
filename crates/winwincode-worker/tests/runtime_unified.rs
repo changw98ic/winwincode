@@ -117,7 +117,6 @@ impl Fixture {
             gateway_route: wire::ModelGatewayRoute { capability: "reasoning".into(), route: "embedded-canonical-loopback".into() },
             registered_capabilities: config.capabilities.clone(), discovered_capabilities: Vec::new(),
             action_signing_key: winwincode_execution_port::action_enforcement::ActionEnforcementSigningKey::from_bytes([31; 32]).unwrap(),
-            execution_envelope: winwincode_execution_port::action_gateway::ExecutionEnvelopeToken { version: 1, digest: digest(b"test-envelope") },
             execution_mode: mode, observer_mode: winwincode_codex::ObserverMode::Off,
         }).unwrap();
         ProductionCodexAdapter::open(if hosted {

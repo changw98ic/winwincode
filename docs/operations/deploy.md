@@ -211,19 +211,18 @@ globalThis.__WINWINCODE_CLIENT_CONFIG__ = Object.freeze({
 
 ## 接入 Device Client
 
-以下步骤只完成 Device Client 服务接入、设备连接、仓库注册和 Provider 配置。它们不能单独证明任务可执行。当前发布包缺少 `WWC_WORKER_EXECUTION_ENVELOPE_DIGEST` 的生产生成和可信下发流程。因此，当前文档不能给出完整的 managed Worker 生产装配。不要使用测试 fixture 的固定密钥或合成 digest 补齐生产配置。
+以下步骤只完成 Device Client 服务接入、设备连接、仓库注册和 Provider 配置。它们不能单独证明任务可执行。managed Worker 还需要下表中的运行配置。不要使用测试 fixture 的固定密钥补齐生产配置。
 
 Device supervisor 启动 Worker 时会继承 Device Client 进程的环境。它只额外设置 `WWC_MANAGED_START_GATE=1`，并写入包含会话身份、仓库、目录、Server origin 和 Worker 凭据路径的 managed config。该 config 不包含下表中的 Worker 运行配置。
 
 | 变量 | 当前要求和来源 |
 | --- | --- |
-| `WWC_WORKER_TLS_ROOT_DER_FILE` | `run_worker` 必填。它应指向 Worker 连接 Server 时信任的 DER 根证书。`WWC_DEVICE_TLS_ROOT_DER_FILE` 不会自动映射到该变量。两条连接信任同一根证书时，部署者可以显式让两个变量指向同一文件。 |
+| `WWC_WORKER_TLS_ROOT_DER_FILE` | `run_worker` 必填。它应指向 Worker 连接 Server 时信任的 DER 根证书。未设置时，Device supervisor 使用 `WWC_DEVICE_TLS_ROOT_DER_FILE`。需要不同根证书时显式设置该变量。 |
 | `WWC_WORKER_ACTION_SIGNING_KEY_HEX` | `run_worker` 和 `production_codex` 必填。它从 Device Client 的环境继承，由部署者通过受保护的服务配置或部署环境提供。它必须与 Server 的 `WWC_SERVER_ACTION_SIGNING_KEY_HEX` 使用同一 32 字节动作签名密钥。不要把密钥写入仓库或日志。 |
-| `WWC_WORKER_HELPER_RELEASE_MANIFEST` | `production_codex` 必填。可信来源是已完成整包校验的发布包内 `bin/winwincode-kernel-helper.release.json`。Worker 会验证清单签名及绑定信息。 |
-| `WWC_WORKER_HELPER_EXECUTABLE` | `production_codex` 必填。可信来源是同一已校验发布包内与签名清单配对的 `bin/winwincode-kernel-helper`。使用绝对路径。 |
-| `WWC_WORKER_EXECUTION_ENVELOPE_DIGEST` | `production_codex` 必填。Worker 用固定版本 `1` 和该 SHA-256 digest 构造 execution-envelope 身份。发布包和当前 Device 启动配置未提供该值的生成与可信下发流程。 |
+| `WWC_WORKER_HELPER_RELEASE_MANIFEST` | `production_codex` 必填。未设置时，Device supervisor 使用 Worker 同目录的 `winwincode-kernel-helper.release.json`。Worker 会验证清单签名及绑定信息。 |
+| `WWC_WORKER_HELPER_EXECUTABLE` | `production_codex` 必填。未设置时，Device supervisor 使用 Worker 同目录的 `winwincode-kernel-helper`。显式设置时使用绝对路径。 |
 
-同目录发现只为 Device supervisor 提供 `winwincode-worker` 的可执行文件路径。它不会提供 Worker TLS 根、动作签名密钥、helper 路径、helper 清单或 execution-envelope digest。
+同目录发现提供 `winwincode-worker`、helper 和 helper 清单路径。动作签名密钥仍需部署者提供；当前协议没有让 Server 向 Device 下发该密钥。
 
 Device Client 必须与目标 Server 建立 HTTPS 连接。自签名证书需要转换为 DER，再通过环境变量提供：
 
@@ -243,7 +242,7 @@ export WWC_DEVICE_SERVER_URL=https://localhost:8443
   --server-url "$WWC_DEVICE_SERVER_URL"
 ```
 
-`wwc device serve` 是前台进程。它会把自身环境传给后续 Worker。发布包中的 `service/` 模板可以交给 `launchd` 或用户级 `systemd`。模板中的占位符必须替换为绝对路径。Linux 模板还要求 `$HOME/.config/winwincode/device-client.env` 提供 `WWC_DEVICE_DATA_DIRECTORY` 和 `WWC_DEVICE_SERVER_URL`。该环境文件也可以作为受支持 Worker 变量的注入点。当前 macOS 模板未预置 Worker 环境变量。两个模板都没有补齐 execution-envelope 身份来源。
+`wwc device serve` 是前台进程。它会把自身环境传给后续 Worker。发布包中的 `service/` 模板可以交给 `launchd` 或用户级 `systemd`。模板中的占位符必须替换为绝对路径。Linux 模板还要求 `$HOME/.config/winwincode/device-client.env` 提供 `WWC_DEVICE_DATA_DIRECTORY` 和 `WWC_DEVICE_SERVER_URL`。该环境文件也可以作为受支持 Worker 变量的注入点。当前 macOS 模板未预置 Worker 环境变量。
 
 另一个终端可以检查状态：
 
@@ -420,7 +419,7 @@ Device 恢复使用相同参数，并把 `--store` 改为 `device`。Device 快�
 - Device Client 拒绝 URL：它要求没有路径、查询和凭据的 `https://` origin。
 - Device Client 无法建立自签名 TLS：检查 `WWC_DEVICE_TLS_ROOT_DER_FILE` 是否为 DER 证书。
 - 任务提示没有 Provider：在 Web 设置页为该 Device 配置 Provider。不要把密钥放到 Server 环境。
-- Worker 在注册前退出：先用 `wwc device logs` 检查缺失的 `WWC_WORKER_*` 变量。`WWC_DEVICE_TLS_ROOT_DER_FILE` 不会设置 `WWC_WORKER_TLS_ROOT_DER_FILE`。当前产品仍缺少 execution-envelope digest 的生产装配来源。
+- Worker 在注册前退出：先用 `wwc device logs` 检查缺失的 `WWC_WORKER_*` 变量。未设置 `WWC_WORKER_TLS_ROOT_DER_FILE` 时，Worker 使用 `WWC_DEVICE_TLS_ROOT_DER_FILE`。
 - Worker 找不到可执行文件：检查 `wwc` 与 `winwincode-worker` 是否位于同一 `bin` 目录。同目录发现只解决 Worker 可执行文件路径。
 - Worker 拒绝 helper：检查 `WWC_WORKER_HELPER_EXECUTABLE` 和 `WWC_WORKER_HELPER_RELEASE_MANIFEST` 是否指向同一已校验发布包中的配对文件。不要绕过签名、摘要、文件模式或 helper 身份校验。
 - 数据库提示 unsupported schema version：停止进程。恢复匹配版本的程序和备份。不要手改 `PRAGMA user_version`。

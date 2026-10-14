@@ -59,7 +59,7 @@ use winwincode_domain::{
 };
 use winwincode_execution_port::{
     action_enforcement::ActionEnforcementSigningKey,
-    action_gateway::{ExecutionEnvelopeToken, PostActionHook, PostActionOutcome},
+    action_gateway::{PostActionHook, PostActionOutcome},
     action_normalizer::{ActionOperation, ActionSource},
     agent_config::{
         AgentJevContextSettings, AgentProfileSettings, AgentSessionConfigSnapshot,
@@ -179,7 +179,6 @@ pub struct ProductionCodexOptions {
     pub registered_capabilities: WorkerCapabilitySet,
     pub discovered_capabilities: Vec<CapabilityDescriptor>,
     pub action_signing_key: ActionEnforcementSigningKey,
-    pub execution_envelope: ExecutionEnvelopeToken,
     pub execution_mode: ExecutionMode,
     pub observer_mode: ObserverMode,
 }
@@ -203,7 +202,6 @@ pub struct ProductionCodexConfig {
     registered_capabilities: WorkerCapabilitySet,
     discovered_capabilities: Vec<CapabilityDescriptor>,
     action_signing_key: ActionEnforcementSigningKey,
-    execution_envelope: ExecutionEnvelopeToken,
     execution_mode: ExecutionMode,
     observer_mode: ObserverMode,
     event_poll_timeout: Duration,
@@ -293,14 +291,6 @@ impl ProductionCodexConfig {
                 valid_route_token(&options.gateway_route.capability),
                 "MODEL_GATEWAY_CAPABILITY_INVALID",
             ),
-            (
-                options.execution_envelope.version > 0,
-                "EXECUTION_ENVELOPE_VERSION_INVALID",
-            ),
-            (
-                valid_sha256_digest(&options.execution_envelope.digest.0),
-                "EXECUTION_ENVELOPE_DIGEST_INVALID",
-            ),
         ] {
             if !valid {
                 return Err(configuration_failure(code));
@@ -337,7 +327,6 @@ impl ProductionCodexConfig {
             registered_capabilities: options.registered_capabilities,
             discovered_capabilities: options.discovered_capabilities,
             action_signing_key: options.action_signing_key,
-            execution_envelope: options.execution_envelope,
             execution_mode: options.execution_mode,
             observer_mode: options.observer_mode,
             event_poll_timeout: Duration::from_millis(DEFAULT_EVENT_POLL_MILLIS),
@@ -581,7 +570,6 @@ impl ProductionCodexAdapter {
             ExecutionPortActionGate::open(
                 &config.data_directory,
                 capability_catalog.clone(),
-                config.execution_envelope.clone(),
                 config.action_signing_key.clone(),
                 bridge.authority(),
             )
@@ -7689,12 +7677,6 @@ fn valid_route_token(value: &str) -> bool {
         })
 }
 
-fn valid_sha256_digest(value: &str) -> bool {
-    value.len() == 71
-        && value.starts_with("sha256:")
-        && value[7..].bytes().all(|byte| byte.is_ascii_hexdigit())
-}
-
 const SEALED_HELPER_DIRECTORY: &str = "helper-installation";
 const SEALED_HELPER_NAME: &str = "winwincode-kernel-helper";
 
@@ -8393,7 +8375,6 @@ mod tests {
     };
     use winwincode_execution_port::{
         action_enforcement::ActionEnforcementSigningKey,
-        action_gateway::ExecutionEnvelopeToken,
         generated::{
             ArtifactAckMessage, ArtifactAckMessageKind, ArtifactKind, ArtifactReference,
             ExecutionPortMessage, LeaseWriteStatus, ModelGatewayRoute,
@@ -11844,10 +11825,6 @@ mod tests {
                 discovered_capabilities: Vec::new(),
                 action_signing_key: ActionEnforcementSigningKey::from_bytes([31_u8; 32])
                     .expect("diagnostic signing key"),
-                execution_envelope: ExecutionEnvelopeToken {
-                    version: 1,
-                    digest: Sha256Digest(format!("sha256:{}", "a".repeat(64))),
-                },
                 execution_mode: ExecutionMode::React,
                 observer_mode: ObserverMode::Off,
             },

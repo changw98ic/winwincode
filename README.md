@@ -16,7 +16,7 @@ WinWinCode 是可自托管的 AI 编程工具。你在浏览器中提交任务�
 2. 在执行设备上启动 Device Client，绑定本地仓库。
 3. 在浏览器中连接设备并配置模型。
 
-这些步骤可以建立 Device 连接。当前发布包仍缺少 managed Worker 的完整生产装配来源。完成该缺口前，不应把 Device 已连接视为 Chat 或 StrongFlow 任务已经可以执行。具体缺口见[接入 Device Client](docs/operations/deploy.md#接入-device-client)。
+这些步骤可以建立 Device 连接。managed Worker 还需要部署者提供与 Server 一致的 `WWC_WORKER_ACTION_SIGNING_KEY_HEX`。配置齐全前，不应把 Device 已连接视为 Chat 或 StrongFlow 任务已经可以执行。所需变量见[接入 Device Client](docs/operations/deploy.md#接入-device-client)。
 
 0.2.0 的新库 password 初始化流程尚未接通。首次部署请使用指南中的本机回环 `local-open` 配置。
 

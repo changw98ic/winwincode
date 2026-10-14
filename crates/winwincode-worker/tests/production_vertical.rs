@@ -1479,10 +1479,6 @@ fn adapter_config_with_modes(
         registered_capabilities: worker_config().capabilities,
         discovered_capabilities: Vec::new(),
         action_signing_key: action_signing_key(),
-        execution_envelope: winwincode_execution_port::action_gateway::ExecutionEnvelopeToken {
-            version: 1,
-            digest: Sha256Digest(format!("sha256:{}", "a".repeat(64))),
-        },
         execution_mode,
         observer_mode,
     })

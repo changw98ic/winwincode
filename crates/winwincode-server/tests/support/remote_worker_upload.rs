@@ -208,7 +208,6 @@ fn adapter(root: &Path, config: &WorkerConfig) -> ProductionCodexAdapter {
         gateway_route: ModelGatewayRoute { capability: "reasoning".into(), route: "unused-fixture".into() },
         registered_capabilities: config.capabilities.clone(), discovered_capabilities: vec![],
         action_signing_key: winwincode_execution_port::action_enforcement::ActionEnforcementSigningKey::from_bytes([31;32]).unwrap(),
-        execution_envelope: winwincode_execution_port::action_gateway::ExecutionEnvelopeToken { version:1, digest: Sha256Digest(format!("sha256:{}","a".repeat(64))) },
         execution_mode: ExecutionMode::React, observer_mode: winwincode_codex::ObserverMode::Off,
     }).unwrap()).unwrap()
 }
