@@ -12,16 +12,16 @@ importers:
         specifier: 24.13.3
         version: 24.13.3
       '@winwincode/browser-core':
-        specifier: 0.1.0-alpha.2
+        specifier: 0.2.0
         version: link:packages/browser-core
       '@winwincode/browser-ui':
-        specifier: 0.1.0-alpha.2
+        specifier: 0.2.0
         version: link:packages/browser-ui
       '@winwincode/control-plane-client':
-        specifier: 0.1.0-alpha.2
+        specifier: 0.2.0
         version: link:packages/control-plane-client
       '@winwincode/network-request':
-        specifier: 0.1.0-alpha.2
+        specifier: 0.2.0
         version: link:packages/network-request
       ajv:
         specifier: 8.20.0
@@ -45,16 +45,16 @@ importers:
         specifier: 4.3.1
         version: 4.3.1
       '@winwincode/browser-core':
-        specifier: 0.1.0-alpha.2
+        specifier: 0.2.0
         version: link:../../packages/browser-core
       '@winwincode/browser-ui':
-        specifier: 0.1.0-alpha.2
+        specifier: 0.2.0
         version: link:../../packages/browser-ui
       '@winwincode/control-plane-client':
-        specifier: 0.1.0-alpha.2
+        specifier: 0.2.0
         version: link:../../packages/control-plane-client
       '@winwincode/network-request':
-        specifier: 0.1.0-alpha.2
+        specifier: 0.2.0
         version: link:../../packages/network-request
       clsx:
         specifier: 2.1.1
@@ -109,7 +109,7 @@ importers:
   packages/browser-core:
     dependencies:
       '@winwincode/contracts':
-        specifier: 0.1.0-alpha.2
+        specifier: 0.2.0
         version: link:../contracts
 
   packages/browser-ui: {}
@@ -119,10 +119,10 @@ importers:
   packages/control-plane-client:
     dependencies:
       '@winwincode/contracts':
-        specifier: 0.1.0-alpha.2
+        specifier: 0.2.0
         version: link:../contracts
       '@winwincode/network-request':
-        specifier: 0.1.0-alpha.2
+        specifier: 0.2.0
         version: link:../network-request
 
   packages/network-request: {}
@@ -130,7 +130,7 @@ importers:
   packages/strongflow:
     dependencies:
       '@winwincode/contracts':
-        specifier: 0.1.0-alpha.2
+        specifier: 0.2.0
         version: link:../contracts
 
 packages:

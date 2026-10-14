@@ -1,6 +1,6 @@
 {
   "name": "@winwincode/strongflow",
-  "version": "0.1.0-alpha.2",
+  "version": "0.2.0",
   "description": "StrongFlow surface descriptor and credential boundary",
   "license": "Apache-2.0",
   "type": "module",
@@ -20,6 +20,6 @@
     "dist"
   ],
   "dependencies": {
-    "@winwincode/contracts": "0.1.0-alpha.2"
+    "@winwincode/contracts": "0.2.0"
   }
 }

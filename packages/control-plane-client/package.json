@@ -1,6 +1,6 @@
 {
   "name": "@winwincode/control-plane-client",
-  "version": "0.1.0-alpha.2",
+  "version": "0.2.0",
   "description": "Product-neutral browser Control Plane facade with injected generated transport",
   "license": "Apache-2.0",
   "type": "module",
@@ -21,7 +21,7 @@
     "access": "public"
   },
   "dependencies": {
-    "@winwincode/contracts": "0.1.0-alpha.2",
-    "@winwincode/network-request": "0.1.0-alpha.2"
+    "@winwincode/contracts": "0.2.0",
+    "@winwincode/network-request": "0.2.0"
   }
 }

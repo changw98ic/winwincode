@@ -45,7 +45,7 @@ exclude = [
 resolver = "2"
 
 [workspace.package]
-version = "0.1.0-alpha.2"
+version = "0.2.0"
 edition = "2024"
 rust-version = "1.95"
 license = "Apache-2.0"
@@ -86,11 +86,11 @@ winwincode-api = { path = "crates/winwincode-api" }
 winwincode-client-port = { path = "crates/winwincode-client-port" }
 winwincode-audit = { path = "crates/winwincode-audit" }
 winwincode-data-export = { path = "crates/winwincode-data-export" }
-winwincode-delivery = { version = "=0.1.0-alpha.2", path = "crates/winwincode-delivery" }
-winwincode-domain = { version = "=0.1.0-alpha.2", path = "crates/winwincode-domain" }
+winwincode-delivery = { version = "=0.2.0", path = "crates/winwincode-delivery" }
+winwincode-domain = { version = "=0.2.0", path = "crates/winwincode-domain" }
 winwincode-execution-port = { path = "crates/winwincode-execution-port" }
 winwincode-fusion = { path = "crates/winwincode-fusion" }
-winwincode-integration-core = { version = "=0.1.0-alpha.2", path = "crates/winwincode-integration-core" }
+winwincode-integration-core = { version = "=0.2.0", path = "crates/winwincode-integration-core" }
 winwincode-integration-sqlite = { path = "crates/winwincode-integration-sqlite" }
 winwincode-connector-github = { path = "crates/winwincode-connector-github" }
 winwincode-connector-jira = { path = "crates/winwincode-connector-jira" }

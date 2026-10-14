@@ -70,19 +70,6 @@ export function setProductVersion(root, version) {
       .replace(workspacePackageVersion, `$1"${version}"`)
       .replace(internalWorkspaceDependencyVersion, `$1=${version}$2`),
   }))
-  const internalDependencyManifestPath = resolve(
-    root,
-    'crates/winwincode-delivery/Cargo.toml',
-  )
-  const internalDependencyManifest = readFileSync(internalDependencyManifestPath, 'utf8')
-  const internalDependencyVersion = /(winwincode-storage\s*=\s*\{[^\n]*\bversion\s*=\s*)"[^"]+"/u
-  if (!internalDependencyVersion.test(internalDependencyManifest)) {
-    throw new Error('winwincode-delivery is missing its exact winwincode-storage version')
-  }
-  updates.push(Object.freeze({
-    path: internalDependencyManifestPath,
-    text: internalDependencyManifest.replace(internalDependencyVersion, `$1"${version}"`),
-  }))
   for (const update of updates) writeFileSync(update.path, update.text)
   return Object.freeze(updates.map(update => update.path))
 }

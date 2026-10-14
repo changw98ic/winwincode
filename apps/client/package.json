@@ -1,6 +1,6 @@
 {
   "name": "@winwincode/client",
-  "version": "0.1.0-alpha.2",
+  "version": "0.2.0",
   "description": "Deployable browser client for WinWinCode Chat, tasks, settings, and approvals",
   "license": "Apache-2.0",
   "type": "module",
@@ -23,9 +23,9 @@
   },
   "dependencies": {
     "@shikijs/langs": "4.3.1",
-    "@winwincode/browser-core": "0.1.0-alpha.2",
-    "@winwincode/browser-ui": "0.1.0-alpha.2",
-    "@winwincode/control-plane-client": "0.1.0-alpha.2",
+    "@winwincode/browser-core": "0.2.0",
+    "@winwincode/browser-ui": "0.2.0",
+    "@winwincode/control-plane-client": "0.2.0",
     "clsx": "2.1.1",
     "mdast-util-from-markdown": "2.0.3",
     "mdast-util-gfm": "3.1.0",
@@ -38,7 +38,7 @@
     "react": "18.3.1",
     "react-dom": "18.3.1",
     "shiki": "4.3.1",
-    "@winwincode/network-request": "0.1.0-alpha.2"
+    "@winwincode/network-request": "0.2.0"
   },
   "scripts": {
     "build": "node scripts/build.mjs",

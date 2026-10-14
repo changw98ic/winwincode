@@ -178,12 +178,12 @@ test('product version command updates every manifest and rejects invalid version
     ].join('\n'))
     mkdirSync(join(fixture, 'crates/winwincode-delivery'), { recursive: true })
     writeFileSync(join(fixture, 'crates/winwincode-delivery/Cargo.toml'), [
-      '[dependencies]',
-      'winwincode-storage = { version = "0.0.0-dev.0", path = "../winwincode-storage" }',
+      '[dev-dependencies]',
+      'winwincode-storage = { path = "../winwincode-storage" }',
       '',
     ].join('\n'))
     const updated = setProductVersion(fixture, '1.2.3-rc.1')
-    assert.equal(updated.length, PRODUCT_PACKAGE_DIRECTORIES.length + 3)
+    assert.equal(updated.length, PRODUCT_PACKAGE_DIRECTORIES.length + 2)
     for (const directory of directories) {
       const manifest = JSON.parse(
         readFileSync(join(fixture, directory, 'package.json'), 'utf8'),
@@ -210,7 +210,7 @@ test('product version command updates every manifest and rejects invalid version
     )
     assert.match(
       readFileSync(join(fixture, 'crates/winwincode-delivery/Cargo.toml'), 'utf8'),
-      /winwincode-storage = \{ version = "1\.2\.3-rc\.1"/u,
+      /winwincode-storage = \{ path = "\.\.\/winwincode-storage" \}/u,
     )
   } finally {
     rmSync(fixture, { recursive: true, force: true })

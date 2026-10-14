@@ -1,0 +1,269 @@
+name: Product release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing release tag
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: product-release-${{ inputs.tag || github.ref_name }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: release-${{ matrix.target }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 360
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: aarch64-apple-darwin
+            runner: macos-15
+          - target: x86_64-apple-darwin
+            runner: macos-15-intel
+          - target: aarch64-unknown-linux-gnu
+            runner: ubuntu-24.04-arm
+          - target: x86_64-unknown-linux-gnu
+            runner: ubuntu-24.04
+    env:
+      CI: '1'
+      COREPACK_ENABLE_DOWNLOAD_PROMPT: '0'
+      CARGO_INCREMENTAL: '0'
+      RUSTC_WRAPPER: sccache
+      SCCACHE_GHA_ENABLED: 'true'
+      SCCACHE_IDLE_TIMEOUT: '0'
+      WINWINCODE_HELPER_RELEASE_PUBLIC_KEY_HEX: ${{ vars.WINWINCODE_HELPER_RELEASE_PUBLIC_KEY_HEX }}
+      RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
+      RELEASE_TARGET: ${{ matrix.target }}
+    steps:
+      - name: Check out release tag
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.tag || github.ref_name }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Verify release identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          git merge-base --is-ancestor HEAD origin/main
+          test "$(git rev-parse HEAD)" = "$(git rev-parse "${RELEASE_TAG}^{commit}")"
+          printf 'SOURCE_DATE_EPOCH=%s\n' "$(git show -s --format=%ct HEAD)" >> "${GITHUB_ENV}"
+          node --input-type=module <<'NODE'
+          import assert from 'node:assert/strict'
+          import { readFileSync } from 'node:fs'
+          const version = JSON.parse(readFileSync('package.json', 'utf8')).version
+          assert.match(version, /^\d+\.\d+\.\d+$/u)
+          assert.equal(process.env.RELEASE_TAG, `v${version}`)
+          assert.match(process.env.WINWINCODE_HELPER_RELEASE_PUBLIC_KEY_HEX, /^[0-9a-f]{64}$/u)
+          NODE
+
+      - name: Install pinned Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version-file: .node-version
+
+      - name: Install Linux build dependencies
+        if: ${{ runner.os == 'Linux' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo bash scripts/install-code-mode-linux-build-deps.sh
+          printf 'LIBCLANG_PATH=/usr/lib/llvm-23/lib\nCLANG_BASE_PATH=/usr/lib/llvm-23\n' >> "${GITHUB_ENV}"
+          printf 'CLANG_PATH=/usr/lib/llvm-23/bin/clang\n' >> "${GITHUB_ENV}"
+          printf 'RUSTFLAGS=-C link-arg=-fuse-ld=lld\n' >> "${GITHUB_ENV}"
+          printf '/usr/lib/llvm-23/bin\n' >> "${GITHUB_PATH}"
+          if [[ ! -e /usr/local/bin/ld.lld ]]; then
+            sudo ln -sf /usr/lib/llvm-23/bin/ld.lld /usr/local/bin/ld.lld
+          fi
+          if [[ -e /proc/sys/kernel/apparmor_restrict_unprivileged_userns ]]; then
+            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          fi
+          bwrap --ro-bind / / --unshare-user --unshare-pid --unshare-net --as-pid-1 -- true
+
+      - name: Install macOS bindgen dependencies
+        if: ${{ runner.os == 'macOS' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          HOMEBREW_NO_AUTO_UPDATE=1 brew install llvm@19
+          printf 'LIBCLANG_PATH=%s/lib\n' "$(brew --prefix llvm@19)" >> "${GITHUB_ENV}"
+          printf 'CLANG_PATH=%s/bin/clang\n' "$(brew --prefix llvm@19)" >> "${GITHUB_ENV}"
+
+      - name: Install pinned Rust
+        shell: bash
+        run: |
+          set -euo pipefail
+          rustup toolchain install 1.95.0 --profile minimal --component rust-src
+          rustup override set 1.95.0
+
+      - name: Install Rust compiler cache
+        uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba
+        with:
+          version: v0.17.0
+
+      - name: Wire C/C++ compiler cache
+        shell: bash
+        run: |
+          set -euo pipefail
+          sccache_bin=$(command -v sccache)
+          printf 'SCCACHE=%s\nCC_WRAPPER=%s\n' "${sccache_bin}" "${sccache_bin}" >> "${GITHUB_ENV}"
+          printf 'CC=%s\nCXX=%s++\n' "${CLANG_PATH}" "${CLANG_PATH}" >> "${GITHUB_ENV}"
+
+      - name: Cache pinned V8 source build
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
+        with:
+          path: target/**/gn_out
+          key: v8-gn-${{ matrix.target }}-release-${{ hashFiles('Cargo.lock', '.cargo/config.toml', 'rust-toolchain.toml', 'scripts/code-mode-ninja.mjs', 'scripts/install-code-mode-linux-build-deps.sh') }}
+
+      - name: Configure release path remapping
+        shell: bash
+        run: |
+          node --input-type=module <<'NODE'
+          import { appendFileSync } from 'node:fs'
+          import { resolve } from 'node:path'
+          import { createReleaseBuildEnvironment, helperReleaseBuildBaseEnvironment } from './scripts/release-artifact-contract.mjs'
+          const root = process.cwd()
+          const environment = createReleaseBuildEnvironment({
+            baseEnvironment: helperReleaseBuildBaseEnvironment(process.env),
+            root,
+            buildRoot: resolve('.cache/release-build'),
+            targetDirectory: resolve('target'),
+            targetDirectories: [resolve('target')],
+            target: process.env.RELEASE_TARGET,
+            runnerTemp: process.env.RUNNER_TEMP,
+            home: process.env.HOME,
+            sourceDateEpoch: Number(process.env.SOURCE_DATE_EPOCH),
+          })
+          appendFileSync(process.env.GITHUB_ENV, `RUSTFLAGS=${environment.RUSTFLAGS}\n`)
+          NODE
+
+      - name: Build Client and release executables
+        shell: bash
+        run: |
+          set -euo pipefail
+          corepack enable
+          corepack pnpm install --frozen-lockfile
+          corepack pnpm build:ts
+          cargo build --locked --release --target "${RELEASE_TARGET}" \
+            -p winwincode-server --bin winwincode-server \
+            -p winwincode-worker --bin winwincode-worker \
+            -p winwincode-kernel-helper --bin winwincode-kernel-helper \
+            -p winwincode-cli --bin wwc
+          for binary in winwincode-server winwincode-worker winwincode-kernel-helper wwc; do
+            path="target/${RELEASE_TARGET}/release/${binary}"
+            chmod 755 "${path}"
+            if [[ "${RUNNER_OS}" == 'macOS' ]]; then
+              codesign --force --sign - "${path}"
+            fi
+          done
+
+      - name: Sign helper and seal release executables
+        shell: bash
+        env:
+          WINWINCODE_HELPER_RELEASE_PRIVATE_KEY_HEX: ${{ secrets.WINWINCODE_HELPER_RELEASE_PRIVATE_KEY_HEX }}
+        run: |
+          node --input-type=module <<'NODE'
+          import assert from 'node:assert/strict'
+          import { resolve } from 'node:path'
+          import { writeHelperReleaseManifest, writeApiProductionSourceSeal } from './scripts/run-api-production-vertical.mjs'
+          assert.match(process.env.WINWINCODE_HELPER_RELEASE_PRIVATE_KEY_HEX, /^[0-9a-f]{64}$/u)
+          const root = process.cwd()
+          const bin = resolve('target', process.env.RELEASE_TARGET, 'release')
+          const helperExecutable = resolve(bin, 'winwincode-kernel-helper')
+          const helperReleaseManifest = writeHelperReleaseManifest(root, helperExecutable)
+          writeApiProductionSourceSeal({ root, serverBinary: resolve(bin, 'winwincode-server'), helperExecutable, helperReleaseManifest })
+          NODE
+
+      - name: Verify the release through the production API
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p .cache
+          node scripts/run-api-production-vertical.mjs --skip-build --device-prerequisites \
+            --server-binary "target/${RELEASE_TARGET}/release/winwincode-server" \
+            --wwc-binary "target/${RELEASE_TARGET}/release/wwc" \
+            --output .cache/release-api-report.json
+
+      - name: Stage, scan and archive the release
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p release-artifacts .cache/release-upload
+          bundle="winwincode-${RELEASE_TAG#v}-${RELEASE_TARGET}"
+          node scripts/stage-product-release.mjs "${RELEASE_TARGET}" "release-artifacts/${bundle}"
+          cd "release-artifacts/${bundle}"
+          shasum -a 256 -c SHA256SUMS
+          cd ../..
+          tar -czf ".cache/release-upload/${bundle}.tar.gz" -C release-artifacts "${bundle}"
+          cd .cache/release-upload
+          shasum -a 256 "${bundle}.tar.gz" > "${bundle}.tar.gz.sha256"
+
+      - name: Upload verified release archive
+        uses: actions/upload-artifact@v7
+        with:
+          name: release-${{ matrix.target }}
+          path: .cache/release-upload/*
+          if-no-files-found: error
+          retention-days: 7
+
+  publish:
+    name: Publish verified release
+    needs: build
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
+    steps:
+      - name: Check out release notes
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.tag || github.ref_name }}
+          persist-credentials: false
+
+      - name: Download all four verified archives
+        uses: actions/download-artifact@v8
+        with:
+          pattern: release-*
+          path: release-upload
+          merge-multiple: true
+
+      - name: Verify archive inventory and checksums
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd release-upload
+          for target in aarch64-apple-darwin x86_64-apple-darwin aarch64-unknown-linux-gnu x86_64-unknown-linux-gnu; do
+            archive="winwincode-${RELEASE_TAG#v}-${target}.tar.gz"
+            test -s "${archive}"
+            sha256sum -c "${archive}.sha256"
+          done
+          cat *.sha256 > SHA256SUMS
+          rm -f -- *.sha256
+
+      - name: Create draft and upload complete release
+        shell: bash
+        run: |
+          set -euo pipefail
+          if gh release view "${RELEASE_TAG}" --json isDraft --jq '.isDraft' > /tmp/release-is-draft; then
+            test "$(cat /tmp/release-is-draft)" = true
+          else
+            gh release create "${RELEASE_TAG}" --verify-tag --draft \
+              --title "WinWinCode ${RELEASE_TAG#v}" \
+              --notes-file ".github/release-notes/${RELEASE_TAG#v}.md"
+          fi
+          gh release upload "${RELEASE_TAG}" release-upload/* --clobber
+          gh release edit "${RELEASE_TAG}" --draft=false --prerelease=false --latest
