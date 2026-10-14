@@ -109,9 +109,9 @@ HTTP 写入入口是 `POST /api/v1/commands`。`CommandEnvelope` 要求以下字
 - `expectedRevision`
 - `payload`
 
-`requestId` 的格式是 `req_` 加 26 个 Crockford Base32 字符。服务端使用 `actor + scope + requestId` 作为幂等身份。同一请求的重试返回原始状态和响应体。相同身份携带不同请求内容时返回 `IDEMPOTENCY_CONFLICT`。
+`requestId` 的格式是 `req_` 加 26 个 Crockford Base32 字符。幂等身份与重放约束见 [命令身份与修订](invariants.md#命令身份与修订)。内容冲突的机器错误码是 `IDEMPOTENCY_CONFLICT`。
 
-`expectedRevision` 是变更前的预期修订号。服务端在写入前检查它。冲突返回 `REVISION_CONFLICT`，并报告预期修订号和当前修订号。完成响应包含 `requestId`、`command`、`previousRevision`、`currentRevision` 和 `result`。异步接受响应包含 `requestId`、`command`、`currentRevision` 和 `acceptedAt`。
+`expectedRevision` 是变更前的预期修订号。修订冲突返回 `REVISION_CONFLICT`，并报告预期修订号和当前修订号。完成响应包含 `requestId`、`command`、`previousRevision`、`currentRevision` 和 `result`。异步接受响应包含 `requestId`、`command`、`currentRevision` 和 `acceptedAt`。写入前置条件见 [命令身份与修订](invariants.md#命令身份与修订)。
 
 查询入口是 `POST /api/v1/queries`。`QueryEnvelope` 要求 `schemaVersion`、`requestId`、`query`、`actor`、`scope`、`parameters` 和 `page`。查询无业务写入副作用。分页游标绑定作用域、查询、筛选条件和快照。
 
@@ -151,7 +151,7 @@ WebSocket 入口是 `/api/v1/events`。它只传输订阅控制帧和服务端�
 
 `ExecutionLeaseStamp` 要求 `leaseId`、`jobId`、`workerId`、`workerInstanceId`、`attempt`、`fencingToken`、`issuedAt` 和 `expiresAt`。`RuntimeEventMessage` 和 `JobOutcomeMessage` 都携带完整 `lease`。运行时事件还携带 `workerSessionId`、`codexThreadId`、`event` 和 `sessionIdentity`。执行结果携带 `workerSessionId`、`outcome` 和 `sessionIdentity`。
 
-`FencingToken` 是十进制字符串。格式是 `^[1-9][0-9]{0,19}$`。字符串编码用于保留 64 位精度。接收方必须按当前租约身份、attempt 和 fencing token 拒绝旧 Worker 的迟到写入。
+`FencingToken` 是十进制字符串。格式是 `^[1-9][0-9]{0,19}$`。字符串编码用于保留 64 位精度。接收约束见 [租约与 fencing](invariants.md#租约与-fencing) 和 [旧 Worker 消息](invariants.md#旧-worker-的迟到消息)。
 
 ## ClientControlPort
 
@@ -169,19 +169,13 @@ WebSocket 入口是 `/api/v1/events`。它只传输订阅控制帧和服务端�
 
 `ClientOccupancyForceFenceMessage` 要求完整信封身份字段，并要求 `occupancyLeaseId`、`occupancyFencingToken`、`supersededLeaseId`、`reason`、`expectedRevision` 和 `idempotencyKey`。
 
-`OccupancyFencingToken` 也是十进制字符串。格式是 `^[1-9][0-9]{0,19}$`。每次新占用都生成更高的 token。旧 token 必须始终被拒绝。不要把该字段改成 JavaScript number。
+`OccupancyFencingToken` 也是十进制字符串。格式是 `^[1-9][0-9]{0,19}$`。不要把该字段改成 JavaScript number。占用校验见 [租约与 fencing](invariants.md#租约与-fencing)。
 
 ExecutionPort 的 `fencingToken` 和 ClientControlPort 的 `occupancyFencingToken` 属于不同租约域。字段名、租约身份和校验上下文不能互换。
 
 ## 当前数据库 Schema 策略
 
-产品数据库只支持唯一的当前 Schema。`crates/winwincode-storage/src/lib.rs` 的 `initialize_schema` 和 `crates/winwincode-device-client/src/store.rs` 的 `initialize_schema` 展示了当前策略。
-
-新库在 `TransactionBehavior::Immediate` 事务中创建当前结构。创建完成后，代码设置 SQLite `user_version`。整个初始化与版本写入一起提交。
-
-打开现有库时，代码先读取 `user_version`。版本既不是 `0`，也不是当前常量时，代码返回 `unsupported schema version <version>`。版本匹配后，代码仍检查关键表、列、索引和触发器。结构不符合规范时，代码返回明确的 `... schema is not canonical` 错误。
-
-当前开发策略不自动升级旧库，也不自动回填旧结构。开发者应保留需要的数据备份，并为不兼容结构使用新的数据目录。运行时不得为了通过启动检查而删除表、清空库或覆盖用户数据。
+产品存储的适用边界、原子初始化与结构拒绝行为见 [当前数据库 schema](invariants.md#当前数据库-schema)。协议版本 `winwincode/v1` 与各库的 SQLite `user_version` 是不同概念。
 
 ## 兼容性检查
 

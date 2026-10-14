@@ -4,7 +4,17 @@
 
 `v0.2.0` 已于 2026-10-14 发布。以下版本号用于说明现有流程。准备新发布时，替换为实际确定且未使用的版本号。
 
-正式发布单位是完整 WinWinCode 产品。不要单独发布 workspace crate 或 npm 包。Rust crate 已有多处 `publish = false`。部分 npm 包仍保留公开 `publishConfig`。这部分配置尚未完成统一清理，不能作为独立发布授权。
+## 发布边界
+
+正式发布单位是完整 WinWinCode 产品。Rust workspace crate 和 npm workspace 包都是产品内部模块。模块可以独立构建和测试，但不形成独立公开版本线。
+
+模块划分服务于产品实现、测试和维护。用户通过产品二进制、网页资源和完整发布包使用 WinWinCode。原决定没有记录独立发布方案的比较理由。
+
+当前配置尚未收敛。部分 Rust crate 已设置 `publish = false`，其他 crate 尚未统一设置。根 npm 包是私有包，但部分 npm workspace 包仍保留公开 `publishConfig`。这些配置不改变完整产品这一发布边界。
+
+后续删除未接入产品的模块前，必须核对产品二进制的正常依赖图，并检查测试、schema、脚本和 workspace 清单。后续清理独立 core 发布流程或消费锁时，必须同步处理对应命令、测试和 schema。清理后仍须保留完整产品的来源、版本、签名、摘要和验收机制。
+
+发布配置的目标是第一方 crate 不可发布、内部 npm 包私有，并统一产品版本。模块删除和配置清理由对应任务实施。
 
 ## 发布前提
 
@@ -209,9 +219,9 @@ winwincode-<version>-<target>/
 └── verification/
 ```
 
-`product-release-manifest.json` 记录来源 commit、版本、target、helper 公钥、构建和验收 run、人工复核 finding、检查集合和全部文件摘要。检查集合包括原生程序身份检查。`SHA256SUMS` 覆盖包内 manifest 及其余文件。`verification/api-production.json` 是精简的 API 验证结果。`verification/source-seal.json` 是来源封印副本。
+`product-release-manifest.json` 记录来源 commit、版本、target、helper 公钥、构建和验收 run、人工复核 finding、检查集合和全部文件摘要。检查集合包括原生程序身份检查。包内 `SHA256SUMS` 是完整文件清单。它覆盖包内 manifest 及其余文件。`verification/api-production.json` 是精简的 API 验证结果。`verification/source-seal.json` 是来源封印副本。
 
-publish job 下载四个平台的归档，并校验每个外层 `.tar.gz.sha256`。随后它把四条外层摘要合并为 Release 根目录的 `SHA256SUMS`。
+publish job 下载四个平台的归档，并校验每个外层 `.tar.gz.sha256`。随后它把四条外层摘要合并为 Release 根目录的 `SHA256SUMS`。这个外层清单只校验四个归档。部署端下载一个平台归档时，应从外层清单精确选择该归档的唯一记录。操作步骤见[部署来源](deploy.md#选择部署来源)。
 
 最终 GitHub Release 至少包含：
 
@@ -295,7 +305,7 @@ node scripts/verify-release-artifact-security.mjs \
 - Release notes 缺失：在 tag 对应 commit 增加正确文件，重新走版本和 tag 流程。
 - 已发布版本有缺陷：发布修复版本。部署端回滚时，恢复旧程序和与旧 schema 匹配的数据备份。
 
-产品数据库只支持当前 schema。程序不会自动升级、回填或清空旧结构。发布说明必须明确数据兼容范围。升级和回滚步骤见[部署指南](deploy.md)。
+数据库适用边界由 [当前数据库 schema](../invariants.md#当前数据库-schema) 维护。发布说明必须明确已发布用户数据的兼容范围；升级策略尚未定义。回滚操作见 [数据目录与 schema](deploy.md#数据目录与-schema)。
 
 ## 相关文档
 

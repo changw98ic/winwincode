@@ -44,6 +44,10 @@
 
 约束：执行权限绑定完整租约身份。至少包括 Job、attempt、lease、fencing token、Worker、Worker instance 和 WorkerSession。终态、取消 ACK、运行时事件、模型帧和工具动作必须匹配当前权限。仅凭 `jobId`、`workerId` 或较新的时间戳都不能授权写入。
 
+Device 占用和 Worker 执行使用不同的租约域。新的 Device 占用使用更高的 token。Device 的 `FencingGuard` 只接受与本地 occupancy mirror 完全相同的 lease ID 和 token。较低 token、未见过的较高 token 或其他 lease 均拒绝。mirror revision 变化会使原本地 ticket 失效。
+
+Worker 凭据绑定 WorkerSession、Worker、Worker instance 和启动授权。远程连接还绑定当前 placement。任务结果与用量结算再次核对当前执行身份和会话状态。
+
 源码依据：
 
 - `crates/winwincode-storage/src/execution_registry.rs`：`ExecutionDispatchAuthority`、`validate_fencing_token`、终态与派发校验。
@@ -55,6 +59,8 @@
 相关测试：`tests/execution-port-contract.test.mjs`、`tests/chat-execution-obsolete-owner-production.test.mjs`、`crates/winwincode-device-client/src/fencing.rs` 的单元测试。
 
 ## 崩溃恢复与新 attempt
+
+每次模型调用和工具调用都保留请求正文与结果正文。执行前允许先保存请求及明确的 pending 状态。成功、失败和取消的终态必须把请求与结果成对原子持久化。
 
 约束：可信的 Worker 崩溃或退出后，系统保存真实退出事实，并将该 owner 的 pending 模型调用和工具调用闭合为失败。原请求和失败结果必须保留。已发操作的用量或副作用无法确定时，应记录 unknown 或 uncertain，不能伪造结果或用量。
 
@@ -133,14 +139,21 @@
 - `crates/winwincode-storage/src/lib.rs`：`receipt_scope_key`。
 - `crates/winwincode-storage/src/execution_registry.rs`：`validate_worker_scope`、`worker_scope_key`。
 - `schema/winwincode/v1/control-plane-http.schema.json`、`schema/winwincode/v1/domain.schema.json` 与 `schema/winwincode/v1/execution-port.schema.json`。
-- [ADR-0004](adr/0004-scope-model.md)。
+
+作用域简化需要同时更新 schema、生成代码、Server、Worker、Device Client、持久化和测试。不能仅改名称或在单一层丢弃归属字段。多个项目的归属、执行授权和持久化隔离必须一起验证。产品目标见 [产品范围](architecture/overview.md#产品范围)；协议变更见 [生成文件规则](contracts.md#生成文件规则)。
 
 相关测试：`tests/control-plane-http-contract.test.mjs`、`tests/execution-port-contract.test.mjs`、`crates/winwincode-server/tests/application_composition.rs`。
 
 ## 当前数据库 schema
 
-约束：产品数据库只接受空库或唯一当前 schema。空库在事务中初始化。版本或列结构不匹配时拒绝打开。运行时恢复使用真实的持久调用事实，不通过自动回填或清空数据绕过不一致。
+运行时只接受唯一当前 schema。开发策略适用于未发布结构：不为这些旧结构添加自动升级、回填或兼容路径。已发布用户数据的升级政策尚未定义；此开发约束不能代替后续发布政策。
 
-源码依据：`crates/winwincode-storage/src/lib.rs` 的 `initialize_schema`、`validate_journal_schema`；各独立存储模块的 `create_schema` 与 `validate_schema`。
+新库原子初始化。当前存储入口在 `TransactionBehavior::Immediate` 事务中读取 SQLite `user_version`。值为 `0` 时创建当前结构并写入当前版本；值为当前常量时检查既有结构；其他值返回 `unsupported schema version <version>`。关键表、列、索引和触发器不符合规范时返回对应的 `... schema is not canonical` 错误。初始化、结构检查和版本写入在同一事务内完成。
+
+不得为了启动而删除表、清空库或覆盖用户数据。不兼容结构需要另用新的数据目录，并保留原数据与失败现场。运行时的 pending 调用闭合和新 attempt 遵循 [崩溃恢复](#崩溃恢复与新-attempt)，继续保留真实调用事实。
+
+备份恢复要求数据与程序的当前结构相匹配。备份本身不提供 schema 升级，操作见 [部署指南](operations/deploy.md#备份校验和恢复)。
+
+源码依据：`crates/winwincode-storage/src/lib.rs` 的 `initialize_schema`、`validate_journal_schema`；`crates/winwincode-device-client/src/store.rs` 的 `initialize_schema`、`validate_store_schema`、`validate_worker_report_schema`；各独立存储模块的 `create_schema` 与 `validate_schema`。
 
 相关测试：`crates/winwincode-codex/src/storage_diagnostic_migration_tests.rs`、`crates/winwincode-storage` 的 schema 测试。

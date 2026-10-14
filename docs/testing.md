@@ -6,6 +6,7 @@
 
 | 层级 | 主要位置 | 标准入口 |
 | --- | --- | --- |
+| 文档格式与本地链接 | 根 Markdown、`docs/`、`scripts/check-docs.mjs`、`tests/docs-check.test.mjs` | `pnpm verify:docs` |
 | 源码格式与边界 | `scripts/check-format.mjs`、`scripts/lint-workspace.mjs`、`scripts/check-network-entrypoints.mjs` | `pnpm verify:source` |
 | TypeScript 构建与测试 | `scripts/run-ts-tests.mjs`、`tests/*.test.mjs` | `pnpm test:ts` |
 | Rust 单元与集成测试 | `crates/*/src`、`crates/*/tests`、根测试目标 | `pnpm test:rust` |
@@ -23,7 +24,8 @@
 | `pnpm test:ts` | 先运行 `pnpm build:ts`，再运行 `node scripts/run-ts-tests.mjs` |
 | `pnpm test:rust` | 先构建 `winwincode-kernel-helper`，再运行 `pnpm test:rust:built` |
 | `pnpm test:rust:built` | 运行 `node scripts/test-rust-workspace.mjs`。调用前必须已有 helper |
-| `pnpm verify:source` | 运行格式检查和源码边界检查 |
+| `pnpm verify:docs` | 运行仓库格式检查、文档检查器的隔离测试和本地文件链接检查。它不构建产品 |
+| `pnpm verify:source` | 先运行 `pnpm verify:docs`，再检查 Rust 格式和源码边界 |
 | `pnpm verify:typescript` | 运行 `pnpm test:ts`，再检查 TypeScript 产品产物 |
 | `pnpm verify:rust` | 构建、lint、测试 Rust，并运行产品和 API 生产链路验证 |
 | `pnpm verify` | 依次运行 source、TypeScript 和 Rust 完整门禁 |
@@ -41,6 +43,14 @@
 这些检查运行真实 Server、Device Client、Worker 和内核二进制。它们验证提交、取消、StrongFlow、重启恢复和消息字节稳定性。模型响应来自 fixture，所以它们不能单独证明真实 Provider 的编程任务质量。
 
 `pnpm verify` 包含上述确定性链路验证。真实编程任务验收应另行使用正式 Client、Device 和真实 Provider 执行，并保存实际模型、调用事实、候选改动和独立验证证据。Provider 配置步骤见 [部署指南](operations/deploy.md)。
+
+## 文档验证
+
+`pnpm verify:docs` 依次运行仓库格式检查、`tests/docs-check.test.mjs` 和 `scripts/check-docs.mjs`。检查器测试使用临时目录。这个命令不启动 Client、Rust、真实 Provider 或浏览器构建。
+
+本地链接检查器支持常规内联链接，以及完整、折叠和快捷引用式链接。它忽略代码围栏和行内代码。它不访问外部链接，也不检查纯锚点。检查本地文件时，它会去掉 fragment，并解码 percent 编码。
+
+链接和引用定义须位于单行，标签不支持嵌套方括号。普通目标不支持空白或右括号；带空白的目标使用尖括号。本地目标中的查询字符串按文件名处理。检查器不实现完整 Markdown 解析。复杂语法、全部标题锚点、外部链接有效性和文档语义仍需人工核对。`pnpm verify:docs` 通过只证明它覆盖的格式、测试和本地文件目标通过。
 
 ## TypeScript 测试
 
@@ -79,6 +89,8 @@ TypeScript 测试使用 Node.js 内置的 `node:test` 和 `node:assert/strict`�
 `apps/client/scripts/build.mjs` 会先删除再重建 `apps/client/dist`。脚本用 `apps/client/.client-build.lock` 串行化构建动作。这个锁不隔离正在读取 `dist` 的测试或服务。
 
 不要并行运行会重建 Client 的浏览器测试。多个验证任务并行时，应使用隔离的 checkout 或隔离的输出目录。需要交给用户继续验收的服务必须保持其对应 `dist` 不变。
+
+交付仍供用户验收的服务时，记录地址、数据目录和启动信息。服务保持运行，直到用户明确要求停止或确认不再需要。
 
 ## Rust 测试
 
@@ -129,7 +141,7 @@ pnpm test:rust
 
 | 变更 | 最小验证 |
 | --- | --- |
-| 纯文档 | 检查 Markdown 格式、相对链接、命令和源码事实。通常不需要重跑完整 Rust 测试 |
+| 纯文档 | `pnpm verify:docs`，再人工核对标题锚点、外部链接、命令和源码事实。通常不需要重跑完整 Rust 测试 |
 | JSON Schema 或生成器 | `pnpm contracts:generate`，再运行 `pnpm contracts:check` 和相关契约测试 |
 | TypeScript 视图模型或页面 | 对应 `tsconfig.*-tests.json`、对应 `tests/*.test.mjs`；交互变化再运行对应真实浏览器测试 |
 | Rust crate | `cargo test --all-features --locked -p <package>`；跨 crate 边界时增加相关集成测试 |

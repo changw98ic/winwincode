@@ -1,6 +1,6 @@
 # 上游源码与补丁
 
-本文说明 WinWinCode 0.2.0 的第三方源码、来源锁、补丁和验收方式。许可证全文与署名见 [`THIRD_PARTY_NOTICES.md`](../THIRD_PARTY_NOTICES.md)。通用检查见[测试指南](testing.md)。产品边界见[架构总览](architecture/overview.md)、[契约](contracts.md)和[安全模型](security-model.md)。目标作用域见 [ADR-0004](adr/0004-scope-model.md)。
+本文说明 WinWinCode 0.2.0 的第三方源码、来源锁、补丁和验收方式。许可证全文与署名见 [`THIRD_PARTY_NOTICES.md`](../THIRD_PARTY_NOTICES.md)。通用检查见 [测试指南](testing.md)。
 
 ## 事实来源
 
@@ -122,4 +122,4 @@ WinWinCode 项目使用 Apache-2.0。以下文件必须保留并随发布源边�
 7. 更新许可证和署名文件。
 8. 运行相关重放测试、`pnpm lint:source`、Rust 构建和受影响测试。
 
-补丁必须能以 `--fuzz=0` 还原和重放。新增或修改目标文件时，要更新重放测试中的上游原始摘要。第三方源码、vendored 源码和补丁保留上游注释与许可证信息。第一方源码只保留 SPDX 许可证头；它是第一方零注释规则的唯一豁免。详情见 [ADR-0001](adr/0001-source-code-comments.md)。
+补丁必须能以 `--fuzz=0` 还原和重放。新增或修改目标文件时，要更新重放测试中的上游原始摘要。维护第三方源码、vendored 源码和补丁时保留上游注释与许可信息。第一方源码风格见 [贡献指南](../CONTRIBUTING.md#源码与注释)。

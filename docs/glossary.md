@@ -22,9 +22,9 @@
 | CodexThread | Codex Core 中的线程对象。WinWinCode 用 `CodexThreadId` 把 Core 线程绑定到 WorkerSession 和 ProductSession。重新开始的 attempt 使用新的 CodexThread。 | `third_party/codex/codex-rs/core-api/src/lib.rs` 的 `CodexThread`；`crates/winwincode-codex/src/contract.rs` 的 `CodexThreadSession` |
 | WorkItem | Delivery 中的一项工作安排。它引用 WorkContract 修订、目标、验收标准和依赖关系。 | `crates/winwincode-domain/src/generated.rs` 的 `WorkItem`、`WorkItemState` |
 | WorkRun | WorkItem 的一次执行尝试。它记录 attempt、ExecutionJob、租约、Worker 身份、Candidate 和终态。 | `crates/winwincode-domain/src/generated.rs` 的 `WorkRun`、`WorkRunState` |
-| requestId | 命令的幂等身份。持久回执实际按 actor、作用域和 `requestId` 查找。同一身份只允许重放同一命令摘要。 | `crates/winwincode-storage/src/lib.rs` 的 `ReceiptIdentity`、`replay_receipt` |
-| expectedRevision | 命令声明的当前状态修订。存储只在它等于实际修订时写入，并把修订增加一。 | `crates/winwincode-storage/src/lib.rs` 的 `append_state_commit`；`crates/winwincode-api/src/generated.rs` 的 `CommandEnvelope` |
-| fencing | 用单调变化的 token 和完整租约身份拒绝旧执行者。新 attempt、Worker replacement 或占用强制切换后，旧 Worker 的迟到消息不能落地。 | `crates/winwincode-storage/src/execution_registry.rs`；`crates/winwincode-device-client/src/fencing.rs` 的 `FencingGuard` |
+| requestId | 命令的逻辑请求标识。幂等条件见 [命令身份与修订](invariants.md#命令身份与修订)。 | `crates/winwincode-storage/src/lib.rs` 的 `ReceiptIdentity`、`replay_receipt` |
+| expectedRevision | 命令声明的预期状态修订。写入条件见 [命令身份与修订](invariants.md#命令身份与修订)。 | `crates/winwincode-storage/src/lib.rs` 的 `append_state_commit`；`crates/winwincode-api/src/generated.rs` 的 `CommandEnvelope` |
+| fencing | 用 token 和租约身份隔离执行权限。完整校验见 [租约与 fencing](invariants.md#租约与-fencing)。 | `crates/winwincode-storage/src/execution_registry.rs`；`crates/winwincode-device-client/src/fencing.rs` 的 `FencingGuard` |
 
 ## 交付与验证
 
@@ -32,7 +32,7 @@
 | --- | --- | --- |
 | Delivery | 从规格到交付终态的聚合根。它包含 DeliverySpec、WorkItem、WorkRun、Candidate、Attention、Evidence 和 Verdict。 | `crates/winwincode-delivery/src/domain/mod.rs` 的 `Delivery`、`DeliverySnapshot` |
 | Candidate | WorkRun 产出的冻结代码结果。其身份绑定 Candidate ref、commit、tree 和 diff 摘要。验证和发布必须读取同一冻结 Candidate。 | `crates/winwincode-domain/src/generated.rs` 的 `Candidate`；`crates/winwincode-delivery/src/domain/candidate.rs` 的 `FrozenDeliveryCandidate` |
-| Publication | 把通过策略检查的 Delivery Candidate 发布到指定目标的状态机。Publication 是 Candidate 的读取者；它到终态前会阻止 Candidate Git ref 释放。 | `crates/winwincode-publication/src/coordinator.rs` 的 `Publication`；`crates/winwincode-control-plane/src/candidate_git_release.rs` 的 `ensure_publication_readers_closed` |
+| Publication | 把 Delivery Candidate 发布到指定目标的状态机。读取者约束见 [Candidate 生命周期](invariants.md#candidate-的读取者与释放)。 | `crates/winwincode-publication/src/coordinator.rs` 的 `Publication`；`crates/winwincode-control-plane/src/candidate_git_release.rs` 的 `ensure_publication_readers_closed` |
 | StrongFlow | WinWinCode 的固定角色交付工作流和对应投影。角色包括需求、方案、计划、执行、独立评审、独立验证、对抗验证和修复。 | `packages/contracts/src/strongflow-role.ts` 的 `STRONGFLOW_ROLE_IDS`；`crates/winwincode-control-plane/src/strongflow_projection.rs` |
 | Fusion | 对多个 Provider 候选进行盲化、claim 提取、共识和冲突分析的机制。Fusion 结果是调查和判定输入。它本身不证明 Candidate 质量通过。 | `crates/winwincode-fusion/src/analysis.rs` 的 `FusionClaim`、`FusionCandidateClaims`；`crates/winwincode-fusion/src/claims.rs` |
 | JEV | 对 premise 与 hypothesis 输出 entailment、contradiction、neutral 分数的判断机制。代码使用 OpenJev 运行时。分数是分析信号，不是验收回执。 | `crates/winwincode-provider/src/jev.rs` 的 `JevHypothesis`、`JevScores`、`JevRuntime` |
@@ -49,4 +49,4 @@
 
 当前实现使用 organization、workspace、project、repository 四级作用域。`OrganizationId`、`WorkspaceId`、`ProjectId`、`RepositoryId` 都是当前协议和存储中的真实身份。`RepositoryScope` 携带完整四级键。
 
-源码依据：`crates/winwincode-domain/src/generated.rs` 的 `RepositoryScope`；`crates/winwincode-storage/src/lib.rs` 的 `receipt_scope_key`；[ADR-0004](adr/0004-scope-model.md)。
+源码依据：`crates/winwincode-domain/src/generated.rs` 的 `RepositoryScope`；`crates/winwincode-storage/src/lib.rs` 的 `receipt_scope_key`。产品目标见 [产品范围](architecture/overview.md#产品范围)，当前校验见 [作用域](invariants.md#作用域)。

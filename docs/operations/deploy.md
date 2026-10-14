@@ -15,7 +15,38 @@ WinWinCode 由浏览器 Client、Server、Device Client、Worker 和内核辅助
 - `aarch64-unknown-linux-gnu`
 - `x86_64-unknown-linux-gnu`
 
-下载压缩包和外层 `SHA256SUMS`。Linux 使用：
+下载所选平台的压缩包和外层 `SHA256SUMS`。外层清单包含四个平台的记录。先精确选择一个归档记录，并要求匹配数等于一。Linux 使用：
+
+```sh
+set -eu
+version=0.2.0
+target=x86_64-unknown-linux-gnu
+archive="winwincode-${version}-${target}.tar.gz"
+awk -v archive="$archive" '$2 == archive { count += 1; record = $0 } END { if (count != 1) exit 1; print record }' \
+  SHA256SUMS > "${archive}.sha256"
+sha256sum -c "${archive}.sha256"
+```
+
+macOS 使用：
+
+```sh
+set -eu
+version=0.2.0
+target=aarch64-apple-darwin
+archive="winwincode-${version}-${target}.tar.gz"
+awk -v archive="$archive" '$2 == archive { count += 1; record = $0 } END { if (count != 1) exit 1; print record }' \
+  SHA256SUMS > "${archive}.sha256"
+shasum -a 256 -c "${archive}.sha256"
+```
+
+校验通过后解压并进入包目录。包内 `SHA256SUMS` 是完整文件清单。不要从包内清单筛选记录。按同样的系统命令校验整个清单。
+
+```sh
+tar -xzf "$archive"
+cd "winwincode-${version}-${target}"
+```
+
+Linux 使用：
 
 ```sh
 sha256sum -c SHA256SUMS
@@ -25,13 +56,6 @@ macOS 使用：
 
 ```sh
 shasum -a 256 -c SHA256SUMS
-```
-
-将下列 `<target>` 替换为所选平台，再解压并进入包目录。按同样的系统命令校验包内 `SHA256SUMS`。
-
-```sh
-tar -xzf 'winwincode-0.2.0-<target>.tar.gz'
-cd 'winwincode-0.2.0-<target>'
 ```
 
 发布包包含这些主要目录和文件：
@@ -63,7 +87,7 @@ git -C /srv/winwincode/repository rev-parse 'HEAD^{tree}'
 
 在输出前添加 `git-tree:`。例如 `git-tree:0123...`。
 
-Server 的 HTTP 监听器可以直接终止 TLS。配置证书时，`WWC_SERVER_PUBLIC_URL` 必须使用 `https://`。不配置证书时，它必须使用 `http://`。Device Client 只接受 HTTPS Server，所以可用的 Device 部署必须在 Server 或受信任反向代理处提供 TLS。
+当前生产 Server 入口总会装配远程 Worker 交换。该交换要求 Server 自己启用 TLS 监听器。生产入口缺少证书或私钥时会在监听前失败。`WWC_SERVER_PUBLIC_URL` 因此必须使用 `https://`。反向代理可以位于 Server 前方，但代理到 Server 的连接仍须使用 Server 的 HTTPS 监听器。当前生产入口不支持由反向代理终止 TLS 后再连接纯 HTTP Server。
 
 下面的示例适用于一台机器上的首次本地部署。它把 Server 绑定到回环地址，并使用 `local-open` 认证。它仍然需要一组发布配置，因为当前 Server 启动时总会装配 GitHub 发布适配器。
 
@@ -111,9 +135,9 @@ export PUBLICATION_APPROVAL_MAX_AGE_MILLIS=3600000
 | 变量 | 要求和默认值 |
 | --- | --- |
 | `WWC_SERVER_BIND` | 必填。Socket 地址，例如 `127.0.0.1:8443`。 |
-| `WWC_SERVER_PUBLIC_URL` | 必填。只允许 origin。不能包含路径、查询、凭据或 fragment。scheme 必须与 TLS 模式一致。 |
+| `WWC_SERVER_PUBLIC_URL` | 必填。只允许 `https://` origin。不能包含路径、查询、凭据或 fragment。 |
 | `WWC_SERVER_ALLOWED_ORIGINS` | 必填。逗号分隔的浏览器 origin。至少一个。 |
-| `WWC_SERVER_PREVIEW_PUBLIC_URL` | 可选。必须是独立 origin。scheme 必须与 Server TLS 模式一致。 |
+| `WWC_SERVER_PREVIEW_PUBLIC_URL` | 可选。必须是独立的 `https://` origin。 |
 | `WWC_SERVER_DATA_DIRECTORY` | 必填。Server 数据根目录。 |
 | `WWC_SERVER_REPOSITORY_ROOT` | 必填。Server 的本地交付仓库。 |
 | `WWC_SERVER_CHECKOUT_REVISION` | 必填。执行配置使用的精确 checkout revision。 |
@@ -134,8 +158,8 @@ export PUBLICATION_APPROVAL_MAX_AGE_MILLIS=3600000
 | `WWC_SERVER_WORKER_POOL_ID` | 默认 `wpl_00000000000000000000000001`。 |
 | `WWC_SERVER_WORKER_INSTANCE_ID` | 可选。未设置时每次启动生成 `wki_` 标识。 |
 | `WWC_SERVER_SCHEDULER_GENERATION` | 可选。未设置时每次启动生成 `gen_` 标识。 |
-| `WWC_SERVER_TLS_CERTIFICATE` | 可选。PEM 证书路径。必须与私钥同时设置。 |
-| `WWC_SERVER_TLS_PRIVATE_KEY` | 可选。PEM 私钥路径。必须与证书同时设置。 |
+| `WWC_SERVER_TLS_CERTIFICATE` | 当前生产入口必填。PEM 证书路径。必须与私钥同时设置。 |
+| `WWC_SERVER_TLS_PRIVATE_KEY` | 当前生产入口必填。PEM 私钥路径。必须与证书同时设置。 |
 | `WWC_SERVER_CREDENTIAL_HASH_CONCURRENCY` | 可选。正整数。无效或缺失时使用可用 CPU 并行数。 |
 | `GITHUB_REPOSITORY` | 必填。格式为 `owner/repository`。 |
 | `GITHUB_CREDENTIAL_REFERENCE_ID` | 必填。规范 `crd_` 标识。 |
@@ -146,6 +170,8 @@ export PUBLICATION_APPROVAL_MAX_AGE_MILLIS=3600000
 | `PUBLICATION_APPROVAL_MAX_AGE_MILLIS` | 必填。审批最大时效，单位为毫秒。 |
 
 当前 Server 不读取 `WWC_SERVER_WORKER_MODE`、`WWC_SERVER_REMOTE_WORKER_CREDENTIAL_FILE`、`WWC_SERVER_REMOTE_WORKER_EXPIRES_AT` 或 `WWC_SERVER_SOURCE_ROOT`。设置这些变量不会改变 Server 的装配方式。Server 当前总是提供远程执行交换和 Device Client 交换端点。
+
+### 认证与首次初始化
 
 首次使用空数据目录时，只有 `local-open` 能完成启动。`SqliteAuthSessionManager::ensure_local_owner` 会自动创建本地 Owner。`password` 模式不会自动创建 Owner，而 `open_production_application` 要求 Owner 在开始监听前已经存在。因此，新数据目录不能通过启动 password Server 后再访问网页完成初始化。
 
@@ -305,13 +331,19 @@ Device Client 的主要数据包括：
 - `providers/providers.sqlite3`。
 - `worker-sessions/`、`execution-workspaces/`、日志和临时运行状态。
 
-当前产品使用唯一当前 schema。新数据库在一个事务中初始化。`control-plane.sqlite3` 和 `device-client.sqlite3` 的 schema 版本不匹配时，程序会拒绝打开。程序不会自动升级、回填或清空旧数据。
+当前运行时只接受唯一当前 schema。新数据库在一个事务中初始化。`control-plane.sqlite3` 和 `device-client.sqlite3` 的 schema 版本不匹配时，程序会拒绝打开。
 
-升级前先备份。降级时恢复旧程序及与它匹配的数据备份。不要让不同版本的 Server 或 Device Client 共享同一数据目录。
+仓库不为未发布的开发结构自动升级、回填或清空数据。这个开发策略不能定义已发布版本的用户数据升级行为。后续版本如何迁移 0.2.0 等已发布版本的数据，目前没有统一策略。发布说明必须逐次说明数据兼容范围。
+
+升级前先备份。备份只提供与原 schema 匹配的恢复点。`wwc backup` 不转换 schema，恢复操作也不执行 schema 升级。不要把备份流程当作升级流程。降级时恢复旧程序及与它匹配的数据备份。不要让不同版本的 Server 或 Device Client 共享同一数据目录。
 
 ## 备份、校验和恢复
 
 `wwc backup` 支持 `server` 和 `device` 两种 store。它使用 SQLite `VACUUM INTO` 生成一致性快照，不会热拷贝 SQLite 文件。
+
+当前备份范围有限。Server backup 只发现 `WWC_SERVER_DATA_DIRECTORY` 根目录下的 `*.sqlite3`。它不包含嵌套的 auth session、event hub、artifact catalog、artifact object 或 `SECRET_DIRECTORY`。Device backup 只包含 `device-client.sqlite3`。它不包含 `providers/providers.sqlite3`、Provider 凭据或 Worker 工作目录。
+
+因此，`wwc backup` 当前不是完整灾难恢复包。运行下列命令前，先为未覆盖数据制定单独的停机备份方案。凭据必须按组织的秘密管理政策单独处理。不要热拷贝未覆盖的 SQLite 文件。
 
 Server 快照：
 
@@ -363,12 +395,6 @@ Device 恢复使用相同参数，并把 `--store` 改为 `device`。Device 快�
 `--apply` 只执行白名单动作，例如 SQLite checkpoint 和清理遗留临时文件。每次诊断或修复都会追加 `backup-repair-log.jsonl`。
 
 所有 backup 子命令都支持 `--json`。Server store 未显式传 `--data-dir` 时会读取 `WWC_SERVER_DATA_DIRECTORY`。Device store 始终要求 `--data-dir`。
-
-### 当前备份范围限制
-
-Server backup 只发现 `WWC_SERVER_DATA_DIRECTORY` 根目录下的 `*.sqlite3`。它不包含嵌套的 auth session、event hub、artifact catalog、artifact object 或 `SECRET_DIRECTORY`。Device backup 只包含 `device-client.sqlite3`。它不包含 `providers/providers.sqlite3`、Provider 凭据或 Worker 工作目录。
-
-因此，`wwc backup` 当前不是完整灾难恢复包。完整迁移还需要在停止服务后保留未覆盖的目录，并按组织的秘密管理政策单独处理凭据。不要把未覆盖目录的热文件拷贝当成 SQLite 一致性快照。
 
 ## 故障定位
 

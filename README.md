@@ -20,18 +20,7 @@ WinWinCode 是可自托管的 AI 编程工具。你在浏览器中提交任务�
 
 ## 从源码构建
 
-需要 Node.js 24.19.0、pnpm 11.7.0、Corepack 和 Rust 1.95.0。macOS 和 Linux 的编译依赖见 [部署指南](docs/operations/deploy.md)。内核构建会从源码编译 V8。
-
-在仓库根目录运行：
-
-```sh
-corepack enable
-pnpm install --frozen-lockfile
-pnpm build
-cargo build --locked -p winwincode-cli --bin wwc
-```
-
-`pnpm build` 构建网页资源、Server、Worker 和内核辅助进程。最后一条命令构建 `wwc`。Rust 输出目录由 `CARGO_TARGET_DIR` 或 Cargo 配置决定。
+环境、工具链和完整构建步骤见 [部署指南](docs/operations/deploy.md#从源码构建)。
 
 ## 文档
 

@@ -4,9 +4,7 @@
 
 ## 产品范围
 
-Server 保存一个 Owner 账户。协议和存储使用 Organization、Workspace、Project 和 Repository 四级作用域，匹配资源身份与访问权限。
-
-Browser Client 负责展示和协议消费。Server 持有产品状态和命令入口。Device Client 持有设备状态、仓库访问和 Device Provider 凭据。Worker 在租约内执行任务。内嵌 Codex 内核负责模型、工具和任务生命周期。
+产品范围和组件职责见 [架构总览](architecture/overview.md#产品范围)。下文说明这些组件之间的安全边界。
 
 ## 保护对象
 
@@ -65,15 +63,7 @@ HTTP 会话 Cookie 使用 `HttpOnly` 和 `SameSite=Lax`。启用 TLS 后，Cooki
 
 ## 请求、修订和 fencing
 
-写命令使用三个互补机制：
-
-- `requestId` 标识一次逻辑请求。相同请求和相同内容可以重放。相同标识和不同内容会冲突。
-- `expectedRevision` 实现乐观并发控制。状态已经变化时，命令返回 revision conflict。
-- fencing token 绑定当前占用或执行租约。只接受与当前 lease、attempt、Worker 和 Worker instance 完全匹配的消息。
-
-Device Client 的 `FencingGuard` 要求 lease ID 和 fencing token 与本地 occupancy mirror 完全相等。较低 token、未见过的较高 token 和其他 lease 都会被拒绝。mirror revision 变化也会使已经签发的本地 ticket 失效。
-
-Worker 凭据绑定 Worker Session、Worker、Worker Instance 和启动授权。远程连接还绑定当前 Worker placement。任务结果和用量结算再次核对 lease、attempt、fencing token、Worker Instance 和会话状态。因此，已被替换的 Worker 不能用旧凭据或旧消息写入当前执行。
+幂等身份防止请求重放产生重复效果，修订检查防止覆盖并发修改，fencing 防止旧执行者继续写入。完整条件由 [命令身份与修订](invariants.md#命令身份与修订)、[租约与 fencing](invariants.md#租约与-fencing) 和 [旧 Worker 消息](invariants.md#旧-worker-的迟到消息) 维护。协议字段见 [契约](contracts.md)。
 
 ## Provider 凭据
 
@@ -132,7 +122,7 @@ macOS 发布二进制使用 `codesign --sign -` 进行 ad-hoc 签名。0.2.0 没
 
 ## 失败策略和剩余风险
 
-关键身份、租约、回执、schema 或摘要不匹配时，组件应拒绝操作。恢复逻辑保留已发生的 Provider 调用、工具调用和结算事实。它不会把未知结果改写为成功。
+关键身份、租约、回执、schema 或摘要不匹配时，组件应拒绝操作。恢复中的调用事实处理见 [崩溃恢复](invariants.md#崩溃恢复与新-attempt)。
 
 以下风险仍需要部署者处理：
 
@@ -148,7 +138,7 @@ macOS 发布二进制使用 `codesign --sign -` 进行 ad-hoc 签名。0.2.0 没
 
 ## 验证与维护
 
-安全相关变更必须同步检查 schema、生成代码、运行时和测试。测试策略见[测试指南](testing.md)。运行约束见[不变量](invariants.md)。上游 Codex 更新见[上游维护](upstream.md)。术语见[术语表](glossary.md)。架构决定见 [ADR 索引](adr/README.md)。
+安全相关变更按 [协议修改流程](contracts.md#生成文件规则) 和 [定向验证](testing.md#定向验证) 检查受影响边界。上游 Codex 更新见 [上游维护](upstream.md)。
 
 ## 实现依据
 

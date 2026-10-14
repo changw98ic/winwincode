@@ -6,7 +6,15 @@
 
 WinWinCode 当前由浏览器 Client、Control Plane、Execution Worker 和设备 Client 组成。`apps/client` 是产品 Client。`winwincode-server` 是独立 Server。`winwincode-worker` 是独立 Worker。`winwincode-local` 提供把 Control Plane 和 Worker 组合到一个进程中的库接口。`wwc` 来自 `crates/winwincode-cli`。
 
-身份模型保留单个本地 Owner。协议使用 organization、workspace、project、repository 四级作用域。`crates/winwincode-domain/src/generated.rs` 中的 `RepositoryScope` 携带四个标识。
+## 产品范围
+
+WinWinCode 的已批准目标是单用户、单工作区、多项目。单个稳定 Owner 身份表示该用户。唯一工作区归属该 Owner。Owner 身份不随 Server 重启或项目切换而改变。
+
+工作区可以包含多个项目。每个项目保留独立身份，并归属该工作区。每个仓库也保留独立身份，并归属对应项目。项目与仓库的最终基数由统一后的领域模型和契约规定。该目标不能推导成单仓库限制。
+
+当前实现尚未完成作用域迁移。协议、领域模型和存储仍使用 organization、workspace、project、repository 四级作用域。`crates/winwincode-domain/src/generated.rs` 中的 `RepositoryScope` 仍携带四个标识。当前校验由 [作用域不变量](../invariants.md#作用域) 维护。
+
+协议事实来源见 [契约](../contracts.md#事实来源)。原决定没有记录简化作用域的比较理由。
 
 ```mermaid
 flowchart LR
@@ -119,7 +127,7 @@ Provider 的 HTTPS/SSE 请求使用这一传输层。设备 Client 和 Worker �
 
 ## 第一方 crate 依赖
 
-下图只显示工作区内当前产品 crate 的 Cargo normal 依赖。箭头表示左侧 crate 依赖右侧 crate。可选 normal 依赖也包含在图中。第三方依赖和计划移除的 crate 不在图中。
+下图只显示工作区内当前产品 crate 的 Cargo normal 依赖。箭头表示左侧 crate 依赖右侧 crate。可选 normal 依赖也包含在图中。第三方依赖和未接入当前产品运行路径的 crate 不在图中。
 
 ```mermaid
 flowchart LR
@@ -199,4 +207,4 @@ flowchart LR
 
 `kernel-helper` 只依赖内嵌 Codex crate 和 Tokio，因此图中没有第一方出边。
 
-模块职责见 [crate 清单](crates.md)。架构决定和迁移范围见 [ADR](../adr/README.md)。
+模块职责见 [crate 清单](crates.md)。发布边界见 [发布指南](../operations/release.md#发布边界)。

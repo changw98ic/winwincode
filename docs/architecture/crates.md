@@ -2,7 +2,7 @@
 
 本文记录 WinWinCode 0.2.0 在提交 `58421705` 的第一方 Rust crate。依赖关系来自 `cargo metadata --no-deps --format-version 1 --offline`。这里只列工作区内的 Cargo normal 依赖和反向依赖。开发依赖不计入。依赖列表省略统一的 `winwincode-` 前缀。
 
-架构关系见 [架构总览](overview.md)。公共术语见 [术语表](../glossary.md)。协议边界见 [契约](../contracts.md)。测试分层见 [测试策略](../testing.md)。
+架构关系见 [架构总览](overview.md)。公共术语见 [术语表](../glossary.md)。协议边界见 [契约](../contracts.md)。测试分层见 [测试策略](../testing.md)。所有 workspace crate 都是产品内部模块。发布规则见[发布边界](../operations/release.md#发布边界)。
 
 ## 运行入口
 
@@ -239,51 +239,53 @@
 - 反向依赖：无工作区 normal 依赖。
 - 测试：`crates/winwincode-cli/tests`，4 个 Cargo test target。
 
-## 计划移除的 crate
+## 未接入当前产品运行路径的 crate
+
+下列 crate 仍是 workspace 成员。它们当前没有接入产品运行入口。后续处理遵循[发布边界](../operations/release.md#发布边界)及其实施约束。
 
 ### `winwincode-connector-github`
 
-未接入产品，计划移除。
+当前未接入产品运行入口。
 
 ### `winwincode-connector-jira`
 
-未接入产品，计划移除。
+当前未接入产品运行入口。
 
 ### `winwincode-connector-linear`
 
-未接入产品，计划移除。
+当前未接入产品运行入口。
 
 ### `winwincode-connector-slack`
 
-未接入产品，计划移除。
+当前未接入产品运行入口。
 
 ### `winwincode-connector-teams`
 
-未接入产品，计划移除。
+当前未接入产品运行入口。
 
 ### `winwincode-connector-webhook`
 
-未接入产品，计划移除。
+当前未接入产品运行入口。
 
 ### `winwincode-integration-core`
 
-未接入产品，计划移除。
+当前未接入产品运行入口。
 
 ### `winwincode-integration-sqlite`
 
-未接入产品，计划移除。
+当前未接入产品运行入口。
 
 ### `winwincode-s3-artifact-adapter`
 
-未接入产品，计划移除。
+当前未接入产品运行入口。
 
 ### `winwincode-data-export`
 
-未接入产品，计划移除。
+当前未接入产品运行入口。
 
 ### `winwincode-observability-sqlite`
 
-未接入产品，计划移除。
+当前未接入产品运行入口。
 
 ## 最大的第一方 Rust 源文件
 

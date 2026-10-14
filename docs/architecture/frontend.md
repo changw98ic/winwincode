@@ -1,13 +1,12 @@
 # 前端架构
 
-本文描述 WinWinCode 0.2.0 的浏览器前端。它同时记录当前实现和 React 迁移约定。整体架构见[架构总览](overview.md)。作用域模型见[作用域模型 ADR](../adr/0004-scope-model.md)。
+本文描述 WinWinCode 0.2.0 的浏览器前端。它同时记录当前实现和已批准的 React 目标。整体架构和产品范围见[架构总览](overview.md#产品范围)。作用域校验见[作用域不变量](../invariants.md#作用域)。
 
 相关文档：
 
 - [文档索引](../README.md)
 - [测试](../testing.md)
 - [契约](../contracts.md)
-- [React UI ADR](../adr/0002-react-ui.md)
 
 ## 产品范围
 
@@ -73,29 +72,55 @@
 
 依据：`apps/client/src/client-surface.ts` 中的 `CLIENT_SURFACES` 和 `clientSurfaceFromHash`；`apps/client/src/application.ts` 中的 `homeSubRoute`、`performRender`、`renderChat` 和 `onRouteAuthorizationRevoked`；`packages/browser-core/src/scope-context.ts` 中的 `scopeSelectionFromHash`、`scopeHash` 和 `surfaceHash`。
 
-## 渲染模型
+## React 约定
 
 0.2.0 是混合前端。
 
 应用外壳和当前路由页面使用命令式 DOM。页面通常由 `mount*Page` 或 `render*Page` 创建节点。挂载结果提供 `close()`。可复用控件还可以提供 `update()`。`@winwincode/browser-ui` 也使用这种挂载协议。聊天等页面会在自己的 DOM 中预留根节点，再挂载 React 岛。
 
-React 负责局部岛。`apps/client/src/dsh-ui.tsx` 用 `createRoot` 挂载以下功能：
+React 当前负责局部岛。`apps/client/src/dsh-ui.tsx` 用 `createRoot` 挂载以下功能：
 
 - `MarkdownText`：聊天 Markdown。
 - `AttachmentRail`：待发送附件。
 - `SessionBrowser`：历史会话列表。
 
-`mountChatMarkdown`、`mountAttachmentRail` 和 `mountSessionBrowser` 是命令式页面与 React 岛之间的适配层。调用方只依赖 `update()` 和 `close()`。React 根不会接管外壳或整个页面。
+`mountChatMarkdown`、`mountAttachmentRail` 和 `mountSessionBrowser` 是命令式页面与 React 岛之间的适配层。调用方只依赖 `update()` 和 `close()`。这三个 React 根当前不包含应用外壳和完整页面。
+
+已批准的目标是一个统一的 React 应用根。页面和组件使用 React 函数组件与 TSX。React 只负责表现层。React 组件继续使用现有 hash 路由和视图模型。新增依赖必须有明确需求。现有 `mount*` 入口、React 适配层和 `@winwincode/browser-ui` 必须保留到全部调用方完成迁移。目标状态不表示当前混合实现已经完成迁移。
+
+迁移保留视图模型的业务语义。页面与对应交互测试在同一改动中更新。挂载迁移只替换视图实现，保留页面行为、视觉和状态协议。需要改变这些边界时，另行修改并验收。
 
 依据：`apps/client/src/application.ts` 中的 `element` 和 `mountWinWinCodeClient`；`packages/browser-ui/src/mounted-view.ts` 中的 `MountedView`；`apps/client/src/dsh-ui.tsx` 中的 `mountChatMarkdown`、`mountAttachmentRail` 和 `mountSessionBrowser`。
 
-## 状态、视图模型和 Client API
+## 视图模型与 React
 
 功能状态位于视图模型。视图模型公开只读 `state`、`subscribe()`、用户命令和 `close()`。`subscribe()` 会立即发送当前状态，并返回退订函数。状态更新会发布新的不可变对象。页面订阅状态，并把用户操作转成视图模型方法调用。
 
 视图模型使用 `AbortController` 取消在途请求。异步加载使用代次检查丢弃过期结果。实时订阅处理增量事件、重置请求和授权撤销。写命令携带预期修订号，并核对响应的请求标识和命令名。异步读取、命令提交、实时订阅、取消和错误归一化应留在视图模型或 Client API 适配器中。
 
 当前组合根仍直接执行少量跨页面编排。例如，它读取会话详情和历史会话，解析路由上下文，并创建功能专用端口。这些调用属于应用组合层。功能组件不应复制 Control Plane 请求结构。
+
+React 组件使用 `useSyncExternalStore` 订阅视图模型。当前视图模型的监听器接收最新状态，但没有统一的 `getSnapshot()` 方法。适配代码从 `model.state` 读取快照，并把监听器转换成 React 的无参数变更通知：
+
+```tsx
+import { useCallback, useSyncExternalStore } from 'react'
+
+function useViewModelState<State>(model: {
+  readonly state: State
+  subscribe(listener: (state: State) => void): () => void
+}): State {
+  const subscribe = useCallback(
+    (onStoreChange: () => void) => model.subscribe(() => onStoreChange()),
+    [model],
+  )
+  const getSnapshot = useCallback(() => model.state, [model])
+  return useSyncExternalStore(subscribe, getSnapshot, getSnapshot)
+}
+```
+
+视图模型必须在状态变化时发布新的不可变快照。一个快照在下一次发布前必须保持引用稳定。组件卸载时，React 会调用 `subscribe()` 返回的退订函数。组件事件处理器只调用视图模型命令或明确注入的端口。异步读取、命令提交、实时订阅、取消和错误归一化仍由视图模型或 Client API 适配器处理。
+
+当前命令式页面通过 `subscribe(state => render(state))` 更新 DOM。`CodeBlock` 使用 `useSyncExternalStore` 订阅语法包加载状态。
 
 Client API 的调用链如下：
 
@@ -114,35 +139,7 @@ Client API 的调用链如下：
 
 `createQueryCache` 包装查询客户端。缓存键包含 actor、scope、查询名、参数和分页。相同键的并发查询共享在途请求。命令、实时事件、授权纪元变化和重连会按相应作用域失效或清空缓存。连接观察器把网络、授权和版本错误映射到统一连接状态。
 
-依据：`apps/client/src/chat-view-model.ts` 中的 `ChatViewModel` 和 `createChatViewModel`；`apps/client/src/settings-view-model.ts` 中的 `SettingsViewModel` 和 `createSettingsViewModel`；`apps/client/src/community-control-plane-client.ts`；`apps/client/src/generated/contracts.ts`；`apps/client/src/generated/control-plane-client.ts`；`apps/client/src/core/connection-state.ts` 中的 `observeControlPlaneClient`；`packages/browser-core/src/query-cache.ts` 中的 `createQueryCache` 和 `queryCacheKey`。
-
-## React 迁移约定
-
-目标 UI 使用 TypeScript 和 React 函数组件。迁移按页面或局部功能进行。迁移必须保留现有视图模型、Client API 边界、hash 路由和用户可见行为。迁移不新增路由依赖或全局状态依赖。
-
-React 组件使用 `useSyncExternalStore` 订阅现有视图模型。当前视图模型的监听器接收最新状态，但还没有统一的 `getSnapshot()` 方法。适配代码应从 `model.state` 读取快照，并把现有监听器转换成 React 的无参数变更通知：
-
-```tsx
-import { useCallback, useSyncExternalStore } from 'react'
-
-function useViewModelState<State>(model: {
-  readonly state: State
-  subscribe(listener: (state: State) => void): () => void
-}): State {
-  const subscribe = useCallback(
-    (onStoreChange: () => void) => model.subscribe(() => onStoreChange()),
-    [model],
-  )
-  const getSnapshot = useCallback(() => model.state, [model])
-  return useSyncExternalStore(subscribe, getSnapshot, getSnapshot)
-}
-```
-
-视图模型必须在状态变化时发布新的不可变快照。一个快照在下一次发布前必须保持引用稳定。组件卸载时，React 会调用 `subscribe()` 返回的退订函数。组件事件处理器只调用视图模型命令或明确注入的端口。
-
-这项约定尚未全量实现。0.2.0 中，`CodeBlock` 使用 `useSyncExternalStore` 订阅语法高亮语法包的加载状态。页面视图模型尚未全部接入该 Hook。多数页面仍通过命令式 `subscribe(state => render(state))` 更新 DOM。
-
-依据：`apps/client/src/dsh/markdown/CodeBlock.tsx` 中的 `CodeBlock`；`apps/client/src/chat-page.ts` 中的 `mountChatPage`；`apps/client/src/chat-view-model.ts` 中的 `subscribe`；[React UI ADR](../adr/0002-react-ui.md)。
+依据：`apps/client/src/chat-view-model.ts` 中的 `ChatViewModel` 和 `createChatViewModel`；`apps/client/src/settings-view-model.ts` 中的 `SettingsViewModel` 和 `createSettingsViewModel`；`apps/client/src/chat-page.ts` 中的 `mountChatPage`；`apps/client/src/dsh/markdown/CodeBlock.tsx` 中的 `CodeBlock`；`apps/client/src/community-control-plane-client.ts`；`apps/client/src/generated/contracts.ts`；`apps/client/src/generated/control-plane-client.ts`；`apps/client/src/core/connection-state.ts` 中的 `observeControlPlaneClient`；`packages/browser-core/src/query-cache.ts` 中的 `createQueryCache` 和 `queryCacheKey`。
 
 ## 共享包边界
 
@@ -191,29 +188,19 @@ DSH 代码来自 DeepSeek Harness `dsh-v0.1.0-rc.8`，提交 `141eb6fef83422698a
 
 构建还复制 `apps/client/public` 和 `THIRD_PARTY_NOTICES.md`。它生成 `version.json` 和 `asset-manifest.json`。清单记录文件大小、SHA-256、发布目标和运行时配置位置。`runtime-config.js` 在部署时可修改，因此不进入资源摘要列表。
 
-`dsh-ui.tsx` 同时属于 TypeScript 编译图和单独的 esbuild 入口。它的单独入口允许 React 岛及其依赖形成 ESM 分块。`boot.ts` 负责可部署应用。`index.ts` 负责包级 API。React 迁移按调用方完成情况收敛挂载与构建入口。
+`dsh-ui.tsx` 同时属于 TypeScript 编译图和单独的 esbuild 入口。它的单独入口允许 React 岛及其依赖形成 ESM 分块。`boot.ts` 负责可部署应用。`index.ts` 负责包级 API。
 
 依据：根 `package.json`；`apps/client/package.json`；`apps/client/tsconfig.json`；`apps/client/scripts/build.mjs`；`apps/client/public/index.html`。
 
-## 测试与视觉验收
+## 验证入口
 
-TypeScript 测试使用 Node.js 内置的 `node:test`。`pnpm test:ts` 先运行 TypeScript 构建，再由 `scripts/run-ts-tests.mjs` 以单并发执行规范测试列表。页面测试按需要使用以下环境：
+前端沿用现有 React、TypeScript、esbuild、`node:test` 和 JSDOM 工具链。测试分层和命令见[TypeScript 测试](../testing.md#typescript-测试)。真实浏览器入口见[真实浏览器入口](../testing.md#真实浏览器入口)。
 
-- 轻量 fake DOM，用于节点身份、监听器释放和精确交互测试。
-- JSDOM，用于聊天、登录设置和 StrongFlow 评审等 DOM 集成测试。相关测试先用专用 `tsconfig` 编译目标。需要浏览器 bundle 的测试再用 esbuild 打包被测入口。
-- 真实 Chromium，用于浏览器路由和可访问性检查。
-
-esbuild 负责浏览器 bundle、CSS bundle 和部分测试 bundle。测试应覆盖构建后的入口、动态分块、公开静态资源和包导出。详细命令和测试分层见[测试](../testing.md)。
-
-视觉验收必须使用真实浏览器渲染截图，并对照设计稿进行评审。截图应覆盖目标视口、主题和关键状态。评审结果应记录页面、视口、状态和差异结论。
-
-保留的 UI-608 测试文件捕获 DOM 路径、文本、状态属性、计算样式 token 和几何信息。它们不生成像素截图，已移出规范 TypeScript 测试清单，只作参考。UI-608 指纹测试不能作为视觉验收证据。
-
-依据：根 `package.json` 中的 `test:ts`；`scripts/run-ts-tests.mjs`；`tests/chat-page.test.mjs`、`tests/codex-login-settings.test.mjs` 和 `tests/strongflow-review-ui.test.mjs` 中的 JSDOM 使用；`tests/ui608-visual-regression.test.mjs`、`tests/ui608-page-visual-browser.test.mjs` 和 `tests/ui608-component-state-visual-browser.test.mjs`。
+并行验证的产物隔离要求见[共享 Client 构建目录](../testing.md#共享-client-构建目录)。真实 Provider 与 fixture 的证据边界见[真实任务与 fixture](../testing.md#真实任务与-fixture)。视觉变更的验收方法见[视觉验收](../testing.md#视觉验收)。
 
 ## DOM 契约和可访问性
 
-迁移和重构必须保留对外可观察的 DOM 契约。以下内容需要稳定：
+迁移和重构必须保留对外可观察的 DOM 契约、hash 路由和用户可见行为。以下内容需要稳定：
 
 - `data-winwincode-client-root` 等挂载标记。
 - `data-surface`、`data-capability`、`data-route-access`、`data-session-key` 和 `data-wwc-component` 等状态与身份属性。
