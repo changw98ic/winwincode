@@ -218,7 +218,7 @@ async function secureAcceptanceRequestOnce(url, { method = 'GET', body, cookie, 
   return new Promise((resolvePromise, reject) => {
     let tls = null
     const request = (endpoint.protocol === 'https:' ? httpsRequest : httpRequest)(endpoint, {
-      method, ca, rejectUnauthorized: true, timeout: timeoutMillis,
+      method, ca, agent: false, rejectUnauthorized: true, timeout: timeoutMillis,
       headers: { Accept: 'application/json', Connection: 'close', ...headers,
         ...(origin ? { Origin: origin } : {}), ...(cookie ? { Cookie: cookie } : {}),
         ...(bytes ? { 'Content-Type': 'application/json', 'Content-Length': bytes.length } : {}) },

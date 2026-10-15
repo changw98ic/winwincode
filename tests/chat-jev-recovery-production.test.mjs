@@ -10,7 +10,7 @@ import { DatabaseSync } from 'node:sqlite'
 import test from 'node:test'
 
 import { createCertificate, runApiProductionVertical } from '../scripts/run-api-production-vertical.mjs'
-import { waitFor } from '../scripts/device-production-fixture.mjs'
+import { waitFor, writeDeviceTrustRoot } from '../scripts/device-production-fixture.mjs'
 import { readDeviceExecutionReceipts } from '../scripts/export-device-candidate.mjs'
 
 const digest = bytes => `sha256:${createHash('sha256').update(bytes).digest('hex')}`
@@ -186,7 +186,10 @@ function acceptedOutcome(database, jobId) {
 // terminal retention. Preparation-in-flight death is a separate recovery case.
 test('JEv-enabled Chat preserves completed paid preparation after Worker terminal retention and a Server crash', async t => {
   const directory = mkdtempSync(join(tmpdir(), 'wwc-chat-jev-recovery-'))
-  const provider = await startJevChatProvider(createCertificate(directory))
+  const certificate = createCertificate(directory)
+  writeDeviceTrustRoot({ certificatePath: certificate.cert,
+    destination: join(directory, 'device-provider-trust-root.der') })
+  const provider = await startJevChatProvider(certificate)
   const settingsPath = join(directory, 'jev-settings.toml')
   writeFileSync(settingsPath, `providerId = "jev-chat-acceptance"
 endpoint = "${provider.origin}/jev"

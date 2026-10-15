@@ -6,7 +6,30 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import test from 'node:test'
-import { assertSuccessfulRetainedCommands, readRetainedCoreCommandResults, readWorkerTransport } from './fixtures/chat-execution-transport-probe.mjs'
+import { assertSuccessfulRetainedCommands, loseCommittedCommandResponse, readRetainedCoreCommandResults, readWorkerTransport } from './fixtures/chat-execution-transport-probe.mjs'
+
+test('committed command response loss closes the actual local HTTP response after its headers', async t => {
+  let committed = null
+  const server = createServer(async (incoming, outgoing) => {
+    const parts = []
+    for await (const part of incoming) parts.push(part)
+    committed = { path: incoming.url, origin: incoming.headers.origin,
+      cookie: incoming.headers.cookie, command: JSON.parse(Buffer.concat(parts).toString('utf8')) }
+    outgoing.writeHead(202, { 'Content-Type': 'application/json' })
+    outgoing.write('{"outcome":')
+  })
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve))
+  t.after(() => new Promise(resolve => server.close(resolve)))
+  const api = { baseUrl: `http://127.0.0.1:${server.address().port}`,
+    origin: 'http://control.localhost', actor: { kind: 'user', id: 'fixture-owner' },
+    scope: { kind: 'repository', repositoryId: 'fixture-repository' }, cookie: 'wwc_session=fixture' }
+  const payload = { productSessionId: 'fixture-session', message: 'same original command' }
+  const lost = await loseCommittedCommandResponse(api, 'chat.submit', 1, payload, 'fixture-request')
+  assert.deepEqual(lost, { status: 202, bodyComplete: false, destroyed: true })
+  assert.deepEqual(committed, { path: '/api/v1/commands', origin: api.origin, cookie: api.cookie,
+    command: { schemaVersion: 'winwincode/v1', requestId: 'fixture-request', actor: api.actor,
+      scope: api.scope, command: 'chat.submit', expectedRevision: 1, payload } })
+})
 
 function receipt(result, input = {}) {
   const bytes = JSON.stringify({ code_mode_result: result,
@@ -92,7 +115,8 @@ test('retained Worker bytes use the Device relay envelope and its inner response
     outgoing.end(JSON.stringify(received.length === 1
       ? { status: 200, body: JSON.stringify({ schemaVersion: 'execution-port.remote-exchange.v2',
         serverTime: '2026-10-15T00:00:00.000Z', frameAccepted: true, deliveries: [] }) }
-      : { status: 400, body: 'Worker route does not match its Device session' }))
+      : { status: 400, body: received.length === 3
+          ? 'remote Worker frame rejected' : 'Worker route does not match its Device session' }))
   })
   await new Promise(resolve => server.listen(0, '127.0.0.1', resolve))
   t.after(() => new Promise(resolve => server.close(resolve)))
@@ -119,6 +143,10 @@ test('retained Worker bytes use the Device relay envelope and its inner response
   const rejected = await probe.postRetainedMessage(bytes)
   assert.equal(rejected.status, 400)
   assert.equal(rejected.rejectionBoundary, 'device-worker-route')
+  const replaced = await probe.postRetainedMessage(bytes)
+  assert.equal(replaced.status, 400)
+  assert.equal(replaced.rejectionBoundary, 'control-plane-worker-instance')
+  assert.equal(replaced.acknowledgement, null)
   const lost = await probe.postRetainedMessage(bytes, { loseResponseAfterHeaders: true })
   assert.equal(lost.httpStatus, 200)
   assert.equal(lost.status, null)

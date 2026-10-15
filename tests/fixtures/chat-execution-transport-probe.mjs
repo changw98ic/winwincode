@@ -4,8 +4,40 @@ import assert from 'node:assert/strict'
 import { createHash } from 'node:crypto'
 import { globSync, readFileSync, realpathSync } from 'node:fs'
 import { request } from 'node:http'
+import { request as httpsRequest } from 'node:https'
 import { join, relative } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
+
+export async function loseCommittedCommandResponse(api, command, expectedRevision, payload, requestId) {
+  const endpoint = new URL('/api/v1/commands', api.baseUrl)
+  const send = endpoint.protocol === 'https:' ? httpsRequest : request
+  const serialized = JSON.stringify({
+    schemaVersion: 'winwincode/v1', requestId, actor: api.actor, scope: api.scope,
+    command, expectedRevision, payload,
+  })
+  return new Promise((resolveResponse, rejectResponse) => {
+    let intentionallyClosed = false
+    const request = send(endpoint, {
+      method: 'POST', servername: 'control.localhost', timeout: 30_000,
+      rejectUnauthorized: api.ca !== undefined,
+      ...(api.ca === undefined ? {} : { ca: api.ca }),
+      headers: {
+        Origin: api.origin, Accept: 'application/json', Connection: 'close',
+        'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(serialized),
+        ...(api.cookie === null ? {} : { Cookie: api.cookie }),
+      },
+    }, response => {
+      const status = response.statusCode
+      const bodyComplete = response.complete
+      intentionallyClosed = true
+      response.destroy()
+      resolveResponse({ status, bodyComplete, destroyed: response.destroyed })
+    })
+    request.on('error', error => { if (!intentionallyClosed) rejectResponse(error) })
+    request.on('timeout', () => request.destroy(new Error('lost response fixture timed out')))
+    request.end(serialized)
+  })
+}
 
 export function signalIfPresent(pid, signal) {
   try {
@@ -207,6 +239,7 @@ export function readWorkerTransport(deviceData, authority, { launch = null } = {
                 acknowledgement: acknowledgement ?? null,
                 deliveries,
                 rejectionBoundary: status === 400 && relay.body === 'Worker route does not match its Device session' ? 'device-worker-route'
+                  : status === 400 && relay.body === 'remote Worker frame rejected' ? 'control-plane-worker-instance'
                   : ['rejected_worker_instance', 'rejected_stale_fencing_token'].includes(acknowledgement?.status)
                     ? 'control-plane-authority'
                     : acknowledgement?.status.startsWith('rejected_') ? 'control-plane-message-rejection' : null })

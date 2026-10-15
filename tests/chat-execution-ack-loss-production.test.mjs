@@ -12,7 +12,7 @@ import { runApiProductionVertical } from '../scripts/run-api-production-vertical
 import { deterministicDeviceProvider, waitFor } from '../scripts/device-production-fixture.mjs'
 import { readDeviceExecutionReceipts } from '../scripts/export-device-candidate.mjs'
 import {
-  assertSuccessfulRetainedCommands, readRetainedCoreCommandResults,
+  assertSuccessfulRetainedCommands, completedCommandScript, readRetainedCoreCommandResults,
   readRetainedOutcomes, readWorkerTransport,
 } from './fixtures/chat-execution-transport-probe.mjs'
 
@@ -57,7 +57,7 @@ test('Chat replays its original ready outcome after actual Device relay business
   const report = await runApiProductionVertical({
     directory, restart: false, repeat: false, includeStrongFlow: false, ...sealedBinaries(),
     deviceProvider: { ...deterministicDeviceProvider(), nativeCellScripts: {
-      'native-cell-A': 'const command=ALL_TOOLS.find(tool=>tool.name.endsWith("exec_command")); if(!command) throw new Error("command tool missing"); const result=await tools[command.name]({cmd:"git rev-parse --verify HEAD",yield_time_ms:1000}); if(result.exit_code!==0) throw new Error("original command failed"); text(result);',
+      'native-cell-A': completedCommandScript('git rev-parse --verify HEAD'),
     } },
     scenario: { async run({ api, modelRoute, devicePath, restartServer }) {
       await api.command('session.create', 0, { productSessionId,

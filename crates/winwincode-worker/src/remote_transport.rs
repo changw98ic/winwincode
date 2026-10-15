@@ -11,8 +11,10 @@ use std::time::Duration;
 
 use winwincode_client_port::worker_relay::{WorkerRelayRequest, WorkerRelayResponse};
 use winwincode_codex::WorkerExecutionPort;
-use winwincode_domain::{ExecutionMessageId, WorkerId, WorkerInstanceId};
-use winwincode_execution_port::generated::ExecutionPortMessage;
+use winwincode_domain::{ExecutionMessageId, SessionIdentity, WorkerId, WorkerInstanceId};
+use winwincode_execution_port::generated::{
+    ExecutionLeaseStamp, ExecutionPortMessage, JobOutcomeAckMessage, JobOutcomeMessage,
+};
 use winwincode_execution_port::transport::{
     FrameDirection, RemoteExchangeRequest, RemoteExchangeResponse, RemoteTransportAdapter,
     TypedFrame,
@@ -189,6 +191,7 @@ struct SharedRemoteState {
     acknowledgements: Vec<ExecutionMessageId>,
     terminal_error: Option<RemoteWorkerPortError>,
     lease_deadlines: BTreeMap<String, (String, std::time::Instant)>,
+    terminal_authorities: BTreeMap<String, (ExecutionLeaseStamp, SessionIdentity)>,
     pending_renewals: BTreeMap<String, (String, String, std::time::Instant)>,
 }
 
@@ -348,6 +351,7 @@ impl RemoteWorkerTransportHandle {
                 acknowledgements: Vec::new(),
                 terminal_error: None,
                 lease_deadlines: BTreeMap::new(),
+                terminal_authorities: BTreeMap::new(),
                 pending_renewals: BTreeMap::new(),
             })),
         }
@@ -399,7 +403,12 @@ impl RemoteWorkerTransportHandle {
                 .get(&job_id)
                 .is_some_and(|(prior, _)| expires_at > *prior)
         {
-            state.lease_deadlines.insert(job_id, (expires_at, deadline));
+            state
+                .lease_deadlines
+                .insert(job_id.clone(), (expires_at.clone(), deadline));
+            if let Some((lease, _)) = state.terminal_authorities.get_mut(&job_id) {
+                lease.expires_at.0.clone_from(&expires_at);
+            }
         }
         if !state.acknowledgements.contains(&id) {
             state.acknowledgements.push(id);
@@ -454,6 +463,7 @@ impl RemoteWorkerPort {
             acknowledgements: Vec::new(),
             terminal_error: None,
             lease_deadlines: BTreeMap::new(),
+            terminal_authorities: BTreeMap::new(),
             pending_renewals: BTreeMap::new(),
         }));
         (
@@ -471,6 +481,90 @@ impl RemoteWorkerPort {
             },
             RemoteWorkerTransportHandle { state },
         )
+    }
+
+    pub(crate) async fn close_retained_terminal(
+        &mut self,
+        delivery: &winwincode_codex::DurableExecutionDelivery,
+    ) -> Result<Option<JobOutcomeAckMessage>, RemoteWorkerPortError> {
+        let ExecutionPortMessage::JobOutcomeMessage(outcome) = &delivery.message else {
+            return Err(RemoteWorkerPortError::Rejected);
+        };
+        let (queued, acknowledgements) = {
+            let mut state = self
+                .state
+                .lock()
+                .map_err(|_| RemoteWorkerPortError::Transport)?;
+            if !matches!(state.terminal_error,
+                Some(RemoteWorkerPortError::NetworkExhausted(failure)) if failure.kind == ErrorKind::AuthorityExpired)
+                || outcome.lease.worker_id != self.worker_id
+                || outcome.lease.worker_instance_id != self.worker_instance_id
+                || outcome.worker_session_id != outcome.session_identity.worker_session_id
+                || delivery.delivery_id != outcome.message_id.0
+            {
+                return Err(RemoteWorkerPortError::Rejected);
+            }
+            let queued = if let Some(index) = state.inbox.iter().position(|(_, message)| {
+                retained_terminal_acknowledgement(message, outcome).is_some()
+            }) {
+                let (id, message) = state
+                    .inbox
+                    .remove(index)
+                    .ok_or(RemoteWorkerPortError::Protocol)?;
+                let acknowledgement = retained_terminal_acknowledgement(&message, outcome)
+                    .ok_or(RemoteWorkerPortError::Protocol)?
+                    .clone();
+                if !state.acknowledgements.contains(&id) {
+                    state.acknowledgements.push(id);
+                }
+                Some(acknowledgement)
+            } else {
+                if !state
+                    .terminal_authorities
+                    .get(&outcome.lease.job_id.0)
+                    .is_some_and(|(lease, identity)| {
+                        lease == &outcome.lease && identity == &outcome.session_identity
+                    })
+                {
+                    return Err(RemoteWorkerPortError::Rejected);
+                }
+                None
+            };
+            (queued, state.acknowledgements_for_exchange())
+        };
+        if let Some(acknowledgement) = queued {
+            self.reconcile_terminal_accounting().await;
+            return Ok(Some(acknowledgement));
+        }
+        let (response, _) = self
+            .request_exchange(delivery.message.clone(), &acknowledgements)
+            .await?;
+        if !response.has_acceptance_receipt() {
+            return Err(RemoteWorkerPortError::Protocol);
+        }
+        for retained in response.deliveries() {
+            let frame = RemoteTransportAdapter::<NoopCore>::decode(&retained.frame)
+                .map_err(|_| RemoteWorkerPortError::Protocol)?;
+            if let Some(acknowledgement) =
+                retained_terminal_acknowledgement(frame.message(), outcome)
+            {
+                {
+                    let mut state = self
+                        .state
+                        .lock()
+                        .map_err(|_| RemoteWorkerPortError::Transport)?;
+                    state
+                        .acknowledgements
+                        .retain(|id| !acknowledgements.contains(id));
+                    if !state.acknowledgements.contains(&retained.delivery_id) {
+                        state.acknowledgements.push(retained.delivery_id.clone());
+                    }
+                }
+                self.reconcile_terminal_accounting().await;
+                return Ok(Some(acknowledgement.clone()));
+            }
+        }
+        Ok(None)
     }
 
     #[must_use]
@@ -559,20 +653,53 @@ impl RemoteWorkerPort {
             _ => None,
         };
         let terminal = completed_job.is_some();
+        let binding = match &message {
+            ExecutionPortMessage::SessionBindingMessage(binding) => {
+                Some((binding.lease.clone(), binding.session_identity.clone()))
+            }
+            _ => None,
+        };
         let result = self.exchange_inner(message).await;
+        if result.is_ok()
+            && let Some((lease, identity)) = binding
+            && let Ok(mut state) = self.state.lock()
+        {
+            state
+                .terminal_authorities
+                .entry(lease.job_id.0.clone())
+                .or_insert((lease, identity));
+        }
         if result.is_ok()
             && let Some(job_id) = completed_job
             && let Ok(mut state) = self.state.lock()
         {
             state.lease_deadlines.remove(&job_id);
+            state.terminal_authorities.remove(&job_id);
             state
                 .pending_renewals
                 .retain(|_, (pending_job, _, _)| *pending_job != job_id);
         }
-        if terminal
-            && self
-                .accounting_enabled
-                .load(std::sync::atomic::Ordering::Acquire)
+        if terminal {
+            self.reconcile_terminal_accounting().await;
+        }
+        if let Err(
+            error @ (RemoteWorkerPortError::Transport
+            | RemoteWorkerPortError::Rejected
+            | RemoteWorkerPortError::Protocol
+            | RemoteWorkerPortError::ResponseTooLarge
+            | RemoteWorkerPortError::NetworkExhausted(_)),
+        ) = result
+            && let Ok(mut state) = self.state.lock()
+        {
+            state.terminal_error = Some(error);
+        }
+        result
+    }
+
+    async fn reconcile_terminal_accounting(&self) {
+        if self
+            .accounting_enabled
+            .load(std::sync::atomic::Ordering::Acquire)
         {
             let requested = self
                 .accounting_epoch
@@ -589,18 +716,6 @@ impl RemoteWorkerPort {
             })
             .await;
         }
-        if let Err(
-            error @ (RemoteWorkerPortError::Transport
-            | RemoteWorkerPortError::Rejected
-            | RemoteWorkerPortError::Protocol
-            | RemoteWorkerPortError::ResponseTooLarge
-            | RemoteWorkerPortError::NetworkExhausted(_)),
-        ) = result
-            && let Ok(mut state) = self.state.lock()
-        {
-            state.terminal_error = Some(error);
-        }
-        result
     }
 
     async fn exchange_inner(
@@ -615,18 +730,30 @@ impl RemoteWorkerPort {
         {
             return Err(error);
         }
-        let frame = TypedFrame::new(FrameDirection::WorkerToControlPlane, message)
-            .and_then(|frame| RemoteTransportAdapter::<NoopCore>::encode(&frame))
-            .map_err(remote_frame_error)?;
         let acknowledgements = self
             .state
             .lock()
             .map_err(|_| RemoteWorkerPortError::Transport)?
             .acknowledgements_for_exchange();
+        let (response, request_started) = self.request_exchange(message, &acknowledgements).await?;
+        self.state
+            .lock()
+            .map_err(|_| RemoteWorkerPortError::Transport)?
+            .receive_response(&response, &acknowledgements, request_started)
+    }
+
+    async fn request_exchange(
+        &self,
+        message: ExecutionPortMessage,
+        acknowledgements: &[ExecutionMessageId],
+    ) -> Result<(RemoteExchangeResponse, std::time::Instant), RemoteWorkerPortError> {
+        let frame = TypedFrame::new(FrameDirection::WorkerToControlPlane, message)
+            .and_then(|frame| RemoteTransportAdapter::<NoopCore>::encode(&frame))
+            .map_err(remote_frame_error)?;
         let request = RemoteExchangeRequest::new(
             self.worker_id.clone(),
             self.worker_instance_id.clone(),
-            acknowledgements.clone(),
+            acknowledgements.to_vec(),
             frame,
         )
         .and_then(|request| request.with_acceptance_receipt().encode())
@@ -637,11 +764,23 @@ impl RemoteWorkerPort {
             .relay
             .request(WorkerRelayRequest::Exchange { body })
             .await?;
-        let response = decode_exchange_response(body.as_bytes())?;
-        self.state
-            .lock()
-            .map_err(|_| RemoteWorkerPortError::Transport)?
-            .receive_response(&response, &acknowledgements, request_started)
+        Ok((decode_exchange_response(body.as_bytes())?, request_started))
+    }
+}
+
+fn retained_terminal_acknowledgement<'a>(
+    message: &'a ExecutionPortMessage,
+    outcome: &JobOutcomeMessage,
+) -> Option<&'a JobOutcomeAckMessage> {
+    match message {
+        ExecutionPortMessage::JobOutcomeAckMessage(acknowledgement)
+            if acknowledgement.lease == outcome.lease
+                && acknowledgement.worker_session_id == outcome.worker_session_id
+                && acknowledgement.session_identity == outcome.session_identity =>
+        {
+            Some(acknowledgement)
+        }
+        _ => None,
     }
 }
 
@@ -725,6 +864,154 @@ fn remote_frame_error(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    #[allow(clippy::too_many_lines)]
+    async fn expired_execution_can_close_its_retained_terminal_without_reopening_controls() {
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../tests/fixtures/contracts/execution-port.valid.json"
+        ))
+        .unwrap();
+        let message = |kind: &str| -> ExecutionPortMessage {
+            serde_json::from_value(
+                fixture["messages"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .find(|message| message["kind"] == kind)
+                    .unwrap()
+                    .clone(),
+            )
+            .unwrap()
+        };
+        let ExecutionPortMessage::JobOutcomeMessage(outcome) = message("job.outcome") else {
+            panic!("terminal fixture")
+        };
+        let ExecutionPortMessage::JobOutcomeAckMessage(mut acknowledgement) =
+            message("job.outcome_ack")
+        else {
+            panic!("terminal acknowledgement fixture")
+        };
+        acknowledgement.lease = outcome.lease.clone();
+        acknowledgement.worker_session_id = outcome.worker_session_id.clone();
+        acknowledgement.session_identity = outcome.session_identity.clone();
+        let mut foreign = acknowledgement.clone();
+        foreign.message_id.0 = "xmsg_00000000000000000000000321".into();
+        foreign.lease.fencing_token.0 = "999".into();
+        let controls = [
+            message("job.dispatch"),
+            message("lease.renew"),
+            ExecutionPortMessage::JobOutcomeAckMessage(foreign),
+            ExecutionPortMessage::JobOutcomeAckMessage(acknowledgement.clone()),
+        ];
+        let deliveries = controls
+            .into_iter()
+            .map(
+                |message| winwincode_execution_port::transport::RemoteExchangeDelivery {
+                    delivery_id: winwincode_execution_port::transport::execution_message_id(
+                        &message,
+                    )
+                    .unwrap(),
+                    frame: RemoteTransportAdapter::<NoopCore>::encode(
+                        &TypedFrame::new(FrameDirection::ControlPlaneToWorker, message).unwrap(),
+                    )
+                    .unwrap(),
+                },
+            )
+            .collect();
+        let response = WorkerRelayResponse {
+            status: 200,
+            body: String::from_utf8(
+                RemoteExchangeResponse::with_acceptance(deliveries, true)
+                    .unwrap()
+                    .encode()
+                    .unwrap(),
+            )
+            .unwrap(),
+            failure: None,
+        };
+        let mut input = serde_json::to_vec(&response).unwrap();
+        input.push(b'\n');
+        let (mut port, handle) = RemoteWorkerPort::with_io(
+            outcome.lease.worker_id.clone(),
+            outcome.lease.worker_instance_id.clone(),
+            std::io::Cursor::new(input),
+            Vec::new(),
+        );
+        handle.state.lock().unwrap().lease_deadlines.insert(
+            outcome.lease.job_id.0.clone(),
+            (
+                outcome.lease.expires_at.0.clone(),
+                std::time::Instant::now()
+                    .checked_sub(Duration::from_secs(1))
+                    .unwrap(),
+            ),
+        );
+        handle.state.lock().unwrap().terminal_authorities.insert(
+            outcome.lease.job_id.0.clone(),
+            (outcome.lease.clone(), outcome.session_identity.clone()),
+        );
+        let expired = handle.wait_for_terminal_error().await;
+        assert_eq!(
+            port.send(ExecutionPortMessage::JobOutcomeMessage(outcome.clone()))
+                .await,
+            Err(expired)
+        );
+        let delivery = winwincode_codex::DurableExecutionDelivery {
+            delivery_id: outcome.message_id.0.clone(),
+            message: ExecutionPortMessage::JobOutcomeMessage(outcome.clone()),
+        };
+        let mut changed = delivery.clone();
+        let ExecutionPortMessage::JobOutcomeMessage(changed_outcome) = &mut changed.message else {
+            panic!("terminal delivery")
+        };
+        changed_outcome.lease.fencing_token.0 = "999".into();
+        assert_eq!(
+            port.close_retained_terminal(&changed).await,
+            Err(RemoteWorkerPortError::Rejected)
+        );
+        assert_eq!(
+            port.close_retained_terminal(&delivery)
+                .await
+                .expect("exact terminal cleanup after expiry"),
+            Some(acknowledgement.clone())
+        );
+        assert_eq!(handle.terminal_error(), Some(expired));
+        assert_eq!(handle.next_control(), Err(expired));
+        assert!(handle.state.lock().unwrap().inbox.is_empty());
+        let mut rejection = acknowledgement.clone();
+        rejection.status = winwincode_execution_port::generated::JobOutcomeAckMessageStatus::RejectedStaleFencingToken;
+        rejection.error = Some(winwincode_execution_port::generated::ExecutionPortError {
+            code: winwincode_execution_port::generated::ExecutionPortErrorCode::StaleFencingToken,
+            message: "the original owner was replaced".into(),
+            retryable: false,
+        });
+        {
+            let mut state = handle.state.lock().unwrap();
+            state.terminal_authorities.clear();
+            state.inbox.push_back((
+                rejection.message_id.clone(),
+                ExecutionPortMessage::JobOutcomeAckMessage(rejection.clone()),
+            ));
+        }
+        assert_eq!(
+            port.close_retained_terminal(&delivery).await.unwrap(),
+            Some(rejection)
+        );
+        handle.state.lock().unwrap().terminal_authorities.insert(
+            outcome.lease.job_id.0.clone(),
+            (outcome.lease.clone(), outcome.session_identity.clone()),
+        );
+        assert_eq!(
+            port.close_retained_terminal(&delivery).await,
+            Err(RemoteWorkerPortError::Transport)
+        );
+        assert_eq!(handle.terminal_error(), Some(expired));
+        assert_eq!(
+            delivery.message,
+            ExecutionPortMessage::JobOutcomeMessage(outcome)
+        );
+    }
 
     #[tokio::test]
     #[allow(clippy::too_many_lines)]
@@ -1052,6 +1339,7 @@ mod tests {
             acknowledgements: vec![sent.clone(), suffix.clone()],
             terminal_error: None,
             lease_deadlines: BTreeMap::new(),
+            terminal_authorities: BTreeMap::new(),
             pending_renewals: BTreeMap::new(),
         };
         let response = RemoteExchangeResponse::with_acceptance(vec![delivery], false).unwrap();
@@ -1109,6 +1397,7 @@ mod tests {
                 .collect(),
             terminal_error: None,
             lease_deadlines: BTreeMap::new(),
+            terminal_authorities: BTreeMap::new(),
             pending_renewals: BTreeMap::new(),
         };
         let first = state.acknowledgements_for_exchange();

@@ -28,6 +28,7 @@ use winwincode_worker::{WorkerConfig, WorkerLifecycleState, WorkerMain};
 const WORKER_TOKIO_STACK_BYTES: usize = 16 * 1024 * 1024;
 const WORKER_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(10);
 const WORKER_CORE_STOP_TIMEOUT: Duration = Duration::from_secs(5);
+const WORKER_TERMINAL_CLEANUP_TIMEOUT: Duration = Duration::from_secs(5);
 
 const USAGE: &str = "usage: winwincode-worker [--check|--managed-session <config-file>|--version]";
 
@@ -322,6 +323,22 @@ async fn run_worker(bootstrap: WorkerBootstrap) -> Result<(), Box<dyn std::error
         handle.close();
     }
     shutdown_worker(&mut worker, now_instant()?).await;
+    if matches!(handle.terminal_error(),
+        Some(winwincode_worker::remote_transport::RemoteWorkerPortError::NetworkExhausted(failure))
+            if failure.kind == winwincode_network::ErrorKind::AuthorityExpired)
+    {
+        let _ = tokio::time::timeout(WORKER_TERMINAL_CLEANUP_TIMEOUT, async {
+            loop {
+                if Box::pin(worker.close_expired_terminal_outbox(now_instant()?)).await == Ok(true)
+                {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+            Ok::<_, Box<dyn std::error::Error>>(())
+        })
+        .await;
+    }
     if interrupted {
         return Ok(());
     }

@@ -210,10 +210,15 @@ test('acceptance HTTPS uses verified trust and hostname for the requested endpoi
   await new Promise(resolvePromise => server.listen(0, '127.0.0.1', resolvePromise))
   t.after(async () => { server.closeAllConnections(); await new Promise(resolvePromise => server.close(resolvePromise)) })
   const url = `https://127.0.0.1:${server.address().port}/api/v1/clients`
-  const response = await secureAcceptanceRequest(url, { ca: readFileSync(certificate.cert) })
-  assert.equal(response.status, 403)
-  assert.equal(response.tls.authorized, true)
-  assert.match(response.tls.certificateSha256, /^[a-f0-9]{64}$/u)
+  let certificateSha256
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    const response = await secureAcceptanceRequest(url, { ca: readFileSync(certificate.cert) })
+    assert.equal(response.status, 403)
+    assert.equal(response.tls.authorized, true)
+    assert.match(response.tls.certificateSha256, /^[a-f0-9]{64}$/u)
+    certificateSha256 ??= response.tls.certificateSha256
+    assert.equal(response.tls.certificateSha256, certificateSha256)
+  }
   await assert.rejects(secureAcceptanceRequest(url), error => /SELF_SIGNED|VERIFY/u.test(error.code))
   await assert.rejects(secureAcceptanceRequest('http://127.0.0.1:1/api/v1/clients'))
 })

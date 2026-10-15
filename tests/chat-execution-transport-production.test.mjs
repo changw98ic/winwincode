@@ -219,10 +219,10 @@ for (const variant of ['completed-replay', 'genuine-gap']) {
             runtime: runtimeLedgerSnapshot(database, productSessionId), core: coreSnapshot(devicePath.deviceData, job.job_id) }, before)
           assert.equal(devicePath.modelServer.requests.length, count)
           for (const bytes of [runtime[0].bytes, outcome.bytes]) {
-            const rejected = await probe.postRetainedMessage(bytes)
-            assert.equal(rejected.status, 400, 'the trusted exit closes the original Device route')
-            assert.equal(rejected.acknowledgement, null, 'a dead Worker receives no business ACK')
-            assert.equal(rejected.rejectionBoundary, 'device-worker-route')
+            const duplicate = await probe.postRetainedMessage(bytes)
+            assert.equal(duplicate.status, 200, 'the Device relay can recover the original durable receipt after Worker exit')
+            assert.equal(duplicate.acknowledgement?.status, 'duplicate')
+            assert.equal(duplicate.rejectionBoundary, null)
           }
           assert.deepEqual({ terminal: terminalSnapshot(database, job.job_id),
             runtime: runtimeLedgerSnapshot(database, productSessionId), core: coreSnapshot(devicePath.deviceData, job.job_id) }, before)
@@ -230,7 +230,7 @@ for (const variant of ['completed-replay', 'genuine-gap']) {
           return { jobId: job.job_id, workerInstanceId: probe.workerInstanceId, gap,
             runtimeDuplicate: 'duplicate', changedPayload: 'rejected_conflict', terminalDuplicate: 'duplicate',
             businessStateUnchanged: true, originalCoreHistoryUnchanged: true, realCommands: 16,
-            workerPostProbe, exitedRouteStatus: 400, exitedBusinessAck: false, extraHttp: 0 }
+            workerPostProbe, exitedRouteStatus: 200, exitedBusinessAck: 'duplicate', extraHttp: 0 }
         } finally {
           database.exec('DROP TRIGGER IF EXISTS pause_chat_runtime_insert')
           database.exec('DROP TRIGGER IF EXISTS pause_chat_runtime_update')

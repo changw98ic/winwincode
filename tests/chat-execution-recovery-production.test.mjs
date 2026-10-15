@@ -758,6 +758,7 @@ for (const [point, suffix] of [['terminal-retained', '61'], ['cp-commit-before-a
           assert.deepEqual(acceptedOutcome(database, job.job_id), cut.accepted)
           assert.deepEqual(settlementSources(database, job.job_id), originalSettlementSources)
           assert.equal(devicePath.modelServer.requests.length, httpCount)
+          let exitedRelayStatus = null
           if (deadWorker) {
             assert.equal(Number(execFileSync('ps', ['-p', String(probe.pid), '-o', 'pgid='], { encoding: 'utf8' }).trim()), probe.pid)
             globalThis.process.kill(-probe.pid, 'SIGKILL')
@@ -768,9 +769,10 @@ for (const [point, suffix] of [['terminal-retained', '61'], ['cp-commit-before-a
             assert.equal(pending.payload.acknowledgementReady, false)
             assert.equal(database.prepare('SELECT state FROM worker_session_slots WHERE job_id=?').get(job.job_id).state, 'running')
             const denied = await probe.postRetainedMessage(cut.worker.bytes)
-            assert.equal(denied.status, 400)
+            assert.equal(denied.status, 503, 'the original accepted terminal still awaits the blocked CP cleanup')
             assert.equal(denied.acknowledgement, null)
-            assert.deepEqual(acceptedOutcome(database, job.job_id), pending, 'an exited Device route cannot consume the retained CP result')
+            exitedRelayStatus = denied.status
+            assert.deepEqual(acceptedOutcome(database, job.job_id), pending, 'Device relay replay cannot bypass the blocked terminal cleanup')
           }
           database.exec('DROP TRIGGER pause_chat_recovery')
           database.exec('DROP TRIGGER IF EXISTS pause_chat_recovery_settlement')
@@ -817,7 +819,7 @@ for (const [point, suffix] of [['terminal-retained', '61'], ['cp-commit-before-a
             turnId: originalCore.submissionId, toolCalls: originalCore.commands.length, physicalAttempts: httpCount,
             terminalDigest: cut.worker.digest, beforeRevision: cut.accepted?.revision ?? 0, afterRevision: 2,
             signal: restarted.signal, businessAcknowledged: !deadWorker, serverCleanupRecovered: true,
-            exitedCredentialStatus: deadWorker ? 401 : null }
+            exitedRelayStatus }
         } finally {
           database.exec('DROP TRIGGER IF EXISTS pause_chat_recovery')
           database.exec('DROP TRIGGER IF EXISTS pause_chat_recovery_settlement')

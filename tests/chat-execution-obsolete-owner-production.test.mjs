@@ -11,9 +11,9 @@ import test from 'node:test'
 import { isDeepStrictEqual } from 'node:util'
 import { runApiProductionVertical } from '../scripts/run-api-production-vertical.mjs'
 import { deterministicDeviceProvider, waitFor } from '../scripts/device-production-fixture.mjs'
-import { assertSuccessfulRetainedCommands, readRetainedCoreCommandResults,
+import { assertSuccessfulRetainedCommands, completedCommandScript, readRetainedCoreCommandResults,
   readRetainedOutcomes, readRetainedRuntime, readWorkerTransport,
-  runtimeLedgerSnapshot } from './fixtures/chat-execution-transport-probe.mjs'
+  runtimeLedgerSnapshot, signalIfPresent } from './fixtures/chat-execution-transport-probe.mjs'
 
 function sealedBinaries() {
   const directory = process.env.WWC_CODE_MODE_ACCEPTANCE_BIN_DIR
@@ -65,10 +65,10 @@ function businessSnapshot(database, productSessionId, jobId) {
 }
 
 function assertObsoleteWorkerRejected(response) {
-  assert.equal(response.status, 400, 'an exited Worker has no active Device route')
-  assert.equal(response.rejectionBoundary, 'device-worker-route')
+  assert.equal(response.status, 400, 'the Device relay rejects the replaced Worker instance')
+  assert.equal(response.rejectionBoundary, 'control-plane-worker-instance')
   assert.equal(response.acknowledgement, null, 'an obsolete Worker receives no business receipt')
-  return 'device-worker-route'
+  return 'control-plane-worker-instance'
 }
 
 function assertReplacementTerminal(database, oldAuthority, oldFacts, successorGrantId) {
@@ -158,7 +158,7 @@ for (const kind of ['runtime', 'outcome']) {
       directory, restart: false, repeat: false, includeStrongFlow: false, ...sealedBinaries(),
       serverEnvironment: { WWC_SERVER_EXECUTION_LEASE_SECONDS: '30' },
       deviceProvider: { ...deterministicDeviceProvider(), responseGateMarkers: [marker], nativeCellScripts: {
-        'native-cell-A': 'const command=ALL_TOOLS.find(tool=>tool.name.endsWith("exec_command")); if(!command) throw new Error("command tool missing"); for(let index=0;index<16;index++) { const result=await tools[command.name]({cmd:"true",yield_time_ms:1000}); if(result.exit_code!==0) throw new Error("original command did not exit successfully"); await new Promise(resolve=>setTimeout(resolve,100)); } text("original retained owner calls completed");',
+        'native-cell-A': completedCommandScript('true', 16),
       } },
       scenario: { async run({ api, modelRoute, devicePath }) {
         const database = new DatabaseSync(join(directory, 'server-data/control-plane.sqlite3'))
@@ -284,8 +284,14 @@ for (const kind of ['runtime', 'outcome']) {
             assert.equal(usage.tokens ?? null, null)
             assert.equal(usage.costMicrounits ?? null, null)
           }
-          process.kill(successorProbe.pid, 'SIGSTOP')
-          paused = successorProbe.pid
+          const successorPaused = signalIfPresent(successorProbe.pid, 'SIGSTOP')
+          paused = successorPaused ? successorProbe.pid : null
+          if (!successorPaused) await waitFor(() => {
+            const exit = database.prepare('SELECT * FROM worker_launch_grant_exits WHERE worker_launch_grant_id=?')
+              .get(replacement.successor_grant_id)
+            return exit?.worker_instance_id === successorProbe.workerInstanceId
+              && exit.worker_session_id === successorProbe.launchWorkerSessionId && exit
+          }, 'the acknowledged successor has its exact trusted process exit', 30_000)
           const before = businessSnapshot(database, productSessionId, job.job_id)
           const predecessorTerminal = assertReplacementTerminal(database, oldAuthority, oldFacts, replacement.successor_grant_id)
           assert.equal(before.sessionJobs.length, 1)
@@ -304,7 +310,7 @@ for (const kind of ['runtime', 'outcome']) {
           assert.deepEqual(assertReplacementTerminal(database, oldAuthority, oldFacts, replacement.successor_grant_id), predecessorTerminal)
           const heartbeat = database.prepare('SELECT heartbeat_sequence FROM execution_workers WHERE worker_id=?')
             .get(successorProbe.workerId)
-          process.kill(successorProbe.pid, 'SIGCONT')
+          if (successorPaused) signalIfPresent(successorProbe.pid, 'SIGCONT')
           paused = null
           const successorPostProbe = await waitFor(() => {
             const current = database.prepare('SELECT worker_instance_id,heartbeat_sequence FROM execution_workers WHERE worker_id=?')

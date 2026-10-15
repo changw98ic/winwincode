@@ -4,7 +4,71 @@ use winwincode_codex::{CodexCoreAdapter, WorkerExecutionPort};
 use winwincode_domain::{ExecutionMessageId, Instant};
 use winwincode_execution_port::generated::ExecutionPortMessage;
 
-use crate::{WorkerError, WorkerErrorCode, WorkerMain};
+use crate::{
+    WorkerError, WorkerErrorCode, WorkerLifecycleState, WorkerMain, codex_model_error,
+    execution_port_error, worker_error,
+};
+
+impl<Codex> WorkerMain<crate::remote_transport::RemoteWorkerPort, Codex>
+where
+    Codex: CodexCoreAdapter + Send + 'static,
+{
+    pub async fn close_expired_terminal_outbox(
+        &mut self,
+        now: Instant,
+    ) -> Result<bool, WorkerError> {
+        if self.lifecycle != WorkerLifecycleState::Stopped || !self.active.is_empty() {
+            return Err(worker_error(
+                WorkerErrorCode::InvalidLifecycle,
+                "expired terminal cleanup requires stopped execution",
+            ));
+        }
+        let deliveries = self
+            .codex
+            .pending_execution_deliveries()
+            .map_err(|_| codex_model_error())?;
+        let mut complete = true;
+        for delivery in deliveries {
+            let ExecutionPortMessage::JobOutcomeMessage(outcome) = &delivery.message else {
+                continue;
+            };
+            if !self
+                .dispatches
+                .get(&outcome.lease.job_id.0)
+                .is_some_and(|record| {
+                    record.terminal
+                        && record.run_key.attempt == outcome.lease.attempt
+                        && record.run_key.fencing_token == outcome.lease.fencing_token
+                        && record.worker_session_id == outcome.worker_session_id
+                        && record.codex_thread_id == outcome.session_identity.codex_thread_id
+                })
+            {
+                return Err(worker_error(
+                    WorkerErrorCode::InvalidDispatchAuthority,
+                    "retained terminal differs from this stopped execution",
+                ));
+            }
+            let Some(acknowledgement) = self
+                .port
+                .close_retained_terminal(&delivery)
+                .await
+                .map_err(|_| execution_port_error())?
+            else {
+                complete = false;
+                continue;
+            };
+            self.codex
+                .record_execution_delivery_sent(&delivery.delivery_id)
+                .map_err(|_| codex_model_error())?;
+            Box::pin(self.apply_control(
+                &ExecutionPortMessage::JobOutcomeAckMessage(acknowledgement),
+                now.clone(),
+            ))
+            .await?;
+        }
+        Ok(complete)
+    }
+}
 
 pub trait WorkerControlSource {
     type Error: std::error::Error + 'static;
