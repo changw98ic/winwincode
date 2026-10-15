@@ -97,6 +97,57 @@ impl ProcessGroupLifeline {
     }
 }
 
+#[cfg(target_os = "macos")]
+fn close_guardian_descriptors(ready_writer: libc::c_int) -> io::Result<()> {
+    let mut descriptors = [libc::proc_fdinfo {
+        proc_fd: 0,
+        proc_fdtype: 0,
+    }; 1024];
+    loop {
+        let bytes = unsafe {
+            libc::proc_pidinfo(
+                libc::getpid(),
+                libc::PROC_PIDLISTFDS,
+                0,
+                descriptors.as_mut_ptr().cast(),
+                std::mem::size_of_val(&descriptors) as libc::c_int,
+            )
+        };
+        if bytes <= 0
+            || bytes as usize > std::mem::size_of_val(&descriptors)
+            || !(bytes as usize).is_multiple_of(std::mem::size_of::<libc::proc_fdinfo>())
+        {
+            return Err(io::Error::from_raw_os_error(libc::EIO));
+        }
+        let count = bytes as usize / std::mem::size_of::<libc::proc_fdinfo>();
+        let mut closed_any = false;
+        for descriptor in descriptors.iter().take(count) {
+            let fd = descriptor.proc_fd;
+            if fd == libc::STDIN_FILENO || fd == ready_writer {
+                continue;
+            }
+            if fd < 0 {
+                return Err(io::Error::from_raw_os_error(libc::EIO));
+            }
+            loop {
+                if unsafe { libc::close(fd) } == 0 {
+                    break;
+                }
+                let error = io::Error::last_os_error();
+                match error.raw_os_error() {
+                    Some(libc::EINTR) => continue,
+                    Some(libc::EBADF) => break,
+                    _ => return Err(error),
+                }
+            }
+            closed_any = true;
+        }
+        if !closed_any {
+            return Ok(());
+        }
+    }
+}
+
 /// Install after setsid and before exec. The owner alone retains the writer.
 /// Double-fork so a shell's `wait` cannot wait for its own lifetime guardian.
 #[cfg(unix)]
@@ -141,16 +192,32 @@ pub fn guard_process_group_lifetime(
                 libc::killpg(0, libc::SIGKILL);
                 libc::_exit(1);
             }
-            #[cfg(target_os = "linux")]
-            let closed = libc::syscall(libc::SYS_close_range, 1u32, (ready[1] - 1) as u32, 0u32)
-                == 0
-                && libc::syscall(libc::SYS_close_range, (ready[1] + 1) as u32, u32::MAX, 0u32) == 0;
-            #[cfg(not(target_os = "linux"))]
-            let closed = false;
-            if !closed {
-                for fd in 1..descriptor_limit {
-                    if fd != ready[1] {
-                        libc::close(fd);
+            #[cfg(target_os = "macos")]
+            {
+                let _ = descriptor_limit;
+                if close_guardian_descriptors(ready[1]).is_err() {
+                    libc::close(ready[1]);
+                    libc::_exit(1);
+                }
+            }
+            #[cfg(not(target_os = "macos"))]
+            {
+                #[cfg(target_os = "linux")]
+                let closed =
+                    libc::syscall(libc::SYS_close_range, 1u32, (ready[1] - 1) as u32, 0u32) == 0
+                        && libc::syscall(
+                            libc::SYS_close_range,
+                            (ready[1] + 1) as u32,
+                            u32::MAX,
+                            0u32,
+                        ) == 0;
+                #[cfg(not(target_os = "linux"))]
+                let closed = false;
+                if !closed {
+                    for fd in 1..descriptor_limit {
+                        if fd != ready[1] {
+                            libc::close(fd);
+                        }
                     }
                 }
             }

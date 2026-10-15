@@ -315,6 +315,136 @@ async fn lifeline_crash_owner_fixture() -> anyhow::Result<()> {
     anyhow::bail!("owner fixture was not killed")
 }
 
+#[cfg(target_os = "macos")]
+#[test]
+fn guardian_descriptor_fixture() -> anyhow::Result<()> {
+    use std::fs::File;
+    use std::io::Read;
+    use std::os::fd::FromRawFd;
+    use std::time::{Duration, Instant};
+
+    let Ok(case) = std::env::var("CODEX_TEST_GUARDIAN_DESCRIPTORS") else {
+        return Ok(());
+    };
+    let mut limit = libc::rlimit {
+        rlim_cur: 0,
+        rlim_max: 0,
+    };
+    anyhow::ensure!(unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &raw mut limit) } == 0);
+    let mut set_limit = |desired: libc::rlim_t| -> anyhow::Result<()> {
+        limit.rlim_cur = desired.min(limit.rlim_max);
+        anyhow::ensure!(unsafe { libc::setrlimit(libc::RLIMIT_NOFILE, &raw const limit) } == 0);
+        Ok(())
+    };
+    if case == "cost" {
+        let spawn = || -> anyhow::Result<Duration> {
+            let mut command = std::process::Command::new("/usr/bin/true");
+            let lifeline =
+                crate::process_group::ProcessGroupLifeline::configure_command(&mut command)?;
+            let started = Instant::now();
+            let mut child = command.spawn()?;
+            let elapsed = started.elapsed();
+            anyhow::ensure!(child.wait()?.success());
+            drop(lifeline);
+            Ok(elapsed)
+        };
+        set_limit(1024)?;
+        let low = spawn()?;
+        set_limit(16_777_216)?;
+        let high = spawn()?;
+        println!("guardian spawn low={low:?} high={high:?}");
+        anyhow::ensure!(
+            high < low + Duration::from_secs(1),
+            "empty FD range increased startup by {:?}",
+            high.saturating_sub(low)
+        );
+        return Ok(());
+    }
+    anyhow::ensure!(case == "late-pipes");
+    set_limit(8192)?;
+    let mut command = std::process::Command::new("/bin/sleep");
+    command.arg("60");
+    let lifeline = crate::process_group::ProcessGroupLifeline::configure_command(&mut command)?;
+    let mut readers = Vec::new();
+    let mut writers = Vec::new();
+    for _ in 0..1200 {
+        let mut fds = [-1; 2];
+        anyhow::ensure!(unsafe { libc::pipe(fds.as_mut_ptr()) } == 0);
+        for fd in fds {
+            anyhow::ensure!(unsafe { libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC) } == 0);
+        }
+        anyhow::ensure!(unsafe { libc::fcntl(fds[0], libc::F_SETFL, libc::O_NONBLOCK) } == 0);
+        readers.push(unsafe { File::from_raw_fd(fds[0]) });
+        writers.push(unsafe { File::from_raw_fd(fds[1]) });
+    }
+    struct Child(std::process::Child);
+    impl Drop for Child {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+    let mut child = Child(command.spawn()?);
+    drop(writers);
+    let mut byte = [0];
+    let deadline = Instant::now() + Duration::from_secs(1);
+    for reader in &mut readers {
+        loop {
+            match reader.read(&mut byte) {
+                Ok(0) => break,
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    anyhow::ensure!(
+                        Instant::now() < deadline,
+                        "guardian retained a late CLOEXEC writer"
+                    );
+                    std::thread::sleep(Duration::from_millis(1));
+                }
+                result => anyhow::bail!("unexpected pipe result: {result:?}"),
+            }
+        }
+    }
+    anyhow::ensure!(
+        child.0.try_wait()?.is_none(),
+        "guarded child must remain alive during EOF checks"
+    );
+    drop(child);
+    drop(lifeline);
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn run_guardian_descriptor_fixture(case: &str) -> anyhow::Result<()> {
+    let output = std::process::Command::new(std::env::current_exe()?)
+        .args([
+            "--exact",
+            "tests::guardian_descriptor_fixture",
+            "--nocapture",
+            "--test-threads=1",
+        ])
+        .env("CODEX_TEST_GUARDIAN_DESCRIPTORS", case)
+        .output()?;
+    anyhow::ensure!(
+        output.status.success(),
+        "fixture failed: {}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    eprint!("{}", String::from_utf8_lossy(&output.stdout));
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn guarded_spawn_does_not_scan_empty_descriptor_ranges() -> anyhow::Result<()> {
+    run_guardian_descriptor_fixture("cost")
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn guarded_spawn_closes_late_cloexec_descriptors_across_batches() -> anyhow::Result<()> {
+    run_guardian_descriptor_fixture("late-pipes")
+}
+
 #[cfg(unix)]
 #[test]
 fn owner_sigkill_stops_pipe_and_pty_tool_groups() -> anyhow::Result<()> {

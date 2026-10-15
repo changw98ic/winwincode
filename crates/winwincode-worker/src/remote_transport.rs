@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use sha2::Digest;
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::fmt;
 use std::future::Future;
 use std::io::{BufRead, BufReader, Write};
@@ -53,6 +53,17 @@ impl std::error::Error for RemoteWorkerPortError {}
 struct RelayIo {
     input: Box<dyn BufRead + Send>,
     output: Box<dyn Write + Send>,
+    retries: HashMap<RelayRetryQueue, RelayRetry>,
+}
+
+#[derive(Clone, Copy, Eq, Hash, PartialEq)]
+enum RelayRetryQueue {
+    Exchange(Option<std::mem::Discriminant<ExecutionPortMessage>>),
+    AccountingRead,
+    AccountingWrite,
+}
+
+struct RelayRetry {
     retry: winwincode_network::RequestRetryState,
     retry_at: Option<std::time::Instant>,
     retry_error: Option<RemoteWorkerPortError>,
@@ -63,10 +74,23 @@ impl RelayIo {
         Self {
             input: Box::new(input),
             output: Box::new(output),
-            retry: relay_retry(),
-            retry_at: None,
-            retry_error: None,
+            retries: HashMap::new(),
         }
+    }
+}
+
+fn relay_retry_queue(request: &WorkerRelayRequest) -> RelayRetryQueue {
+    match request {
+        WorkerRelayRequest::Exchange { body } => RelayRetryQueue::Exchange(
+            RemoteExchangeRequest::decode(body.as_bytes())
+                .ok()
+                .and_then(|request| {
+                    RemoteTransportAdapter::<NoopCore>::decode(request.frame()).ok()
+                })
+                .map(|frame| std::mem::discriminant(frame.message())),
+        ),
+        WorkerRelayRequest::Accounting { body: None, .. } => RelayRetryQueue::AccountingRead,
+        WorkerRelayRequest::Accounting { body: Some(_), .. } => RelayRetryQueue::AccountingWrite,
     }
 }
 
@@ -93,8 +117,15 @@ impl DeviceRelay {
             .spawn(move || {
                 let result = (|| {
                     let mut io = io.lock().map_err(|_| RemoteWorkerPortError::Transport)?;
-                    if io.retry_at.is_some_and(|at| std::time::Instant::now() < at) {
-                        return Err(io.retry_error.unwrap_or(RemoteWorkerPortError::Transport));
+                    let queue = relay_retry_queue(&request);
+                    if let Some(retry) = io.retries.get(&queue)
+                        && retry
+                            .retry_at
+                            .is_some_and(|at| std::time::Instant::now() < at)
+                    {
+                        return Err(retry
+                            .retry_error
+                            .unwrap_or(RemoteWorkerPortError::Transport));
                     }
                     serde_json::to_writer(&mut io.output, &request)
                         .map_err(|_| RemoteWorkerPortError::Transport)?;
@@ -124,20 +155,23 @@ impl DeviceRelay {
                         {
                             return Err(RemoteWorkerPortError::NetworkExhausted(failure));
                         }
-                        let error = match io.retry.decision_after(&failure) {
+                        let retry = io.retries.entry(queue).or_insert_with(|| RelayRetry {
+                            retry: relay_retry(),
+                            retry_at: None,
+                            retry_error: None,
+                        });
+                        let error = match retry.retry.decision_after(&failure) {
                             winwincode_network::RetryDecision::RetryAfter(delay)
                             | winwincode_network::RetryDecision::DeferredUntil(delay) => {
-                                io.retry_at = Some(std::time::Instant::now() + delay);
+                                retry.retry_at = Some(std::time::Instant::now() + delay);
                                 RemoteWorkerPortError::Network(failure)
                             }
                             _ => RemoteWorkerPortError::NetworkExhausted(failure),
                         };
-                        io.retry_error = Some(error);
+                        retry.retry_error = Some(error);
                         return Err(error);
                     }
-                    io.retry = relay_retry();
-                    io.retry_at = None;
-                    io.retry_error = None;
+                    io.retries.remove(&queue);
                     Ok(response.body)
                 })();
                 let _ = sender.send(result);
@@ -691,6 +725,159 @@ fn remote_frame_error(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    #[allow(clippy::too_many_lines)]
+    async fn retrying_one_relay_request_does_not_block_heartbeat_accounting_or_cancel() {
+        #[derive(Clone, Default)]
+        struct Output(Arc<Mutex<Vec<u8>>>);
+        impl Write for Output {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(bytes);
+                Ok(bytes.len())
+            }
+
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../tests/fixtures/contracts/execution-port.valid.json"
+        ))
+        .unwrap();
+        let message = |kind: &str| -> ExecutionPortMessage {
+            serde_json::from_value(
+                fixture["messages"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .find(|message| message["kind"] == kind)
+                    .unwrap()
+                    .clone(),
+            )
+            .unwrap()
+        };
+        let cancellation = message("job.cancel");
+        let delivery_id =
+            winwincode_execution_port::transport::execution_message_id(&cancellation).unwrap();
+        let control = winwincode_execution_port::transport::RemoteExchangeDelivery {
+            delivery_id: delivery_id.clone(),
+            frame: RemoteTransportAdapter::<NoopCore>::encode(
+                &TypedFrame::new(FrameDirection::ControlPlaneToWorker, cancellation.clone())
+                    .unwrap(),
+            )
+            .unwrap(),
+        };
+        let success = String::from_utf8(
+            RemoteExchangeResponse::with_acceptance(Vec::new(), true)
+                .unwrap()
+                .encode()
+                .unwrap(),
+        )
+        .unwrap();
+        let failure = NetworkFailure::http(503, Some(Duration::from_mins(1)));
+
+        for failed_kind in [
+            "artifact.chunk",
+            "runtime.event",
+            "job.outcome",
+            "action.enforcement_request",
+        ] {
+            let responses = [
+                WorkerRelayResponse {
+                    status: 503,
+                    body: String::new(),
+                    failure: Some(failure),
+                },
+                WorkerRelayResponse {
+                    status: 200,
+                    body: String::from_utf8(
+                        RemoteExchangeResponse::with_acceptance(vec![control.clone()], true)
+                            .unwrap()
+                            .encode()
+                            .unwrap(),
+                    )
+                    .unwrap(),
+                    failure: None,
+                },
+                WorkerRelayResponse {
+                    status: 200,
+                    body: "accounting".into(),
+                    failure: None,
+                },
+                WorkerRelayResponse {
+                    status: 200,
+                    body: success.clone(),
+                    failure: None,
+                },
+            ];
+            let mut input = Vec::new();
+            for response in responses {
+                serde_json::to_writer(&mut input, &response).unwrap();
+                input.push(b'\n');
+            }
+            let output = Output::default();
+            let (mut port, handle) = RemoteWorkerPort::with_io(
+                WorkerId("worker".into()),
+                WorkerInstanceId("instance".into()),
+                std::io::Cursor::new(input),
+                output.clone(),
+            );
+            let error = RemoteWorkerPortError::Network(failure);
+            assert_eq!(port.send(message(failed_kind)).await, Err(error));
+            assert_eq!(
+                port.send(message("worker.heartbeat")).await,
+                Ok(()),
+                "{failed_kind} retry must not prevent a heartbeat from fetching cancellation"
+            );
+            assert_eq!(
+                handle.next_control().unwrap(),
+                Some((delivery_id.clone(), cancellation.clone()))
+            );
+            handle.confirm(delivery_id.clone()).unwrap();
+            assert_eq!(
+                port.send(message(failed_kind)).await,
+                Err(error),
+                "new delivery acknowledgements must preserve the original request's retry delay"
+            );
+            assert_eq!(
+                port.relay
+                    .request(WorkerRelayRequest::Accounting {
+                        body: None,
+                        offset: 0
+                    })
+                    .await,
+                Ok("accounting".into())
+            );
+            assert_eq!(port.send(message("job.cancel_ack")).await, Ok(()));
+            assert_eq!(
+                port.send(message(failed_kind)).await,
+                Err(error),
+                "other successful requests must preserve the original retry delay"
+            );
+            let requests = output.0.lock().unwrap();
+            let requests = requests
+                .split(|byte| *byte == b'\n')
+                .filter(|line| !line.is_empty())
+                .map(|line| serde_json::from_slice::<WorkerRelayRequest>(line).unwrap())
+                .collect::<Vec<_>>();
+            assert_eq!(
+                requests.len(),
+                4,
+                "only the original failed attempt is written"
+            );
+            let WorkerRelayRequest::Exchange { body } = &requests[3] else {
+                panic!("cancel acknowledgement is an exchange");
+            };
+            assert_eq!(
+                RemoteExchangeRequest::decode(body.as_bytes())
+                    .unwrap()
+                    .acknowledgements(),
+                std::slice::from_ref(&delivery_id)
+            );
+        }
+    }
 
     #[tokio::test]
     async fn exchange_and_accounting_share_one_json_lines_channel() {
