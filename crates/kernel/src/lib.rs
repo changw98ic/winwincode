@@ -1010,13 +1010,13 @@ pub struct Kernel {
     _linux_sandbox_alias: Option<tempfile::TempDir>,
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", all(test, unix)))]
 fn install_linux_sandbox_alias(
     home: &Path,
     executable: &Path,
 ) -> KernelResult<(PathBuf, tempfile::TempDir)> {
     let install = || -> std::io::Result<_> {
-        let executable = executable.canonicalize()?;
+        let executable = std::path::absolute(executable)?;
         let directory = tempfile::Builder::new()
             .prefix(".linux-sandbox-")
             .tempdir_in(home.canonicalize()?)?;
@@ -2712,6 +2712,32 @@ mod tests {
         } else {
             assert_eq!(options.linux_sandbox_executable, None);
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn linux_sandbox_alias_defers_helper_availability_until_execution() {
+        let root = tempfile::tempdir().unwrap();
+        let helper = root.path().join("missing-helper");
+        let (alias, _directory) = super::install_linux_sandbox_alias(root.path(), &helper).unwrap();
+        assert!(!helper.exists());
+        assert_eq!(std::fs::read_link(&alias).unwrap(), helper);
+        assert_eq!(
+            std::process::Command::new(&alias)
+                .output()
+                .unwrap_err()
+                .kind(),
+            std::io::ErrorKind::NotFound
+        );
+        std::os::unix::fs::symlink(std::env::current_exe().unwrap(), &helper).unwrap();
+        assert!(
+            std::process::Command::new(&alias)
+                .arg("--list")
+                .output()
+                .unwrap()
+                .status
+                .success()
+        );
     }
 
     #[cfg(target_os = "linux")]

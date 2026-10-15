@@ -1252,7 +1252,16 @@ export async function stopProcessGroup(child, { graceMillis = 1000, deviceData }
     for (const [target, witnesses] of targets) {
       if (!witnesses.some(row => ownedProcessAlive(row, processSnapshot()))) continue
       try { process.kill(target, signal) } catch (error) {
-        if (error.code !== 'ESRCH') throw error
+        if (error.code !== 'ESRCH') {
+          const targetIdentity = target < 0 ? `pgid:${-target}` : `pid:${target}`
+          const ownership = witnesses.map(row => ({ pid: row.pid, parentPid: row.parent,
+            processGroupId: row.group, state: row.state,
+            startIdentity: process.platform === 'linux' ? row.start : `darwin-ps-${row.start}` }))
+          const failure = new Error(`fixture process signal failed: target=${targetIdentity} signal=${signal} ownership=${JSON.stringify(ownership)}`,
+            { cause: error })
+          failure.code = error.code
+          throw failure
+        }
       }
     }
   }
