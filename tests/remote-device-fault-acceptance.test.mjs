@@ -67,6 +67,16 @@ test('SSH transport quotes paths and carries no binding token or Owner password 
   assert.doesNotMatch(arguments_.join(' '), /PAIRING_TOKEN|passwordEnvironment|pairingToken/u)
 })
 
+test('SSH transport passes an explicit identity file as one local argument', () => {
+  const value = configuration()
+  value.device.identityFile = "/private/keys/test 'identity'"
+  assert.doesNotThrow(() => validateRemoteFaultConfiguration(value))
+  const arguments_ = remoteOperationCommand(value.device)
+  assert.deepEqual(arguments_.slice(4, 7), ['-i', value.device.identityFile, value.device.sshHost])
+  value.device.identityFile = 'relative-key'
+  assert.throws(() => validateRemoteFaultConfiguration(value))
+})
+
 test('process witnesses select the exact Worker descendants while preserving unrelated processes', () => {
   const snapshot = { workers: [{ workerSessionId: 'fixture-session', pid: 10 }], processes: [
     { pid: 10, parent: 1, start: 'worker' }, { pid: 11, parent: 10, start: 'helper' },

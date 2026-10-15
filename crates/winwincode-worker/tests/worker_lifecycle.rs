@@ -5731,7 +5731,7 @@ async fn owned_model_chunk_retry_does_not_starve_cancelled_core_facts() {
     let port = RecordingPort::default();
     let messages = Rc::clone(&port.messages);
     let codex = FakeCodex::with_threads([thread('A')]);
-    let pump = codex.clone();
+    let mut pump = codex.clone();
     let root = tempfile::tempdir().unwrap();
     let providers = root.path().join("providers");
     let intake_log = root.path().join("intake.log");
@@ -5747,9 +5747,23 @@ async fn owned_model_chunk_retry_does_not_starve_cancelled_core_facts() {
         .await
         .unwrap();
     let active = worker.active_jobs()[0].clone();
-    let (open, _, _) = provider_quota_messages(&active);
+    let (open, _, mut replay) = provider_quota_messages(&active);
     let store = winwincode_provider::DeviceProviderStore::open(&providers).unwrap();
     let original = store.reject_model_start(&open).unwrap();
+    replay.model_exchange_id = open.model_exchange_id.clone();
+    replay.ack_sequence = ExecutionAckSequence(0);
+    replay.error = None;
+    replay.replay_from_sequence = Some(ExecutionSequence(1));
+    pump.retain_execution_delivery(&ExecutionPortMessage::ModelOpenMessage(open.clone()))
+        .unwrap();
+    pump.retain_execution_delivery(&ExecutionPortMessage::ModelAckMessage(replay))
+        .unwrap();
+    worker.flush_durable_outbox().await.unwrap();
+    assert_eq!(
+        pump.state.lock().unwrap().model_start_requests,
+        vec![open.clone()],
+        "the original durable open must establish ownership before its stored result is retried"
+    );
     worker
         .accept_control(
             &ExecutionPortMessage::JobCancelMessage(cancel_for(&active, 'C')),

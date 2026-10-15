@@ -162,6 +162,10 @@ node --experimental-test-module-mocks --test --test-concurrency=1 tests/<name>.t
 
 ## 远程 Device 验证
 
+需要 Ubuntu 22.04 x86_64 验收制品时，在同一源码提交上手动运行 `Native Code Mode acceptance`，将 `remote_artifacts` 设为 `true`。该模式只运行 Ubuntu 22.04 构建任务，使用已锁定的 Node.js 24、Rust 1.95.0 和 LLVM 23。默认值为 `false`，沿用原生 Kernel 验证任务。
+
+下载名为 `remote-test-support-ubuntu-22.04-x86_64-<commit>` 的 artifact。保存期为 7 天。压缩包只包含 `winwincode-server`、`wwc`、`winwincode-worker`、`winwincode-kernel-helper` 和 `winwincode-api-production.source.json`。来源封印绑定干净提交和四个程序。该包启用 `test-support`，仅用于隔离验收，不是发布包。解压后仍须按下文验证来源封印和两端源码，不能仅凭 CI 构建成功声明两机验收通过。
+
 远程验证覆盖绑定、身份恢复、HTTPS/WSS、取消、断线重连、吊销和候选应用恢复。先准备相同 `CARGO_TARGET_DIR` 下的内核辅助进程，再选择相关检查：
 
 ```sh
@@ -207,7 +211,7 @@ node scripts/run-remote-device-fault-acceptance.mjs --plan --output /private/rem
 node scripts/run-remote-device-fault-acceptance.mjs --config /private/remote-acceptance.json --output /private/remote-acceptance-report.json
 ```
 
-配置的 `schemaVersion` 为 `1`。`server` 指定 HTTPS `url`、浏览器 `origin`、`tlsMode`、Owner `username`、密码环境变量名 `passwordEnvironment`、本端只读 `database` 路径、实际运行的 Server `binary` 绝对路径与 `pid`，并可指定 `caFile`。真实 TCP 丢响应还需要 `logFile`，以核对本次新增的截断响应 marker。`tlsMode` 使用 `direct` 或 `loopback-proxy`；后者还需要回环 HTTP `backendUrl`。`device` 指定 `sshHost`、源码目录 `checkout`、程序目录 `binaryDirectory` 和新建的、位于源码目录外的独立验收目录 `directory`。
+配置的 `schemaVersion` 为 `1`。`server` 指定 HTTPS `url`、浏览器 `origin`、`tlsMode`、Owner `username`、密码环境变量名 `passwordEnvironment`、本端只读 `database` 路径、实际运行的 Server `binary` 绝对路径与 `pid`，并可指定 `caFile`。真实 TCP 丢响应还需要 `logFile`，以核对本次新增的截断响应 marker。`tlsMode` 使用 `direct` 或 `loopback-proxy`；后者还需要回环 HTTP `backendUrl`。`device` 指定 `sshHost`、源码目录 `checkout`、程序目录 `binaryDirectory` 和新建的、位于源码目录外的独立验收目录 `directory`。使用指定 SSH 私钥时，将本机私钥的绝对路径写入 `device.identityFile`。
 
 `binaryDirectory` 和 Server 程序所在目录都必须包含四个产品程序及 `winwincode-api-production.source.json`。两端通过 `verifyApiProductionSourceSeal` 将完整制品与当前源码绑定。`device.toolTty` 可设为 `true` 或 `false`；一次运行只声明实际执行的 PTY 或 pipe 变体。
 

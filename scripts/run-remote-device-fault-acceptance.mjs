@@ -94,6 +94,7 @@ export function validateRemoteFaultConfiguration(configuration) {
   assert.ok(device.directory !== '/' && !device.directory.startsWith(`${device.checkout}/`),
     'Device acceptance data must be outside the checkout')
   if (device.port !== undefined) assert.ok(Number.isInteger(device.port) && device.port > 0 && device.port <= 65535)
+  if (device.identityFile !== undefined) assert.equal(resolve(device.identityFile), device.identityFile)
   if (device.toolTty !== undefined) assert.equal(typeof device.toolTty, 'boolean')
   if (server.tlsMode === 'loopback-proxy') {
     const backend = new URL(server.backendUrl)
@@ -181,6 +182,7 @@ function command(command_, arguments_, { input, env = process.env, timeoutMillis
 
 export function remoteOperationCommand(device) {
   const arguments_ = ['-o', 'BatchMode=yes', '-o', 'StrictHostKeyChecking=yes']
+  if (device.identityFile !== undefined) arguments_.push('-i', device.identityFile)
   if (device.port !== undefined) arguments_.push('-p', String(device.port))
   arguments_.push(device.sshHost, `exec ${shellQuote(device.node ?? 'node')} ${shellQuote(join(device.checkout,
     'scripts/run-remote-device-fault-acceptance.mjs'))} --device-operation`)
