@@ -94,7 +94,7 @@ export function mountClientsPage(options: ClientsPageOptions): ClientsPage {
   const error = element(document, 'p', 'wwc-clients-error')
   const form = element(document, 'form', 'wwc-clients-add-form')
   const pairing = element(document, 'section', 'wwc-clients-pairing')
-  const pairingHeading = element(document, 'h3', 'wwc-clients-add-heading')
+  const pairingHeading = element(document, 'h2', 'wwc-clients-add-heading')
   const pairingHint = element(document, 'p', 'wwc-clients-pairing-hint')
   const pair = element(document, 'button', 'wwc-clients-pair')
   const pairingDetails = element(document, 'div', 'wwc-clients-pairing-details')

@@ -241,6 +241,34 @@ struct DirectorySnapshot {
 
 impl DirectorySnapshot {
     fn capture(root: &Path) -> Self {
+        fn is_runtime_sandbox_alias(path: &Path, relative: &Path) -> bool {
+            if !relative.parent().is_some_and(|parent| {
+                parent == Path::new("kernel-home") || parent == Path::new("worker/kernel-home")
+            }) || !path
+                .file_name()
+                .and_then(std::ffi::OsStr::to_str)
+                .is_some_and(|name| name.starts_with(".linux-sandbox-"))
+            {
+                return false;
+            }
+            let entries = fs::read_dir(path)
+                .expect("read runtime sandbox alias directory")
+                .collect::<Result<Vec<_>, _>>()
+                .expect("collect runtime sandbox alias directory");
+            let [alias] = entries.as_slice() else {
+                return false;
+            };
+            alias.file_name() == "codex-linux-sandbox"
+                && alias
+                    .file_type()
+                    .expect("read runtime sandbox alias type")
+                    .is_symlink()
+                && fs::read_link(alias.path()).expect("read runtime sandbox alias target")
+                    == helper_executable()
+                        .canonicalize()
+                        .expect("canonical helper")
+        }
+
         fn visit(
             root: &Path,
             current: &Path,
@@ -262,6 +290,9 @@ impl DirectorySnapshot {
                     .to_path_buf();
                 let file_type = entry.file_type().expect("read snapshot entry type");
                 if file_type.is_dir() {
+                    if is_runtime_sandbox_alias(&path, &relative) {
+                        continue;
+                    }
                     directories.push((
                         relative,
                         entry
@@ -294,7 +325,10 @@ impl DirectorySnapshot {
                         metadata.permissions(),
                     ));
                 } else {
-                    panic!("durable crash snapshot contains a non-file entry");
+                    panic!(
+                        "durable crash snapshot contains a non-file entry: {}",
+                        path.display()
+                    );
                 }
             }
         }
@@ -339,6 +373,51 @@ impl DirectorySnapshot {
             fs::hard_link(root.join(original), root.join(path))
                 .expect("restore durable crash snapshot hard link");
         }
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn crash_snapshot_excludes_only_verified_runtime_sandbox_aliases() {
+    use std::os::unix::fs::symlink;
+
+    for entire_fixture in [false, true] {
+        let root = TestDirectory::new("crash-runtime-sandbox-alias");
+        let home = root.worker().join("kernel-home");
+        fs::create_dir_all(&home).expect("kernel home");
+        let alias_directory = tempfile::Builder::new()
+            .prefix(".linux-sandbox-")
+            .tempdir_in(&home)
+            .expect("private runtime alias directory");
+        let alias = alias_directory.path().join("codex-linux-sandbox");
+        let durable = root.worker().join("durable-receipt");
+        fs::write(&durable, b"retained receipt").expect("durable receipt");
+        let snapshot_root = if entire_fixture {
+            root.0.clone()
+        } else {
+            root.worker()
+        };
+        symlink(&durable, &alias).expect("untrusted alias");
+        assert!(
+            std::panic::catch_unwind(|| DirectorySnapshot::capture(&snapshot_root)).is_err(),
+            "an untrusted alias must not be omitted from a crash snapshot"
+        );
+        fs::remove_file(&alias).expect("remove untrusted alias");
+        symlink(
+            helper_executable()
+                .canonicalize()
+                .expect("canonical helper"),
+            &alias,
+        )
+        .expect("runtime sandbox alias");
+        let snapshot = DirectorySnapshot::capture(&snapshot_root);
+        drop(alias_directory);
+        snapshot.restore(&snapshot_root);
+        assert_eq!(fs::read(&durable).unwrap(), b"retained receipt");
+        assert!(
+            !alias.exists(),
+            "a runtime alias must be rebuilt after restart"
+        );
     }
 }
 
@@ -1287,6 +1366,9 @@ impl winwincode_codex::WorkerExecutionPort for RecordedPort {
 }
 
 fn helper_executable() -> PathBuf {
+    if let Some(executable) = std::env::var_os("WWC_WORKER_HELPER_EXECUTABLE") {
+        return PathBuf::from(executable);
+    }
     let workspace = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .and_then(Path::parent)

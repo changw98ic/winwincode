@@ -939,7 +939,7 @@ mod deadline_tests {
             .stderr(Stdio::piped());
         let _ = run_isolated_command(
             command,
-            Duration::from_secs(60),
+            Duration::from_mins(1),
             1024,
             &VerificationCancellation::default(),
         )

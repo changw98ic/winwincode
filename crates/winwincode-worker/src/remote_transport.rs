@@ -819,7 +819,9 @@ mod tests {
             Vec::new(),
         );
         let mut state = late_handle.state.lock().unwrap();
-        let request_started = std::time::Instant::now() - Duration::from_millis(300);
+        let request_started = std::time::Instant::now()
+            .checked_sub(Duration::from_millis(300))
+            .unwrap();
         assert!(matches!(
             state.receive_response(&response, &[], request_started),
             Err(RemoteWorkerPortError::NetworkExhausted(failure))

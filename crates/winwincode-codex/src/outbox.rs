@@ -998,8 +998,13 @@ fn response_target(
 fn response_replay_digest(message: &ExecutionPortMessage) -> Result<String, AdapterStoreError> {
     let mut value = serde_json::to_value(message).map_err(|_| AdapterStoreError::Corrupt)?;
     let object = value.as_object_mut().ok_or(AdapterStoreError::Corrupt)?;
-    object.remove("messageId");
-    object.remove("sentAt");
+    if !matches!(
+        message,
+        ExecutionPortMessage::ActionEnforcementReceiptMessage(_)
+    ) {
+        object.remove("messageId");
+        object.remove("sentAt");
+    }
     if matches!(
         message,
         ExecutionPortMessage::WorkerRegistrationResultMessage(_)
@@ -1585,6 +1590,43 @@ mod tests {
             drop(outbox);
             std::fs::remove_dir_all(root).expect("remove fixture");
         }
+    }
+
+    #[test]
+    fn compacted_action_receipt_rejects_a_different_message_identity_after_reopen() {
+        let root = test_root("action-receipt-message-identity");
+        let outbox = ExecutionOutbox::open(AdapterStore::open(&root).unwrap()).unwrap();
+        let response = fixture("action.enforcement_receipt");
+        outbox
+            .retain(&fixture("action.enforcement_request"))
+            .unwrap();
+        outbox.record_applied_response(&response).unwrap();
+        outbox.acknowledge_response(&response).unwrap();
+        drop(outbox);
+        let outbox = ExecutionOutbox::open(AdapterStore::open(&root).unwrap()).unwrap();
+        assert!(outbox.has_applied_response(&response).unwrap());
+        let mut changed = response.clone();
+        let ExecutionPortMessage::ActionEnforcementReceiptMessage(receipt) = &mut changed else {
+            panic!("action receipt fixture");
+        };
+        receipt.message_id.0 = format!("xmsg_{}", "Z".repeat(26));
+        assert_eq!(
+            outbox.has_applied_response(&changed),
+            Err(AdapterStoreError::Conflict)
+        );
+        assert_eq!(
+            outbox.record_applied_response(&changed),
+            Err(AdapterStoreError::Conflict)
+        );
+        assert_eq!(
+            outbox.acknowledge_response(&changed),
+            Err(AdapterStoreError::Conflict)
+        );
+        outbox.acknowledge_response(&response).unwrap();
+        assert!(outbox.has_applied_response(&response).unwrap());
+        assert!(outbox.pending().unwrap().is_empty());
+        drop(outbox);
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

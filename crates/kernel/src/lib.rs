@@ -2759,8 +2759,7 @@ mod tests {
             helper.canonicalize().unwrap()
         );
         let quote = |value: &str| format!("'{}'", value.replace('\'', "'\\''"));
-        let profile =
-            serde_json::to_string(&codex_protocol::models::PermissionProfile::read_only()).unwrap();
+        let profile = serde_json::to_string(&PermissionProfile::read_only()).unwrap();
         for supports_argv0 in [false, true] {
             if supports_argv0 && !help.contains("--argv0") {
                 continue;

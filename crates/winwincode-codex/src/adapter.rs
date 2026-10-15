@@ -9668,7 +9668,11 @@ mod tests {
         use winwincode_execution_port::generated::ActionEnforcementDecision;
         use winwincode_kernel::{KernelActionGate as _, KernelActionPayload, KernelActionRequest};
 
-        let root = test_root("action-claim-before-transport-proof");
+        let root = test_root(if permitted {
+            "action-permit-claim-before-transport-proof"
+        } else {
+            "action-reject-claim-before-transport-proof"
+        });
         let config = diagnostic_adapter_config(&root);
         let mut adapter = ProductionCodexAdapter::open(config.clone()).unwrap();
         let original = crate::action_bridge::tests::binding();
