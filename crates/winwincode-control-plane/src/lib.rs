@@ -1405,9 +1405,17 @@ impl ControlPlane {
         authority: &winwincode_delivery::application::workrun_execution::SessionBindingAuthority,
         server_time: &Instant,
     ) -> Result<execution_port::RuntimeAckMessage, RuntimeMessageError> {
+        let database_path = self.local_database_path.clone();
         let ack = {
             let storage = self.storage_mut().map_err(RuntimeMessageError::Storage)?;
-            runtime_event_transaction::execute_at(storage, scope, message, authority, server_time)?
+            runtime_event_transaction::execute_at(
+                storage,
+                database_path.as_deref(),
+                scope,
+                message,
+                authority,
+                server_time,
+            )?
         };
         if !matches!(
             ack.status,

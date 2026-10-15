@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
-use std::{collections::HashSet, fmt};
+use std::{collections::HashSet, fmt, path::Path};
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -36,7 +36,7 @@ use winwincode_execution_port::generated::{
 use winwincode_storage::{
     CommitReceipt, DurableOutboxEvent, ExecutionAuthorityCommitGuard, ImmutableStateImport,
     NewOutboxEvent, PendingAuditEvent, ProductStateStorage, ProjectionEventStream,
-    PublicEventSource, ReceiptIdentity, ReceiptScopeKey, StateCommit, StateMutation,
+    PublicEventSource, ReceiptIdentity, ReceiptScopeKey, SqliteStorage, StateCommit, StateMutation,
     StateRevisionGuard, StorageError, StorageErrorKind,
 };
 
@@ -62,6 +62,18 @@ const RUNTIME_INVALIDATION_NAMESPACE: &[u8] = b"winwincode.runtime-event-runtime
 const MAX_SAFE_INTEGER: u64 = 9_007_199_254_740_991;
 const MAX_SUMMARY_LENGTH: usize = 2_000;
 const ACK_ID_ALPHABET: &[u8; 32] = b"0123456789ABCDEFGHJKMNPQRSTVWXYZ";
+
+#[cfg(test)]
+thread_local! {
+    pub(crate) static LEDGER_READ_INTERLEAVE: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(test)]
+fn interleave_after_ledger_read() {
+    if let Some(interleave) = LEDGER_READ_INTERLEAVE.with_borrow_mut(Option::take) {
+        interleave();
+    }
+}
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum RuntimeMessageError {
@@ -105,6 +117,7 @@ impl From<StorageError> for RuntimeMessageError {
 #[allow(clippy::too_many_lines)]
 pub(crate) fn execute_at(
     storage: &mut dyn ProductStateStorage,
+    database_path: Option<&Path>,
     scope: &RepositoryScope,
     message: &RuntimeEventMessage,
     authority: &SessionBindingAuthority,
@@ -222,14 +235,22 @@ pub(crate) fn execute_at(
         None
     };
     let stream_id = phase.stream_id.clone();
-    let stored_ledger = load_ledger(storage, &stream_id)?;
+    let snapshot = database_path
+        .map(SqliteStorage::open_read_snapshot)
+        .transpose()?;
+    let read_storage = snapshot
+        .as_ref()
+        .map_or(&*storage, |snapshot| snapshot as &dyn ProductStateStorage);
+    let stored_ledger = load_ledger(read_storage, &stream_id)?;
+    #[cfg(test)]
+    interleave_after_ledger_read();
     let ledger = match stored_ledger.clone() {
         Some(previous)
             if context.scope_kind == RuntimeScopeKind::ProductSession
                 && previous.execution_job_id != context.execution_job_id =>
         {
             let (prior_intent, prior_job) =
-                load_durable_execution_intent(storage, &previous.execution_job_id)?;
+                load_durable_execution_intent(read_storage, &previous.execution_job_id)?;
             if prior_intent.stream_id() != durable.stream_id()
                 || prior_intent.revision() >= durable.revision()
                 || prior_job.scope != job.scope
@@ -249,7 +270,7 @@ pub(crate) fn execute_at(
                 && previous.execution_job_id == context.execution_job_id
                 && context.attempt > previous.attempt =>
         {
-            if !trusted_runtime_successor(storage, &previous, message)? {
+            if !trusted_runtime_successor(read_storage, &previous, message)? {
                 return Ok(rejection_ack(
                     message,
                     0,
@@ -271,7 +292,7 @@ pub(crate) fn execute_at(
     }
 
     let event_digest = event_digest(&message.event)?;
-    match classify_indexed_event(storage, &ledger, &message.event, &event_digest)? {
+    match classify_indexed_event(read_storage, &ledger, &message.event, &event_digest)? {
         LedgerDecision::Duplicate => {
             return Ok(accepted_ack(
                 message,
@@ -305,7 +326,7 @@ pub(crate) fn execute_at(
         .as_ref()
         .filter(|previous| previous.schema_version == 1 && !previous.events.is_empty());
     let legacy_source_digest = if let Some(previous) = legacy {
-        let source = storage
+        let source = read_storage
             .load_state(&stream_id)?
             .ok_or_else(|| StorageError::invalid_input("legacy runtime source is missing"))?;
         if decode_runtime_ledger_state(&source, &stream_id)? != *previous {
@@ -422,6 +443,7 @@ pub(crate) fn execute_at(
                 0,
             )?);
     }
+    drop(snapshot);
     let committed = if let Some(guard) = execution_guard.as_ref() {
         storage.commit_with_execution_authority_guard(&commit, guard)
     } else {
@@ -447,7 +469,7 @@ pub(crate) fn execute_at(
             ));
         }
         Err(error) if error.kind() == StorageErrorKind::RevisionConflict => {
-            return resolve_raced_append(storage, &phase, message, &event_digest);
+            return resolve_raced_append(storage, database_path, &phase, message, &event_digest);
         }
         Err(error) => return Err(error.into()),
     };
@@ -489,13 +511,22 @@ fn validate_trusted_lease_time(
 
 fn resolve_raced_append(
     storage: &dyn ProductStateStorage,
+    database_path: Option<&Path>,
     phase: &RuntimePhase,
     message: &RuntimeEventMessage,
     digest: &Sha256Digest,
 ) -> Result<RuntimeAckMessage, RuntimeMessageError> {
-    let Some(ledger) = load_ledger(storage, &phase.stream_id)? else {
+    let snapshot = database_path
+        .map(SqliteStorage::open_read_snapshot)
+        .transpose()?;
+    let read_storage = snapshot
+        .as_ref()
+        .map_or(storage, |snapshot| snapshot as &dyn ProductStateStorage);
+    let Some(ledger) = load_ledger(read_storage, &phase.stream_id)? else {
         return Err(StorageError::revision_conflict(0, 1).into());
     };
+    #[cfg(test)]
+    interleave_after_ledger_read();
     if !ledger.owns_message(message) {
         return Ok(rejection_ack(
             message,
@@ -503,7 +534,7 @@ fn resolve_raced_append(
             Rejection::Conflict("runtime execution identity changed during append"),
         ));
     }
-    match classify_indexed_event(storage, &ledger, &message.event, digest)? {
+    match classify_indexed_event(read_storage, &ledger, &message.event, digest)? {
         LedgerDecision::Duplicate => Ok(accepted_ack(
             message,
             ledger.highest_sequence,

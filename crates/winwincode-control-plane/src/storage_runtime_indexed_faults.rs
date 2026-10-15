@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 use crate::runtime_event_transaction::{
-    hydrate_runtime_ledger, load_ledger, runtime_stream_id_for_projection,
+    LEDGER_READ_INTERLEAVE, hydrate_runtime_ledger, load_ledger, runtime_stream_id_for_projection,
 };
 
 fn indexed_runtime_fixture(seed: u64) -> (Fixture, RuntimeEventMessage, String) {
@@ -52,6 +52,81 @@ fn assert_indexed_accepted(fixture: &mut Fixture, message: &RuntimeEventMessage)
         panic!("runtime ack")
     };
     assert_eq!(ack.status, LeaseWriteStatus::Accepted);
+}
+
+fn assert_indexed_runtime_interleaved_commit(advance_during_resolution: bool) {
+    let seed = if advance_during_resolution {
+        8_610_000
+    } else {
+        8_600_000
+    };
+    let (mut fixture, mut message, _) = indexed_runtime_fixture(seed);
+    message.event.sequence = ExecutionSequence(2);
+    message.event.event_id = ExecutionEventId(canonical_id("xevt", seed + 2_000));
+    message.message_id = ExecutionMessageId(canonical_id("xmsg", seed + 2_000));
+    let mut winner = message.clone();
+    winner.message_id = ExecutionMessageId(canonical_id("xmsg", seed + 2_001));
+    winner.event.summary = "concurrent committed runtime event".into();
+    if advance_during_resolution {
+        winner.event.event_id = ExecutionEventId(canonical_id("xevt", seed + 2_001));
+    }
+    let mut later = message.clone();
+    later.event.sequence = ExecutionSequence(3);
+    later.message_id = ExecutionMessageId(canonical_id("xmsg", seed + 2_002));
+    let mut writer = Fixture {
+        root: fixture.root.clone(),
+        control_plane: ControlPlane::start_local(
+            ControlPlaneConfig::local(&fixture.root),
+            Box::new(RecordingPublisher),
+        )
+        .unwrap(),
+        storage: SqliteStorage::open(&fixture.root).unwrap(),
+        scope: fixture.scope.clone(),
+    };
+    LEDGER_READ_INTERLEAVE.with_borrow_mut(|hook| {
+        *hook = Some(Box::new(move || {
+            assert_indexed_accepted(&mut writer, &winner);
+            if advance_during_resolution {
+                LEDGER_READ_INTERLEAVE.with_borrow_mut(|hook| {
+                    *hook = Some(Box::new(move || {
+                        assert_indexed_accepted(&mut writer, &later);
+                        Box::new(writer.storage).close().unwrap();
+                        writer.control_plane.shutdown().unwrap();
+                    }));
+                });
+            } else {
+                Box::new(writer.storage).close().unwrap();
+                writer.control_plane.shutdown().unwrap();
+            }
+        }));
+    });
+    let response = fixture
+        .accept(
+            &ExecutionPortMessage::RuntimeEventMessage(message.clone()),
+            message.sent_at.clone(),
+        )
+        .expect("concurrent append must return an ACK, never a storage error");
+    let [ExecutionPortMessage::RuntimeAckMessage(ack)] = response.as_slice() else {
+        panic!("runtime ack")
+    };
+    assert_eq!(ack.status, LeaseWriteStatus::RejectedConflict);
+    assert_eq!(ack.ack_sequence.0, 2);
+    assert_eq!(
+        ack.error.as_ref().unwrap().code,
+        winwincode_execution_port::generated::ExecutionPortErrorCode::MessageConflict
+    );
+    assert!(LEDGER_READ_INTERLEAVE.with_borrow(Option::is_none));
+    fixture.close();
+}
+
+#[test]
+fn indexed_runtime_commit_after_header_read_returns_conflict_ack() {
+    assert_indexed_runtime_interleaved_commit(false);
+}
+
+#[test]
+fn indexed_runtime_commit_during_race_resolution_returns_conflict_ack() {
+    assert_indexed_runtime_interleaved_commit(true);
 }
 
 #[test]
