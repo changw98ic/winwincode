@@ -325,3 +325,26 @@ fn status_restart_and_logs_control_the_live_service_files() {
     assert_eq!(logs.code, 0);
     assert_eq!(logs.stdout, "first\nsecond\n");
 }
+
+#[test]
+fn remote_binding_refuses_plaintext_remote_urls_before_network_and_redacts_the_token() {
+    let fixture = Fixture::new();
+    let exit = fixture.cli(&[
+        "bind",
+        "--server-url",
+        "http://192.0.2.1:8443",
+        "--pairing-token",
+        "fixture-private-token",
+        "--json",
+    ]);
+    assert_eq!(exit.code, 5);
+    assert!(exit.stderr.contains("HTTPS"), "{}", exit.stderr);
+    assert!(!exit.stderr.contains("fixture-private-token"));
+    assert!(exit.stdout.is_empty());
+    let store = DeviceStore::open(&fixture.data_directory).expect("Device store");
+    assert!(
+        winwincode_device_client::load_remote_binding(&store)
+            .expect("remote binding")
+            .is_none()
+    );
+}

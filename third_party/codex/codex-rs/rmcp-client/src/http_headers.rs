@@ -56,6 +56,8 @@ struct HttpHeadersClient {
 struct HelperProcess {
     child: Child,
     #[cfg(unix)]
+    _lifeline: codex_utils_pty::process_group::ProcessGroupLifeline,
+    #[cfg(unix)]
     process_group_id: u32,
     #[cfg(windows)]
     job: codex_utils_pty::JobObject,
@@ -294,6 +296,10 @@ async fn run_helper(command: &str, cwd: &Path) -> Result<HeaderMap> {
         .envs(create_env_for_mcp_server(/*extra_env*/ None, &[])?)
         .kill_on_drop(true);
 
+    #[cfg(unix)]
+    let lifeline = codex_utils_pty::process_group::ProcessGroupLifeline::configure_command(
+        process.as_std_mut(),
+    )?;
     #[cfg(windows)]
     let (child, job) = {
         let job = codex_utils_pty::JobObject::create_without_breakaway()
@@ -308,6 +314,8 @@ async fn run_helper(command: &str, cwd: &Path) -> Result<HeaderMap> {
         .spawn()
         .map_err(|error| anyhow!("MCP HTTP headers helper failed to start: {error}"))?;
     let mut process = HelperProcess {
+        #[cfg(unix)]
+        _lifeline: lifeline,
         #[cfg(unix)]
         process_group_id: child
             .id()

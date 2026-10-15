@@ -56,6 +56,7 @@ const STAMP: &str = "2026-09-04T00:00:00.000Z";
 const LEASE: &str = "ocl_CANDIDATE000000000000000000000";
 const BINDING: &str = "rbd_CANDIDATEBINDING00000000000000";
 const SESSION: &str = "wks_CANDIDATESESSION0000000000000";
+const BASE: &str = "0123456789abcdef0123456789abcdef01234567";
 const COMMIT: &str = "0f9e8d7c6b5a4938271605f4e3d2c1b0a9988776";
 const CANDIDATE_REF_NAME: &str =
     "refs/winwincode/candidates/0f9e8d7c6b5a4938271605f4e3d2c1b0a9988776";
@@ -161,9 +162,16 @@ fn mirror_the_lease(store: &mut DeviceStore) {
         .expect("the occupancy mirror should advance");
 }
 
-fn retention(commit: &str, binding: &str, session: &str, stamp: &str) -> CandidateRetention {
+fn retention(
+    commit: &str,
+    base_commit: &str,
+    binding: &str,
+    session: &str,
+    stamp: &str,
+) -> CandidateRetention {
     CandidateRetention {
         candidate_commit: commit.to_owned(),
+        base_commit: base_commit.to_owned(),
         repository_binding_id: binding.to_owned(),
         worker_session_id: session.to_owned(),
         local_git_ref: format!("refs/winwincode/candidates/{commit}"),
@@ -172,7 +180,7 @@ fn retention(commit: &str, binding: &str, session: &str, stamp: &str) -> Candida
 }
 
 fn retention_for_commit(commit: &str) -> CandidateRetention {
-    retention(commit, BINDING, SESSION, STAMP)
+    retention(commit, BASE, BINDING, SESSION, STAMP)
 }
 
 fn pending_frames(store: &mut DeviceStore) -> Vec<(String, Value)> {
@@ -289,6 +297,7 @@ fn a_retention_round_trips_and_survives_a_restart_for_recovery() {
             created_at: STAMP.to_owned(),
             candidate_ref: CANDIDATE_REF_NAME.to_owned(),
             candidate_commit: COMMIT.to_owned(),
+            base_commit: BASE.to_owned(),
             retained_at: STAMP.to_owned(),
         },
         "the recorded row carries every registry fact"
@@ -316,7 +325,7 @@ fn a_repeated_retention_of_the_same_candidate_is_idempotent() {
         .expect("the first retention records");
     let replay = record_candidate_retention(
         &mut store,
-        &retention(COMMIT, BINDING, SESSION, "2026-09-04T12:00:00.000Z"),
+        &retention(COMMIT, BASE, BINDING, SESSION, "2026-09-04T12:00:00.000Z"),
     )
     .expect("the replay is an idempotent duplicate");
     let CandidateRetentionOutcome::Recorded(original) = first else {
@@ -353,11 +362,23 @@ fn a_diverging_re_report_fails_closed() {
     for (label, diverging) in [
         (
             "a different repository binding",
-            retention(COMMIT, "rbd_OTHER000000000000000000000000", SESSION, STAMP),
+            retention(
+                COMMIT,
+                BASE,
+                "rbd_OTHER000000000000000000000000",
+                SESSION,
+                STAMP,
+            ),
         ),
         (
             "a different worker session",
-            retention(COMMIT, BINDING, "wks_OTHER00000000000000000000000", STAMP),
+            retention(
+                COMMIT,
+                BASE,
+                BINDING,
+                "wks_OTHER00000000000000000000000",
+                STAMP,
+            ),
         ),
     ] {
         let error = record_candidate_retention(&mut store, &diverging)
@@ -689,8 +710,11 @@ fn reconciliation_reports_verified_missing_and_drifted_refs() {
         (missing_commit.as_str(), MISSING_BINDING),
         (unmapped_commit, UNMAPPED_BINDING),
     ] {
-        record_candidate_retention(&mut store, &retention(commit, binding, SESSION, STAMP))
-            .expect("the retention should record");
+        record_candidate_retention(
+            &mut store,
+            &retention(commit, commit, binding, SESSION, STAMP),
+        )
+        .expect("the retention should record");
     }
 
     let mut verdicts = reconcile_retained_candidates(&store).expect("the reconciliation scans");
@@ -798,10 +822,15 @@ fn startup_rejects_a_pre_v6_database_instead_of_migrating() {
 
 #[test]
 fn daemon_recovers_a_frozen_candidate_and_reports_exit_after_restart() {
-    let (repository, _) = init_repository("worker-freeze");
-    let message =
-        r#"{"originProvenance":{"workerId":"wrk_WRITER","workerInstanceId":"wki_WRITER"}}"#;
-    let commit = add_commit(&repository, message);
+    let (repository, base_commit) = init_repository("worker-freeze");
+    let message = serde_json::json!({
+        "schemaVersion": 1,
+        "repositoryId": "repo_WRITER",
+        "sourceCommitId": base_commit,
+        "originProvenance": { "workerId": "wrk_WRITER", "workerInstanceId": "wki_WRITER" }
+    })
+    .to_string();
+    let commit = add_commit(&repository, &message);
     git(
         &repository,
         &[
@@ -845,6 +874,7 @@ fn daemon_recovers_a_frozen_candidate_and_reports_exit_after_restart() {
         let rows = retained_candidates(daemon.store_mut()).unwrap();
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].candidate_commit, commit);
+        assert_eq!(rows[0].base_commit, base_commit);
         assert!(
             pending_frames(daemon.store_mut())
                 .iter()

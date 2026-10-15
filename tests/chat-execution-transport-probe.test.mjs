@@ -91,7 +91,7 @@ test('retained Worker bytes use the Device relay envelope and its inner response
     outgoing.writeHead(200, { 'Content-Type': 'application/json' })
     outgoing.end(JSON.stringify(received.length === 1
       ? { status: 200, body: JSON.stringify({ schemaVersion: 'execution-port.remote-exchange.v2',
-        frameAccepted: true, deliveries: [] }) }
+        serverTime: '2026-10-15T00:00:00.000Z', frameAccepted: true, deliveries: [] }) }
       : { status: 400, body: 'Worker route does not match its Device session' }))
   })
   await new Promise(resolve => server.listen(0, '127.0.0.1', resolve))

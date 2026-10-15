@@ -9,6 +9,7 @@ mod client_occupancy;
 mod client_repositories;
 mod client_sessions;
 mod config;
+mod device_auth;
 mod device_providers;
 mod dispatcher;
 mod durable_event_hub;
@@ -72,7 +73,10 @@ pub use runtime::{
 };
 #[cfg(feature = "local-worker")]
 pub use runtime::{LocalRuntimeScheduler, LocalRuntimeSupervisor, RuntimeHealthHandle};
-pub use server::{RunningServer, ServerError, start_server, start_server_with_remote_worker};
+pub use server::{
+    RunningServer, ServerError, start_server, start_server_with_remote_worker,
+    wait_for_owner_initialization,
+};
 pub use transport::{
     ApiError, AuthError, AuthenticatedPrincipal, ControlPlaneApiPort, EventSubscription,
     RequestAuthenticator, TransportCredentials,

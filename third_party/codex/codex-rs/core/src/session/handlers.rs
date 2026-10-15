@@ -398,6 +398,10 @@ pub async fn set_thread_memory_mode(sess: &Arc<Session>, sub_id: String, mode: T
 
 async fn shutdown_session_runtime(sess: &Arc<Session>) {
     crate::tools::ExecutionFacts::seal(sess);
+    let (_, code_mode_result) = tokio::join!(
+        sess.services.unified_exec_manager.shutdown(),
+        sess.services.code_mode_service.shutdown(),
+    );
     if let Some(startup_prewarm) = sess.take_session_startup_prewarm().await {
         startup_prewarm.abort().await;
     }
@@ -410,7 +414,6 @@ async fn shutdown_session_runtime(sess: &Arc<Session>) {
         .unified_exec_manager
         .terminate_all_processes()
         .await;
-    let code_mode_result = sess.services.code_mode_service.shutdown().await;
     crate::tools::ExecutionFacts::finish_shutdown(sess, code_mode_result).await;
     sess.stop_mcp_prewarm_worker().await;
     {

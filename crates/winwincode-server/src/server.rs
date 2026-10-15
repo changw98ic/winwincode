@@ -23,6 +23,8 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{any, get, post};
 use axum_server::Handle;
 use futures::StreamExt;
+#[cfg(feature = "test-support")]
+use http::header::CONTENT_LENGTH;
 use serde_json::{Value, json};
 use winwincode_api::generated::{
     AuthSessionRequest, ControlPlaneWebSocketProtocolErrorFrame,
@@ -58,19 +60,27 @@ use crate::client_sessions::ClientSessionsConfig;
 use crate::client_sessions::ClientSessionsError;
 use crate::client_sessions::ClientSessionsErrorKind;
 use crate::config::ServerConfig;
+use crate::device_auth::DeviceAuthApplication;
 use crate::preview::{PreviewApplication, PreviewError, PreviewErrorKind};
 use crate::remote_worker_transport::RemoteWorkerExchangePort;
 use crate::transport::{
-    ApiError, AuthenticatedPrincipal, ControlPlaneApiPort, RequestAuthenticator,
+    ApiError, AuthenticatedPrincipal, ControlPlaneApiPort, EventSubscription, RequestAuthenticator,
     TransportCredentials,
 };
 use crate::user_accounts::UserAccountServiceErrorKind;
+use winwincode_api::generated::{
+    DeviceAuthErrorResponse, DeviceBindRequest, DevicePairingRequest, DeviceRevokeRequest,
+};
+use winwincode_storage::DeviceAuthStoreError;
 
 const MAX_REQUEST_BYTES: usize = 2 * 1024 * 1024;
 const FIRST_SUBSCRIPTION_FRAME_TIMEOUT: Duration = Duration::from_secs(15);
 const SESSION_REVALIDATION_INTERVAL: Duration = Duration::from_millis(250);
 const SUPPORTED_SCHEMA_VERSION: &str = "winwincode/v1";
 static NEXT_DIAGNOSTIC_REQUEST_ID: AtomicU64 = AtomicU64::new(1);
+#[cfg(feature = "test-support")]
+static DEVICE_BIND_RESPONSE_DROPPED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
 type ResponseResult<T> = Result<T, BoundaryError>;
 
 struct BoundaryError {
@@ -133,6 +143,8 @@ struct ServerState {
     client_repositories: Option<Arc<ClientRepositoriesApplication>>,
     client_sessions: Option<Arc<ClientSessionsApplication>>,
     preview: Option<Arc<PreviewApplication>>,
+    device_auth: Arc<DeviceAuthApplication>,
+    device_request_gate: Arc<tokio::sync::Mutex<()>>,
 }
 
 pub struct RunningServer {
@@ -198,6 +210,69 @@ impl RunningServer {
     }
 }
 
+pub async fn wait_for_owner_initialization(
+    config: ServerConfig,
+    sessions: Arc<SqliteAuthSessionManager>,
+) -> Result<(), ServerError> {
+    struct InitializationApi;
+    impl ControlPlaneApiPort for InitializationApi {
+        fn command(&self, _: &AuthenticatedPrincipal, _: Value) -> Result<Value, ApiError> {
+            Err(ApiError::new(
+                503,
+                "SERVER_INITIALIZING",
+                "Server initialization is required",
+            ))
+        }
+        fn query(&self, _: &AuthenticatedPrincipal, _: Value) -> Result<Value, ApiError> {
+            Err(ApiError::new(
+                503,
+                "SERVER_INITIALIZING",
+                "Server initialization is required",
+            ))
+        }
+        fn subscribe(
+            &self,
+            _: &AuthenticatedPrincipal,
+            _: Value,
+        ) -> Result<EventSubscription, ApiError> {
+            Err(ApiError::new(
+                503,
+                "SERVER_INITIALIZING",
+                "Server initialization is required",
+            ))
+        }
+        fn event_control(
+            &self,
+            _: &AuthenticatedPrincipal,
+            _: Value,
+        ) -> Result<Vec<Value>, ApiError> {
+            Err(ApiError::new(
+                503,
+                "SERVER_INITIALIZING",
+                "Server initialization is required",
+            ))
+        }
+        fn shutdown(&self) -> Result<(), ApiError> {
+            Ok(())
+        }
+    }
+    let authenticator: Arc<dyn RequestAuthenticator> = sessions.clone();
+    let mut server = start_server(
+        config,
+        sessions.clone(),
+        authenticator,
+        Arc::new(InitializationApi),
+    )
+    .await?;
+    while sessions.initialized_owner().is_none() {
+        tokio::select! {
+            _=tokio::signal::ctrl_c()=>{server.shutdown_listener().await?;return Err(ServerError::new("Server initialization was interrupted"));}
+            ()=tokio::time::sleep(Duration::from_millis(100))=>{}
+        }
+    }
+    server.shutdown_listener().await
+}
+
 pub async fn start_server(
     config: ServerConfig,
     auth_sessions: Arc<SqliteAuthSessionManager>,
@@ -216,6 +291,14 @@ pub async fn start_server_with_remote_worker(
     remote_worker: Option<Arc<dyn RemoteWorkerExchangePort>>,
     client_exchange: Option<Arc<dyn ClientExchangePort>>,
 ) -> Result<RunningServer, ServerError> {
+    config
+        .validate_transport()
+        .map_err(|error| ServerError::new(error.to_string()))?;
+    if config.remote() && auth_sessions.local_open() {
+        return Err(ServerError::new(
+            "remote Server cannot use local-open authentication",
+        ));
+    }
     let config = Arc::new(config);
     let client_connections = match &client_exchange {
         Some(_) => {
@@ -306,6 +389,8 @@ pub async fn start_server_with_remote_worker(
         client_repositories,
         client_sessions,
         preview,
+        device_auth: Arc::new(DeviceAuthApplication::new(config.data_directory())),
+        device_request_gate: Arc::new(tokio::sync::Mutex::new(())),
     };
     let router = router(state);
     let handle = Handle::new();
@@ -371,13 +456,27 @@ fn spawn_listener(
     handle: Handle<SocketAddr>,
 ) -> tokio::task::JoinHandle<Result<(), ServerError>> {
     let address = config.bind_address();
+    let tls_pem = config.tls_pem().cloned();
     let make_service = router.into_make_service_with_connect_info::<SocketAddr>();
     tokio::spawn(async move {
-        axum_server::bind(address)
-            .handle(handle)
-            .serve(make_service)
-            .await
-            .map_err(|_| ServerError::new("HTTP listener failed"))
+        if let Some((certificate, private_key)) = tls_pem {
+            codex_utils_rustls_provider::ensure_rustls_crypto_provider();
+            let tls =
+                axum_server::tls_rustls::RustlsConfig::from_pem_file(certificate, private_key)
+                    .await
+                    .map_err(|_| ServerError::new("TLS certificate or private key is invalid"))?;
+            axum_server::bind_rustls(address, tls)
+                .handle(handle)
+                .serve(make_service)
+                .await
+                .map_err(|_| ServerError::new("HTTPS listener failed"))
+        } else {
+            axum_server::bind(address)
+                .handle(handle)
+                .serve(make_service)
+                .await
+                .map_err(|_| ServerError::new("HTTP listener failed"))
+        }
     })
 }
 
@@ -385,6 +484,16 @@ fn spawn_listener(
 fn router(state: ServerState) -> Router {
     Router::new()
         .route("/health", get(health))
+        .route(
+            "/api/v1/devices/pairing",
+            post(device_pairing).options(preflight),
+        )
+        .route(
+            "/api/v1/devices/{client_node_id}/revoke",
+            post(device_revoke).options(preflight),
+        )
+        .route("/internal/v1/device/challenge", post(device_challenge))
+        .route("/internal/v1/device/bind", post(device_bind))
         .route(
             "/api/v1/auth/session",
             get(get_auth_session)
@@ -510,6 +619,195 @@ fn router(state: ServerState) -> Router {
         .layer(DefaultBodyLimit::max(MAX_REQUEST_BYTES))
 }
 
+fn device_auth_error(error: DeviceAuthStoreError, origin: Option<&HeaderValue>) -> Response {
+    let (status, code) = match error {
+        DeviceAuthStoreError::Revoked => (StatusCode::FORBIDDEN, "DEVICE_REVOKED"),
+        DeviceAuthStoreError::Authentication => (StatusCode::UNAUTHORIZED, "DEVICE_AUTH_REQUIRED"),
+        DeviceAuthStoreError::Conflict => (StatusCode::CONFLICT, "IDEMPOTENCY_CONFLICT"),
+        DeviceAuthStoreError::InvalidRequest => (StatusCode::BAD_REQUEST, "INVALID_REQUEST"),
+        DeviceAuthStoreError::NotFound => (StatusCode::NOT_FOUND, "RESOURCE_NOT_FOUND"),
+        DeviceAuthStoreError::Unavailable => {
+            (StatusCode::SERVICE_UNAVAILABLE, "SERVICE_UNAVAILABLE")
+        }
+    };
+    device_error_response(status, code, origin)
+}
+
+fn device_boundary_error(error: &BoundaryError) -> Response {
+    let code = match error.status {
+        StatusCode::UNAUTHORIZED => "DEVICE_AUTH_REQUIRED",
+        StatusCode::FORBIDDEN => "PERMISSION_DENIED",
+        StatusCode::BAD_REQUEST => "INVALID_REQUEST",
+        _ => "SERVICE_UNAVAILABLE",
+    };
+    device_error_response(error.status, code, error.origin.as_ref())
+}
+
+fn device_error_response(status: StatusCode, code: &str, origin: Option<&HeaderValue>) -> Response {
+    json_response(
+        status,
+        serde_json::to_value(DeviceAuthErrorResponse {
+            schema_version: SchemaVersion::WinwincodeV1,
+            code: code.to_owned(),
+        })
+        .expect("Device auth error serializes"),
+        origin,
+    )
+}
+
+fn authenticate_device_route(
+    state: &ServerState,
+    headers: &HeaderMap,
+    uri: &Uri,
+    method: &str,
+    node: &str,
+    body: &[u8],
+) -> Result<(), DeviceAuthStoreError> {
+    if uri.query().is_some() {
+        return Err(DeviceAuthStoreError::Authentication);
+    }
+    if state.config.remote() || headers.contains_key("x-winwincode-device-public-key") {
+        state
+            .device_auth
+            .authenticate(headers, method, uri.path(), node, body)?;
+    }
+    Ok(())
+}
+
+async fn device_pairing(
+    State(state): State<ServerState>,
+    headers: HeaderMap,
+    uri: Uri,
+    body: Bytes,
+) -> Response {
+    let (principal, origin, _) = match authorize(&state, &headers, &uri) {
+        Ok(value) => value,
+        Err(error) => return device_boundary_error(&error),
+    };
+    if state.client_exchange.is_none() {
+        return device_auth_error(DeviceAuthStoreError::Unavailable, origin.as_ref());
+    }
+    let Some(owner) = principal
+        .actor_user_id()
+        .filter(|id| state.auth_sessions.initialized_owner().as_ref() == Some(id))
+    else {
+        return device_error_response(StatusCode::FORBIDDEN, "PERMISSION_DENIED", origin.as_ref());
+    };
+    if serde_json::from_slice::<DevicePairingRequest>(&body).is_err() {
+        return device_auth_error(DeviceAuthStoreError::InvalidRequest, origin.as_ref());
+    }
+    match state.device_auth.pairing(&owner.0) {
+        Ok(value) => json_response(StatusCode::CREATED, value, origin.as_ref()),
+        Err(error) => device_auth_error(error, origin.as_ref()),
+    }
+}
+
+async fn device_challenge(State(state): State<ServerState>, uri: Uri, body: Bytes) -> Response {
+    if state.client_exchange.is_none() {
+        return device_auth_error(DeviceAuthStoreError::Unavailable, None);
+    }
+    if uri.query().is_some() {
+        return device_auth_error(DeviceAuthStoreError::InvalidRequest, None);
+    }
+    let Ok(request) = serde_json::from_slice::<Value>(&body) else {
+        return device_auth_error(DeviceAuthStoreError::InvalidRequest, None);
+    };
+    match state.device_auth.challenge(&request) {
+        Ok(value) => json_response(StatusCode::OK, value, None),
+        Err(error) => device_auth_error(error, None),
+    }
+}
+
+async fn device_bind(
+    State(state): State<ServerState>,
+    headers: HeaderMap,
+    uri: Uri,
+    body: Bytes,
+) -> Response {
+    let _gate = state.device_request_gate.lock().await;
+    if state.client_exchange.is_none() {
+        return device_auth_error(DeviceAuthStoreError::Unavailable, None);
+    }
+    if uri.query().is_some() {
+        return device_auth_error(DeviceAuthStoreError::InvalidRequest, None);
+    }
+    let Ok(request) = serde_json::from_slice::<Value>(&body) else {
+        return device_auth_error(DeviceAuthStoreError::InvalidRequest, None);
+    };
+    if serde_json::from_value::<DeviceBindRequest>(request.clone()).is_err() {
+        return device_auth_error(DeviceAuthStoreError::InvalidRequest, None);
+    }
+    let key = match state
+        .device_auth
+        .authenticate(&headers, "POST", uri.path(), "", &body)
+    {
+        Ok(value) => value,
+        Err(error) => return device_auth_error(error, None),
+    };
+    match state.device_auth.bind(&request, &key) {
+        Ok(value) => {
+            #[cfg(feature = "test-support")]
+            if std::env::var("WWC_TEST_DROP_FIRST_DEVICE_BIND_RESPONSE").as_deref() == Ok("1")
+                && DEVICE_BIND_RESPONSE_DROPPED
+                    .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+                    .is_ok()
+            {
+                eprintln!(
+                    "winwincode-server: test-support dropped committed device binding response"
+                );
+                let bytes = serde_json::to_vec(&value).expect("Device binding response serializes");
+                let stream = futures::stream::iter([
+                    Ok(Bytes::copy_from_slice(&bytes[..1])),
+                    Err(std::io::Error::new(
+                        std::io::ErrorKind::ConnectionAborted,
+                        "test-support binding response loss",
+                    )),
+                ]);
+                return Response::builder()
+                    .status(StatusCode::OK)
+                    .header(CONTENT_TYPE, "application/json")
+                    .header(CONTENT_LENGTH, bytes.len())
+                    .body(Body::from_stream(stream))
+                    .expect("Device binding fault response builds");
+            }
+            json_response(StatusCode::OK, value, None)
+        }
+        Err(error) => device_auth_error(error, None),
+    }
+}
+
+async fn device_revoke(
+    State(state): State<ServerState>,
+    Path(node): Path<String>,
+    headers: HeaderMap,
+    uri: Uri,
+    body: Bytes,
+) -> Response {
+    let _gate = state.device_request_gate.lock().await;
+    let (principal, origin, _) = match authorize(&state, &headers, &uri) {
+        Ok(value) => value,
+        Err(error) => return device_boundary_error(&error),
+    };
+    let Some(owner) = principal
+        .actor_user_id()
+        .filter(|id| state.auth_sessions.initialized_owner().as_ref() == Some(id))
+    else {
+        return device_error_response(StatusCode::FORBIDDEN, "PERMISSION_DENIED", origin.as_ref());
+    };
+    if serde_json::from_slice::<DeviceRevokeRequest>(&body).is_err() {
+        return device_auth_error(DeviceAuthStoreError::InvalidRequest, origin.as_ref());
+    }
+    match state.device_auth.revoke(&node, &owner.0) {
+        Ok(value) => {
+            if let Some(preview) = &state.preview {
+                preview.disconnect_device(&node);
+            }
+            json_response(StatusCode::OK, value, origin.as_ref())
+        }
+        Err(error) => device_auth_error(error, origin.as_ref()),
+    }
+}
+
 async fn preview_tunnel(
     State(state): State<ServerState>,
     headers: HeaderMap,
@@ -530,6 +828,11 @@ async fn preview_tunnel(
     else {
         return StatusCode::UNAUTHORIZED.into_response();
     };
+    if let Err(error) =
+        authenticate_device_route(&state, &headers, &uri, "GET", &client_node_id, &[])
+    {
+        return device_auth_error(error, None);
+    }
     let preview = Arc::clone(preview);
     upgrade
         .on_upgrade(move |socket| async move {
@@ -694,16 +997,32 @@ fn preview_error_response(error: &PreviewError, origin: Option<&HeaderValue>) ->
     connect_error_response(status, code, error.message(), origin)
 }
 
-async fn client_worker_exchange(State(state): State<ServerState>, body: Bytes) -> Response {
+async fn client_worker_exchange(
+    State(state): State<ServerState>,
+    headers: HeaderMap,
+    uri: Uri,
+    body: Bytes,
+) -> Response {
     use winwincode_client_port::worker_relay::{
         DeviceWorkerRelayRequest, WorkerRelayRequest, WorkerRelayResponse,
     };
+    let _gate = state.device_request_gate.lock().await;
     let Some(exchange) = &state.remote_worker else {
         return StatusCode::NOT_FOUND.into_response();
     };
     let Ok(request) = serde_json::from_slice::<DeviceWorkerRelayRequest>(&body) else {
         return StatusCode::BAD_REQUEST.into_response();
     };
+    if let Err(error) = authenticate_device_route(
+        &state,
+        &headers,
+        &uri,
+        "POST",
+        &request.client_node_id,
+        &body,
+    ) {
+        return device_auth_error(error, None);
+    }
     let exchange = Arc::clone(exchange);
     let result = tokio::task::spawn_blocking(move || {
         let now = SystemStandaloneApplicationClock.now_instant();
@@ -728,25 +1047,49 @@ async fn client_worker_exchange(State(state): State<ServerState>, body: Bytes) -
     .await;
     let response = match result {
         Ok(Ok(body)) => match String::from_utf8(body) {
-            Ok(body) => WorkerRelayResponse { status: 200, body },
+            Ok(body) => WorkerRelayResponse {
+                status: 200,
+                body,
+                failure: None,
+            },
             Err(_) => return StatusCode::SERVICE_UNAVAILABLE.into_response(),
         },
         Ok(Err(error)) => WorkerRelayResponse {
             status: error.status_code(),
             body: error.to_string(),
+            failure: None,
         },
         Err(_) => WorkerRelayResponse {
             status: 503,
             body: "Worker relay is unavailable".to_owned(),
+            failure: None,
         },
     };
     Json(response).into_response()
 }
 
-async fn client_control_exchange(State(state): State<ServerState>, body: Bytes) -> Response {
+async fn client_control_exchange(
+    State(state): State<ServerState>,
+    headers: HeaderMap,
+    uri: Uri,
+    body: Bytes,
+) -> Response {
+    let _gate = state.device_request_gate.lock().await;
     let Some(exchange) = &state.client_exchange else {
         return StatusCode::NOT_FOUND.into_response();
     };
+    if state.config.remote() || headers.contains_key("x-winwincode-device-public-key") {
+        let node = serde_json::from_slice::<Value>(&body)
+            .ok()
+            .and_then(|v| v["clientNodeId"].as_str().map(str::to_owned));
+        let Some(node) = node else {
+            return StatusCode::BAD_REQUEST.into_response();
+        };
+        if let Err(error) = authenticate_device_route(&state, &headers, &uri, "POST", &node, &body)
+        {
+            return device_auth_error(error, None);
+        }
+    }
     let now = SystemStandaloneApplicationClock.now_instant();
     match exchange.exchange(&body, now) {
         Ok(response) => (

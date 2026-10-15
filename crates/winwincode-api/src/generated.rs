@@ -45,6 +45,16 @@ pub enum ActorId {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+pub enum ApplicationReconciliationOutcome {
+    #[serde(rename = "applied")]
+    Applied,
+    #[serde(rename = "not_started")]
+    NotStarted,
+    #[serde(rename = "outcome_unknown")]
+    OutcomeUnknown,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum ApprovalDecideCommandCommand {
     #[serde(rename = "approval.decide")]
     ApprovalDecide,
@@ -353,6 +363,39 @@ pub struct AuthSessionResponse {
     pub expires_at: winwincode_domain::Instant,
     #[serde(rename = "schemaVersion")]
     pub schema_version: winwincode_domain::SchemaVersion,
+}
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CandidateApplicationProjection {
+    #[serde(rename = "applicationId")]
+    pub application_id: winwincode_domain::LocalApplyReceiptId,
+    #[serde(rename = "approvalId")]
+    pub approval_id: winwincode_domain::IdempotencyKey,
+    #[serde(rename = "baseCommit")]
+    pub base_commit: winwincode_domain::GitCommitSha,
+    #[serde(rename = "candidateDigest")]
+    pub candidate_digest: winwincode_domain::ApplicationCandidateDigest,
+    #[serde(rename = "status")]
+    pub status: CandidateApplicationStatus,
+    #[serde(rename = "targetBranch")]
+    pub target_branch: winwincode_domain::GitRefName,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+pub enum CandidateApplicationStatus {
+    #[serde(rename = "applying")]
+    Applying,
+    #[serde(rename = "applied")]
+    Applied,
+    #[serde(rename = "stale")]
+    Stale,
+    #[serde(rename = "awaiting_retry")]
+    AwaitingRetry,
+    #[serde(rename = "blocked")]
+    Blocked,
+    #[serde(rename = "failed")]
+    Failed,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
@@ -1256,6 +1299,60 @@ pub enum ClientAccessGrantState {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+pub enum ClientApplicationReconciledMessageKind {
+    #[serde(rename = "client.application.reconciled")]
+    ClientApplicationReconciled,
+}
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ClientApplicationReconciledMessage {
+    #[serde(rename = "applicationId")]
+    pub application_id: winwincode_domain::LocalApplyReceiptId,
+    #[serde(rename = "approvalId")]
+    pub approval_id: winwincode_domain::IdempotencyKey,
+    #[serde(rename = "baseCommit")]
+    pub base_commit: winwincode_domain::GitCommitSha,
+    #[serde(rename = "candidateDigest")]
+    pub candidate_digest: winwincode_domain::ApplicationCandidateDigest,
+    #[serde(rename = "candidateRef")]
+    pub candidate_ref: winwincode_domain::CandidateRef,
+    #[serde(rename = "clientInstanceId")]
+    pub client_instance_id: winwincode_domain::ClientInstanceId,
+    #[serde(rename = "clientNodeId")]
+    pub client_node_id: winwincode_domain::ClientNodeId,
+    #[serde(rename = "expectedRevision")]
+    pub expected_revision: winwincode_domain::Revision,
+    #[serde(rename = "idempotencyKey")]
+    pub idempotency_key: winwincode_domain::IdempotencyKey,
+    #[serde(rename = "kind")]
+    pub kind: ClientApplicationReconciledMessageKind,
+    #[serde(rename = "messageId")]
+    pub message_id: winwincode_domain::ClientControlMessageId,
+    #[serde(rename = "occupancyFencingToken")]
+    pub occupancy_fencing_token: winwincode_domain::OccupancyFencingToken,
+    #[serde(rename = "occupancyLeaseId")]
+    pub occupancy_lease_id: winwincode_domain::ClientOccupancyLeaseId,
+    #[serde(rename = "occurredAt")]
+    pub occurred_at: winwincode_domain::Instant,
+    #[serde(rename = "originalEpoch")]
+    pub original_epoch: winwincode_domain::OccupancyFencingToken,
+    #[serde(rename = "outcome")]
+    pub outcome: ApplicationReconciliationOutcome,
+    #[serde(rename = "repositoryBindingId")]
+    pub repository_binding_id: winwincode_domain::RepositoryBindingId,
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    #[serde(rename = "resultCommit")]
+    pub result_commit: Option<winwincode_domain::GitCommitSha>,
+    #[serde(rename = "schemaVersion")]
+    pub schema_version: winwincode_domain::SchemaVersion,
+    #[serde(rename = "sequence")]
+    pub sequence: winwincode_domain::ClientExchangeSequence,
+    #[serde(rename = "targetBranch")]
+    pub target_branch: winwincode_domain::GitRefName,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum ClientArchitecture {
     #[serde(rename = "aarch64")]
     Aarch64,
@@ -1272,6 +1369,12 @@ pub enum ClientCandidateApplyMessageKind {
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ClientCandidateApplyMessage {
+    #[serde(rename = "applicationId")]
+    pub application_id: winwincode_domain::LocalApplyReceiptId,
+    #[serde(rename = "approvalId")]
+    pub approval_id: winwincode_domain::IdempotencyKey,
+    #[serde(rename = "candidateDigest")]
+    pub candidate_digest: winwincode_domain::ApplicationCandidateDigest,
     #[serde(rename = "candidateRef")]
     pub candidate_ref: winwincode_domain::CandidateRef,
     #[serde(rename = "clientInstanceId")]
@@ -1294,6 +1397,8 @@ pub struct ClientCandidateApplyMessage {
     pub occupancy_lease_id: winwincode_domain::ClientOccupancyLeaseId,
     #[serde(rename = "occurredAt")]
     pub occurred_at: winwincode_domain::Instant,
+    #[serde(rename = "reconciledRetry")]
+    pub reconciled_retry: bool,
     #[serde(rename = "repositoryBindingId")]
     pub repository_binding_id: winwincode_domain::RepositoryBindingId,
     #[serde(rename = "requesterUserId")]
@@ -1578,6 +1683,7 @@ pub enum ClientControlMessage {
     ClientRepositoryRegisteredMessage(ClientRepositoryRegisteredMessage),
     ClientManagedAppCommandMessage(ClientManagedAppCommandMessage),
     ClientManagedAppStatusMessage(ClientManagedAppStatusMessage),
+    ClientApplicationReconciledMessage(ClientApplicationReconciledMessage),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
@@ -1644,6 +1750,8 @@ pub enum ClientControlMessageKind {
     ClientManagedAppCommand,
     #[serde(rename = "client.managed_app.status")]
     ClientManagedAppStatus,
+    #[serde(rename = "client.application.reconciled")]
+    ClientApplicationReconciled,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
@@ -5738,6 +5846,82 @@ pub struct DeliveryVerdictProjection {
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
+pub struct DeviceAuthErrorResponse {
+    #[serde(rename = "code")]
+    pub code: String,
+    #[serde(rename = "schemaVersion")]
+    pub schema_version: winwincode_domain::SchemaVersion,
+}
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DeviceBindingIntent {
+    #[serde(rename = "architecture")]
+    pub architecture: ClientArchitecture,
+    #[serde(rename = "clientVersion")]
+    pub client_version: winwincode_domain::ClientVersion,
+    #[serde(rename = "displayName")]
+    pub display_name: winwincode_domain::ClientDisplayName,
+    #[serde(rename = "platform")]
+    pub platform: ClientPlatformTarget,
+}
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DeviceBindRequest {
+    #[serde(rename = "intent")]
+    pub intent: DeviceBindingIntent,
+    #[serde(rename = "pairingToken")]
+    pub pairing_token: String,
+    #[serde(rename = "publicKey")]
+    pub public_key: String,
+    #[serde(rename = "requestId")]
+    pub request_id: winwincode_domain::IdempotencyKey,
+    #[serde(rename = "schemaVersion")]
+    pub schema_version: winwincode_domain::SchemaVersion,
+}
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DeviceBindResponse {
+    #[serde(rename = "boundAt")]
+    pub bound_at: winwincode_domain::Instant,
+    #[serde(rename = "clientNodeId")]
+    pub client_node_id: winwincode_domain::ClientNodeId,
+    #[serde(rename = "ownerUserId")]
+    pub owner_user_id: winwincode_domain::UserId,
+    #[serde(rename = "publicClientId")]
+    pub public_client_id: winwincode_domain::PublicClientId,
+    #[serde(rename = "requestId")]
+    pub request_id: winwincode_domain::IdempotencyKey,
+    #[serde(rename = "schemaVersion")]
+    pub schema_version: winwincode_domain::SchemaVersion,
+}
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DeviceChallengeRequest {
+    #[serde(rename = "publicKey")]
+    pub public_key: String,
+    #[serde(rename = "schemaVersion")]
+    pub schema_version: winwincode_domain::SchemaVersion,
+}
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DeviceChallengeResponse {
+    #[serde(rename = "challenge")]
+    pub challenge: String,
+    #[serde(rename = "challengeId")]
+    pub challenge_id: String,
+    #[serde(rename = "expiresAt")]
+    pub expires_at: winwincode_domain::Instant,
+    #[serde(rename = "schemaVersion")]
+    pub schema_version: winwincode_domain::SchemaVersion,
+}
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct DeviceConfigurationEnvelope {
     #[serde(rename = "ciphertext")]
     pub ciphertext: String,
@@ -5892,6 +6076,24 @@ pub struct DeviceModelRouteParameters {
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
+pub struct DevicePairingRequest {
+    #[serde(rename = "schemaVersion")]
+    pub schema_version: winwincode_domain::SchemaVersion,
+}
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DevicePairingResponse {
+    #[serde(rename = "expiresAt")]
+    pub expires_at: winwincode_domain::Instant,
+    #[serde(rename = "pairingToken")]
+    pub pairing_token: String,
+    #[serde(rename = "schemaVersion")]
+    pub schema_version: winwincode_domain::SchemaVersion,
+}
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct DeviceProviderConfig {
     #[serde(rename = "displayName")]
     pub display_name: String,
@@ -6022,6 +6224,24 @@ pub enum DeviceResponsesStructuredOutput {
     JsonObject,
     #[serde(rename = "text")]
     Text,
+}
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DeviceRevokeRequest {
+    #[serde(rename = "schemaVersion")]
+    pub schema_version: winwincode_domain::SchemaVersion,
+}
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DeviceRevokeResponse {
+    #[serde(rename = "clientNodeId")]
+    pub client_node_id: winwincode_domain::ClientNodeId,
+    #[serde(rename = "revoked")]
+    pub revoked: bool,
+    #[serde(rename = "schemaVersion")]
+    pub schema_version: winwincode_domain::SchemaVersion,
 }
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -6744,6 +6964,8 @@ pub enum LocalApplyResult {
     Discarded,
     #[serde(rename = "failed")]
     Failed,
+    #[serde(rename = "outcome_unknown")]
+    OutcomeUnknown,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
@@ -6761,6 +6983,8 @@ pub enum LocalApplyStrategy {
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct LocalCandidateReceipt {
+    #[serde(rename = "baseCommit")]
+    pub base_commit: winwincode_domain::GitCommitSha,
     #[serde(rename = "candidateCommit")]
     pub candidate_commit: winwincode_domain::GitCommitSha,
     #[serde(rename = "candidateRef")]

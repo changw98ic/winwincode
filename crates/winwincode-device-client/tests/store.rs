@@ -57,7 +57,7 @@ fn envelope(message_id: &str, client_instance_id: &str, sequence: u64) -> Client
 
 #[test]
 fn open_initializes_the_full_current_schema_and_round_trips_it() {
-    assert_eq!(winwincode_device_client::CLIENT_STORE_SCHEMA_VERSION, 10);
+    assert_eq!(winwincode_device_client::CLIENT_STORE_SCHEMA_VERSION, 11);
     let (root, mut store) = open_store("schema-round-trip");
     let database_path = store.database_path().to_path_buf();
     let canonical_root = fs::canonicalize(&root).expect("root should canonicalize");
@@ -244,6 +244,7 @@ const CANONICAL_LOCAL_TABLES: &[(&str, &str, &[&str])] = &[
             "candidate_ref",
             "candidate_commit",
             "retained_at",
+            "base_commit",
         ],
     ),
     (

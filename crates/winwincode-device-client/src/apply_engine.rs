@@ -9,14 +9,17 @@ use std::process::Command;
 use rusqlite::params;
 use sha2::{Digest, Sha256};
 use time::OffsetDateTime;
+use winwincode_client_port::candidate_application::candidate_application_digest;
 use winwincode_client_port::domain::{
     ApplyResult, ApplyStrategy, LocalApplyReceipt, LocalCandidateState,
 };
 use winwincode_client_port::messages::{
+    ApplicationReconciliationOutcome, ClientApplicationReconciledPayload,
     ClientCandidateApplyResultPayload, ClientToServerMessage, CommandContext,
     OccupancyCommandContext,
 };
 
+use crate::application_journal::{application, finish_application, start_application};
 use crate::candidate_registry::{CANDIDATE_REF_PREFIX, CandidateLocalRefRecord};
 use crate::daemon::DeviceDaemon;
 use crate::fencing::{
@@ -45,6 +48,10 @@ const MAX_BRANCH_BYTES: usize = 200;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CandidateApplyRequest {
+    pub application_id: String,
+    pub approval_id: String,
+    pub candidate_digest: String,
+    pub reconciled_retry: bool,
     pub repository_binding_id: String,
     pub candidate_ref: String,
     pub target_branch: String,
@@ -60,6 +67,8 @@ pub enum CandidateApplyErrorKind {
     FencingRejected(FencingRejection),
     UnknownCandidate,
     TerminalCandidate,
+    OutcomeUnknown,
+    ReconciliationRequired,
     Store,
 }
 
@@ -98,7 +107,7 @@ impl CandidateApplyError {
         }
     }
 
-    fn store(message: impl Into<String>) -> Self {
+    pub(crate) fn store(message: impl Into<String>) -> Self {
         Self {
             kind: CandidateApplyErrorKind::Store,
             message: message.into(),
@@ -219,35 +228,249 @@ pub fn apply_candidate_to_branch(
     request: &CandidateApplyRequest,
     integration_root: &Path,
 ) -> Result<CandidateApplyOutcome, CandidateApplyError> {
+    apply_candidate(daemon, request, integration_root, None)
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ApplicationCrashPoint {
+    AfterStarted,
+    AfterRepositoryCommit,
+}
+
+#[cfg(feature = "test-support")]
+pub fn apply_candidate_with_crash_point(
+    daemon: &mut DeviceDaemon,
+    request: &CandidateApplyRequest,
+    integration_root: &Path,
+    crash_point: ApplicationCrashPoint,
+) -> Result<CandidateApplyOutcome, CandidateApplyError> {
+    apply_candidate(daemon, request, integration_root, Some(crash_point))
+}
+
+#[allow(clippy::too_many_lines)]
+fn apply_candidate(
+    daemon: &mut DeviceDaemon,
+    request: &CandidateApplyRequest,
+    integration_root: &Path,
+    crash_point: Option<ApplicationCrashPoint>,
+) -> Result<CandidateApplyOutcome, CandidateApplyError> {
     validate_request(request)?;
     let ticket = authorize_fencing(daemon, request)?;
+    if crate::application_journal::blocked_application(
+        daemon.store_mut(),
+        &request.repository_binding_id,
+        &request.candidate_ref,
+    )?
+    .is_some_and(|record| record.request.application_id != request.application_id)
+    {
+        return Err(CandidateApplyError {
+            kind: CandidateApplyErrorKind::OutcomeUnknown,
+            message: "an unresolved application blocks another apply for this candidate".into(),
+        });
+    }
+    if let Some(existing) = application(daemon.store_mut(), &request.application_id)? {
+        ensure_application_binding(&existing.request, request)?;
+        if let Some(receipt) = existing.finished_receipt {
+            return replay_finished_application(daemon, request, &ticket, receipt);
+        }
+        let observed = inspect_started_application(daemon.store_mut(), &existing.request)?;
+        let observed = if existing.recovery_outcome.as_deref() == Some("outcome_unknown")
+            && !matches!(observed, ApplicationRecovery::Applied(_))
+        {
+            ApplicationRecovery::OutcomeUnknown
+        } else {
+            observed
+        };
+        match observed {
+            ApplicationRecovery::Applied(resulting_commit) => {
+                let receipt = application_receipt(
+                    &existing.request,
+                    SettledAttempt {
+                        result: ApplyResult::Applied,
+                        resulting_commit: Some(resulting_commit),
+                        conflict_artifact_ref: None,
+                        detail: "the application commit already exists".into(),
+                    },
+                    &existing.started_at,
+                );
+                finish_application(daemon.store_mut(), &receipt)?;
+                return replay_finished_application(daemon, request, &ticket, receipt);
+            }
+            ApplicationRecovery::NotStarted
+                if request.reconciled_retry
+                    && existing.recovery_outcome.as_deref() == Some("not_started") => {}
+            ApplicationRecovery::NotStarted => {
+                crate::application_journal::note_recovery_outcome(
+                    daemon.store_mut(),
+                    &request.application_id,
+                    "not_started",
+                )?;
+                enqueue_application_reconciled(
+                    daemon,
+                    &ticket,
+                    &existing.request,
+                    &ApplicationRecovery::NotStarted,
+                )?;
+                return Err(CandidateApplyError {
+                    kind: CandidateApplyErrorKind::ReconciliationRequired,
+                    message: "the application has not started; a current server retry authorization is required".into(),
+                });
+            }
+            ApplicationRecovery::OutcomeUnknown => {
+                crate::application_journal::note_recovery_outcome(
+                    daemon.store_mut(),
+                    &request.application_id,
+                    "outcome_unknown",
+                )?;
+                enqueue_application_reconciled(
+                    daemon,
+                    &ticket,
+                    &existing.request,
+                    &ApplicationRecovery::OutcomeUnknown,
+                )?;
+                return Err(CandidateApplyError {
+                    kind: CandidateApplyErrorKind::OutcomeUnknown,
+                    message: "the application outcome cannot be established; repository writes are blocked".into(),
+                });
+            }
+        }
+    }
     if let Some(replay) = pending_apply_result(daemon, request)? {
         return Ok(replay);
     }
     let record = load_candidate_for_request(daemon.store_mut(), request)?;
-    let receipt_id = generate_prefixed_id("lar_")
-        .map_err(|error| CandidateApplyError::store(format!("apply receipt id: {error}")))?;
+    if request.candidate_digest
+        != candidate_application_digest(
+            &request.repository_binding_id,
+            &request.expected_head,
+            &record.candidate_commit,
+        )
+    {
+        return Err(CandidateApplyError::invalid(
+            "the approval digest does not match the repository, baseline and frozen candidate",
+        ));
+    }
+    let started_at = if let Some(existing) =
+        application(daemon.store_mut(), &request.application_id)?
+    {
+        existing.started_at
+    } else {
+        if request.reconciled_retry {
+            return Err(CandidateApplyError::invalid(
+                "a retry authorization requires a retained application and a not_started reconciliation",
+            ));
+        }
+        let started_at = now_rfc3339();
+        start_application(daemon.store_mut(), request, &started_at)?;
+        started_at
+    };
+    #[cfg(feature = "test-support")]
+    maybe_test_application_crash(daemon.store_mut(), request, "after_started", None)?;
+    if crash_point == Some(ApplicationCrashPoint::AfterStarted) {
+        return Err(CandidateApplyError::store(
+            "injected crash after application.started",
+        ));
+    }
 
     let stop = run_attempt(
         daemon.store_mut(),
         &record,
         request,
         integration_root,
-        &receipt_id,
+        &request.application_id,
         &ticket,
     );
     let settled = match stop {
         AttemptStop::Fencing(rejection) => return Err(CandidateApplyError::fencing(rejection)),
         AttemptStop::Settled(settled) => settled,
     };
+    #[cfg(feature = "test-support")]
+    if settled.result == ApplyResult::Applied {
+        maybe_test_application_crash(
+            daemon.store_mut(),
+            request,
+            "after_repository_commit",
+            settled.resulting_commit.as_deref(),
+        )?;
+    }
+    if settled.result == ApplyResult::Applied
+        && crash_point == Some(ApplicationCrashPoint::AfterRepositoryCommit)
+    {
+        return Err(CandidateApplyError::store(
+            "injected crash after repository commit",
+        ));
+    }
 
     let target_state = if settled.result == ApplyResult::Applied {
         "applied"
     } else {
         "failed"
     };
-    let receipt = LocalApplyReceipt {
-        local_apply_receipt_id: receipt_id,
+    let receipt = application_receipt(request, settled, &started_at);
+    finish_application(daemon.store_mut(), &receipt)?;
+    let frame_sequence = enqueue_apply_result(daemon, &ticket, &receipt)?;
+    transition_candidate_state(daemon.store_mut(), &record.candidate_id, target_state)?;
+    Ok(CandidateApplyOutcome {
+        receipt,
+        frame_sequence,
+    })
+}
+
+#[cfg(feature = "test-support")]
+fn maybe_test_application_crash(
+    store: &DeviceStore,
+    request: &CandidateApplyRequest,
+    point: &str,
+    resulting_commit: Option<&str>,
+) -> Result<(), CandidateApplyError> {
+    if std::env::var("WWC_TEST_APPLICATION_CRASH_POINT").as_deref() != Ok(point)
+        || std::env::var("WWC_TEST_APPLICATION_ID").is_ok_and(|id| id != request.application_id)
+    {
+        return Ok(());
+    }
+    let connection = store.connection()?;
+    assert!(connection.is_autocommit());
+    let synchronous: i64 = connection
+        .pragma_query_value(None, "synchronous", |row| row.get(0))
+        .map_err(crate::store::sql_error)?;
+    assert!(synchronous >= 2);
+    let retained =
+        application(store, &request.application_id)?.expect("the started application is durable");
+    assert!(retained.finished_receipt.is_none());
+    if let Some(commit) = resulting_commit {
+        let repository = resolve_binding_checkout(store, &request.repository_binding_id)
+            .map_err(|failure| CandidateApplyError::store(failure.detail))?;
+        assert_eq!(
+            read_git_ref(
+                &repository,
+                &format!("refs/heads/{}", request.target_branch)
+            )
+            .map_err(|failure| CandidateApplyError::store(failure.detail))?
+            .as_deref(),
+            Some(commit)
+        );
+        let message = probe_git(&repository, &["show", "-s", "--format=%B", commit])
+            .map_err(|failure| CandidateApplyError::store(failure.detail))?;
+        assert!(
+            message
+                .lines()
+                .any(|line| line == format!("WinWinCode-Application: {}", request.application_id))
+        );
+    }
+    eprintln!(
+        "WWC_TEST_APPLICATION_CRASH_POINT reached point={point} application_id={}",
+        request.application_id
+    );
+    std::process::exit(86)
+}
+
+fn application_receipt(
+    request: &CandidateApplyRequest,
+    settled: SettledAttempt,
+    started_at: &str,
+) -> LocalApplyReceipt {
+    LocalApplyReceipt {
+        local_apply_receipt_id: request.application_id.clone(),
         candidate_ref: request.candidate_ref.clone(),
         repository_binding_id: request.repository_binding_id.clone(),
         target_branch: request.target_branch.clone(),
@@ -256,15 +479,244 @@ pub fn apply_candidate_to_branch(
         result: settled.result,
         resulting_commit: settled.resulting_commit,
         conflict_artifact_ref: settled.conflict_artifact_ref,
-        created_at: now_rfc3339(),
+        created_at: started_at.into(),
         revision: 1,
-    };
-    let frame_sequence = enqueue_apply_result(daemon, &ticket, &receipt)?;
-    transition_candidate_state(daemon.store_mut(), &record.candidate_id, target_state)?;
+    }
+}
+
+fn ensure_application_binding(
+    original: &CandidateApplyRequest,
+    request: &CandidateApplyRequest,
+) -> Result<(), CandidateApplyError> {
+    if original.application_id == request.application_id
+        && original.approval_id == request.approval_id
+        && original.repository_binding_id == request.repository_binding_id
+        && original.candidate_ref == request.candidate_ref
+        && original.candidate_digest == request.candidate_digest
+        && original.target_branch == request.target_branch
+        && original.expected_head == request.expected_head
+        && original.strategy == request.strategy
+    {
+        return Ok(());
+    }
+    Err(CandidateApplyError::invalid(
+        "the application id is already bound to a different approval or candidate",
+    ))
+}
+
+fn replay_finished_application(
+    daemon: &mut DeviceDaemon,
+    request: &CandidateApplyRequest,
+    ticket: &FencingTicket,
+    receipt: LocalApplyReceipt,
+) -> Result<CandidateApplyOutcome, CandidateApplyError> {
+    let original = application(daemon.store_mut(), &request.application_id)?
+        .ok_or_else(|| CandidateApplyError::store("finished application has no journal"))?;
+    if original.request.occupancy_lease_id != request.occupancy_lease_id
+        || original.request.occupancy_fencing_token != request.occupancy_fencing_token
+    {
+        let recovery = if let Some(commit) = &receipt.resulting_commit {
+            ApplicationRecovery::Applied(commit.clone())
+        } else {
+            inspect_started_application(daemon.store_mut(), &original.request)?
+        };
+        let sequence =
+            enqueue_application_reconciled(daemon, ticket, &original.request, &recovery)?;
+        if receipt.result == ApplyResult::Applied {
+            transition_candidate_state(
+                daemon.store_mut(),
+                &candidate_id_from_ref(&request.candidate_ref)?,
+                "applied",
+            )?;
+        }
+        return Ok(CandidateApplyOutcome {
+            receipt,
+            frame_sequence: sequence,
+        });
+    }
+    if let Some(replay) = pending_apply_result(daemon, request)? {
+        return Ok(replay);
+    }
+    let sequence = enqueue_apply_result(daemon, ticket, &receipt)?;
+    transition_candidate_state(
+        daemon.store_mut(),
+        &candidate_id_from_ref(&request.candidate_ref)?,
+        if receipt.result == ApplyResult::Applied {
+            "applied"
+        } else {
+            "failed"
+        },
+    )?;
     Ok(CandidateApplyOutcome {
         receipt,
-        frame_sequence,
+        frame_sequence: sequence,
     })
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ApplicationRecovery {
+    Applied(String),
+    NotStarted,
+    OutcomeUnknown,
+}
+
+fn inspect_started_application(
+    store: &DeviceStore,
+    request: &CandidateApplyRequest,
+) -> Result<ApplicationRecovery, CandidateApplyError> {
+    let repository = resolve_binding_checkout(store, &request.repository_binding_id)
+        .map_err(|failure| CandidateApplyError::store(failure.detail))?;
+    let target_ref = format!("refs/heads/{}", request.target_branch);
+    let target = read_git_ref(&repository, &target_ref)
+        .map_err(|failure| CandidateApplyError::store(failure.detail))?;
+    let Some(target) = target else {
+        return Ok(ApplicationRecovery::OutcomeUnknown);
+    };
+    let ancestry = git_command(&repository)
+        .args([
+            "merge-base",
+            "--is-ancestor",
+            &request.expected_head,
+            &target,
+        ])
+        .output()
+        .map_err(|error| CandidateApplyError::store(error.to_string()))?;
+    if ancestry.status.success() {
+        let range = format!("{}..{target}", request.expected_head);
+        let output = git_command(&repository)
+            .args(["log", "--format=%H%x00%B%x00", &range, "--"])
+            .output()
+            .map_err(|error| CandidateApplyError::store(error.to_string()))?;
+        if !output.status.success() {
+            return Err(CandidateApplyError::store(
+                "application recovery cannot inspect target history",
+            ));
+        }
+        let trailer = format!("WinWinCode-Application: {}", request.application_id);
+        let text = String::from_utf8_lossy(&output.stdout);
+        let mut fields = text.split('\0');
+        let mut found = None;
+        while let (Some(commit), Some(message)) = (fields.next(), fields.next()) {
+            if message.lines().any(|line| line == trailer) {
+                if found.is_some() {
+                    return Ok(ApplicationRecovery::OutcomeUnknown);
+                }
+                found = Some(commit.trim().to_owned());
+            }
+        }
+        if let Some(commit) = found {
+            return Ok(ApplicationRecovery::Applied(commit));
+        }
+    }
+    if target != request.expected_head || !working_tree_dirty(&repository).is_ok_and(|dirty| !dirty)
+    {
+        return Ok(ApplicationRecovery::OutcomeUnknown);
+    }
+    let worktrees = probe_git(&repository, &["worktree", "list", "--porcelain"])
+        .map_err(|failure| CandidateApplyError::store(failure.detail))?;
+    if worktrees.lines().any(|line| {
+        line.starts_with("worktree ")
+            && Path::new(&line[9..])
+                .components()
+                .any(|part| part.as_os_str() == request.application_id.as_str())
+    }) {
+        return Ok(ApplicationRecovery::OutcomeUnknown);
+    }
+    Ok(ApplicationRecovery::NotStarted)
+}
+
+pub fn recover_started_applications(
+    daemon: &mut DeviceDaemon,
+) -> Result<Vec<(String, ApplicationRecovery)>, CandidateApplyError> {
+    let records = crate::application_journal::unfinished_applications(daemon.store_mut())?;
+    let mut recovered = Vec::with_capacity(records.len());
+    for record in records {
+        let observed = inspect_started_application(daemon.store_mut(), &record.request)?;
+        let outcome = if record.recovery_outcome.as_deref() == Some("outcome_unknown")
+            && !matches!(observed, ApplicationRecovery::Applied(_))
+        {
+            ApplicationRecovery::OutcomeUnknown
+        } else {
+            observed
+        };
+        if let ApplicationRecovery::Applied(commit) = &outcome {
+            let receipt = application_receipt(
+                &record.request,
+                SettledAttempt {
+                    result: ApplyResult::Applied,
+                    resulting_commit: Some(commit.clone()),
+                    conflict_artifact_ref: None,
+                    detail: "startup recovered an existing application commit".into(),
+                },
+                &record.started_at,
+            );
+            finish_application(daemon.store_mut(), &receipt)?;
+        } else {
+            crate::application_journal::note_recovery_outcome(
+                daemon.store_mut(),
+                &record.request.application_id,
+                if outcome == ApplicationRecovery::NotStarted {
+                    "not_started"
+                } else {
+                    "outcome_unknown"
+                },
+            )?;
+        }
+        recovered.push((record.request.application_id, outcome));
+    }
+    Ok(recovered)
+}
+
+pub fn report_recovered_applications(
+    daemon: &mut DeviceDaemon,
+) -> Result<usize, CandidateApplyError> {
+    recover_started_applications(daemon)?;
+    let Some(mirror) = daemon.occupancy_mirror().cloned() else {
+        return Ok(0);
+    };
+    let ticket = match FencingGuard::from_store(daemon.store_mut())?.authorize_command(
+        FencedCommandKind::CandidateApply,
+        &mirror.occupancy_lease_id,
+        mirror.fencing_token,
+    ) {
+        FencingVerdict::Authorized(ticket) => ticket,
+        FencingVerdict::Rejected(_) => return Ok(0),
+    };
+    let records = crate::application_journal::all_applications(daemon.store_mut())?;
+    let mut reported = 0;
+    for record in records {
+        if record.reported_epoch == Some(ticket.occupancy_fencing_token) {
+            continue;
+        }
+        let recovery = if let Some(commit) = record
+            .finished_receipt
+            .as_ref()
+            .filter(|receipt| receipt.result == ApplyResult::Applied)
+            .and_then(|receipt| receipt.resulting_commit.as_ref())
+        {
+            ApplicationRecovery::Applied(commit.clone())
+        } else if record.recovery_outcome.as_deref() == Some("outcome_unknown") {
+            ApplicationRecovery::OutcomeUnknown
+        } else {
+            inspect_started_application(daemon.store_mut(), &record.request)?
+        };
+        enqueue_application_reconciled(daemon, &ticket, &record.request, &recovery)?;
+        crate::application_journal::mark_reported(
+            daemon.store_mut(),
+            &record.request.application_id,
+            ticket.occupancy_fencing_token,
+        )?;
+        if matches!(recovery, ApplicationRecovery::Applied(_)) {
+            let candidate_id = candidate_id_from_ref(&record.request.candidate_ref)?;
+            if crate::candidate_registry::candidate_local_ref(daemon.store_mut(), &candidate_id)?
+                .is_some()
+            {
+                transition_candidate_state(daemon.store_mut(), &candidate_id, "applied")?;
+            }
+        }
+        reported += 1;
+    }
+    Ok(reported)
 }
 
 fn pending_apply_result(
@@ -283,6 +735,7 @@ fn pending_apply_result(
         };
         let receipt = payload.receipt;
         if receipt.result == ApplyResult::Applied
+            && receipt.local_apply_receipt_id == request.application_id
             && payload.occupancy.occupancy_lease_id == request.occupancy_lease_id
             && payload.occupancy.occupancy_fencing_token == request.occupancy_fencing_token
             && receipt.repository_binding_id == request.repository_binding_id
@@ -706,6 +1159,7 @@ fn load_integration_candidates(
     Ok(records)
 }
 
+#[allow(clippy::too_many_lines)]
 fn run_attempt(
     store: &mut DeviceStore,
     record: &CandidateLocalRefRecord,
@@ -714,6 +1168,12 @@ fn run_attempt(
     receipt_id: &str,
     ticket: &FencingTicket,
 ) -> AttemptStop {
+    if request.expected_head != record.base_commit {
+        return AttemptStop::Settled(SettledAttempt::refused(
+            ApplyResult::BaseStale,
+            "the approval baseline differs from the frozen candidate source baseline",
+        ));
+    }
     let repository = match resolve_binding_checkout(store, &request.repository_binding_id) {
         Ok(repository) => repository,
         Err(settled) => return AttemptStop::Settled(settled),
@@ -735,6 +1195,29 @@ fn run_attempt(
         Ok(Some(_)) => {}
         Err(failure) => {
             return AttemptStop::Settled(failure.settled("the candidate ref read"));
+        }
+    }
+    match git_command(&repository)
+        .args([
+            "merge-base",
+            "--is-ancestor",
+            &record.base_commit,
+            &record.candidate_commit,
+        ])
+        .output()
+    {
+        Ok(output) if output.status.success() => {}
+        Ok(_) => {
+            return AttemptStop::Settled(SettledAttempt::refused(
+                ApplyResult::BaseStale,
+                "the frozen candidate does not descend from its retained source baseline",
+            ));
+        }
+        Err(error) => {
+            return AttemptStop::Settled(io_failure_settled(
+                &error,
+                "the candidate source ancestry check",
+            ));
         }
     }
 
@@ -811,7 +1294,7 @@ fn run_attempt(
 }
 
 fn resolve_binding_checkout(
-    store: &mut DeviceStore,
+    store: &DeviceStore,
     repository_binding_id: &str,
 ) -> Result<PathBuf, SettledAttempt> {
     let Some(mapping) = store.path_mapping(repository_binding_id).map_err(|error| {
@@ -934,10 +1417,18 @@ fn run_strategy(
             finish_commit_step(worktree, command, "fast_forward")
         }
         ApplyStrategy::CherryPick => {
+            let mut snapshot = git_command(worktree);
+            snapshot.args(["read-tree", "--reset", "-u", &request.candidate_ref]);
+            finish_commit_step(worktree, snapshot, "frozen candidate tree")?;
             let mut command = git_command(worktree);
             command.env("GIT_COMMITTER_NAME", COMMITTER_NAME);
             command.env("GIT_COMMITTER_EMAIL", COMMITTER_EMAIL);
-            command.args(["cherry-pick", "--", &request.candidate_ref]);
+            command.args([
+                "commit",
+                "--allow-empty",
+                "--reuse-message",
+                &request.candidate_ref,
+            ]);
             finish_commit_step(worktree, command, "cherry_pick")
         }
         ApplyStrategy::Merge => {
@@ -956,6 +1447,26 @@ fn run_strategy(
             finish_commit_step(worktree, command, "merge")
         }
     }?;
+    let mut marker = git_command(worktree);
+    marker.env("GIT_COMMITTER_NAME", COMMITTER_NAME);
+    marker.env("GIT_COMMITTER_EMAIL", COMMITTER_EMAIL);
+    if request.strategy == ApplyStrategy::FastForward {
+        marker.env("GIT_AUTHOR_NAME", COMMITTER_NAME);
+        marker.env("GIT_AUTHOR_EMAIL", COMMITTER_EMAIL);
+        marker.args([
+            "commit",
+            "--allow-empty",
+            "-m",
+            "Apply WinWinCode candidate",
+        ]);
+    } else {
+        marker.args(["commit", "--amend", "--no-edit"]);
+    }
+    marker.arg("--trailer").arg(format!(
+        "WinWinCode-Application: {}",
+        request.application_id
+    ));
+    finish_commit_step(worktree, marker, "application marker")?;
     read_git_ref(worktree, "HEAD")
         .ok()
         .flatten()
@@ -1281,7 +1792,16 @@ fn transition_candidate_state(
         )
         .map_err(crate::store::sql_error)
         .map_err(CandidateApplyError::from)?;
-    if updated == 1 {
+    if updated == 1
+        || crate::candidate_registry::candidate_local_ref(store, candidate_id)?.is_some_and(
+            |record| {
+                matches!(
+                    record.local_state,
+                    LocalCandidateState::Applied | LocalCandidateState::Discarded
+                )
+            },
+        )
+    {
         return Ok(());
     }
     Err(CandidateApplyError::store(format!(
@@ -1319,7 +1839,78 @@ fn enqueue_apply_result(
     Ok(sequence)
 }
 
+fn enqueue_application_reconciled(
+    daemon: &mut DeviceDaemon,
+    ticket: &FencingTicket,
+    original: &CandidateApplyRequest,
+    recovery: &ApplicationRecovery,
+) -> Result<u64, CandidateApplyError> {
+    let (outcome, result_commit) = match recovery {
+        ApplicationRecovery::Applied(commit) => (
+            ApplicationReconciliationOutcome::Applied,
+            Some(commit.clone()),
+        ),
+        ApplicationRecovery::NotStarted => (ApplicationReconciliationOutcome::NotStarted, None),
+        ApplicationRecovery::OutcomeUnknown => {
+            (ApplicationReconciliationOutcome::OutcomeUnknown, None)
+        }
+    };
+    daemon
+        .enqueue(ClientToServerMessage::ApplicationReconciled(
+            ClientApplicationReconciledPayload {
+                occupancy: OccupancyCommandContext {
+                    command: CommandContext {
+                        expected_revision: ticket.mirror_revision,
+                        idempotency_key: generate_prefixed_id("application-reconciled-")
+                            .map_err(|error| CandidateApplyError::store(error.to_string()))?,
+                    },
+                    occupancy_lease_id: ticket.occupancy_lease_id.clone(),
+                    occupancy_fencing_token: ticket.occupancy_fencing_token,
+                },
+                application_id: original.application_id.clone(),
+                approval_id: original.approval_id.clone(),
+                original_epoch: original.occupancy_fencing_token,
+                repository_binding_id: original.repository_binding_id.clone(),
+                candidate_ref: original.candidate_ref.clone(),
+                candidate_digest: original.candidate_digest.clone(),
+                base_commit: original.expected_head.clone(),
+                target_branch: original.target_branch.clone(),
+                outcome,
+                result_commit,
+            },
+        ))
+        .map_err(|error| {
+            CandidateApplyError::store(format!(
+                "application reconciliation cannot enter the durable outbox: {error:?}"
+            ))
+        })
+}
+
 fn validate_request(request: &CandidateApplyRequest) -> Result<(), CandidateApplyError> {
+    for (value, label, prefix) in [
+        (request.application_id.as_str(), "application id", "lar_"),
+        (request.approval_id.as_str(), "approval id", "apr_"),
+    ] {
+        require_non_empty(value, label, MAX_ID_BYTES)?;
+        if !value.starts_with(prefix) || value.len() != prefix.len() + 26
+            || !value[prefix.len()..].bytes().all(|byte| byte.is_ascii_digit()
+                || matches!(byte, b'A'..=b'H' | b'J' | b'K' | b'M' | b'N' | b'P'..=b'T' | b'V'..=b'Z'))
+        {
+            return Err(CandidateApplyError::invalid(format!("{label} is invalid")));
+        }
+    }
+    if !request
+        .candidate_digest
+        .strip_prefix("sha256:")
+        .is_some_and(|digest| {
+            digest.len() == 64
+                && digest
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        })
+    {
+        return Err(CandidateApplyError::invalid("candidate digest is invalid"));
+    }
     require_non_empty(
         &request.repository_binding_id,
         "repository binding id",
@@ -1482,6 +2073,10 @@ mod tests {
 
     fn base_request(strategy: ApplyStrategy) -> CandidateApplyRequest {
         CandidateApplyRequest {
+            application_id: "lar_AAAAAAAAAAAAAAAAAAAAAAAAAA".into(),
+            approval_id: "apr_AAAAAAAAAAAAAAAAAAAAAAAAAA".into(),
+            candidate_digest: format!("sha256:{}", "a".repeat(64)),
+            reconciled_retry: false,
             repository_binding_id: "rbd_AAAAAAAAAAAAAAAAAAAAAAAAAA".to_owned(),
             candidate_ref: format!("{CANDIDATE_REF_PREFIX}{}", "a".repeat(40)),
             target_branch: "main".to_owned(),

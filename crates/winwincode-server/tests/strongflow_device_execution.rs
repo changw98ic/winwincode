@@ -51,7 +51,7 @@ impl EventPublisher for HubPublisher {
     }
 }
 
-struct FixedClock;
+struct FixedClock(Instant);
 
 impl StandaloneApplicationClock for FixedClock {
     fn now_millis(&self) -> u64 {
@@ -59,7 +59,7 @@ impl StandaloneApplicationClock for FixedClock {
     }
 
     fn now_instant(&self) -> Instant {
-        Instant("2027-01-15T08:00:00.000Z".to_owned())
+        self.0.clone()
     }
 }
 
@@ -189,7 +189,11 @@ fn compose_application_with_runtime(
     root: &Path,
     runtime: Option<i64>,
 ) -> StandaloneControlPlaneApplication {
-    compose_application_with_clock(root, runtime, Arc::new(FixedClock))
+    compose_application_with_clock(
+        root,
+        runtime,
+        Arc::new(FixedClock(Instant("2027-01-15T08:00:00.000Z".into()))),
+    )
 }
 
 fn compose_application_with_clock(
@@ -470,7 +474,8 @@ fn existing_worker_route_survives_device_recovery_but_not_release() {
             std::time::Duration::from_secs(30),
         )
         .unwrap();
-        let exchange = ProductionRemoteWorkerExchange::new(&root, api_scope(), scheduler, Core);
+        let exchange = ProductionRemoteWorkerExchange::new(&root, api_scope(), scheduler, Core)
+            .with_clock(Arc::new(FixedClock(now.clone())));
         let fixture: serde_json::Value = serde_json::from_str(include_str!(
             "../../../tests/fixtures/contracts/execution-port.valid.json"
         ))

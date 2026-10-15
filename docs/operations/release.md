@@ -139,8 +139,16 @@ API production 验证在 fixture 场景中要求以下事实成立：
 - StrongFlow 完成且 verdict 为 `pass`。
 - 重复执行内容一致。
 - Server 重启前后的消息和交付字节稳定。
+- Device 登记初始 Worker 的真实退出，并启动不同进程和 Worker Session。
+- 新 Worker 完成任务。另一条活跃 Worker 在 Server 重启后保留同一进程身份，再完成独立任务。
 
-这些事实证明发布二进制、Device/Worker 链路和恢复行为。它们不构成真实 Provider 编程质量结论。真实编程任务仍须通过正式 Client 和真实 Provider 另行执行，并记录模型调用、工具结果、候选和独立验证证据。
+API 报告的 `artifacts.sourceSeal` 必须与候选 source seal 的七个字段逐项一致：`gitHead`、`helperBinarySha256`、`cliBinarySha256`、`workerBinarySha256`、`serverBinarySha256`、`sourceSha256` 和 `trackedDiffSha256`。报告还须提供相同的 Worker 二进制摘要。staging 与本地制品门禁共用 `scripts/release-artifact-contract.mjs::assertReleaseApiReport` 校验这些字段。
+
+`deviceWorkerLifecycle` 保存 `initial`、`restarted`、`stopped`、`terminalAfterWorkerRestart`、`workerRestartCompletion`、`serverRestartWorker`、`survivedServerRestart`、`terminalAfterServerRestart` 和 `serverRestartCompletion`。每个进程身份包含启动进程的 WorkerSession、Worker、Worker instance、PID 和 `processStartIdentity`。重启后的 PID 与启动 WorkerSession 必须改变。`survivedServerRestart` 必须与 `serverRestartWorker` 的完整进程身份一致。
+
+受管 Worker 完成任务后正常退出。验收脚本分别启动两条任务：第一条由 Worker 被终止后的新进程完成；第二条在 Provider fixture 的响应等待点保持活跃，跨 Server 重启后继续完成。两份完成记录分别保存原始 dispatch authority 的 canonical 执行 WorkerSession、Worker、Worker instance、ProductSession、执行任务和租约身份。两次完成的执行任务与 ProductSession 必须不同。脚本通过同一 Worker 和 Worker instance 关联进程身份与执行身份，并核对 Server 的持久化任务已完成。
+
+这些事实证明确定性 Provider fixture 下的发布二进制、Device/Worker 链路和恢复行为。远程两机部署与真实 Provider 编程质量各自需要独立验收。真实编程任务仍须通过正式 Client 和真实 Provider 另行执行，并记录模型调用、工具结果、候选和独立验证证据。
 
 候选包名为 `candidate-<target>`，保留一天。它包含已验收的四个 `bin` 程序、source seal 和 API 报告。
 

@@ -12,6 +12,8 @@ pub enum WorkerRelayRequest {
 pub struct WorkerRelayResponse {
     pub status: u16,
     pub body: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failure: Option<winwincode_network::NetworkFailure>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]

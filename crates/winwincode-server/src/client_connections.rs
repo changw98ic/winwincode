@@ -542,10 +542,9 @@ fn directory_json(
             .active_grants_for_user(user_id)
             .map_err(|_| ClientConnectionsError::unavailable())?
     };
-    let mut registry = ClientRegistryService::new(storage);
     let mut clients = Vec::with_capacity(grants.len());
     for grant in grants {
-        let record = registry
+        let record = ClientRegistryService::new(storage)
             .snapshot(&grant.client_node_id)
             .map_err(|_| ClientConnectionsError::unavailable())?;
         if let Some(record) = record
@@ -554,7 +553,14 @@ fn directory_json(
                 ClientPresenceState::PendingEnrollment | ClientPresenceState::Revoked
             )
         {
-            clients.push(device_summary(&record));
+            let mut summary = device_summary(&record);
+            if storage
+                .device_identity_owned_by(&record.client_node_id, user_id)
+                .map_err(|_| ClientConnectionsError::unavailable())?
+            {
+                summary["clientNodeId"] = json!(record.client_node_id);
+            }
+            clients.push(summary);
         }
     }
     Ok(json!({

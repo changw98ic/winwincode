@@ -212,9 +212,10 @@ fn write_candidate_ref(repository: &Path, commit: &str) {
     );
 }
 
-fn retention(commit: &str, binding: &str) -> CandidateRetention {
+fn retention(commit: &str, base_commit: &str, binding: &str) -> CandidateRetention {
     CandidateRetention {
         candidate_commit: commit.to_owned(),
+        base_commit: base_commit.to_owned(),
         repository_binding_id: binding.to_owned(),
         worker_session_id: SESSION.to_owned(),
         local_git_ref: format!("refs/winwincode/candidates/{commit}"),
@@ -222,7 +223,13 @@ fn retention(commit: &str, binding: &str) -> CandidateRetention {
     }
 }
 
-fn seed_retained(store: &mut DeviceStore, repository: &Path, commit: &str, binding: &str) {
+fn seed_retained(
+    store: &mut DeviceStore,
+    repository: &Path,
+    commit: &str,
+    base_commit: &str,
+    binding: &str,
+) {
     store
         .put_path_mapping(&PathMappingRecord {
             repository_binding_id: binding.to_owned(),
@@ -235,7 +242,7 @@ fn seed_retained(store: &mut DeviceStore, repository: &Path, commit: &str, bindi
             local_state: "ready".to_owned(),
         })
         .expect("the binding should map");
-    record_candidate_retention(store, &retention(commit, binding))
+    record_candidate_retention(store, &retention(commit, base_commit, binding))
         .expect("the retention should record");
 }
 
@@ -279,6 +286,7 @@ fn seed_scenario_store(state: &Scenario, with_mirror: bool) -> (DeviceStore, Ide
         &mut store,
         &state.repository,
         &state.candidate_commit,
+        &state.base_commit,
         BINDING,
     );
     if with_mirror {
@@ -839,8 +847,11 @@ fn a_missing_candidate_fails_closed_as_candidate_missing() {
 
     let state = scenario("unmapped-binding");
     let mut store = DeviceStore::open(&state.root).expect("store should open");
-    record_candidate_retention(&mut store, &retention(&state.candidate_commit, BINDING))
-        .expect("the retention should record");
+    record_candidate_retention(
+        &mut store,
+        &retention(&state.candidate_commit, &state.base_commit, BINDING),
+    )
+    .expect("the retention should record");
     mirror_the_lease(&mut store);
     store.close().expect("store should close");
     let (store, identity) = open_enrolled(&state.root);
@@ -925,6 +936,7 @@ fn terminal_candidates_refuse_branch_creation() {
             &mut store,
             &state.repository,
             &state.candidate_commit,
+            &state.base_commit,
             BINDING,
         );
         mirror_the_lease(&mut store);
@@ -1102,6 +1114,7 @@ fn the_creation_survives_a_restart_and_a_failed_retry_can_succeed() {
         &mut store,
         &state.repository,
         &state.candidate_commit,
+        &state.base_commit,
         BINDING,
     );
     mirror_the_lease(&mut store);
@@ -1247,6 +1260,7 @@ fn the_registry_lifecycle_transition_table_stays_fail_closed() {
         &mut store,
         &state.repository,
         &state.candidate_commit,
+        &state.base_commit,
         BINDING,
     );
 

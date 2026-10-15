@@ -12,6 +12,18 @@ const sourceLock = JSON.parse(readFileSync(join(root, 'upstream/sources.lock.jso
 const manifest = JSON.parse(readFileSync(join(root, 'third_party/codex.UPSTREAM.json'), 'utf8'))
 const patches = sourceLock.patches.filter(({ id }) => id.startsWith('codex-code-mode-dispatch-') || id.startsWith('codex-tool-execution-facts-') || id.startsWith('codex-tool-runtime-recovery-') || id.startsWith('codex-tool-diagnostics-') || id.startsWith('codex-tool-dependencies-') || id.startsWith('codex-tool-receipts-') || id.startsWith('codex-tool-review-') || id.startsWith('codex-tool-runtime-reconciliation-') || id === 'codex-recover-original-turn-start-options' || id === 'codex-tool-payload-mismatch-model-feedback' || id === 'codex-seatbelt-explicit-literal-deny' || id === 'codex-zsh-parent-approval-context' || ["codex-mechanism-behavior-audit","codex-task-state-compaction-budget","codex-runtime-timer-and-pending-cost","codex-stdio-lifecycle-deadlines","codex-exact-input-call-routing","codex-private-input-recovery-store","codex-input-recovery-dispatch-and-pages","codex-required-tool-fact-storage-fatal","codex-terminal-core-error-rollout","codex-execution-terminal-cause-and-drain","codex-host-model-retry-semantics","codex-model-authority-expiry-cause","codex-guardian-transcript-test-registration","codex-native-fixture-transport-lifecycle","codex-native-fixture-network-isolation"].includes(id))
 const originalHashes = {
+  "codex-rs/core/src/shell_snapshot.rs": "03e9b3e78ad73bc5387e7416382c15eee512101cd207bb3dcec892e5c019bf9f",
+  "codex-rs/hooks/src/engine/command_runner.rs": "1777999eccdc5fe023c77fb6eef1c40a7f3df1fe12a8bc94e6aef0ee9aea3aae",
+  "codex-rs/rmcp-client/src/stdio_server_launcher.rs": "a64a85b7b7f4037f7ec70c2555f4971f6824ec4ff87aa40c984e7c5b16fc2ad1",
+  "codex-rs/rmcp-client/src/http_headers.rs": "e65a19c522a725f18796217a2995b3c987c4fdc29e42a1b0f4cec55a5cafe72f",
+  "codex-rs/git-utils/src/git_process.rs": "8961e2748659fca01ea0a4b51baff983b76207e3ca3222f6a637a91360288d06",
+  "codex-rs/core/src/spawn.rs": "960e85b5f6ba7f6b9d55e6800cb4cae3454f38d19051a3e966dc33c146d87db0",
+  "codex-rs/core/src/exec.rs": "f6dbe03a02c83eed8de6a17c083093056131177238eb4fe7b21c2ae1b3334613",
+  "codex-rs/utils/pty/src/process_group.rs": "4c9c062f990c9bfef8c61641956765379586c4f4bb8fc61db67cf1a515d084d3",
+  "codex-rs/utils/pty/src/pipe.rs": "ce78d972bb162d5a54c47214aa4c83777f895dd316f6b32b75493c608e0654ab",
+  "codex-rs/utils/pty/src/pty.rs": "9d1f1a1a156fee23cd9aed84c1087df8bd474385e6a32599b56b1f89d6a57450",
+  "codex-rs/utils/pty/src/process.rs": "f6dca08eec90266e43c7bebe9d1e651611d8d074614bae9df707c11c1c64d71c",
+  "codex-rs/utils/pty/src/tests.rs": "3b47bbca9f2eb47405b7a729c5ccc4f9e8ecf8a90b109902330927afea70f35a",
   "codex-rs/exec-server/src/process_sandbox_tests.rs": "11f6eb1066abc6474ab196d974fed352a4facaf672e4441e4ed2ddbe8b3928bb",
   "codex-rs/external-agent-migration/src/service_tests/plugins/marketplaces.rs": "a0899f521c2e3eb2a65d012c65a9d9e6531928e4ee692786085ed36131c27d5b",
 
@@ -373,7 +385,7 @@ test('the tool runtime manifest and ordered patch digests describe the dispatch 
   assert.equal(sourceLock.patches.find(({ id }) => id === 'codex-seatbelt-explicit-literal-deny')?.file, 'upstream/patches/codex/0096-seatbelt-explicit-literal-deny.patch')
   assert.equal(sourceLock.patches.find(({ id }) => id === 'codex-zsh-parent-approval-context')?.file, 'upstream/patches/codex/0097-zsh-parent-approval-context.patch')
   assert.equal(sourceLock.patches.find(({ id }) => id === 'codex-mechanism-behavior-audit')?.file, 'upstream/patches/codex/0098-mechanism-behavior-audit.patch')
-  assert.equal(patches.length, 104)
+  assert.equal(patches.length, 105)
   assert.deepEqual([...new Set(patches.flatMap(({ targets }) => targets))].sort(), Object.keys(originalHashes).sort())
   for (const patch of patches) {
     assert.equal(digest(readFileSync(join(root, patch.file))), patch.patchSha256, patch.file)

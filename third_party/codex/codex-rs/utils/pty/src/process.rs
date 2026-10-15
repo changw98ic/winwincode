@@ -8,6 +8,7 @@ use std::sync::Mutex as StdMutex;
 use std::sync::atomic::AtomicBool;
 
 use anyhow::anyhow;
+#[cfg(not(unix))]
 use portable_pty::MasterPty;
 use portable_pty::PtySize;
 use portable_pty::SlavePty;
@@ -84,6 +85,7 @@ pub(crate) trait PtyHandleKeepAlive: Send {}
 impl<T: Send + ?Sized> PtyHandleKeepAlive for T {}
 
 pub(crate) enum PtyMasterHandle {
+    #[cfg(not(unix))]
     Resizable(Box<dyn MasterPty + Send>),
     #[cfg(unix)]
     Opaque {
@@ -191,6 +193,7 @@ impl ProcessHandle {
                 .map_err(|_| anyhow!("failed to lock PTY handles"))?;
             if let Some(handles) = handles.as_ref() {
                 return match &handles._master {
+                    #[cfg(not(unix))]
                     PtyMasterHandle::Resizable(master) => master.resize(size.into()),
                     #[cfg(unix)]
                     PtyMasterHandle::Opaque { raw_fd, .. } => resize_raw_pty(*raw_fd, size),

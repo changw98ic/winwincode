@@ -30,11 +30,14 @@ import {
 } from 'node:fs'
 import { basename, dirname, join, resolve } from 'node:path'
 import { tmpdir } from 'node:os'
+import { DatabaseSync } from 'node:sqlite'
 import { pathToFileURL } from 'node:url'
 
 import { projectSourceDigest } from './product-build-contract.mjs'
 import {
   runtimeChildEnvironment,
+  captureDeviceWorkerProcess,
+  stopDeviceWorkerProcess,
   pendingDeviceTaskWorkRuns,
   DEVICE_ONLY_PREREQUISITES,
   FORBIDDEN_SERVER_MODEL_ENVIRONMENT_KEYS,
@@ -57,6 +60,7 @@ const SCHEMA_VERSION = 'winwincode/v1'
 const DEFAULT_TIMEOUT_MILLIS = 240_000
 const POLL_INTERVAL_MILLIS = 50
 const SERVER_GRACEFUL_STOP_TIMEOUT_MILLIS = 30_000
+const SERVER_RESTART_GATE_MARKER = 'api-production-server-restart'
 export const DELIVERY_TRANSITION_DIAGNOSTIC_CAPACITY = 64
 export {
   DEVICE_ONLY_PREREQUISITES,
@@ -92,6 +96,7 @@ const API_SOURCE_TRACKED_PATHS = [
   API_RUNNER_SOURCE_PATH,
   'scripts/product-build-contract.mjs',
   'scripts/build-community.mjs',
+  'scripts/device-production-fixture.mjs',
 ]
 const API_SOURCE_SEAL_KEYS = [
   'cliBinaryMode',
@@ -127,6 +132,7 @@ const IDS = Object.freeze({
   workItem: 'wit_01J00000000000000000000001',
   credential: 'crd_01J00000000000000000000001',
   reconnectSession: 'psn_01J00000000000000000000004',
+  serverRestartSession: 'psn_01J00000000000000000000005',
 })
 
 const ACTOR = Object.freeze({ kind: 'user', id: IDS.actor })
@@ -267,6 +273,10 @@ export function apiProductionSourceDigest(root = ROOT) {
     .update('scripts/build-community.mjs')
     .update('\0')
     .update(sha256File(join(root, 'scripts/build-community.mjs')))
+    .update('\0')
+    .update('scripts/device-production-fixture.mjs')
+    .update('\0')
+    .update(sha256File(join(root, 'scripts/device-production-fixture.mjs')))
     .digest('hex')
 }
 
@@ -737,6 +747,25 @@ function assertRuntimeSession(session, { productSessionId, workRunId = undefined
   if (workRunId !== undefined) assert.equal(session.workRunId, workRunId)
 }
 
+export function assertDeviceRuntimeWorker({ serverDatabase, runtime, worker }) {
+  const database = new DatabaseSync(serverDatabase, { readOnly: true })
+  try {
+    database.exec('PRAGMA busy_timeout=5000')
+    const authority = database.prepare(`SELECT a.job_id AS jobId,a.worker_id AS workerId,
+      a.worker_instance_id AS workerInstanceId,a.worker_session_id AS executionWorkerSessionId,
+      a.lease_id AS leaseId,a.attempt,a.fencing_token AS fencingToken,j.product_session_id AS productSessionId,j.state AS jobState
+      FROM execution_dispatch_authorities a JOIN scheduler_execution_jobs j ON j.job_id=a.job_id
+      WHERE a.job_id=?`).get(runtime.executionJobId)
+    assert.ok(authority, 'the actual runtime job must retain its original dispatch authority')
+    assert.equal(authority.workerId, worker.workerId)
+    assert.equal(authority.workerInstanceId, worker.workerInstanceId)
+    assert.equal(authority.executionWorkerSessionId, runtime.workerSessionId)
+    assert.equal(authority.productSessionId, runtime.productSessionId)
+    for (const field of ['leaseId', 'attempt', 'fencingToken']) assert.equal(authority[field], runtime[field])
+    return authority.jobState === 'completed' ? { ...authority, processWorkerSessionId: worker.workerSessionId } : null
+  } finally { database.close() }
+}
+
 async function waitFor(predicate, label, timeoutMillis) {
   const deadline = Date.now() + timeoutMillis
   for (;;) {
@@ -1113,11 +1142,15 @@ export async function inspectRegisteredDeviceTask(launch) {
   assert.equal(resolve(launch.directory), launch.directory, 'registered directory must be absolute')
   const endpoint = JSON.parse(readFileSync(join(launch.directory, 'server-endpoint.json'), 'utf8'))
   const target = new URL(endpoint.controlUrl)
-  assert.equal(target.protocol, 'http:')
+  assert.ok(['http:', 'https:'].includes(target.protocol))
   assert.equal(target.hostname, '127.0.0.1')
   assert.equal(target.username + target.password + target.search + target.hash, '')
   assert.equal(target.pathname, '/')
-  assert.equal(endpoint.origin, `http://127.0.0.1:${target.port}`)
+  const origin = new URL(endpoint.origin)
+  assert.equal(origin.origin, endpoint.origin)
+  assert.equal(origin.protocol, target.protocol)
+  assert.ok(['127.0.0.1', 'localhost', 'api.localhost'].includes(origin.hostname))
+  assert.equal(origin.port, target.port)
   const api = new ApiClient(endpoint.controlUrl, endpoint.origin, 1,
     readFileSync(join(launch.directory, 'fixture-cert.pem')))
   await api.bootstrap(null, { localOpen: true })
@@ -1143,6 +1176,8 @@ async function runChat(
     modelRoute = configuredModelRoute(),
     productSessionId = IDS.session,
     beforeSubmit = null,
+    afterSubmit = null,
+    message = 'Run the deterministic local API workflow.',
   } = {},
 ) {
   if (create) {
@@ -1159,17 +1194,26 @@ async function runChat(
   if (beforeSubmit !== null) {
     await beforeSubmit({ productSessionId, modelRoute })
   }
-  const submitted = await client.command('chat.submit', 1, {
+  const previousRevision = create ? 1
+    : (await client.query('session.get', { productSessionId })).result.revision
+  const existingMessages = create ? []
+    : (await client.query('session.messages.list', { productSessionId })).result.items.map(message => message.id)
+  const previousRuntime = create ? null
+    : (await client.query('runtime.projection.get', { kind: 'product-session', productSessionId }))
+      .result.sessions?.find(session => session.productSessionId === productSessionId)?.executionJobId
+  const submitted = await client.command('chat.submit', previousRevision, {
     productSessionId,
-    message: 'Run the deterministic local API workflow.',
+    message,
   })
-  assertCompleted(submitted, 'chat.submit', 1)
+  assertCompleted(submitted, 'chat.submit', previousRevision)
   assert.equal(submitted.result.id, productSessionId)
+  if (afterSubmit !== null) await afterSubmit({ productSessionId, submitted })
   const terminal = await waitFor(async () => {
     const response = await client.query('session.messages.list', { productSessionId })
     const assistant = response.result?.items?.find(message => (
       message.productSessionId === productSessionId
       && message.role === 'assistant'
+      && !existingMessages.includes(message.id)
       && message.state === 'completed'
       && typeof message.content === 'string'
       && message.content.trim().length > 0
@@ -1183,8 +1227,10 @@ async function runChat(
     })
     const sessions = response.result?.sessions
     if (!Array.isArray(sessions) || sessions.length === 0) return false
-    const matching = sessions.find(session => session.productSessionId === productSessionId)
-    return matching === undefined ? false : { response, session: matching }
+    const matching = sessions.find(session => session.productSessionId === productSessionId
+      && session.executionJobId !== previousRuntime)
+    return matching === undefined || matching.executionJobId === previousRuntime
+      ? false : { response, session: matching }
   }, `Chat ${productSessionId} runtime projection`, timeoutMillis)
   assertRuntimeSession(runtime.session, { productSessionId })
   return {
@@ -1841,6 +1887,8 @@ export async function runApiProductionVertical({
   const report = {
     schemaVersion: 'winwincode.api-production-vertical.v1',
     execution: 'device-worker-only',
+    topology: 'single-host-local',
+    modelEvidence: deviceProvider?.endpoint ? 'external-provider' : 'fixture',
     devicePrerequisites: plannedDevicePrerequisites,
     deviceProvider: devicePrerequisites
       ? {
@@ -1853,6 +1901,8 @@ export async function runApiProductionVertical({
       sourceSeal: {
         gitHead: sourceSeal.seal.gitHead,
         helperBinarySha256: sourceSeal.seal.helperBinarySha256,
+        cliBinarySha256: sourceSeal.seal.cliBinarySha256,
+        workerBinarySha256: sourceSeal.seal.workerBinarySha256,
         serverBinarySha256: sourceSeal.seal.serverBinarySha256,
         sourceSha256: sourceSeal.seal.sourceSha256,
         trackedDiffSha256: sourceSeal.seal.trackedDiffSha256,
@@ -1865,6 +1915,7 @@ export async function runApiProductionVertical({
     deterministic: null,
     devicePath: null,
     errorCodeTruthfulness: null,
+    deviceWorkerLifecycle: null,
   }
 
   const endpointPath = join(fixtureDirectory, 'server-endpoint.json')
@@ -1927,7 +1978,9 @@ export async function runApiProductionVertical({
         helperExecutable,
         modelRouteSource: modelRoute,
         timeoutMillis,
-        deviceProvider,
+        deviceProvider: restart && scenario === null && !deviceProvider?.endpoint ? {
+          ...deviceProvider, responseGateMarkers: [...(deviceProvider?.responseGateMarkers ?? []), SERVER_RESTART_GATE_MARKER],
+        } : deviceProvider,
         deviceSecret: deviceProviderSecrets[0] ?? null,
         seedDeviceProvider: true,
         repositoryScope: {
@@ -2010,10 +2063,11 @@ export async function runApiProductionVertical({
     if (devicePrerequisites && devicePath === null) {
       fail('Device-only production vertical could not establish Device prerequisites')
     }
+    const launchedDeviceWorkers = new Map()
     const launchForProductSession = devicePath === null
       ? null
       : async ({ productSessionId }) => {
-        await devicePath.launchAnchor({ productSessionId })
+        launchedDeviceWorkers.set(productSessionId, await devicePath.launchAnchor({ productSessionId }))
         report.devicePath.steps = [...devicePath.steps]
       }
     const chat = await runChat(api, timeoutMillis, {
@@ -2238,72 +2292,126 @@ export async function runApiProductionVertical({
     report.flow.cancel = await runCancelledSession(
       api,
       modelRoute,
-      devicePath === null
-        ? null
-        : async ({ productSessionId }) => {
-          await devicePath.launchAnchor({ productSessionId })
-          report.devicePath.steps = [...devicePath.steps]
-        },
+      launchForProductSession,
     )
 
     if (restart) {
       const firstDeliveryBytes = delivery === null ? null : JSON.stringify(delivery.detail)
       const firstCancelled = report.flow.cancel
-      await stopServer(started.child)
-      serverOutput += started.errors.join('')
-      const restartProof = randomBytes(32).toString('base64url')
-      proofs.push(restartProof)
-      started = await startServer({
-        root,
-        certificate,
-        directory: fixtureDirectory,
-        proof: restartProof,
-        checkoutRevision: baseline,
-        helperExecutable,
-        repositoryRoot: controlledRepository.repository,
-        sourceRoot: controlledRepository.sourceRoot,
-        serverEnvironment,
-        allowedClientOrigin,
-        serverBinary: binary,
-        timeoutMillis,
-        port: stableServerPort,
-      })
-      report.health.afterRestart = started.health.status
-      const restartedApi = new ApiClient(started.controlUrl, started.origin, 1_000_001)
-      await restartedApi.bootstrap(restartProof, { login: true, localOpen: true })
-      const reloadedMessages = (await restartedApi.query(
-        'session.messages.list',
-        { productSessionId: IDS.session },
-      )).result.items
-      assert.deepEqual(reloadedMessages, chat.messages, 'Chat projection must survive Server restart')
-      const reloadedCancelled = (await restartedApi.query('session.get', {
-        productSessionId: IDS.cancelSession,
-      })).result
-      assert.equal(reloadedCancelled.state, firstCancelled.state, 'Cancellation state must survive Server restart')
-      assert.equal(reloadedCancelled.revision, firstCancelled.revision, 'Cancellation revision must survive Server restart')
-      let status = reloadedCancelled.state
-      let deliveryBytesStable = null
-      if (firstDeliveryBytes !== null) {
-        const reloaded = (await restartedApi.query('delivery.get', { deliveryId: IDS.delivery })).result
-        assert.equal(JSON.stringify(reloaded), firstDeliveryBytes, 'Delivery projection must survive Server restart')
-        status = reloaded.status
-        deliveryBytesStable = true
-        assert.notEqual(delivery?.terminalCommand, null, 'terminal Delivery command must be retained for replay')
-        const replayedTerminal = await restartedApi.command(
-          delivery.terminalCommand.command,
-          delivery.terminalCommand.expectedRevision,
-          delivery.terminalCommand.payload,
-          delivery.terminalCommand.requestId,
-        )
-        assert.equal(replayedTerminal.outcome, 'completed', 'terminal Delivery replay must complete')
-        assert.equal(replayedTerminal.command, delivery.terminalCommand.command)
-        assert.equal(replayedTerminal.currentRevision, delivery.detail.deliveryRevision)
-        assert.equal(replayedTerminal.previousRevision, delivery.detail.deliveryRevision - 1)
+      if (devicePath !== null) {
+        const initial = await waitFor(() => captureDeviceWorkerProcess({
+          deviceData: devicePath.deviceData, launched: launchedDeviceWorkers.get(IDS.cancelSession),
+        }), 'initial Device-owned Worker process', timeoutMillis)
+        const stopped = await stopDeviceWorkerProcess({ deviceData: devicePath.deviceData,
+          worker: initial, timeoutMillis })
+        let restarted
+        const recovered = await runChat(api, timeoutMillis, {
+          modelRoute, productSessionId: IDS.reconnectSession, beforeSubmit: async context => {
+            await launchForProductSession(context)
+            restarted = await waitFor(() => captureDeviceWorkerProcess({
+              deviceData: devicePath.deviceData, launched: launchedDeviceWorkers.get(context.productSessionId),
+            }), 'restarted Device-owned Worker before task submission', timeoutMillis)
+          },
+        })
+        assert.notEqual(restarted.pid, initial.pid)
+        report.deviceWorkerLifecycle = { initial, restarted, stopped,
+          terminalAfterWorkerRestart: true,
+          workerRestartCompletion: await waitFor(() => assertDeviceRuntimeWorker({
+            serverDatabase: join(fixtureDirectory, 'server-data/control-plane.sqlite3'),
+            runtime: recovered.runtime, worker: restarted }), 'recovered Worker durable terminal and original dispatch authority', timeoutMillis),
+          serverRestartWorker: null, survivedServerRestart: null,
+          terminalAfterServerRestart: false, serverRestartCompletion: null }
       }
-      report.restart = {
-        deliveryBytesStable,
-        messageBytesStable: true,
-        status,
+      const restartServerAndInspect = async () => {
+        await stopServer(started.child)
+        serverOutput += started.errors.join('')
+        const restartProof = randomBytes(32).toString('base64url')
+        proofs.push(restartProof)
+        started = await startServer({
+          root,
+          certificate,
+          directory: fixtureDirectory,
+          proof: restartProof,
+          checkoutRevision: baseline,
+          helperExecutable,
+          repositoryRoot: controlledRepository.repository,
+          sourceRoot: controlledRepository.sourceRoot,
+          serverEnvironment,
+          allowedClientOrigin,
+          serverBinary: binary,
+          timeoutMillis,
+          port: stableServerPort,
+        })
+        report.health.afterRestart = started.health.status
+        const restartedApi = new ApiClient(started.controlUrl, started.origin, 1_000_001)
+        await restartedApi.bootstrap(restartProof, { login: true, localOpen: true })
+        const reloadedMessages = (await restartedApi.query(
+          'session.messages.list',
+          { productSessionId: IDS.session },
+        )).result.items
+        assert.deepEqual(reloadedMessages, chat.messages, 'Chat projection must survive Server restart')
+        const reloadedCancelled = (await restartedApi.query('session.get', {
+          productSessionId: IDS.cancelSession,
+        })).result
+        assert.equal(reloadedCancelled.state, firstCancelled.state, 'Cancellation state must survive Server restart')
+        assert.equal(reloadedCancelled.revision, firstCancelled.revision, 'Cancellation revision must survive Server restart')
+        let status = reloadedCancelled.state
+        let deliveryBytesStable = null
+        if (firstDeliveryBytes !== null) {
+          const reloaded = (await restartedApi.query('delivery.get', { deliveryId: IDS.delivery })).result
+          assert.equal(JSON.stringify(reloaded), firstDeliveryBytes, 'Delivery projection must survive Server restart')
+          status = reloaded.status
+          deliveryBytesStable = true
+          assert.notEqual(delivery?.terminalCommand, null, 'terminal Delivery command must be retained for replay')
+          const replayedTerminal = await restartedApi.command(
+            delivery.terminalCommand.command,
+            delivery.terminalCommand.expectedRevision,
+            delivery.terminalCommand.payload,
+            delivery.terminalCommand.requestId,
+          )
+          assert.equal(replayedTerminal.outcome, 'completed', 'terminal Delivery replay must complete')
+          assert.equal(replayedTerminal.command, delivery.terminalCommand.command)
+          assert.equal(replayedTerminal.currentRevision, delivery.detail.deliveryRevision)
+          assert.equal(replayedTerminal.previousRevision, delivery.detail.deliveryRevision - 1)
+        }
+        Object.assign(api, restartedApi)
+        report.restart = {
+          deliveryBytesStable,
+          messageBytesStable: true,
+          status,
+        }
+      }
+      if (devicePath === null) await restartServerAndInspect()
+      else {
+        assert.ok(devicePath.modelServer, 'the default Server restart lifecycle requires its deterministic Provider response gate')
+        const lifecycle = report.deviceWorkerLifecycle
+        const afterRestart = await runChat(api, timeoutMillis, {
+          modelRoute, productSessionId: IDS.serverRestartSession, message: SERVER_RESTART_GATE_MARKER,
+          beforeSubmit: async context => {
+            await launchForProductSession(context)
+            lifecycle.serverRestartWorker = await waitFor(() => captureDeviceWorkerProcess({
+              deviceData: devicePath.deviceData, launched: launchedDeviceWorkers.get(context.productSessionId),
+            }), 'active Device-owned Worker before Server restart', timeoutMillis)
+            assert.notEqual(lifecycle.serverRestartWorker.workerSessionId, lifecycle.restarted.workerSessionId)
+          },
+          afterSubmit: async () => {
+            await waitFor(() => devicePath.modelServer.requests.some(request => request.gateMarker === SERVER_RESTART_GATE_MARKER),
+              'actual Provider request held while its Worker remains active', timeoutMillis)
+            try {
+              await restartServerAndInspect()
+              lifecycle.survivedServerRestart = captureDeviceWorkerProcess({ deviceData: devicePath.deviceData,
+                launched: launchedDeviceWorkers.get(IDS.serverRestartSession) })
+              assert.deepEqual(lifecycle.survivedServerRestart, lifecycle.serverRestartWorker,
+                'the same active Device-owned Worker process must survive Server restart')
+            } finally { devicePath.modelServer.releaseResponseGate(SERVER_RESTART_GATE_MARKER) }
+          },
+        })
+        lifecycle.serverRestartCompletion = await waitFor(() => assertDeviceRuntimeWorker({
+          serverDatabase: join(fixtureDirectory, 'server-data/control-plane.sqlite3'),
+          runtime: afterRestart.runtime, worker: lifecycle.serverRestartWorker,
+        }), 'Server-surviving Worker durable terminal and original dispatch authority', timeoutMillis)
+        assert.notEqual(lifecycle.serverRestartCompletion.jobId, lifecycle.workerRestartCompletion.jobId)
+        lifecycle.terminalAfterServerRestart = true
       }
     }
   } catch (error) {

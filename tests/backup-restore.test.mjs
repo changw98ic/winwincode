@@ -43,7 +43,7 @@ test('snapshots are consistent cuts from VACUUM INTO, never file-level cold copi
   assert.match(backupModule, /fn place_snapshot\(/)
   const snapshotFunction = backupModule.slice(
     backupModule.indexOf('fn create_snapshot('),
-    backupModule.indexOf('fn redact_device_credentials('),
+    backupModule.indexOf('fn seal_snapshot('),
   )
   assert.doesNotMatch(snapshotFunction, /fs::copy/)
 })
@@ -55,10 +55,6 @@ test('server backup covers the sidecar layout dynamically and gates the product 
   assert.match(backupModule, /strip_suffix\("\.sqlite3"\)/)
   assert.match(
     backupModule,
-    /const SERVER_CONTROL_PLANE_SCHEMA_VERSION: i64 = 6;/,
-  )
-  assert.match(
-    backupModule,
     /winwincode_device_client::CLIENT_STORE_SCHEMA_VERSION/,
   )
 })
@@ -68,17 +64,12 @@ test('schema version constants stay locked to the canonical storage sources', ()
   const storageLib = read(storageLibPath)
   const deviceStore = read(deviceStorePath)
 
-  const declaredServer = backupModule.match(
-    /const SERVER_CONTROL_PLANE_SCHEMA_VERSION: i64 = (\d+);/,
+  assert.match(
+    backupModule,
+    /use winwincode_storage::CONTROL_PLANE_SCHEMA_VERSION as SERVER_CONTROL_PLANE_SCHEMA_VERSION;/,
+    'backup imports the canonical Server schema version',
   )
-  assert.ok(declaredServer, 'server version constant declared')
-  const storageVersion = storageLib.match(/const SCHEMA_VERSION: i64 = (\d+);/)
-  assert.ok(storageVersion, 'storage SCHEMA_VERSION declared')
-  assert.equal(
-    declaredServer[1],
-    storageVersion[1],
-    'backup server version must match winwincode-storage SCHEMA_VERSION',
-  )
+  assert.match(storageLib, /pub const CONTROL_PLANE_SCHEMA_VERSION: i64 = \d+;/)
 
   assert.match(
     backupModule,
@@ -88,9 +79,7 @@ test('schema version constants stay locked to the canonical storage sources', ()
 
   const declaredDevice = backupModule.match(/CLIENT_STORE_SCHEMA_VERSION/)
   assert.ok(declaredDevice, 'device gate uses the canonical constant')
-  const deviceVersion = deviceStore.match(/CLIENT_STORE_SCHEMA_VERSION: i64 = (\d+);/)
-  assert.ok(deviceVersion, 'device store schema version declared')
-  assert.equal(deviceVersion[1], '9', 'device store uses schema v9 (command receipts without device rotation)')
+  assert.match(deviceStore, /pub const CLIENT_STORE_SCHEMA_VERSION: i64 = \d+;/)
 })
 
 test('restore fails closed on unsupported schema versions before touching targets', () => {
@@ -104,19 +93,16 @@ test('restore fails closed on unsupported schema versions before touching target
   assert.match(backupModule, /fs::rename\(&restore_tmp, &target\)/)
 })
 
-test('backup artifacts carry no plaintext credential material', () => {
+test('backup artifacts restrict access and reject plaintext secret markers', () => {
   const backupModule = read(backupModulePath)
-  assert.match(backupModule, /UPDATE device_credential SET credential_secret = zeroblob\(32\)/)
   assert.match(backupModule, /backup\.secret-detected/)
-  assert.match(backupModule, /fn credential_redaction_finding\(/)
-  assert.match(backupModule, /快照携带明文设备凭据/)
+  assert.match(backupModule, /if let Some\(marker\) = scan_secret_markers\(&bytes\)/)
   assert.match(backupModule, /wwc_session=/)
   assert.match(backupModule, /authorization:bearer/)
-  assert.match(backupModule, /fn rebind_device_credentials\(/)
-  assert.match(backupModule, /restore\.credential-mismatch/)
-  assert.match(backupModule, /restore\.device-credential-unavailable/)
   assert.match(backupModule, /fn set_owner_only_permissions\(/)
   assert.match(backupModule, /fn set_directory_permissions\(/)
+  assert.match(backupModule, /set_owner_only_permissions\(vacuum_tmp\)\?/)
+  assert.match(backupModule, /set_directory_permissions\(output\)\?/)
 })
 
 test('repair stays read-only by default, applies bounded actions only, and leaves a trace', () => {
@@ -135,10 +121,10 @@ test('acceptance behaviors are pinned by named Rust tests inside the module', ()
     'snapshot_and_restore_round_trip_server_ids_cursors_and_receipts',
     'restore_fails_closed_on_newer_control_plane_schema_version',
     'restore_fails_closed_on_unsupported_device_schema_version',
-    'device_snapshot_redacts_credential_and_restore_keeps_identity_state',
-    'restore_rejects_snapshot_when_live_device_credential_rotated',
-    'restore_rejects_device_backup_without_live_store',
-    'verify_rejects_snapshot_carrying_plaintext_device_credential',
+    'device_snapshot_and_restore_keep_identity_state',
+    'device_backup_restores_into_an_empty_directory',
+    'secret_marker_scan_finds_plaintext_and_ignores_digests',
+    'supported_restore_versions_use_current_managed_schemas',
     'verify_rejects_tampered_snapshot_bytes',
     'repair_without_apply_is_read_only_and_records_a_trace',
     'repair_apply_checkpoints_wal_and_removes_stale_temp_files',

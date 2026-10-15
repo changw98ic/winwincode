@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use sha2::Digest;
-use std::collections::VecDeque;
+use std::collections::{BTreeMap, VecDeque};
 use std::fmt;
 use std::future::Future;
 use std::io::{BufRead, BufReader, Write};
@@ -53,6 +53,30 @@ impl std::error::Error for RemoteWorkerPortError {}
 struct RelayIo {
     input: Box<dyn BufRead + Send>,
     output: Box<dyn Write + Send>,
+    retry: winwincode_network::RequestRetryState,
+    retry_at: Option<std::time::Instant>,
+    retry_error: Option<RemoteWorkerPortError>,
+}
+
+impl RelayIo {
+    fn new(input: impl BufRead + Send + 'static, output: impl Write + Send + 'static) -> Self {
+        Self {
+            input: Box::new(input),
+            output: Box::new(output),
+            retry: relay_retry(),
+            retry_at: None,
+            retry_error: None,
+        }
+    }
+}
+
+fn relay_retry() -> winwincode_network::RequestRetryState {
+    winwincode_network::RequestRetry::new(
+        winwincode_network::defaults().max_attempts,
+        b"worker-device-relay",
+    )
+    .for_replay(winwincode_network::Replay::ReplayExact)
+    .state()
 }
 
 #[derive(Clone)]
@@ -69,6 +93,9 @@ impl DeviceRelay {
             .spawn(move || {
                 let result = (|| {
                     let mut io = io.lock().map_err(|_| RemoteWorkerPortError::Transport)?;
+                    if io.retry_at.is_some_and(|at| std::time::Instant::now() < at) {
+                        return Err(io.retry_error.unwrap_or(RemoteWorkerPortError::Transport));
+                    }
                     serde_json::to_writer(&mut io.output, &request)
                         .map_err(|_| RemoteWorkerPortError::Transport)?;
                     io.output
@@ -88,14 +115,29 @@ impl DeviceRelay {
                     }
                     let response: WorkerRelayResponse =
                         serde_json::from_str(&line).map_err(|_| RemoteWorkerPortError::Protocol)?;
-                    if response.status != 200 {
-                        let failure = NetworkFailure::http(response.status, None);
-                        return Err(if failure.retryable() {
-                            RemoteWorkerPortError::Network(failure)
-                        } else {
-                            RemoteWorkerPortError::NetworkExhausted(failure)
-                        });
+                    if let Some(failure) = response.failure.or_else(|| {
+                        (response.status != 200)
+                            .then(|| NetworkFailure::http(response.status, None))
+                    }) {
+                        if failure.kind == ErrorKind::ProtocolInvalid
+                            && failure.phase == Phase::Decode
+                        {
+                            return Err(RemoteWorkerPortError::NetworkExhausted(failure));
+                        }
+                        let error = match io.retry.decision_after(&failure) {
+                            winwincode_network::RetryDecision::RetryAfter(delay)
+                            | winwincode_network::RetryDecision::DeferredUntil(delay) => {
+                                io.retry_at = Some(std::time::Instant::now() + delay);
+                                RemoteWorkerPortError::Network(failure)
+                            }
+                            _ => RemoteWorkerPortError::NetworkExhausted(failure),
+                        };
+                        io.retry_error = Some(error);
+                        return Err(error);
                     }
+                    io.retry = relay_retry();
+                    io.retry_at = None;
+                    io.retry_error = None;
                     Ok(response.body)
                 })();
                 let _ = sender.send(result);
@@ -112,13 +154,34 @@ struct SharedRemoteState {
     processing: Vec<ExecutionMessageId>,
     acknowledgements: Vec<ExecutionMessageId>,
     terminal_error: Option<RemoteWorkerPortError>,
+    lease_deadlines: BTreeMap<String, (String, std::time::Instant)>,
+    pending_renewals: BTreeMap<String, (String, String, std::time::Instant)>,
 }
 
 impl SharedRemoteState {
+    fn check_authority(&mut self) -> Result<(), RemoteWorkerPortError> {
+        if self.terminal_error.is_none()
+            && self
+                .lease_deadlines
+                .values()
+                .any(|(_, deadline)| std::time::Instant::now() >= *deadline)
+        {
+            self.terminal_error = Some(RemoteWorkerPortError::NetworkExhausted(
+                NetworkFailure::new(
+                    ErrorKind::AuthorityExpired,
+                    Acceptance::NotSent,
+                    Phase::Connect,
+                ),
+            ));
+        }
+        self.terminal_error.map_or(Ok(()), Err)
+    }
+
     fn receive_response(
         &mut self,
         response: &RemoteExchangeResponse,
         acknowledgements: &[ExecutionMessageId],
+        request_started: std::time::Instant,
     ) -> Result<(), RemoteWorkerPortError> {
         if !response.has_acceptance_receipt() {
             return Err(RemoteWorkerPortError::Protocol);
@@ -140,6 +203,49 @@ impl SharedRemoteState {
             }
             let frame = RemoteTransportAdapter::<NoopCore>::decode(&delivery.frame)
                 .map_err(|_| RemoteWorkerPortError::Protocol)?;
+            let authority = match frame.message() {
+                ExecutionPortMessage::JobDispatchMessage(dispatch) => Some(&dispatch.lease),
+                ExecutionPortMessage::LeaseRenewMessage(renewal) => Some(&renewal.lease),
+                _ => None,
+            };
+            if let Some(lease) = authority {
+                let expires = time::OffsetDateTime::parse(
+                    &lease.expires_at.0,
+                    &time::format_description::well_known::Rfc3339,
+                )
+                .map_err(|_| RemoteWorkerPortError::Protocol)?;
+                let server_time = time::OffsetDateTime::parse(
+                    &response.server_time().0,
+                    &time::format_description::well_known::Rfc3339,
+                )
+                .map_err(|_| RemoteWorkerPortError::Protocol)?;
+                let lifetime = Duration::try_from(expires - server_time).unwrap_or(Duration::ZERO);
+                let deadline = request_started
+                    .checked_add(lifetime)
+                    .ok_or(RemoteWorkerPortError::Protocol)?;
+                if deadline <= std::time::Instant::now() {
+                    let error = RemoteWorkerPortError::NetworkExhausted(NetworkFailure::new(
+                        ErrorKind::AuthorityExpired,
+                        Acceptance::ResponseReceived,
+                        Phase::Decode,
+                    ));
+                    state.terminal_error = Some(error);
+                    return Err(error);
+                }
+                if matches!(frame.message(), ExecutionPortMessage::LeaseRenewMessage(_)) {
+                    state
+                        .pending_renewals
+                        .entry(delivery.delivery_id.0.clone())
+                        .or_insert_with(|| {
+                            (lease.job_id.0.clone(), lease.expires_at.0.clone(), deadline)
+                        });
+                } else {
+                    state
+                        .lease_deadlines
+                        .entry(lease.job_id.0.clone())
+                        .or_insert_with(|| (lease.expires_at.0.clone(), deadline));
+                }
+            }
             if let ExecutionPortMessage::LeaseRenewMessage(renewal) = frame.message() {
                 eprintln!(
                     "component=worker stage=lease_renewal_received message_sha256={:x} received_at_unix_ms={} prior_expires_at={} new_expires_at={} sent_at={}",
@@ -176,6 +282,18 @@ pub struct RemoteWorkerTransportHandle {
 }
 
 impl RemoteWorkerTransportHandle {
+    pub async fn wait_for_terminal_error(&self) -> RemoteWorkerPortError {
+        loop {
+            if let Ok(mut state) = self.state.lock() {
+                if let Err(error) = state.check_authority() {
+                    return error;
+                }
+            } else {
+                return RemoteWorkerPortError::Transport;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+    }
     pub fn close(&self) {
         if let Ok(mut state) = self.state.lock() {
             state.terminal_error = Some(RemoteWorkerPortError::Transport);
@@ -195,6 +313,8 @@ impl RemoteWorkerTransportHandle {
                 processing: Vec::new(),
                 acknowledgements: Vec::new(),
                 terminal_error: None,
+                lease_deadlines: BTreeMap::new(),
+                pending_renewals: BTreeMap::new(),
             })),
         }
     }
@@ -222,6 +342,7 @@ impl RemoteWorkerTransportHandle {
             .state
             .lock()
             .map_err(|_| RemoteWorkerPortError::Transport)?;
+        state.check_authority()?;
         let delivery = state.inbox.pop_front();
         if let Some((id, _)) = &delivery
             && !state.processing.contains(id)
@@ -236,7 +357,16 @@ impl RemoteWorkerTransportHandle {
             .state
             .lock()
             .map_err(|_| RemoteWorkerPortError::Transport)?;
+        state.check_authority()?;
         state.processing.retain(|processing| processing != &id);
+        if let Some((job_id, expires_at, deadline)) = state.pending_renewals.remove(&id.0)
+            && state
+                .lease_deadlines
+                .get(&job_id)
+                .is_some_and(|(prior, _)| expires_at > *prior)
+        {
+            state.lease_deadlines.insert(job_id, (expires_at, deadline));
+        }
         if !state.acknowledgements.contains(&id) {
             state.acknowledgements.push(id);
         }
@@ -289,6 +419,8 @@ impl RemoteWorkerPort {
             processing: Vec::new(),
             acknowledgements: Vec::new(),
             terminal_error: None,
+            lease_deadlines: BTreeMap::new(),
+            pending_renewals: BTreeMap::new(),
         }));
         (
             Self {
@@ -297,10 +429,7 @@ impl RemoteWorkerPort {
                 accounting_epoch: Arc::new(std::sync::atomic::AtomicU64::new(0)),
                 accounting_progress: tokio::sync::watch::channel(0).0,
                 relay: DeviceRelay {
-                    io: Arc::new(Mutex::new(RelayIo {
-                        input: Box::new(input),
-                        output: Box::new(output),
-                    })),
+                    io: Arc::new(Mutex::new(RelayIo::new(input, output))),
                 },
                 worker_id,
                 worker_instance_id,
@@ -321,6 +450,7 @@ impl RemoteWorkerPort {
         let wake = Arc::clone(&self.accounting_wake);
         let epoch = Arc::clone(&self.accounting_epoch);
         let progress = self.accounting_progress.clone();
+        let state = Arc::clone(&self.state);
         tokio::spawn(async move {
             let mut offset = 0;
             loop {
@@ -328,6 +458,12 @@ impl RemoteWorkerPort {
                 let query = relay
                     .request(WorkerRelayRequest::Accounting { body: None, offset })
                     .await;
+                if let Err(error @ RemoteWorkerPortError::NetworkExhausted(_)) = &query {
+                    if let Ok(mut state) = state.lock() {
+                        state.terminal_error = Some(*error);
+                    }
+                    break;
+                }
                 if let Ok(body) = query {
                     if let Ok(page) = serde_json::from_str::<
                         winwincode_execution_port::accounting::PendingAccountingPage,
@@ -350,14 +486,19 @@ impl RemoteWorkerPort {
                             let Ok(body) = String::from_utf8(bytes) else {
                                 continue;
                             };
-                            if relay
+                            if let Err(error) = relay
                                 .request(WorkerRelayRequest::Accounting {
                                     body: Some(body),
                                     offset: 0,
                                 })
                                 .await
-                                .is_err()
                             {
+                                if matches!(error, RemoteWorkerPortError::NetworkExhausted(_)) {
+                                    if let Ok(mut state) = state.lock() {
+                                        state.terminal_error = Some(error);
+                                    }
+                                    return;
+                                }
                                 remote_transport_debug(
                                     "Provider accounting receipt remains pending",
                                 );
@@ -377,8 +518,23 @@ impl RemoteWorkerPort {
         &mut self,
         message: ExecutionPortMessage,
     ) -> Result<(), RemoteWorkerPortError> {
-        let terminal = matches!(&message, ExecutionPortMessage::JobOutcomeMessage(_));
+        let completed_job = match &message {
+            ExecutionPortMessage::JobOutcomeMessage(outcome) => {
+                Some(outcome.lease.job_id.0.clone())
+            }
+            _ => None,
+        };
+        let terminal = completed_job.is_some();
         let result = self.exchange_inner(message).await;
+        if result.is_ok()
+            && let Some(job_id) = completed_job
+            && let Ok(mut state) = self.state.lock()
+        {
+            state.lease_deadlines.remove(&job_id);
+            state
+                .pending_renewals
+                .retain(|_, (pending_job, _, _)| *pending_job != job_id);
+        }
         if terminal
             && self
                 .accounting_enabled
@@ -442,6 +598,7 @@ impl RemoteWorkerPort {
         .and_then(|request| request.with_acceptance_receipt().encode())
         .map_err(remote_frame_error)?;
         let body = String::from_utf8(request).map_err(|_| RemoteWorkerPortError::Protocol)?;
+        let request_started = std::time::Instant::now();
         let body = self
             .relay
             .request(WorkerRelayRequest::Exchange { body })
@@ -450,7 +607,7 @@ impl RemoteWorkerPort {
         self.state
             .lock()
             .map_err(|_| RemoteWorkerPortError::Transport)?
-            .receive_response(&response, &acknowledgements)
+            .receive_response(&response, &acknowledgements, request_started)
     }
 }
 
@@ -540,10 +697,10 @@ mod tests {
         use std::os::unix::net::UnixStream;
         let (worker, device) = UnixStream::pair().unwrap();
         let relay = DeviceRelay {
-            io: Arc::new(Mutex::new(RelayIo {
-                input: Box::new(BufReader::new(worker.try_clone().unwrap())),
-                output: Box::new(worker),
-            })),
+            io: Arc::new(Mutex::new(RelayIo::new(
+                BufReader::new(worker.try_clone().unwrap()),
+                worker,
+            ))),
         };
         let server = std::thread::spawn(move || {
             let mut input = BufReader::new(device.try_clone().unwrap());
@@ -558,8 +715,15 @@ mod tests {
                     WorkerRelayRequest::Accounting { offset, .. } => offset.to_string(),
                 };
                 requests.push(request);
-                serde_json::to_writer(&mut output, &WorkerRelayResponse { status: 200, body })
-                    .unwrap();
+                serde_json::to_writer(
+                    &mut output,
+                    &WorkerRelayResponse {
+                        status: 200,
+                        body,
+                        failure: None,
+                    },
+                )
+                .unwrap();
                 output.write_all(b"\n").unwrap();
                 output.flush().unwrap();
             }
@@ -577,6 +741,92 @@ mod tests {
         assert_eq!(exchange.unwrap(), "exchange");
         assert_eq!(accounting.unwrap(), "3");
         assert_eq!(server.join().unwrap().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn execution_authority_uses_fresh_server_time_and_replay_does_not_extend_it() {
+        use winwincode_execution_port::transport::RemoteExchangeDelivery;
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../tests/fixtures/contracts/execution-port.valid.json"
+        ))
+        .unwrap();
+        let mut dispatch = fixture["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|message| message["kind"] == "job.dispatch")
+            .unwrap()
+            .clone();
+        dispatch["sentAt"] = "2098-01-01T00:00:00.000Z".into();
+        dispatch["lease"]["expiresAt"] = "2099-01-01T00:00:00.200Z".into();
+        let message: ExecutionPortMessage = serde_json::from_value(dispatch).unwrap();
+        let ExecutionPortMessage::JobDispatchMessage(dispatch) = &message else {
+            unreachable!()
+        };
+        let delivery_id = dispatch.message_id.clone();
+        let job_id = dispatch.lease.job_id.0.clone();
+        let response = RemoteExchangeResponse::with_acceptance_at(
+            vec![RemoteExchangeDelivery {
+                delivery_id,
+                frame: RemoteTransportAdapter::<NoopCore>::encode(
+                    &TypedFrame::new(FrameDirection::ControlPlaneToWorker, message).unwrap(),
+                )
+                .unwrap(),
+            }],
+            true,
+            winwincode_domain::Instant("2099-01-01T00:00:00.000Z".into()),
+        )
+        .unwrap();
+        let (_, handle) = RemoteWorkerPort::with_io(
+            WorkerId("worker".into()),
+            WorkerInstanceId("instance".into()),
+            std::io::Cursor::new(Vec::new()),
+            Vec::new(),
+        );
+        let deadline = {
+            let mut state = handle.state.lock().unwrap();
+            state
+                .receive_response(&response, &[], std::time::Instant::now())
+                .unwrap();
+            state.lease_deadlines[&job_id].1
+        };
+        assert!(deadline <= std::time::Instant::now() + Duration::from_millis(200));
+        tokio::time::sleep(Duration::from_millis(60)).await;
+        {
+            let mut state = handle.state.lock().unwrap();
+            state
+                .receive_response(&response, &[], std::time::Instant::now())
+                .unwrap();
+            assert_eq!(state.lease_deadlines[&job_id].1, deadline);
+        }
+        let error =
+            tokio::time::timeout(Duration::from_millis(300), handle.wait_for_terminal_error())
+                .await
+                .unwrap();
+        assert!(
+            matches!(error, RemoteWorkerPortError::NetworkExhausted(failure) if failure.kind == ErrorKind::AuthorityExpired)
+        );
+        assert_eq!(handle.next_control(), Err(error));
+        assert_eq!(
+            handle.confirm(response.deliveries()[0].delivery_id.clone()),
+            Err(error)
+        );
+
+        let (_, late_handle) = RemoteWorkerPort::with_io(
+            WorkerId("worker".into()),
+            WorkerInstanceId("instance".into()),
+            std::io::Cursor::new(Vec::new()),
+            Vec::new(),
+        );
+        let mut state = late_handle.state.lock().unwrap();
+        let request_started = std::time::Instant::now() - Duration::from_millis(300);
+        assert!(matches!(
+            state.receive_response(&response, &[], request_started),
+            Err(RemoteWorkerPortError::NetworkExhausted(failure))
+                if failure.kind == ErrorKind::AuthorityExpired
+        ));
+        assert!(state.inbox.is_empty());
+        assert!(state.lease_deadlines.is_empty());
     }
 
     #[test]
@@ -612,17 +862,27 @@ mod tests {
             processing: Vec::new(),
             acknowledgements: vec![sent.clone(), suffix.clone()],
             terminal_error: None,
+            lease_deadlines: BTreeMap::new(),
+            pending_renewals: BTreeMap::new(),
         };
         let response = RemoteExchangeResponse::with_acceptance(vec![delivery], false).unwrap();
         assert_eq!(
-            state.receive_response(&response, std::slice::from_ref(&sent)),
+            state.receive_response(
+                &response,
+                std::slice::from_ref(&sent),
+                std::time::Instant::now()
+            ),
             Err(RemoteWorkerPortError::Backpressure)
         );
         assert_eq!(state.acknowledgements, vec![suffix]);
         assert_eq!(state.inbox.len(), 1);
         assert!(state.terminal_error.is_none());
         assert_eq!(
-            state.receive_response(&response, std::slice::from_ref(&sent)),
+            state.receive_response(
+                &response,
+                std::slice::from_ref(&sent),
+                std::time::Instant::now()
+            ),
             Err(RemoteWorkerPortError::Backpressure)
         );
         assert_eq!(
@@ -633,12 +893,17 @@ mod tests {
         assert_eq!(
             state.receive_response(
                 &RemoteExchangeResponse::with_acceptance(Vec::new(), true).unwrap(),
-                &[]
+                &[],
+                std::time::Instant::now()
             ),
             Ok(())
         );
         assert_eq!(
-            state.receive_response(&RemoteExchangeResponse::new(Vec::new()).unwrap(), &[]),
+            state.receive_response(
+                &RemoteExchangeResponse::new(Vec::new()).unwrap(),
+                &[],
+                std::time::Instant::now()
+            ),
             Err(RemoteWorkerPortError::Protocol)
         );
     }
@@ -654,6 +919,8 @@ mod tests {
                 .map(|id| ExecutionMessageId(format!("xmsg_{id:026}")))
                 .collect(),
             terminal_error: None,
+            lease_deadlines: BTreeMap::new(),
+            pending_renewals: BTreeMap::new(),
         };
         let first = state.acknowledgements_for_exchange();
         assert_eq!(first.len(), 128);

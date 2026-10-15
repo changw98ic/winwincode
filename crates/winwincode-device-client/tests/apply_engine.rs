@@ -8,6 +8,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use serde_json::Value;
+use winwincode_client_port::candidate_application::candidate_application_digest;
 use winwincode_client_port::domain::{
     ApplyResult, ApplyStrategy, ClientArchitecture, ClientCapacityReport, ClientPlatformTarget,
     LocalApplyReceipt, LocalCandidateState,
@@ -238,11 +239,12 @@ fn write_candidate_ref(repository: &Path, candidate_commit: &str) {
     );
 }
 
-fn retain_candidate(store: &mut DeviceStore, candidate_commit: &str) {
+fn retain_candidate(store: &mut DeviceStore, candidate_commit: &str, base_commit: &str) {
     record_candidate_retention(
         store,
         &CandidateRetention {
             candidate_commit: candidate_commit.to_owned(),
+            base_commit: base_commit.into(),
             repository_binding_id: BINDING.to_owned(),
             worker_session_id: WORKER_SESSION.to_owned(),
             local_git_ref: format!("refs/winwincode/candidates/{candidate_commit}"),
@@ -267,13 +269,20 @@ fn bind(store: &mut DeviceStore, repository: &Path) {
         .expect("the binding should map");
 }
 
-fn request(
+fn apply_request(
     candidate_commit: &str,
     target_branch: &str,
     expected_head: &str,
     strategy: ApplyStrategy,
 ) -> CandidateApplyRequest {
+    let digest = candidate_application_digest(BINDING, expected_head, candidate_commit);
+    let identity = candidate_application_digest(target_branch, &format!("{strategy:?}"), &digest);
+    let identity = identity.trim_start_matches("sha256:")[..26].to_ascii_uppercase();
     CandidateApplyRequest {
+        application_id: format!("lar_{identity}"),
+        approval_id: format!("apr_{identity}"),
+        candidate_digest: digest,
+        reconciled_retry: false,
         repository_binding_id: BINDING.to_owned(),
         candidate_ref: format!("refs/winwincode/candidates/{candidate_commit}"),
         target_branch: target_branch.to_owned(),
@@ -331,17 +340,6 @@ fn user_tree_is_untouched(repository: &Path, expected_head: &str, file_content: 
     );
 }
 
-fn integration_attempt_directory(
-    integration_root: &Path,
-    candidate_commit: &str,
-    receipt_id: &str,
-) -> PathBuf {
-    integration_root
-        .join("conflict-artifacts")
-        .join(candidate_commit)
-        .join(receipt_id)
-}
-
 #[test]
 fn fast_forward_applies_the_candidate_commit_to_the_target_branch() {
     let (repo, base) = init_repository("fast-forward");
@@ -353,21 +351,28 @@ fn fast_forward_applies_the_candidate_commit_to_the_target_branch() {
     let root = temporary_directory("fast-forward-store");
     let mut daemon = started_daemon("fast-forward", &root);
     bind(daemon.store_mut(), &repo);
-    retain_candidate(daemon.store_mut(), &candidate);
+    retain_candidate(daemon.store_mut(), &candidate, &base);
     write_candidate_ref(&repo, &candidate);
 
     let outcome = apply_candidate_to_branch(
         &mut daemon,
-        &request(&candidate, "main", &base, ApplyStrategy::FastForward),
+        &apply_request(&candidate, "main", &base, ApplyStrategy::FastForward),
         &integration_root,
     )
     .expect("the fast-forward apply should settle applied");
     let receipt = &outcome.receipt;
     assert_eq!(receipt.result, ApplyResult::Applied, "the apply applies");
+    let resulting = receipt.resulting_commit.as_deref().unwrap();
+    assert_ne!(resulting, candidate);
     assert_eq!(
-        receipt.resulting_commit.as_deref(),
-        Some(candidate.as_str()),
-        "a fast-forward resulting commit is exactly the candidate commit"
+        git(&repo, &["rev-parse", &format!("{resulting}^")]),
+        candidate
+    );
+    assert!(
+        git(&repo, &["log", "-1", "--format=%B", resulting])
+            .lines()
+            .any(|line| line
+                == format!("WinWinCode-Application: {}", receipt.local_apply_receipt_id))
     );
     assert_eq!(
         receipt.candidate_ref,
@@ -379,7 +384,7 @@ fn fast_forward_applies_the_candidate_commit_to_the_target_branch() {
     assert_eq!(receipt.conflict_artifact_ref, None);
     assert_eq!(receipt.revision, 1);
     assert!(receipt.local_apply_receipt_id.starts_with("lar_"));
-    assert_eq!(git(&repo, &["rev-parse", "main"]), candidate);
+    assert_eq!(git(&repo, &["rev-parse", "main"]), resulting);
     user_tree_is_untouched(&repo, &workspace_head, &workspace_content);
     assert!(
         !repo.join("candidate.txt").exists(),
@@ -410,7 +415,7 @@ fn fast_forward_applies_the_candidate_commit_to_the_target_branch() {
 
     let replay = apply_candidate_to_branch(
         &mut daemon,
-        &request(&candidate, "main", &base, ApplyStrategy::FastForward),
+        &apply_request(&candidate, "main", &base, ApplyStrategy::FastForward),
         &integration_root,
     )
     .expect("pending receipt survives downlink replay");
@@ -503,8 +508,8 @@ fn peer_candidates_combine_into_a_stable_ref_that_requires_fresh_verification() 
     let root = temporary_directory("peer-integration-store");
     let mut daemon = started_daemon("peer-integration", &root);
     bind(daemon.store_mut(), &repo);
-    retain_candidate(daemon.store_mut(), &candidate_a);
-    retain_candidate(daemon.store_mut(), &candidate_b);
+    retain_candidate(daemon.store_mut(), &candidate_a, &base);
+    retain_candidate(daemon.store_mut(), &candidate_b, &base);
 
     let outcome = integrate_candidates_for_verification(
         &mut daemon,
@@ -574,6 +579,7 @@ fn cherry_pick_applies_with_the_original_author_and_device_committer() {
     fs::write(repo.join("main.txt"), "main work\n").expect("main file");
     let expected_head = commit_everything(&repo, "main work");
     git(&repo, &["checkout", "-q", "workspace"]);
+    git(&repo, &["reset", "--hard", &expected_head]);
     fs::write(repo.join("candidate.txt"), "candidate work\n").expect("candidate file");
     let candidate = commit_everything(&repo, "the candidate change");
     write_candidate_ref(&repo, &candidate);
@@ -583,11 +589,11 @@ fn cherry_pick_applies_with_the_original_author_and_device_committer() {
     let root = temporary_directory("cherry-pick-store");
     let mut daemon = started_daemon("cherry-pick", &root);
     bind(daemon.store_mut(), &repo);
-    retain_candidate(daemon.store_mut(), &candidate);
+    retain_candidate(daemon.store_mut(), &candidate, &expected_head);
 
     let outcome = apply_candidate_to_branch(
         &mut daemon,
-        &request(
+        &apply_request(
             &candidate,
             "main",
             &expected_head,
@@ -637,13 +643,14 @@ fn cherry_pick_applies_with_the_original_author_and_device_committer() {
 }
 
 #[test]
-fn merge_applies_as_a_merge_commit_when_the_target_diverged() {
+fn merge_applies_the_frozen_candidate_with_an_application_trailer() {
     let (repo, _base) = init_repository("merge");
     let integration_root = temporary_directory("merge-root");
     git(&repo, &["checkout", "-q", "main"]);
     fs::write(repo.join("main.txt"), "main work\n").expect("main file");
     let expected_head = commit_everything(&repo, "main work");
     git(&repo, &["checkout", "-q", "workspace"]);
+    git(&repo, &["reset", "--hard", &expected_head]);
     fs::write(repo.join("candidate.txt"), "candidate work\n").expect("candidate file");
     let candidate = commit_everything(&repo, "the candidate change");
     write_candidate_ref(&repo, &candidate);
@@ -653,11 +660,11 @@ fn merge_applies_as_a_merge_commit_when_the_target_diverged() {
     let root = temporary_directory("merge-store");
     let mut daemon = started_daemon("merge", &root);
     bind(daemon.store_mut(), &repo);
-    retain_candidate(daemon.store_mut(), &candidate);
+    retain_candidate(daemon.store_mut(), &candidate, &expected_head);
 
     let outcome = apply_candidate_to_branch(
         &mut daemon,
-        &request(&candidate, "main", &expected_head, ApplyStrategy::Merge),
+        &apply_request(&candidate, "main", &expected_head, ApplyStrategy::Merge),
         &integration_root,
     )
     .expect("the merge apply should settle applied");
@@ -685,7 +692,7 @@ fn merge_applies_as_a_merge_commit_when_the_target_diverged() {
 }
 
 #[test]
-fn a_moved_target_branch_settles_base_stale_and_stays_retryable() {
+fn a_moved_target_branch_requires_a_new_frozen_candidate() {
     let (repo, base) = init_repository("base-stale");
     let integration_root = temporary_directory("base-stale-root");
     let candidate = candidate_commit_on_main(&repo, "base-stale", "1");
@@ -695,7 +702,7 @@ fn a_moved_target_branch_settles_base_stale_and_stays_retryable() {
     let root = temporary_directory("base-stale-store");
     let mut daemon = started_daemon("base-stale", &root);
     bind(daemon.store_mut(), &repo);
-    retain_candidate(daemon.store_mut(), &candidate);
+    retain_candidate(daemon.store_mut(), &candidate, &base);
     write_candidate_ref(&repo, &candidate);
 
     git(&repo, &["checkout", "-q", "main"]);
@@ -704,7 +711,7 @@ fn a_moved_target_branch_settles_base_stale_and_stays_retryable() {
     git(&repo, &["checkout", "-q", "workspace"]);
     let drifted = apply_candidate_to_branch(
         &mut daemon,
-        &request(&candidate, "main", &base, ApplyStrategy::FastForward),
+        &apply_request(&candidate, "main", &base, ApplyStrategy::FastForward),
         &integration_root,
     )
     .expect("a stale base is a settled result, not an engine error");
@@ -724,27 +731,22 @@ fn a_moved_target_branch_settles_base_stale_and_stays_retryable() {
 
     let retried = apply_candidate_to_branch(
         &mut daemon,
-        &request(&candidate, "main", &moved_on, ApplyStrategy::CherryPick),
+        &apply_request(&candidate, "main", &moved_on, ApplyStrategy::CherryPick),
         &integration_root,
     )
     .expect("the retry settles");
-    assert_eq!(retried.receipt.result, ApplyResult::Applied);
+    assert_eq!(retried.receipt.result, ApplyResult::BaseStale);
     assert_ne!(
         retried.receipt.local_apply_receipt_id, drifted.receipt.local_apply_receipt_id,
         "every attempt settles its own fresh receipt"
     );
-    assert_ne!(git(&repo, &["rev-parse", "main"]), candidate);
-    assert_eq!(
-        git(&repo, &["log", "-1", "--format=%s", "main"]),
-        "the candidate change",
-        "the retried apply delivered the candidate onto the moved target"
-    );
+    assert_eq!(git(&repo, &["rev-parse", "main"]), moved_on);
 
     let mut store = daemon.into_store();
     let frames = apply_result_frames(&mut store);
     assert_eq!(frames.len(), 2, "both attempts appended one receipt each");
     assert_eq!(frames[0].2.receipt.result, ApplyResult::BaseStale);
-    assert_eq!(frames[1].2.receipt.result, ApplyResult::Applied);
+    assert_eq!(frames[1].2.receipt.result, ApplyResult::BaseStale);
     store.close().expect("store should close");
     cleanup(&root);
     cleanup(&integration_root);
@@ -780,12 +782,12 @@ fn the_expected_head_drift_during_execution_is_refused_by_the_cas() {
     let root = temporary_directory("cas-drift-store");
     let mut daemon = started_daemon("cas-drift", &root);
     bind(daemon.store_mut(), &repo);
-    retain_candidate(daemon.store_mut(), &candidate);
+    retain_candidate(daemon.store_mut(), &candidate, &base);
     write_candidate_ref(&repo, &candidate);
 
     let settled = apply_candidate_to_branch(
         &mut daemon,
-        &request(&candidate, "main", &base, ApplyStrategy::FastForward),
+        &apply_request(&candidate, "main", &base, ApplyStrategy::FastForward),
         &integration_root,
     )
     .expect("the drift is a settled result, not an engine error");
@@ -830,12 +832,12 @@ fn a_dirty_working_tree_is_refused_before_any_git_write() {
     let root = temporary_directory("dirty-store");
     let mut daemon = started_daemon("dirty", &root);
     bind(daemon.store_mut(), &repo);
-    retain_candidate(daemon.store_mut(), &candidate);
+    retain_candidate(daemon.store_mut(), &candidate, &base);
     write_candidate_ref(&repo, &candidate);
 
     let settled = apply_candidate_to_branch(
         &mut daemon,
-        &request(&candidate, "main", &base, ApplyStrategy::FastForward),
+        &apply_request(&candidate, "main", &base, ApplyStrategy::FastForward),
         &integration_root,
     )
     .expect("the dirty policy settles a result");
@@ -873,8 +875,8 @@ fn a_dirty_working_tree_is_refused_before_any_git_write() {
 }
 
 #[test]
-fn a_conflict_is_kept_only_in_the_isolated_artifact_directory() {
-    let (repo, _base) = init_repository("conflict");
+fn a_diverged_baseline_is_refused_before_a_conflicting_merge() {
+    let (repo, base) = init_repository("conflict");
     let integration_root = temporary_directory("conflict-root");
     git(&repo, &["checkout", "-q", "main"]);
     fs::write(repo.join("file.txt"), "main's own line\n").expect("main edit");
@@ -889,29 +891,16 @@ fn a_conflict_is_kept_only_in_the_isolated_artifact_directory() {
     let root = temporary_directory("conflict-store");
     let mut daemon = started_daemon("conflict", &root);
     bind(daemon.store_mut(), &repo);
-    retain_candidate(daemon.store_mut(), &candidate);
+    retain_candidate(daemon.store_mut(), &candidate, &base);
 
     let settled = apply_candidate_to_branch(
         &mut daemon,
-        &request(&candidate, "main", &expected_head, ApplyStrategy::Merge),
+        &apply_request(&candidate, "main", &expected_head, ApplyStrategy::Merge),
         &integration_root,
     )
     .expect("the conflict settles a result");
-    assert_eq!(settled.receipt.result, ApplyResult::MergeConflict);
-    assert_eq!(settled.receipt.resulting_commit, None);
-    let artifact = settled
-        .receipt
-        .conflict_artifact_ref
-        .clone()
-        .expect("a merge conflict carries its conflict artifact reference");
-    assert!(
-        !artifact.contains(root.to_str().expect("UTF-8")),
-        "the artifact reference is opaque, never a device path: {artifact}"
-    );
-    assert!(
-        !artifact.starts_with('/'),
-        "the artifact reference is not a path"
-    );
+    assert_eq!(settled.receipt.result, ApplyResult::BaseStale);
+    assert!(settled.receipt.conflict_artifact_ref.is_none());
 
     user_tree_is_untouched(&repo, &workspace_head, &workspace_content);
     assert_eq!(git(&repo, &["rev-parse", "main"]), expected_head);
@@ -920,47 +909,12 @@ fn a_conflict_is_kept_only_in_the_isolated_artifact_directory() {
         LocalCandidateState::Failed
     );
 
-    let artifact_directory = integration_attempt_directory(
-        &integration_root,
-        &candidate,
-        settled.receipt.local_apply_receipt_id.as_str(),
-    );
-    let conflicted_worktree = artifact_directory.join("worktree");
-    assert!(
-        conflicted_worktree.exists(),
-        "the conflicted worktree is kept"
-    );
-    let conflicted =
-        fs::read_to_string(conflicted_worktree.join("file.txt")).expect("conflict file");
-    assert!(
-        conflicted.contains("<<<<<<<") && conflicted.contains("candidate's line"),
-        "the kept worktree shows the real conflict markers: {conflicted}"
-    );
-    assert_eq!(
-        git(
-            &conflicted_worktree,
-            &["diff", "--name-only", "--diff-filter=U"]
-        ),
-        "file.txt",
-        "the kept worktree reports the unmerged path"
-    );
-    let summary: Value = serde_json::from_str(
-        &fs::read_to_string(artifact_directory.join("conflict.json")).expect("conflict summary"),
-    )
-    .expect("the summary is JSON");
-    assert_eq!(summary["candidateCommit"], candidate);
-    assert_eq!(summary["targetBranch"], "main");
-    assert_eq!(summary["strategy"], "merge");
-    assert_eq!(summary["unmergedPaths"][0], "file.txt");
+    assert!(!integration_root.exists());
 
     let mut store = daemon.into_store();
     let frames = apply_result_frames(&mut store);
     assert_eq!(frames.len(), 1);
-    assert_eq!(
-        frames[0].2.receipt.conflict_artifact_ref.as_deref(),
-        Some(artifact.as_str()),
-        "the durable frame carries the same opaque artifact reference"
-    );
+    assert_eq!(frames[0].2.receipt.result, ApplyResult::BaseStale);
     store.close().expect("store should close");
     cleanup(&root);
     cleanup(&integration_root);
@@ -978,10 +932,10 @@ fn a_missing_or_drifted_candidate_ref_settles_candidate_missing() {
     let root = temporary_directory("candidate-missing-store");
     let mut daemon = started_daemon("candidate-missing", &root);
     bind(daemon.store_mut(), &repo);
-    retain_candidate(daemon.store_mut(), &candidate);
+    retain_candidate(daemon.store_mut(), &candidate, &base);
     let missing = apply_candidate_to_branch(
         &mut daemon,
-        &request(&candidate, "main", &base, ApplyStrategy::FastForward),
+        &apply_request(&candidate, "main", &base, ApplyStrategy::FastForward),
         &integration_root,
     )
     .expect("the missing ref settles a result");
@@ -999,7 +953,7 @@ fn a_missing_or_drifted_candidate_ref_settles_candidate_missing() {
     );
     let drifted = apply_candidate_to_branch(
         &mut daemon,
-        &request(&candidate, "main", &base, ApplyStrategy::FastForward),
+        &apply_request(&candidate, "main", &base, ApplyStrategy::FastForward),
         &integration_root,
     )
     .expect("the drifted ref settles a result");
@@ -1046,7 +1000,7 @@ fn applies_to_the_bound_checkout_and_protects_other_worktrees() {
     let root = temporary_directory("checked-out-store");
     let mut daemon = started_daemon("checked-out", &root);
     bind(daemon.store_mut(), &repo);
-    retain_candidate(daemon.store_mut(), &candidate);
+    retain_candidate(daemon.store_mut(), &candidate, &base);
     write_candidate_ref(&repo, &candidate);
 
     for (label, target) in [
@@ -1055,7 +1009,7 @@ fn applies_to_the_bound_checkout_and_protects_other_worktrees() {
     ] {
         let settled = apply_candidate_to_branch(
             &mut daemon,
-            &request(&candidate, target, &base, ApplyStrategy::FastForward),
+            &apply_request(&candidate, target, &base, ApplyStrategy::FastForward),
             &integration_root,
         )
         .expect("the checked-out target settles a result");
@@ -1070,11 +1024,11 @@ fn applies_to_the_bound_checkout_and_protects_other_worktrees() {
             "{label}"
         );
         assert_eq!(
-            git(&repo, &["rev-parse", target]),
+            git(&repo, &["rev-parse", &format!("{target}^{{tree}}")]),
             if current {
-                candidate.as_str()
+                git(&repo, &["rev-parse", &format!("{candidate}^{{tree}}")])
             } else {
-                base.as_str()
+                git(&repo, &["rev-parse", &format!("{base}^{{tree}}")])
             },
             "{label}: only the bound checkout may move"
         );
@@ -1103,7 +1057,7 @@ fn applies_to_the_bound_checkout_and_protects_other_worktrees() {
 
 #[test]
 fn a_non_descendant_candidate_fails_closed_under_the_fast_forward_strategy() {
-    let (repo, _base) = init_repository("not-ff");
+    let (repo, base) = init_repository("not-ff");
     let integration_root = temporary_directory("not-ff-root");
     fs::write(repo.join("candidate.txt"), "candidate work\n").expect("candidate file");
     let candidate = commit_everything(&repo, "the candidate change");
@@ -1118,11 +1072,11 @@ fn a_non_descendant_candidate_fails_closed_under_the_fast_forward_strategy() {
     let root = temporary_directory("not-ff-store");
     let mut daemon = started_daemon("not-ff", &root);
     bind(daemon.store_mut(), &repo);
-    retain_candidate(daemon.store_mut(), &candidate);
+    retain_candidate(daemon.store_mut(), &candidate, &base);
 
     let settled = apply_candidate_to_branch(
         &mut daemon,
-        &request(
+        &apply_request(
             &candidate,
             "main",
             &expected_head,
@@ -1133,7 +1087,7 @@ fn a_non_descendant_candidate_fails_closed_under_the_fast_forward_strategy() {
     .expect("the strategy mismatch settles a result");
     assert_eq!(
         settled.receipt.result,
-        ApplyResult::Failed,
+        ApplyResult::BaseStale,
         "fast_forward refuses a candidate that is not a descendant"
     );
     assert_eq!(
@@ -1168,10 +1122,10 @@ fn a_stale_fencing_stamp_is_refused_before_any_local_action() {
     let root = temporary_directory("fencing-store");
     let mut daemon = started_daemon("fencing", &root);
     bind(daemon.store_mut(), &repo);
-    retain_candidate(daemon.store_mut(), &candidate);
+    retain_candidate(daemon.store_mut(), &candidate, &base);
     write_candidate_ref(&repo, &candidate);
 
-    let mut stale = request(&candidate, "main", &base, ApplyStrategy::FastForward);
+    let mut stale = apply_request(&candidate, "main", &base, ApplyStrategy::FastForward);
     stale.occupancy_fencing_token = TOKEN - 1;
     let error = apply_candidate_to_branch(&mut daemon, &stale, &integration_root)
         .expect_err("a stale token must refuse the command");
@@ -1181,7 +1135,7 @@ fn a_stale_fencing_stamp_is_refused_before_any_local_action() {
         "the fencing layer refuses before any git action"
     );
 
-    let mut foreign = request(&candidate, "main", &base, ApplyStrategy::FastForward);
+    let mut foreign = apply_request(&candidate, "main", &base, ApplyStrategy::FastForward);
     foreign.occupancy_lease_id = "ocl_FOREIGN0000000000000000000000".to_owned();
     let error = apply_candidate_to_branch(&mut daemon, &foreign, &integration_root)
         .expect_err("a foreign lease must refuse the command");
@@ -1219,12 +1173,12 @@ fn unknown_terminal_and_branch_creation_commands_are_refused() {
     let root = temporary_directory("refusals-store");
     let mut daemon = started_daemon("refusals", &root);
     bind(daemon.store_mut(), &repo);
-    retain_candidate(daemon.store_mut(), &candidate);
+    retain_candidate(daemon.store_mut(), &candidate, &base);
     write_candidate_ref(&repo, &candidate);
 
     let error = apply_candidate_to_branch(
         &mut daemon,
-        &request(&candidate, "main", &base, ApplyStrategy::CreateBranch),
+        &apply_request(&candidate, "main", &base, ApplyStrategy::CreateBranch),
         &integration_root,
     )
     .expect_err("create_branch is refused by the apply engine");
@@ -1233,7 +1187,7 @@ fn unknown_terminal_and_branch_creation_commands_are_refused() {
     let unknown = "ffffffffffffffffffffffffffffffffffffffff";
     let error = apply_candidate_to_branch(
         &mut daemon,
-        &request(unknown, "main", &base, ApplyStrategy::Merge),
+        &apply_request(unknown, "main", &base, ApplyStrategy::Merge),
         &integration_root,
     )
     .expect_err("an unknown candidate must refuse");
@@ -1252,7 +1206,7 @@ fn unknown_terminal_and_branch_creation_commands_are_refused() {
     }
     let error = apply_candidate_to_branch(
         &mut daemon,
-        &request(&candidate, "main", &base, ApplyStrategy::Merge),
+        &apply_request(&candidate, "main", &base, ApplyStrategy::Merge),
         &integration_root,
     )
     .expect_err("a terminal candidate must refuse");
@@ -1289,12 +1243,12 @@ fn an_unusable_integration_root_settles_permission_denied() {
     let root = temporary_directory("permission-store");
     let mut daemon = started_daemon("permission", &root);
     bind(daemon.store_mut(), &repo);
-    retain_candidate(daemon.store_mut(), &candidate);
+    retain_candidate(daemon.store_mut(), &candidate, &base);
     write_candidate_ref(&repo, &candidate);
 
     let settled = apply_candidate_to_branch(
         &mut daemon,
-        &request(&candidate, "main", &base, ApplyStrategy::Merge),
+        &apply_request(&candidate, "main", &base, ApplyStrategy::Merge),
         &integration_root,
     )
     .expect("the permission refusal settles a result");
@@ -1317,6 +1271,7 @@ fn an_unusable_integration_root_settles_permission_denied() {
 }
 
 #[test]
+#[allow(clippy::too_many_lines)]
 fn daemon_applies_the_complete_reworked_candidate_from_its_downlink() {
     use winwincode_client_port::messages::{
         CommandContext, OccupancyCommandContext, ServerCandidateApplyPayload,
@@ -1339,6 +1294,26 @@ fn daemon_applies_the_complete_reworked_candidate_from_its_downlink() {
                 sequence: 1,
                 occurred_at: STAMP.into(),
                 message: ServerToClientMessage::CandidateApply(ServerCandidateApplyPayload {
+                    reconciled_retry: false,
+                    application_id: apply_request(
+                        &self.candidate,
+                        "workspace",
+                        &self.base,
+                        ApplyStrategy::Merge,
+                    )
+                    .application_id,
+                    approval_id: apply_request(
+                        &self.candidate,
+                        "workspace",
+                        &self.base,
+                        ApplyStrategy::Merge,
+                    )
+                    .approval_id,
+                    candidate_digest: candidate_application_digest(
+                        BINDING,
+                        &self.base,
+                        &self.candidate,
+                    ),
                     occupancy: OccupancyCommandContext {
                         command: CommandContext {
                             expected_revision: 1,
@@ -1374,7 +1349,7 @@ fn daemon_applies_the_complete_reworked_candidate_from_its_downlink() {
     let root = temporary_directory("daemon-apply-store");
     let mut daemon = started_daemon("daemon-apply", &root);
     bind(daemon.store_mut(), &repo);
-    retain_candidate(daemon.store_mut(), &candidate);
+    retain_candidate(daemon.store_mut(), &candidate, &base);
     write_candidate_ref(&repo, &candidate);
     let store = daemon.into_store();
     let identity = load_device_identity(&store).unwrap().unwrap();
@@ -1410,5 +1385,417 @@ fn daemon_applies_the_complete_reworked_candidate_from_its_downlink() {
     assert_eq!(git(&repo, &["rev-parse", "HEAD"]), head);
     daemon.into_store().close().unwrap();
     cleanup(&root);
+    cleanup(&repo);
+}
+
+#[test]
+#[cfg(feature = "test-support")]
+fn committed_application_is_recovered_after_a_crash_without_a_second_commit() {
+    use winwincode_device_client::apply_engine::{
+        ApplicationCrashPoint, apply_candidate_with_crash_point, recover_started_applications,
+    };
+    let (repo, base) = init_repository("recover-committed");
+    let integration_root = temporary_directory("recover-committed-integration");
+    let root = temporary_directory("recover-committed-store");
+    let candidate = candidate_commit_on_main(&repo, "recover-committed", "1");
+    let mut daemon = started_daemon("recover-committed", &root);
+    bind(daemon.store_mut(), &repo);
+    retain_candidate(daemon.store_mut(), &candidate, &base);
+    write_candidate_ref(&repo, &candidate);
+    let request = apply_request(&candidate, "workspace", &base, ApplyStrategy::Merge);
+    apply_candidate_with_crash_point(
+        &mut daemon,
+        &request,
+        &integration_root,
+        ApplicationCrashPoint::AfterRepositoryCommit,
+    )
+    .expect_err("crash before application.finished");
+    let applied = git(&repo, &["rev-parse", "HEAD"]);
+    assert_ne!(applied, base);
+    assert!(apply_result_frames(daemon.store_mut()).is_empty());
+    let before = git(&repo, &["rev-list", "--count", "HEAD"]);
+    daemon.into_store().close().unwrap();
+    let (store, identity) = open_resumed(&root);
+    let mut daemon = DeviceDaemon::start(
+        daemon_config("recover-committed"),
+        store,
+        Arc::new(NeverTransport),
+        &identity,
+    )
+    .unwrap();
+    let recovered = recover_started_applications(&mut daemon).unwrap();
+    assert_eq!(recovered.len(), 1);
+    let outcome = apply_candidate_to_branch(&mut daemon, &request, &integration_root).unwrap();
+    assert_eq!(
+        outcome.receipt.resulting_commit.as_deref(),
+        Some(applied.as_str())
+    );
+    assert_eq!(git(&repo, &["rev-list", "--count", "HEAD"]), before);
+    assert_eq!(
+        git(&repo, &["rev-parse", &request.candidate_ref]),
+        candidate
+    );
+    let repeated = apply_candidate_to_branch(&mut daemon, &request, &integration_root).unwrap();
+    assert_eq!(repeated.receipt, outcome.receipt);
+    assert_eq!(apply_result_frames(daemon.store_mut()).len(), 1);
+    daemon.into_store().close().unwrap();
+    cleanup(&root);
+    cleanup(&integration_root);
+    cleanup(&repo);
+}
+
+#[test]
+#[cfg(feature = "test-support")]
+fn an_unstarted_application_needs_explicit_server_retry_authorization() {
+    use winwincode_device_client::apply_engine::{
+        ApplicationCrashPoint, apply_candidate_with_crash_point,
+    };
+    let (repo, base) = init_repository("recover-unstarted");
+    let integration_root = temporary_directory("recover-unstarted-integration");
+    let root = temporary_directory("recover-unstarted-store");
+    let candidate = candidate_commit_on_main(&repo, "recover-unstarted", "1");
+    let mut daemon = started_daemon("recover-unstarted", &root);
+    bind(daemon.store_mut(), &repo);
+    retain_candidate(daemon.store_mut(), &candidate, &base);
+    write_candidate_ref(&repo, &candidate);
+    let mut request = apply_request(&candidate, "workspace", &base, ApplyStrategy::Merge);
+    apply_candidate_with_crash_point(
+        &mut daemon,
+        &request,
+        &integration_root,
+        ApplicationCrashPoint::AfterStarted,
+    )
+    .unwrap_err();
+    let error = apply_candidate_to_branch(&mut daemon, &request, &integration_root).unwrap_err();
+    assert_eq!(
+        error.kind(),
+        CandidateApplyErrorKind::ReconciliationRequired
+    );
+    assert_eq!(git(&repo, &["rev-parse", "HEAD"]), base);
+    request.reconciled_retry = true;
+    let outcome = apply_candidate_to_branch(&mut daemon, &request, &integration_root).unwrap();
+    assert_eq!(outcome.receipt.result, ApplyResult::Applied);
+    assert_eq!(
+        outcome.receipt.local_apply_receipt_id,
+        request.application_id
+    );
+    daemon.into_store().close().unwrap();
+    cleanup(&root);
+    cleanup(&integration_root);
+    cleanup(&repo);
+}
+
+#[test]
+#[cfg(feature = "test-support")]
+fn a_changed_repository_blocks_an_interrupted_application_even_after_the_tree_is_cleaned() {
+    use winwincode_device_client::apply_engine::{
+        ApplicationCrashPoint, apply_candidate_with_crash_point,
+    };
+    let (repo, base) = init_repository("recover-unknown");
+    let integration_root = temporary_directory("recover-unknown-integration");
+    let root = temporary_directory("recover-unknown-store");
+    let candidate = candidate_commit_on_main(&repo, "recover-unknown", "1");
+    let mut daemon = started_daemon("recover-unknown", &root);
+    bind(daemon.store_mut(), &repo);
+    retain_candidate(daemon.store_mut(), &candidate, &base);
+    write_candidate_ref(&repo, &candidate);
+    let mut request = apply_request(&candidate, "workspace", &base, ApplyStrategy::Merge);
+    apply_candidate_with_crash_point(
+        &mut daemon,
+        &request,
+        &integration_root,
+        ApplicationCrashPoint::AfterStarted,
+    )
+    .unwrap_err();
+    fs::write(repo.join("partial.txt"), "partial application").unwrap();
+    let error = apply_candidate_to_branch(&mut daemon, &request, &integration_root).unwrap_err();
+    assert_eq!(error.kind(), CandidateApplyErrorKind::OutcomeUnknown);
+    fs::remove_file(repo.join("partial.txt")).unwrap();
+    request.reconciled_retry = true;
+    let error = apply_candidate_to_branch(&mut daemon, &request, &integration_root).unwrap_err();
+    assert_eq!(error.kind(), CandidateApplyErrorKind::OutcomeUnknown);
+    assert_eq!(git(&repo, &["rev-parse", "HEAD"]), base);
+    request.application_id = format!("lar_{}", "B".repeat(26));
+    request.approval_id = format!("apr_{}", "B".repeat(26));
+    request.target_branch = "main".into();
+    request.reconciled_retry = false;
+    let error = apply_candidate_to_branch(&mut daemon, &request, &integration_root).unwrap_err();
+    assert_eq!(error.kind(), CandidateApplyErrorKind::OutcomeUnknown);
+    assert_eq!(git(&repo, &["rev-parse", "main"]), base);
+    assert!(apply_result_frames(daemon.store_mut()).is_empty());
+    daemon.into_store().close().unwrap();
+    cleanup(&root);
+    cleanup(&integration_root);
+    cleanup(&repo);
+}
+
+#[test]
+fn approval_identity_and_digest_cannot_be_rebound_to_another_candidate() {
+    let (repo, base) = init_repository("approval-binding");
+    let integration_root = temporary_directory("approval-binding-integration");
+    let root = temporary_directory("approval-binding-store");
+    let candidate = candidate_commit_on_main(&repo, "approval-binding", "1");
+    let mut daemon = started_daemon("approval-binding", &root);
+    bind(daemon.store_mut(), &repo);
+    retain_candidate(daemon.store_mut(), &candidate, &base);
+    write_candidate_ref(&repo, &candidate);
+    let mut request = apply_request(&candidate, "workspace", &base, ApplyStrategy::Merge);
+    request.candidate_digest =
+        candidate_application_digest("another-repository", &base, &candidate);
+    let error = apply_candidate_to_branch(&mut daemon, &request, &integration_root).unwrap_err();
+    assert_eq!(error.kind(), CandidateApplyErrorKind::InvalidInput);
+    assert_eq!(git(&repo, &["rev-parse", "HEAD"]), base);
+    assert!(apply_result_frames(daemon.store_mut()).is_empty());
+    daemon.into_store().close().unwrap();
+    cleanup(&root);
+    cleanup(&integration_root);
+    cleanup(&repo);
+}
+
+#[test]
+fn cherry_pick_delivers_the_entire_reworked_candidate_snapshot() {
+    let (repo, base) = init_repository("reworked-snapshot");
+    let integration_root = temporary_directory("reworked-snapshot-integration");
+    let root = temporary_directory("reworked-snapshot-store");
+    let first = candidate_commit_on_main(&repo, "reworked-snapshot", "1");
+    git(&repo, &["checkout", "--detach", &first]);
+    fs::write(repo.join("second.txt"), "second candidate change\n").unwrap();
+    let second = commit_everything(&repo, "first rework");
+    fs::write(repo.join("third.txt"), "third candidate change\n").unwrap();
+    let candidate = commit_everything(&repo, "second rework");
+    assert_ne!(candidate, second);
+    git(&repo, &["checkout", "workspace"]);
+    let mut daemon = started_daemon("reworked-snapshot", &root);
+    bind(daemon.store_mut(), &repo);
+    retain_candidate(daemon.store_mut(), &candidate, &base);
+    write_candidate_ref(&repo, &candidate);
+    let outcome = apply_candidate_to_branch(
+        &mut daemon,
+        &apply_request(&candidate, "workspace", &base, ApplyStrategy::CherryPick),
+        &integration_root,
+    )
+    .unwrap();
+    assert_eq!(outcome.receipt.result, ApplyResult::Applied);
+    assert_eq!(
+        git(&repo, &["rev-parse", "HEAD^{tree}"]),
+        git(&repo, &["rev-parse", &format!("{candidate}^{{tree}}")])
+    );
+    assert!(repo.join("candidate.txt").exists());
+    assert!(repo.join("second.txt").exists());
+    assert!(repo.join("third.txt").exists());
+    assert_eq!(git(&repo, &["status", "--porcelain"]), "");
+    daemon.into_store().close().unwrap();
+    cleanup(&root);
+    cleanup(&integration_root);
+    cleanup(&repo);
+}
+
+#[test]
+#[cfg(feature = "test-support")]
+fn a_new_lease_reports_a_reconciled_fact_for_the_original_application() {
+    use winwincode_device_client::apply_engine::{
+        ApplicationCrashPoint, apply_candidate_with_crash_point,
+    };
+    let (repo, base) = init_repository("recover-new-lease");
+    let integration_root = temporary_directory("recover-new-lease-integration");
+    let root = temporary_directory("recover-new-lease-store");
+    let candidate = candidate_commit_on_main(&repo, "recover-new-lease", "1");
+    let mut daemon = started_daemon("recover-new-lease", &root);
+    bind(daemon.store_mut(), &repo);
+    retain_candidate(daemon.store_mut(), &candidate, &base);
+    write_candidate_ref(&repo, &candidate);
+    let mut request = apply_request(&candidate, "workspace", &base, ApplyStrategy::Merge);
+    apply_candidate_with_crash_point(
+        &mut daemon,
+        &request,
+        &integration_root,
+        ApplicationCrashPoint::AfterRepositoryCommit,
+    )
+    .unwrap_err();
+    let applied = git(&repo, &["rev-parse", "HEAD"]);
+    let mut store = daemon.into_store();
+    request.occupancy_lease_id = "ocl_RECOVERED00000000000000000".into();
+    request.occupancy_fencing_token = TOKEN + 1;
+    store
+        .advance_occupancy_mirror(&OccupancyMirrorUpdate {
+            occupancy_lease_id: request.occupancy_lease_id.clone(),
+            fencing_token: request.occupancy_fencing_token,
+            holder_user_id: Some("usr_HOLDER0000000000000000000".into()),
+            claim_request_id: Some("ocq_RECOVERY00000000000000000".into()),
+            idle_expires_at: None,
+            acknowledged_at: STAMP.into(),
+        })
+        .unwrap();
+    let identity = load_device_identity(&store).unwrap().unwrap();
+    let mut daemon = DeviceDaemon::start(
+        daemon_config("recover-new-lease"),
+        store,
+        Arc::new(NeverTransport),
+        &identity,
+    )
+    .unwrap();
+    let outcome = apply_candidate_to_branch(&mut daemon, &request, &integration_root).unwrap();
+    assert_eq!(
+        outcome.receipt.resulting_commit.as_deref(),
+        Some(applied.as_str())
+    );
+    assert_eq!(git(&repo, &["rev-parse", "HEAD"]), applied);
+    assert!(apply_result_frames(daemon.store_mut()).is_empty());
+    let messages = daemon.store_mut().pending_outbox_envelopes().unwrap();
+    let message = messages
+        .iter()
+        .find(|frame| frame.kind == "client.application.reconciled")
+        .unwrap();
+    let envelope: ClientToServerEnvelope = serde_json::from_slice(&message.payload).unwrap();
+    let ClientToServerMessage::ApplicationReconciled(payload) = envelope.message else {
+        panic!("reconciliation frame");
+    };
+    assert_eq!(payload.original_epoch, TOKEN);
+    assert_eq!(payload.occupancy.occupancy_fencing_token, TOKEN + 1);
+    assert_eq!(payload.application_id, request.application_id);
+    assert_eq!(payload.approval_id, request.approval_id);
+    assert_eq!(payload.result_commit.as_deref(), Some(applied.as_str()));
+    daemon.into_store().close().unwrap();
+    cleanup(&root);
+    cleanup(&integration_root);
+    cleanup(&repo);
+}
+
+#[test]
+#[cfg(feature = "test-support")]
+#[allow(clippy::too_many_lines)]
+fn an_obsolete_apply_before_a_new_offer_cannot_block_crash_reconciliation() {
+    use winwincode_client_port::messages::{
+        CommandContext, OccupancyCommandContext, ServerCandidateApplyPayload,
+        ServerOccupancyOfferPayload, ServerToClientEnvelope, ServerToClientMessage,
+    };
+    use winwincode_device_client::apply_engine::{
+        ApplicationCrashPoint, apply_candidate_with_crash_point,
+    };
+    use winwincode_device_client::{ExchangeRequest, ExchangeResponse};
+    struct RecoveryTransport {
+        application: CandidateApplyRequest,
+    }
+    impl ExchangeTransport for RecoveryTransport {
+        fn exchange(&self, bytes: &[u8]) -> Result<Vec<u8>, ExchangeTransportError> {
+            let request: ExchangeRequest = serde_json::from_slice(bytes).unwrap();
+            let first = &request.frames[0];
+            let node = first["clientNodeId"].as_str().unwrap();
+            let instance = first["clientInstanceId"].as_str().unwrap();
+            let stamp = |epoch| OccupancyCommandContext {
+                command: CommandContext {
+                    expected_revision: 1,
+                    idempotency_key: format!("recovery-{epoch}"),
+                },
+                occupancy_lease_id: if epoch == TOKEN {
+                    LEASE.into()
+                } else {
+                    "ocl_00000000000000000000000002".into()
+                },
+                occupancy_fencing_token: epoch,
+            };
+            let obsolete = ServerToClientEnvelope {
+                schema_version: "winwincode/v1".into(),
+                message_id: "obsolete-apply".into(),
+                client_node_id: node.into(),
+                client_instance_id: "cix_00000000000000000000000000".into(),
+                sequence: 1,
+                occurred_at: STAMP.into(),
+                message: ServerToClientMessage::CandidateApply(ServerCandidateApplyPayload {
+                    occupancy: stamp(TOKEN),
+                    application_id: self.application.application_id.clone(),
+                    approval_id: self.application.approval_id.clone(),
+                    candidate_digest: self.application.candidate_digest.clone(),
+                    reconciled_retry: false,
+                    candidate_ref: self.application.candidate_ref.clone(),
+                    repository_binding_id: BINDING.into(),
+                    target_branch: "workspace".into(),
+                    expected_head: self.application.expected_head.clone(),
+                    requester_user_id: "usr_HOLDER0000000000000000000".into(),
+                    strategy: ApplyStrategy::Merge,
+                }),
+            };
+            let offer = ServerToClientEnvelope {
+                schema_version: "winwincode/v1".into(),
+                message_id: "recovery-offer".into(),
+                client_node_id: node.into(),
+                client_instance_id: instance.into(),
+                sequence: 2,
+                occurred_at: STAMP.into(),
+                message: ServerToClientMessage::OccupancyOffer(ServerOccupancyOfferPayload {
+                    occupancy: stamp(TOKEN + 1),
+                    claim_request_id: "ocq_00000000000000000000000002".into(),
+                    claimed_at: STAMP.into(),
+                    holder_user_id: "usr_HOLDER0000000000000000000".into(),
+                    idle_expires_at: None,
+                }),
+            };
+            Ok(serde_json::to_vec(&ExchangeResponse {
+                schema_version: "winwincode/v1".into(),
+                ack_sequence: request.frames.last().unwrap()["sequence"].as_u64().unwrap(),
+                replay_from_sequence: None,
+                frames: vec![
+                    serde_json::to_value(obsolete).unwrap(),
+                    serde_json::to_value(offer).unwrap(),
+                ],
+                enrollment: None,
+            })
+            .unwrap())
+        }
+    }
+    let (repo, base) = init_repository("recover-downlink");
+    let integration_root = temporary_directory("recover-downlink-integration");
+    let root = temporary_directory("recover-downlink-store");
+    let candidate = candidate_commit_on_main(&repo, "recover-downlink", "1");
+    let mut daemon = started_daemon("recover-downlink", &root);
+    bind(daemon.store_mut(), &repo);
+    retain_candidate(daemon.store_mut(), &candidate, &base);
+    write_candidate_ref(&repo, &candidate);
+    let application = apply_request(&candidate, "workspace", &base, ApplyStrategy::Merge);
+    apply_candidate_with_crash_point(
+        &mut daemon,
+        &application,
+        &integration_root,
+        ApplicationCrashPoint::AfterRepositoryCommit,
+    )
+    .unwrap_err();
+    let applied = git(&repo, &["rev-parse", "HEAD"]);
+    let count = git(&repo, &["rev-list", "--count", "HEAD"]);
+    daemon.into_store().close().unwrap();
+    let (store, identity) = open_resumed(&root);
+    let mut daemon = DeviceDaemon::start(
+        daemon_config("recover-downlink"),
+        store,
+        Arc::new(RecoveryTransport { application }),
+        &identity,
+    )
+    .unwrap();
+    for attempt in 0..4 {
+        daemon
+            .tick(std::time::Instant::now() + Duration::from_secs(attempt))
+            .unwrap();
+        if daemon.occupancy_mirror().unwrap().fencing_token == TOKEN + 1 {
+            break;
+        }
+    }
+    assert_eq!(daemon.occupancy_mirror().unwrap().fencing_token, TOKEN + 1);
+    assert_eq!(git(&repo, &["rev-parse", "HEAD"]), applied);
+    assert_eq!(git(&repo, &["rev-list", "--count", "HEAD"]), count);
+    let messages = daemon.store_mut().pending_outbox_envelopes().unwrap();
+    let messages = messages
+        .into_iter()
+        .map(|frame| {
+            serde_json::from_slice::<ClientToServerEnvelope>(&frame.payload)
+                .unwrap()
+                .message
+        })
+        .collect::<Vec<_>>();
+    assert!(messages.iter().any(|message| matches!(message, ClientToServerMessage::CommandAck(payload)
+        if payload.command_message_id == "obsolete-apply" && payload.status == winwincode_client_port::domain::CommandAckStatus::RejectedStaleFencingToken)));
+    assert!(messages.iter().any(|message| matches!(message, ClientToServerMessage::ApplicationReconciled(payload)
+        if payload.original_epoch == TOKEN && payload.occupancy.occupancy_fencing_token == TOKEN + 1 && payload.result_commit.as_deref() == Some(applied.as_str()))));
+    daemon.into_store().close().unwrap();
+    cleanup(&root);
+    cleanup(&integration_root);
     cleanup(&repo);
 }

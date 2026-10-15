@@ -138,12 +138,15 @@ impl std::fmt::Debug for WriteStdinInteractionEvent<'_> {
 #[derive(Default)]
 pub(crate) struct ProcessStore {
     processes: HashMap<i32, ProcessEntry>,
+    starting_processes: HashMap<i32, Arc<UnifiedExecProcess>>,
     reserved_process_ids: HashSet<i32>,
+    closed: bool,
 }
 
 impl ProcessStore {
     fn remove(&mut self, process_id: i32) -> Option<ProcessEntry> {
         self.reserved_process_ids.remove(&process_id);
+        self.starting_processes.remove(&process_id);
         self.processes.remove(&process_id)
     }
 }

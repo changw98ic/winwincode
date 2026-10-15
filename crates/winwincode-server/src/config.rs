@@ -16,6 +16,8 @@ pub struct ServerConfig {
     preview_public_url: Option<String>,
     data_directory: PathBuf,
     shutdown_grace: Duration,
+    tls_pem: Option<(PathBuf, PathBuf)>,
+    tls_proxy: bool,
 }
 
 impl ServerConfig {
@@ -51,6 +53,8 @@ impl ServerConfig {
             preview_public_url: None,
             data_directory,
             shutdown_grace,
+            tls_pem: None,
+            tls_proxy: false,
         })
     }
 
@@ -96,6 +100,54 @@ impl ServerConfig {
     #[must_use]
     pub const fn shutdown_grace(&self) -> Duration {
         self.shutdown_grace
+    }
+
+    #[must_use]
+    pub fn remote(&self) -> bool {
+        !self.bind_address.ip().is_loopback() || self.public_url.starts_with("https://")
+    }
+
+    pub fn with_tls_pem(
+        mut self,
+        certificate: PathBuf,
+        private_key: PathBuf,
+    ) -> Result<Self, ServerConfigError> {
+        if !self.public_url.starts_with("https://") || self.tls_proxy {
+            return Err(ServerConfigError::new(
+                "direct TLS requires an HTTPS public URL and no TLS proxy",
+            ));
+        }
+        self.tls_pem = Some((certificate, private_key));
+        Ok(self)
+    }
+
+    pub fn with_loopback_tls_proxy(mut self) -> Result<Self, ServerConfigError> {
+        if !self.bind_address.ip().is_loopback()
+            || !self.public_url.starts_with("https://")
+            || self.tls_pem.is_some()
+        {
+            return Err(ServerConfigError::new(
+                "TLS proxy requires a protected loopback backend and an HTTPS public URL",
+            ));
+        }
+        self.tls_proxy = true;
+        Ok(self)
+    }
+
+    pub(crate) fn tls_pem(&self) -> Option<&(PathBuf, PathBuf)> {
+        self.tls_pem.as_ref()
+    }
+
+    pub(crate) fn validate_transport(&self) -> Result<(), ServerConfigError> {
+        if self.remote()
+            && (!self.public_url.starts_with("https://")
+                || self.tls_pem.is_none() && !self.tls_proxy)
+        {
+            return Err(ServerConfigError::new(
+                "remote Server requires direct TLS or an explicitly protected TLS proxy",
+            ));
+        }
+        Ok(())
     }
 }
 
@@ -157,6 +209,37 @@ mod tests {
             Duration::from_secs(1),
         )
         .unwrap()
+    }
+
+    #[test]
+    fn remote_requires_tls_and_proxy_backend_remains_remote() {
+        let remote = ServerConfig::new(
+            "0.0.0.0:8443".parse().unwrap(),
+            "http://control.example",
+            ["https://client.example".to_owned()],
+            PathBuf::from("data"),
+            Duration::from_secs(1),
+        )
+        .unwrap();
+        assert!(remote.validate_transport().is_err());
+        let remote = ServerConfig::new(
+            "127.0.0.1:8443".parse().unwrap(),
+            "https://control.example",
+            ["https://client.example".to_owned()],
+            PathBuf::from("data"),
+            Duration::from_secs(1),
+        )
+        .unwrap();
+        assert!(remote.remote());
+        assert!(remote.validate_transport().is_err());
+        assert!(
+            remote
+                .with_loopback_tls_proxy()
+                .unwrap()
+                .validate_transport()
+                .is_ok()
+        );
+        assert!(config().with_loopback_tls_proxy().is_err());
     }
 
     #[test]

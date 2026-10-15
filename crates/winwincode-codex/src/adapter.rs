@@ -8845,12 +8845,6 @@ mod tests {
         let mut options = KernelOptions::new(home, adapter.config.helper_executable.clone());
         assert_eq!(options.shutdown_timeout, Duration::from_secs(5));
         options.shutdown_timeout = Duration::from_secs(1);
-        #[cfg(target_os = "linux")]
-        {
-            options.linux_sandbox_executable = Some(
-                super::install_linux_sandbox_alias(&adapter.config.helper_executable).unwrap(),
-            );
-        }
         adapter.kernel = Arc::new(
             Kernel::new(
                 options,

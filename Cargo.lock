@@ -1108,6 +1108,7 @@ version = "0.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b1df331683d982a0b9492b38127151e6453639cd34926eb9c07d4cd8c6d22bfc"
 dependencies = [
+ "arc-swap",
  "bytes",
  "either",
  "fs-err",
@@ -1115,7 +1116,11 @@ dependencies = [
  "http-body 1.0.1",
  "hyper",
  "hyper-util",
+ "pin-project-lite",
+ "rustls",
+ "rustls-pki-types",
  "tokio",
+ "tokio-rustls",
  "tower-service",
 ]
 
@@ -6229,7 +6234,7 @@ dependencies = [
  "tokio",
  "tokio-rustls",
  "tower-service",
- "webpki-roots",
+ "webpki-roots 1.0.5",
 ]
 
 [[package]]
@@ -9045,7 +9050,7 @@ dependencies = [
  "rustls-pki-types",
  "tokio",
  "tokio-rustls",
- "webpki-roots",
+ "webpki-roots 1.0.5",
  "x509-parser",
 ]
 
@@ -9363,7 +9368,7 @@ dependencies = [
  "wasm-bindgen-futures",
  "wasm-streams 0.4.2",
  "web-sys",
- "webpki-roots",
+ "webpki-roots 1.0.5",
 ]
 
 [[package]]
@@ -10565,7 +10570,7 @@ dependencies = [
  "tracing",
  "url",
  "uuid",
- "webpki-roots",
+ "webpki-roots 1.0.5",
 ]
 
 [[package]]
@@ -11469,6 +11474,7 @@ dependencies = [
  "tokio",
  "tokio-rustls",
  "tungstenite",
+ "webpki-roots 0.26.11",
 ]
 
 [[package]]
@@ -12037,7 +12043,7 @@ dependencies = [
  "ureq-proto",
  "utf-8",
  "webpki-root-certs",
- "webpki-roots",
+ "webpki-roots 1.0.5",
 ]
 
 [[package]]
@@ -12354,6 +12360,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "36a29fc0408b113f68cf32637857ab740edfafdf460c326cd2afaa2d84cc05dc"
 dependencies = [
  "rustls-pki-types",
+]
+
+[[package]]
+name = "webpki-roots"
+version = "0.26.11"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "521bc38abb08001b01866da9f51eb7c5d647a19260e00054a8c7fd5f9e57f7a9"
+dependencies = [
+ "webpki-roots 1.0.5",
 ]
 
 [[package]]
@@ -12961,6 +12976,7 @@ dependencies = [
  "serde_json",
  "sha2 0.10.9",
  "winwincode-api",
+ "winwincode-network",
 ]
 
 [[package]]
@@ -13148,10 +13164,13 @@ name = "winwincode-device-client"
 version = "0.2.0"
 dependencies = [
  "base64 0.22.1",
+ "ed25519-dalek",
  "futures",
  "getrandom 0.3.4",
  "http 1.4.0",
+ "rcgen",
  "rusqlite",
+ "rustls",
  "serde",
  "serde_json",
  "sha2 0.10.9",
@@ -13251,6 +13270,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2 0.10.9",
+ "tempfile",
  "tokio",
  "winwincode-execution-port",
 ]
@@ -13389,11 +13409,15 @@ dependencies = [
  "axum",
  "axum-server",
  "base64 0.22.1",
+ "codex-utils-rustls-provider",
+ "ed25519-dalek",
  "futures",
  "getrandom 0.3.4",
  "http 1.4.0",
  "httpdate",
+ "rcgen",
  "rusqlite",
+ "rustls",
  "serde",
  "serde_json",
  "sha2 0.10.9",

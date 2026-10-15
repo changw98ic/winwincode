@@ -14,7 +14,8 @@ use crate::{
     DoctorRequest, InitRequest, LauncherError, LocalLauncherPort, SetupOutcome,
 };
 use winwincode_device_client::{
-    DeviceServiceConfig, device_service_logs, request_device_service_restart, run_device_service,
+    DeviceBindConfig, DeviceServiceConfig, DeviceStore, bind_device, device_service_logs,
+    load_remote_binding, request_device_service_restart, run_device_service_with_ca,
 };
 
 const EXIT_SUCCESS: i32 = 0;
@@ -60,7 +61,8 @@ pub fn render_help() -> String {
         "  wwc repo list [--data-dir PATH] [--json]",
         "  wwc repo remove <BINDING-ID> [--data-dir PATH] [--json]",
         "  wwc doctor [PATH] [--json]",
-        "  wwc device serve [--data-dir PATH] [--server-url HTTP-URL] [--server-name NAME] [--device-name NAME]",
+        "  wwc device bind [--data-dir PATH] [--server-url URL] [--pairing-token TOKEN] [--ca-file PATH] [--device-name NAME] [--json]",
+        "  wwc device serve [--data-dir PATH] [--server-url URL] [--ca-file PATH] [--server-name NAME] [--device-name NAME]",
         "  wwc device status|refresh-code|lock|unlock|restart [--data-dir PATH] [--json]",
         "  wwc device logs [--data-dir PATH]",
     ];
@@ -319,14 +321,18 @@ fn run_doctor(
 fn run_device(arguments: &[String]) -> Result<WwcCliExit, UsageError> {
     let Some(action) = arguments.first().map(String::as_str) else {
         return Err(UsageError(
-            "device 后需要 serve、status、refresh-code、lock、unlock、restart 或 logs。".into(),
+            "device 后需要 bind、serve、status、refresh-code、lock、unlock、restart 或 logs。"
+                .into(),
         ));
     };
     if !matches!(
         action,
-        "serve" | "status" | "refresh-code" | "lock" | "unlock" | "restart" | "logs"
+        "bind" | "serve" | "status" | "refresh-code" | "lock" | "unlock" | "restart" | "logs"
     ) {
         return Err(UsageError(format!("未知 device 命令 {action}。")));
+    }
+    if action == "bind" {
+        return run_device_bind_action(&arguments[1..]);
     }
     if action == "serve" {
         return run_device_service_action(&arguments[1..]);
@@ -380,23 +386,94 @@ fn run_device(arguments: &[String]) -> Result<WwcCliExit, UsageError> {
     Ok(device_exit(result, json))
 }
 
+fn run_device_bind_action(arguments: &[String]) -> Result<WwcCliExit, UsageError> {
+    let parsed = parse(arguments, &["json"])?;
+    reject_unknown(
+        &parsed,
+        &[
+            "data-dir",
+            "server-url",
+            "pairing-token",
+            "ca-file",
+            "device-name",
+        ],
+        &["json"],
+    )?;
+    let data_directory = device_data_directory(&parsed)?;
+    let server_url = device_flag_or_environment(&parsed, "server-url", "WWC_DEVICE_SERVER_URL")?;
+    let server_url = if server_url.is_none()
+        && DeviceStore::open(&data_directory)
+            .ok()
+            .and_then(|store| load_remote_binding(&store).ok().flatten())
+            .is_none()
+    {
+        Some("http://127.0.0.1:8443".to_owned())
+    } else {
+        server_url
+    };
+    let name =
+        device_flag(&parsed, "device-name")?.unwrap_or_else(|| "WinWinCode Device".to_owned());
+    let outcome = bind_device(&DeviceBindConfig {
+        data_directory,
+        server_url,
+        pairing_token: device_flag_or_environment(
+            &parsed,
+            "pairing-token",
+            "WWC_DEVICE_PAIRING_TOKEN",
+        )?,
+        ca_file: device_flag_or_environment(&parsed, "ca-file", "WWC_DEVICE_CA_FILE")?
+            .map(PathBuf::from),
+        seed: winwincode_device_client::service::device_identity_seed(&name),
+    });
+    Ok(match outcome {
+        Ok(binding) => WwcCliExit {
+            code: EXIT_SUCCESS,
+            stdout: if parsed.switches.contains("json") {
+                render_json(&binding)
+            } else {
+                format!(
+                    "Device 绑定成功。\n设备节点：{}\n公开设备编号：{}\n",
+                    binding.client_node_id.0, binding.public_client_id.0
+                )
+            },
+            stderr: String::new(),
+        },
+        Err(error) => WwcCliExit {
+            code: EXIT_SERVICE,
+            stdout: String::new(),
+            stderr: format!("Device 绑定失败：{error}\n"),
+        },
+    })
+}
+
 fn run_device_service_action(arguments: &[String]) -> Result<WwcCliExit, UsageError> {
     let parsed = parse(arguments, &[])?;
     reject_unknown(
         &parsed,
-        &["data-dir", "server-url", "server-name", "device-name"],
+        &[
+            "data-dir",
+            "server-url",
+            "server-name",
+            "device-name",
+            "ca-file",
+        ],
         &[],
     )?;
     let server_url = device_flag_or_environment(&parsed, "server-url", "WWC_DEVICE_SERVER_URL")?
         .unwrap_or_else(|| "http://127.0.0.1:8443".to_owned());
-    let result = run_device_service(&DeviceServiceConfig {
-        data_directory: device_data_directory(&parsed)?,
-        server_url,
-        server_display_name: device_flag(&parsed, "server-name")?
-            .unwrap_or_else(|| "WinWinCode Server".to_owned()),
-        device_display_name: device_flag(&parsed, "device-name")?
-            .unwrap_or_else(|| "WinWinCode Device".to_owned()),
-    });
+    let ca_file =
+        device_flag_or_environment(&parsed, "ca-file", "WWC_DEVICE_CA_FILE")?.map(PathBuf::from);
+    let result = run_device_service_with_ca(
+        &DeviceServiceConfig {
+            data_directory: device_data_directory(&parsed)?,
+            server_url,
+            server_display_name: device_flag(&parsed, "server-name")?
+                .unwrap_or_else(|| "WinWinCode Server".to_owned()),
+            device_display_name: device_flag(&parsed, "device-name")?
+                .unwrap_or_else(|| "WinWinCode Device".to_owned()),
+        },
+        ca_file.as_deref(),
+    );
     Ok(match result {
         Ok(()) => WwcCliExit {
             code: EXIT_SUCCESS,
@@ -490,6 +567,12 @@ fn render_device(outcome: &DeviceAdminOutcome) -> String {
                     let _ = writeln!(output, "服务状态：运行中（PID {pid}）");
                 }
                 None => output.push_str("服务状态：未运行\n"),
+            }
+            if let Some(url) = &device.service.server_url {
+                let _ = writeln!(output, "Server 地址：{url}");
+            }
+            if let Some(reason) = &device.service.authorization_failure {
+                let _ = writeln!(output, "认证状态：{reason}");
             }
             if device.service.restart_pending {
                 output.push_str("服务重启：等待处理\n");

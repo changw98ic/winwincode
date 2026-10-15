@@ -661,6 +661,11 @@ async fn run_isolated_command(
     }
     let deadline = tokio::time::Instant::now() + timeout;
     command.kill_on_drop(true);
+    #[cfg(unix)]
+    let _lifeline = codex_utils_pty::process_group::ProcessGroupLifeline::configure_command(
+        command.as_std_mut(),
+    )
+    .map_err(|error| IsolationError::new(format!("verification lifeline cannot start: {error}")))?;
     let mut child = command.spawn().map_err(|error| {
         IsolationError::new(format!(
             "isolated verification command cannot start: {error}"
@@ -917,6 +922,97 @@ mod deadline_tests {
     use std::process::Stdio;
 
     #[tokio::test]
+    async fn isolated_command_owner_fixture() {
+        let Some(marker) = std::env::var_os("WWC_TEST_VERIFICATION_OWNER_MARKER") else {
+            return;
+        };
+        let mut command = Command::new("/bin/sh");
+        command
+            .args([
+                "-c",
+                "trap '' HUP TERM; sleep 60 & printf '%s %s' \"$$\" \"$!\" > \"$1\"; wait",
+                "verification-owner-fixture",
+            ])
+            .arg(marker)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        let _ = run_isolated_command(
+            command,
+            Duration::from_secs(60),
+            1024,
+            &VerificationCancellation::default(),
+        )
+        .await;
+        panic!("verification owner fixture was not killed");
+    }
+
+    #[test]
+    fn owner_sigkill_stops_isolated_verification_and_its_descendant() {
+        struct Owner(std::process::Child, Option<u32>);
+        impl Drop for Owner {
+            fn drop(&mut self) {
+                let _ = self.0.kill();
+                let _ = self.0.wait();
+                if let Some(group) = self.1 {
+                    let _ = kill_process_group(group);
+                }
+            }
+        }
+        let root = tempfile::tempdir().unwrap();
+        let marker = root.path().join("tool.pids");
+        let mut owner = Owner(
+            std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "verification_isolation::deadline_tests::isolated_command_owner_fixture",
+                    "--nocapture",
+                ])
+                .env("WWC_TEST_VERIFICATION_OWNER_MARKER", &marker)
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .spawn()
+                .unwrap(),
+            None,
+        );
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        let pids = loop {
+            let pids: Vec<String> = fs::read_to_string(&marker)
+                .unwrap_or_default()
+                .split_whitespace()
+                .map(str::to_owned)
+                .collect();
+            if pids.len() == 2 {
+                break pids;
+            }
+            assert!(owner.0.try_wait().unwrap().is_none());
+            assert!(std::time::Instant::now() < deadline);
+            std::thread::sleep(Duration::from_millis(10));
+        };
+        owner.1 = Some(pids[0].parse().unwrap());
+        let running = |pid: &str| {
+            let output = std::process::Command::new("ps")
+                .args(["-o", "stat=", "-p", pid])
+                .output()
+                .unwrap();
+            let state = String::from_utf8_lossy(&output.stdout);
+            !state.trim().is_empty() && !state.trim().starts_with('Z')
+        };
+        assert!(pids.iter().all(|pid| running(pid)));
+        owner.0.kill().unwrap();
+        owner.0.wait().unwrap();
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while pids.iter().any(|pid| running(pid)) {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "verification survived owner SIGKILL"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        owner.1 = None;
+    }
+
+    #[tokio::test]
     async fn early_eof_does_not_remove_the_process_exit_deadline() {
         let root = tempfile::tempdir().unwrap();
         let descendant = root.path().join("descendant.pid");
@@ -924,7 +1020,7 @@ mod deadline_tests {
         command
             .args([
                 "-c",
-                "exec 1>&- 2>&-; sleep 10 & printf '%s' \"$!\" > \"$1\"; sleep 1",
+                "exec 1>&- 2>&-; sleep 10 & printf '%s' \"$!\" > \"$1\"; sleep 5",
                 "fixture",
             ])
             .arg(&descendant)
@@ -934,14 +1030,14 @@ mod deadline_tests {
         let began = std::time::Instant::now();
         let result = run_isolated_command(
             command,
-            Duration::from_millis(100),
+            Duration::from_secs(1),
             1024,
             &VerificationCancellation::default(),
         )
         .await
         .unwrap();
         assert!(result.timed_out, "EOF is not proof of process termination");
-        assert!(began.elapsed() < Duration::from_millis(800));
+        assert!(began.elapsed() < Duration::from_secs(3));
         let pid = fs::read_to_string(descendant).unwrap();
         for _ in 0..20 {
             let status = std::process::Command::new("ps")

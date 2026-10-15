@@ -116,6 +116,7 @@ impl AuthSessionTokenGenerator for SystemAuthSessionTokenGenerator {
     }
 }
 
+#[derive(Clone)]
 pub struct AuthSessionBootstrap {
     proof: String,
 }
@@ -189,9 +190,6 @@ impl SqliteAuthSessionManager {
         clock: Arc<dyn AuthSessionClock>,
         token_generator: Arc<dyn AuthSessionTokenGenerator>,
     ) -> Result<Self, AuthSessionError> {
-        if bootstraps.is_empty() && !config.local_open {
-            return Err(AuthSessionError::configuration());
-        }
         AuthSessionConfig::new(config.bootstrap_window, config.session_ttl)?;
         let session_authority = canonical_scopes(session_authority)?;
         for (index, bootstrap) in bootstraps.iter().enumerate() {
@@ -255,6 +253,9 @@ impl SqliteAuthSessionManager {
             .optional()
             .map_err(|_| AuthSessionError::storage())?
             .is_some();
+        if bootstraps.is_empty() && !config.local_open && !closed {
+            return Err(AuthSessionError::configuration());
+        }
         let mut manager = Self {
             connection: Mutex::new(connection),
             initialization: Mutex::new(InitializationGate {
@@ -1126,6 +1127,32 @@ mod tests {
             username,
             password,
         )
+    }
+
+    #[test]
+    fn initialized_owner_restarts_without_bootstrap_proof() {
+        let directory = test_directory("password-restart-no-proof");
+        let clock = Arc::new(ManualClock::new(1_000));
+        let manager = manager(&directory, Arc::clone(&clock), "initialization-proof");
+        initialize(&manager, "Owner", "initial-owner-password");
+        let owner = manager.initialized_owner().unwrap();
+        drop(manager);
+        let accounts = Arc::new(UserAccountService::open(directory.join("accounts")).unwrap());
+        let restarted = SqliteAuthSessionManager::open_with_dependencies(
+            &directory,
+            vec![],
+            vec![scope(1), scope(2)],
+            AuthSessionConfig::default(),
+            accounts,
+            None,
+            clock,
+            Arc::new(SequenceToken::new(90)),
+        )
+        .unwrap();
+        assert_eq!(restarted.initialized_owner(), Some(owner));
+        assert!(login(&restarted, "127.0.0.1", "Owner", "initial-owner-password").is_ok());
+        drop(restarted);
+        std::fs::remove_dir_all(directory).unwrap();
     }
 
     #[test]

@@ -34,9 +34,9 @@ flowchart LR
     Server -->|"WebSocket events"| Browser
     Server --> CP
     CP --> DB
-    Server <-->|"ClientControlPort HTTP exchange"| Device
+    Server <-->|"ClientControlPort HTTP/HTTPS exchange"| Device
     Device -->|"launch and supervise"| Worker
-    Server <-->|"Worker exchange relay"| Device
+    Server <-->|"Worker HTTP/HTTPS relay"| Device
     Device <-->|"stdin/stdout JSON-lines"| Worker
     Local --> CP
     Local -->|"in-process ExecutionPort"| Worker
@@ -58,7 +58,7 @@ Client 通过 `packages/control-plane-client/src/index.ts` 和 `apps/client/src/
 
 `crates/winwincode-api/src/generated.rs` 定义公共 HTTP 和 WebSocket 类型。`crates/winwincode-server/src/server.rs::router` 绑定路由。`crates/winwincode-server/src/application.rs` 把传输请求交给 Control Plane 服务。
 
-Server 对浏览器来源、会话和请求体大小做边界检查。本机 Server 默认使用回环 HTTP。Worker 通过父 Device 转发 ExecutionPort 请求。具体安全约束见 [安全模型](../security-model.md)。
+Server 对浏览器来源、会话和请求体大小做边界检查。本机 Server 默认使用回环 HTTP。远程部署使用对外 HTTPS，并由 Server 直接终止 TLS 或显式配置受保护的 loopback TLS 代理。Worker 通过父 Device 转发 ExecutionPort 请求。具体安全约束见 [安全模型](../security-model.md)。
 
 ## Control Plane 与 ExecutionPort
 
@@ -81,6 +81,8 @@ ExecutionPort 使用持久出站消息和确认游标。传输失败不会直接
 设备 Client 使用 `/internal/v1/client/exchange` 与 Server 交换 `ClientControlPort` 帧。协议位于 `crates/winwincode-client-port`。Server 端实现位于 `crates/winwincode-server/src/client_exchange.rs::ClientExchangeApplication`。设备端守护逻辑位于 `crates/winwincode-device-client/src/daemon.rs`。
 
 设备 Client 保存设备身份、连接游标、仓库路径映射、占用状态和 Worker 进程状态。它还能接收 Worker 启动、停止、Provider 配置、扩展配置和仓库注册命令。
+
+远程 Device 先通过 Owner 配对令牌绑定 Ed25519 公钥。它在请求前保存私钥、Server URL 和稳定绑定请求。Server 原子保存绑定回执。重启和成功响应丢失后的重试复用同一身份。Device 签名覆盖控制 HTTP、Worker HTTP 中继和 preview WSS upgrade。Worker 与 Device 使用后者创建并独占的 stdio 管道。远程配置和首次 Owner 初始化见 [部署指南](../operations/deploy.md#远程-server-与-device)。
 
 本机启动和执行链路如下。参数来源见[部署指南](../operations/deploy.md#接入-device-client)。
 
@@ -120,7 +122,7 @@ Publication 是受策略约束的外部副作用。`crates/winwincode-publicatio
 
 Control Plane 使用 `crates/winwincode-storage/src/lib.rs::SqliteStorage`。默认数据库位于 Server 数据目录。打开数据库时启用外键、WAL 和 `synchronous=FULL`。该存储覆盖产品状态、事务回执、事件 outbox、执行队列、租约、Worker 注册、设备绑定、候选产物和 Publication。
 
-设备 Client 使用 `crates/winwincode-device-client/src/store.rs::DeviceStore`。它使用独立 SQLite 数据库。它保存设备身份、上下行游标、仓库映射、占用镜像和 Worker 进程记录。
+设备 Client 使用 `crates/winwincode-device-client/src/store.rs::DeviceStore`。它使用独立 SQLite 数据库。它保存设备身份、远程绑定、上下行游标、仓库映射、占用镜像、Worker 进程记录和候选应用 journal。Server 当前 schema 为 `8`，Device 当前 schema 为 `11`。
 
 Provider 使用 `DeviceProviderStore` 保存设备侧 Provider 配置、调用回执和模型交换。`winwincode-codex` 也维护 Worker 侧执行状态。各数据库通过协议和回执协调，不共享内存事务。
 
@@ -131,6 +133,8 @@ Provider 使用 `DeviceProviderStore` 保存设备侧 Provider 配置、调用�
 `crates/winwincode-network` 提供统一的网络失败分类、重试决策、可取消 I/O 和可选请求日志。`NetworkFailure` 记录失败种类、请求阶段、是否已被上游接受、HTTP 状态和 `Retry-After`。调用方据此决定立即重试、等待连接、重放或终止。
 
 Provider 的 HTTPS/SSE 请求使用这一传输层。设备 Client 和 Worker 也复用失败分类。请求取消会关闭已登记的套接字，从而中止阻塞 I/O。
+
+Device 的持久队列负责远程控制交换重试。单次 HTTP 执行器保留 `Retry-After`，Worker 中继把结构化 `NetworkFailure` 传回调用方。每条请求路径由登记的单一责任方决定退避。Device 认证的首次 401 只刷新一次挑战；永久认证失败和吊销进入停机路径。
 
 前端请求使用 `packages/network-request`。`scripts/generate-network-policy.mjs` 从 `schema/winwincode/network-request-policy.json` 生成 `packages/network-request/src/policy.generated.mjs`。Rust 网络层与前端请求层分别实现各自的传输接口。
 

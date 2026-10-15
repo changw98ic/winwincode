@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+
+import assert from 'node:assert/strict'
 import { createHash } from 'node:crypto'
 import {
   chmodSync,
@@ -16,6 +19,59 @@ import {
   releaseSourceSha256,
   verifyReleaseLegalBoundary,
 } from './release-source-contract.mjs'
+
+export function apiProductionSourceSealSummary(seal) {
+  return Object.fromEntries([
+    'gitHead', 'helperBinarySha256', 'cliBinarySha256', 'workerBinarySha256',
+    'serverBinarySha256', 'sourceSha256', 'trackedDiffSha256',
+  ].map(key => [key, seal[key]]))
+}
+
+export function assertReleaseApiReport(report, seal) {
+  assert.equal(report?.schemaVersion, 'winwincode.api-production-vertical.v1')
+  assert.equal(report.execution, 'device-worker-only')
+  assert.equal(report.devicePath?.complete, true)
+  assert.equal(report.health?.initial, 'ready')
+  assert.equal(report.health?.afterRestart, 'ready')
+  assert.equal(report.flow?.chat?.status, 'Completed')
+  assert.equal(report.flow?.cancel?.state, 'cancelled')
+  assert.equal(report.flow?.strongflow?.status, 'done')
+  assert.equal(report.flow?.strongflow?.verdictStatus, 'pass')
+  assert.equal(report.deterministic?.contentEqual, true)
+  assert.equal(report.restart?.messageBytesStable, true)
+  assert.equal(report.restart?.deliveryBytesStable, true)
+  assert.deepEqual(report.artifacts?.sourceSeal, apiProductionSourceSealSummary(seal),
+    'API report source seal must match the verified release source and executables')
+  assert.equal(report.artifacts.workerBinarySha256, seal.workerBinarySha256)
+  const lifecycle = report.deviceWorkerLifecycle
+  assert.equal(lifecycle?.stopped, true, 'Device must observe the terminated Worker')
+  for (const worker of [lifecycle.initial, lifecycle.restarted, lifecycle.serverRestartWorker]) {
+    assert.ok(Number.isSafeInteger(worker?.pid) && worker.pid > 0)
+    for (const field of ['workerSessionId', 'workerId', 'workerInstanceId', 'processStartIdentity']) {
+      assert.ok(typeof worker[field] === 'string' && worker[field].length > 0, `Worker ${field} is required`)
+    }
+  }
+  assert.notEqual(lifecycle.restarted.pid, lifecycle.initial.pid)
+  assert.notEqual(lifecycle.restarted.workerSessionId, lifecycle.initial.workerSessionId)
+  assert.equal(lifecycle.terminalAfterWorkerRestart, true)
+  assert.notEqual(lifecycle.serverRestartWorker.workerSessionId, lifecycle.restarted.workerSessionId)
+  assert.deepEqual(lifecycle.survivedServerRestart, lifecycle.serverRestartWorker,
+    'Device-owned Worker process identity must survive Server restart')
+  assert.equal(lifecycle.terminalAfterServerRestart, true)
+  for (const [completion, worker] of [[lifecycle.workerRestartCompletion, lifecycle.restarted],
+    [lifecycle.serverRestartCompletion, lifecycle.serverRestartWorker]]) {
+    assert.equal(completion?.jobState, 'completed')
+    assert.equal(completion.processWorkerSessionId, worker.workerSessionId)
+    assert.equal(completion.workerId, worker.workerId)
+    assert.equal(completion.workerInstanceId, worker.workerInstanceId)
+    for (const field of ['jobId', 'productSessionId', 'executionWorkerSessionId', 'leaseId', 'fencingToken']) {
+      assert.ok(typeof completion[field] === 'string' && completion[field].length > 0)
+    }
+    assert.ok(Number.isSafeInteger(completion.attempt) && completion.attempt > 0)
+  }
+  assert.notEqual(lifecycle.workerRestartCompletion.jobId, lifecycle.serverRestartCompletion.jobId)
+  assert.notEqual(lifecycle.workerRestartCompletion.productSessionId, lifecycle.serverRestartCompletion.productSessionId)
+}
 
 export const RELEASE_ARTIFACT_SCHEMA_VERSION = 1
 export const RELEASE_ARTIFACT_KIND = 'winwincode.release-artifact.v1'

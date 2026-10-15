@@ -136,11 +136,11 @@ fn v2_exchange_requires_an_explicit_acceptance_receipt_and_keeps_v1_compatibilit
     }
     assert!(
         RemoteExchangeResponse::decode(
-            br#"{"schemaVersion":"execution-port.remote-exchange.v2","deliveries":[]}"#
+            br#"{"schemaVersion":"execution-port.remote-exchange.v2","serverTime":"2026-10-15T00:00:00.000Z","deliveries":[]}"#
         )
         .is_err()
     );
-    assert!(RemoteExchangeResponse::decode(br#"{"schemaVersion":"execution-port.remote-exchange.v1","frameAccepted":false,"deliveries":[]}"#).is_err());
+    assert!(RemoteExchangeResponse::decode(br#"{"schemaVersion":"execution-port.remote-exchange.v1","serverTime":"2026-10-15T00:00:00.000Z","frameAccepted":false,"deliveries":[]}"#).is_err());
     let legacy = RemoteExchangeResponse::decode(
         &RemoteExchangeResponse::new(Vec::new())
             .unwrap()
@@ -150,6 +150,38 @@ fn v2_exchange_requires_an_explicit_acceptance_receipt_and_keeps_v1_compatibilit
     .unwrap();
     assert!(!legacy.has_acceptance_receipt());
     assert!(legacy.frame_accepted());
+}
+
+#[test]
+fn exchange_response_requires_and_preserves_its_server_clock() {
+    for schema in [
+        "execution-port.remote-exchange.v1",
+        "execution-port.remote-exchange.v2",
+    ] {
+        let mut value = json!({"schemaVersion":schema,"deliveries":[]});
+        if schema.ends_with("v2") {
+            value["frameAccepted"] = json!(true);
+        }
+        assert!(RemoteExchangeResponse::decode(&serde_json::to_vec(&value).unwrap()).is_err());
+        for invalid in [
+            json!(null),
+            json!("not-a-clock"),
+            json!("2099-13-01T00:00:00Z"),
+            json!("2099-01-01T00:00:00Z"),
+            json!("2099-01-01T00:00:00.123+00:00"),
+        ] {
+            value["serverTime"] = invalid;
+            assert!(RemoteExchangeResponse::decode(&serde_json::to_vec(&value).unwrap()).is_err());
+        }
+        value["serverTime"] = json!("2099-01-01T00:00:00.123Z");
+        let encoded = serde_json::to_vec(&value).unwrap();
+        let decoded = RemoteExchangeResponse::decode(&encoded).unwrap();
+        assert_eq!(decoded.server_time().0, "2099-01-01T00:00:00.123Z");
+        assert_eq!(
+            serde_json::from_slice::<Value>(&decoded.encode().unwrap()).unwrap(),
+            value
+        );
+    }
 }
 
 #[test]

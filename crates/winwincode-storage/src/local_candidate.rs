@@ -24,6 +24,7 @@ CREATE TABLE IF NOT EXISTS local_candidate_receipts (
         'retained', 'branch_created', 'applied', 'discarded', 'failed')),
     created_at TEXT NOT NULL,
     revision INTEGER NOT NULL CHECK (revision > 0 AND revision <= 9007199254740991),
+    base_commit TEXT NOT NULL,
     FOREIGN KEY (client_node_id) REFERENCES client_nodes(client_node_id) ON DELETE RESTRICT,
     FOREIGN KEY (repository_binding_id)
         REFERENCES repository_bindings(repository_binding_id) ON DELETE RESTRICT
@@ -45,7 +46,7 @@ CREATE TABLE IF NOT EXISTS local_apply_receipts (
     result TEXT NOT NULL CHECK (result IN (
         'retained', 'branch_created', 'applied', 'base_stale',
         'working_tree_dirty', 'merge_conflict', 'candidate_missing',
-        'permission_denied', 'discarded', 'failed')),
+        'permission_denied', 'discarded', 'failed', 'outcome_unknown')),
     resulting_commit TEXT,
     conflict_artifact_ref TEXT,
     created_at TEXT NOT NULL,
@@ -163,6 +164,7 @@ pub enum LocalApplyResult {
     PermissionDenied,
     Discarded,
     Failed,
+    OutcomeUnknown,
 }
 
 impl LocalApplyResult {
@@ -179,6 +181,7 @@ impl LocalApplyResult {
             Self::PermissionDenied => "permission_denied",
             Self::Discarded => "discarded",
             Self::Failed => "failed",
+            Self::OutcomeUnknown => "outcome_unknown",
         }
     }
 
@@ -194,6 +197,7 @@ impl LocalApplyResult {
             "permission_denied" => Ok(Self::PermissionDenied),
             "discarded" => Ok(Self::Discarded),
             "failed" => Ok(Self::Failed),
+            "outcome_unknown" => Ok(Self::OutcomeUnknown),
             _ => Err(error(
                 LocalCandidateStoreErrorKind::CorruptState,
                 "stored local apply result is invalid",
@@ -212,7 +216,8 @@ impl LocalApplyResult {
             | Self::MergeConflict
             | Self::CandidateMissing
             | Self::PermissionDenied
-            | Self::Failed => LocalCandidateReceiptState::Failed,
+            | Self::Failed
+            | Self::OutcomeUnknown => LocalCandidateReceiptState::Failed,
             Self::Discarded => LocalCandidateReceiptState::Discarded,
         }
     }
@@ -227,6 +232,7 @@ impl LocalApplyResult {
                 | Self::CandidateMissing
                 | Self::PermissionDenied
                 | Self::Failed
+                | Self::OutcomeUnknown
         )
     }
 }
@@ -245,6 +251,7 @@ pub struct LocalCandidateRetained {
     repository_binding_id: String,
     candidate_ref: String,
     candidate_commit: String,
+    base_commit: String,
     local_ref_name: String,
 }
 
@@ -255,6 +262,7 @@ impl LocalCandidateRetained {
         repository_binding_id: impl Into<String>,
         candidate_ref: impl Into<String>,
         candidate_commit: impl Into<String>,
+        base_commit: impl Into<String>,
         local_ref_name: impl Into<String>,
     ) -> Result<Self, LocalCandidateStoreError> {
         let retained = Self {
@@ -263,6 +271,7 @@ impl LocalCandidateRetained {
             repository_binding_id: repository_binding_id.into(),
             candidate_ref: candidate_ref.into(),
             candidate_commit: candidate_commit.into(),
+            base_commit: base_commit.into(),
             local_ref_name: local_ref_name.into(),
         };
         validate_candidate_receipt_id(&retained.local_candidate_receipt_id)?;
@@ -270,6 +279,7 @@ impl LocalCandidateRetained {
         validate_repository_binding_id(&retained.repository_binding_id)?;
         validate_candidate_ref(&retained.candidate_ref)?;
         validate_commit_sha(&retained.candidate_commit, "candidate commit")?;
+        validate_commit_sha(&retained.base_commit, "candidate base commit")?;
         validate_git_ref_name(&retained.local_ref_name, "local ref name")?;
         Ok(retained)
     }
@@ -297,6 +307,11 @@ impl LocalCandidateRetained {
     #[must_use]
     pub fn candidate_commit(&self) -> &str {
         &self.candidate_commit
+    }
+
+    #[must_use]
+    pub fn base_commit(&self) -> &str {
+        &self.base_commit
     }
 
     #[must_use]
@@ -379,7 +394,8 @@ impl LocalApplySettlement {
             | LocalApplyResult::CandidateMissing
             | LocalApplyResult::PermissionDenied
             | LocalApplyResult::Discarded
-            | LocalApplyResult::Failed => {
+            | LocalApplyResult::Failed
+            | LocalApplyResult::OutcomeUnknown => {
                 if settlement.resulting_commit.is_some() {
                     return Err(error(
                         LocalCandidateStoreErrorKind::InvalidInput,
@@ -462,6 +478,7 @@ pub struct LocalCandidateReceiptRecord {
     pub repository_binding_id: String,
     pub candidate_ref: String,
     pub candidate_commit: String,
+    pub base_commit: String,
     pub local_ref_name: String,
     pub state: LocalCandidateReceiptState,
     pub created_at: Instant,
@@ -575,8 +592,8 @@ impl<'storage> LocalCandidateLedger<'storage> {
                 "INSERT INTO local_candidate_receipts
                  (local_candidate_receipt_id, client_node_id, repository_binding_id,
                   candidate_ref, candidate_commit, local_ref_name, state,
-                  created_at, revision)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'retained', ?7, 1)",
+                  created_at, revision, base_commit)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'retained', ?7, 1, ?8)",
                 params![
                     retained.local_candidate_receipt_id(),
                     retained.client_node_id(),
@@ -585,6 +602,7 @@ impl<'storage> LocalCandidateLedger<'storage> {
                     retained.candidate_commit(),
                     retained.local_ref_name(),
                     now.0,
+                    retained.base_commit(),
                 ],
             )
             .map_err(|sql| map_candidate_insert_sql(&sql))?;
@@ -606,6 +624,25 @@ impl<'storage> LocalCandidateLedger<'storage> {
         now: &Instant,
     ) -> Result<(LocalApplyReceiptRecord, LocalCandidateReceiptRecord), LocalCandidateStoreError>
     {
+        self.record_apply_result_inner(settlement, now, false)
+    }
+
+    pub fn record_reconciled_apply_result(
+        &mut self,
+        settlement: &LocalApplySettlement,
+        now: &Instant,
+    ) -> Result<(LocalApplyReceiptRecord, LocalCandidateReceiptRecord), LocalCandidateStoreError>
+    {
+        self.record_apply_result_inner(settlement, now, true)
+    }
+
+    fn record_apply_result_inner(
+        &mut self,
+        settlement: &LocalApplySettlement,
+        now: &Instant,
+        preserve_terminal: bool,
+    ) -> Result<(LocalApplyReceiptRecord, LocalCandidateReceiptRecord), LocalCandidateStoreError>
+    {
         validate_instant(now, "apply result time")?;
         let transaction = self.transaction()?;
         let candidate = load_candidate(&transaction, settlement.local_candidate_receipt_id())?
@@ -621,7 +658,7 @@ impl<'storage> LocalCandidateLedger<'storage> {
             transaction.commit().map_err(|sql| sql_error(&sql))?;
             return Ok((existing, candidate));
         }
-        if candidate.state.is_terminal() {
+        if candidate.state.is_terminal() && !preserve_terminal {
             return Err(error(
                 LocalCandidateStoreErrorKind::TerminalCandidateConflict,
                 format!(
@@ -630,8 +667,12 @@ impl<'storage> LocalCandidateLedger<'storage> {
                 ),
             ));
         }
-        let target = settlement.result().candidate_state();
-        ensure_legal_projection(&candidate, settlement.result())?;
+        let target = if candidate.state.is_terminal() && preserve_terminal {
+            candidate.state
+        } else {
+            ensure_legal_projection(&candidate, settlement.result())?;
+            settlement.result().candidate_state()
+        };
         let inserted = transaction
             .execute(
                 "INSERT INTO local_apply_receipts
@@ -828,6 +869,7 @@ fn ensure_candidate_identity(
         && existing.repository_binding_id == retained.repository_binding_id()
         && existing.candidate_ref == retained.candidate_ref()
         && existing.candidate_commit == retained.candidate_commit()
+        && existing.base_commit == retained.base_commit()
         && existing.local_ref_name == retained.local_ref_name();
     if matches {
         return Ok(());
@@ -844,6 +886,7 @@ fn ensure_candidate_facts(
 ) -> Result<(), LocalCandidateStoreError> {
     let matches = existing.repository_binding_id == retained.repository_binding_id()
         && existing.candidate_commit == retained.candidate_commit()
+        && existing.base_commit == retained.base_commit()
         && existing.local_ref_name == retained.local_ref_name();
     if matches {
         return Ok(());
@@ -902,7 +945,7 @@ fn load_candidate(
         .query_row(
             "SELECT local_candidate_receipt_id, client_node_id, repository_binding_id,
                     candidate_ref, candidate_commit, local_ref_name, state,
-                    created_at, revision
+                    created_at, revision, base_commit
              FROM local_candidate_receipts WHERE local_candidate_receipt_id = ?1",
             [local_candidate_receipt_id],
             |row| {
@@ -916,6 +959,7 @@ fn load_candidate(
                     row.get::<_, String>(6)?,
                     row.get::<_, String>(7)?,
                     row.get::<_, i64>(8)?,
+                    row.get::<_, String>(9)?,
                 ))
             },
         )
@@ -934,7 +978,7 @@ fn load_candidate_by_ref(
         .query_row(
             "SELECT local_candidate_receipt_id, client_node_id, repository_binding_id,
                     candidate_ref, candidate_commit, local_ref_name, state,
-                    created_at, revision
+                    created_at, revision, base_commit
              FROM local_candidate_receipts
              WHERE client_node_id = ?1 AND candidate_ref = ?2",
             params![client_node_id, candidate_ref],
@@ -949,6 +993,7 @@ fn load_candidate_by_ref(
                     row.get::<_, String>(6)?,
                     row.get::<_, String>(7)?,
                     row.get::<_, i64>(8)?,
+                    row.get::<_, String>(9)?,
                 ))
             },
         )
@@ -970,6 +1015,7 @@ fn candidate_record_from_row(
         String,
         String,
         i64,
+        String,
     ),
 ) -> Result<LocalCandidateReceiptRecord, LocalCandidateStoreError> {
     let (
@@ -982,6 +1028,7 @@ fn candidate_record_from_row(
         state,
         created_at,
         revision,
+        base_commit,
     ) = row;
     Ok(LocalCandidateReceiptRecord {
         local_candidate_receipt_id,
@@ -989,6 +1036,7 @@ fn candidate_record_from_row(
         repository_binding_id,
         candidate_ref,
         candidate_commit,
+        base_commit,
         local_ref_name,
         state: LocalCandidateReceiptState::parse(&state)?,
         created_at: parse_stored_instant(&created_at, "candidate created at")?,
@@ -1097,6 +1145,7 @@ fn validate_schema(connection: &rusqlite::Connection) -> Result<(), LocalCandida
             "state",
             "created_at",
             "revision",
+            "base_commit",
         ],
     )?;
     validate_columns(
@@ -1410,6 +1459,7 @@ fn error(
 
 #[cfg(test)]
 mod tests {
+    const TEST_BASE_COMMIT: &str = "0123456789abcdef0123456789abcdef01234567";
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -1528,6 +1578,7 @@ mod tests {
             binding,
             candidate_ref(ref_seed),
             commit,
+            TEST_BASE_COMMIT,
             format!("refs/winwincode/candidates/candidate-{ref_seed}"),
         )
         .expect("retained command")
@@ -1592,6 +1643,7 @@ mod tests {
                 binding_id(3),
                 candidate_ref(4),
                 COMMIT,
+                TEST_BASE_COMMIT,
                 "refs/winwincode/candidates/candidate-4"
             )
             .is_ok()
@@ -1603,6 +1655,7 @@ mod tests {
                 binding_id(3),
                 candidate_ref(4),
                 COMMIT,
+                TEST_BASE_COMMIT,
                 "refs/winwincode/candidates/candidate-4"
             )
             .is_err()
@@ -1614,6 +1667,7 @@ mod tests {
                 binding_id(3),
                 "refs/heads/main",
                 COMMIT,
+                TEST_BASE_COMMIT,
                 "refs/winwincode/candidates/candidate-4"
             )
             .is_err()
@@ -1625,6 +1679,7 @@ mod tests {
                 binding_id(3),
                 candidate_ref(4),
                 "NOT-A-COMMIT",
+                TEST_BASE_COMMIT,
                 "refs/winwincode/candidates/candidate-4"
             )
             .is_err()
@@ -1636,6 +1691,7 @@ mod tests {
                 binding_id(3),
                 candidate_ref(4),
                 COMMIT,
+                TEST_BASE_COMMIT,
                 "-refs/leading-dash"
             )
             .is_err()

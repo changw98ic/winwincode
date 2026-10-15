@@ -54,6 +54,10 @@ pub struct DeviceServiceStatus {
     pub running: bool,
     pub pid: Option<u32>,
     pub restart_pending: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub server_url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub authorization_failure: Option<String>,
 }
 
 #[derive(Debug)]
@@ -166,6 +170,14 @@ impl ManagedAppRepositorySource for ServiceWorkerLaunchMaterial {
 }
 
 pub fn run_device_service(config: &DeviceServiceConfig) -> Result<(), DeviceServiceError> {
+    run_device_service_with_ca(config, None)
+}
+
+pub fn run_device_service_with_ca(
+    config: &DeviceServiceConfig,
+    ca_file: Option<&Path>,
+) -> Result<(), DeviceServiceError> {
+    let ca_roots = crate::remote_auth::load_ca_roots(ca_file)?;
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()?;
@@ -188,7 +200,9 @@ pub fn run_device_service(config: &DeviceServiceConfig) -> Result<(), DeviceServ
             tokio::signal::ctrl_c().await
         };
         let mut service = tokio::task::spawn_blocking(move || {
-            run_device_service_until(&config, || service_stop.load(Ordering::Acquire))
+            run_device_service_with_roots_until(&config, &ca_roots, || {
+                service_stop.load(Ordering::Acquire)
+            })
         });
         tokio::select! {
             result = &mut service => result.map_err(std::io::Error::other)?,
@@ -202,13 +216,20 @@ pub fn run_device_service(config: &DeviceServiceConfig) -> Result<(), DeviceServ
     })
 }
 
-#[allow(clippy::too_many_lines)]
+#[cfg(test)]
 fn run_device_service_until(
     config: &DeviceServiceConfig,
+    should_stop: impl FnMut() -> bool,
+) -> Result<(), DeviceServiceError> {
+    run_device_service_with_roots_until(config, &[], should_stop)
+}
+
+#[allow(clippy::too_many_lines)]
+fn run_device_service_with_roots_until(
+    config: &DeviceServiceConfig,
+    ca_roots: &[Vec<u8>],
     mut should_stop: impl FnMut() -> bool,
 ) -> Result<(), DeviceServiceError> {
-    let endpoint = exchange_endpoint(&config.server_url)?;
-    let origin = server_origin(&config.server_url)?;
     prepare_data_directory(&config.data_directory)?;
     let _lease = ServiceLease::acquire(&config.data_directory)?;
     let restart_path = config.data_directory.join(RESTART_FILE);
@@ -220,12 +241,53 @@ fn run_device_service_until(
 
     loop {
         let mut store = DeviceStore::open(&config.data_directory)?;
+        if crate::remote_auth::load_remote_binding(&store)?
+            .is_some_and(|binding| !binding.is_bound())
+        {
+            crate::remote_auth::bind_device(&crate::remote_auth::DeviceBindConfig {
+                data_directory: config.data_directory.clone(),
+                server_url: None,
+                pairing_token: None,
+                ca_file: None,
+                seed: device_identity_seed(&config.device_display_name),
+            })?;
+        }
+        let binding = crate::remote_auth::load_remote_binding(&store)?;
+        if let Some(reason) = binding
+            .as_ref()
+            .and_then(|binding| binding.failure_reason.as_deref())
+        {
+            return Err(DeviceServiceError::InvalidConfig(reason.to_owned()));
+        }
+        let server_url = binding
+            .as_ref()
+            .map_or(config.server_url.as_str(), |binding| {
+                binding.server_url.as_str()
+            });
+        let endpoint = exchange_endpoint(server_url)?;
+        let origin = server_origin(server_url)?;
+        let auth = binding
+            .as_ref()
+            .map(crate::remote_auth::RemoteBinding::auth)
+            .map(|auth| {
+                if ca_roots.is_empty() {
+                    auth
+                } else {
+                    auth.with_ca_roots(ca_roots.to_vec())
+                }
+            });
         let identity = ensure_device_identity(
             &mut store,
             &device_identity_seed(&config.device_display_name),
             &stamp(),
         )?;
-        let transport = HttpExchangeTransport::new(endpoint.clone());
+        let transport =
+            HttpExchangeTransport::new(endpoint.clone()).with_ca_roots(ca_roots.to_vec());
+        let transport = Arc::new(if let Some(auth) = &auth {
+            transport.with_device_auth(auth.clone())
+        } else {
+            transport
+        });
         let mut daemon = DeviceDaemon::start(
             DaemonConfig {
                 server_profile_id: "default".to_owned(),
@@ -243,9 +305,13 @@ fn run_device_service_until(
                 capacity: service_worker_capacity(),
             },
             store,
-            Arc::new(transport),
+            transport.clone(),
             &identity,
         )?;
+        crate::apply_engine::recover_started_applications(&mut daemon)
+            .map_err(|error| DeviceServiceError::InvalidConfig(error.to_string()))?;
+        crate::apply_engine::report_recovered_applications(&mut daemon)
+            .map_err(|error| DeviceServiceError::InvalidConfig(error.to_string()))?;
         let mut worker_lane_wired = false;
         let mut preview_tunnel = None;
         if identity.identity().is_enrolled() {
@@ -256,12 +322,14 @@ fn run_device_service_until(
                 identity.identity().client_node_id(),
                 identity.current_instance_id(),
                 preview_registry.clone(),
+                transport.clone(),
             )?;
             worker_lane_wired = true;
             preview_tunnel = Some(start_preview_tunnel(
                 &origin,
                 &identity,
                 preview_registry.clone(),
+                auth.clone(),
             )?);
         }
         let mut last_retry = None;
@@ -279,7 +347,32 @@ fn run_device_service_until(
                 daemon.shutdown_workers()?;
                 break;
             }
-            let ready_in = match daemon.tick(Instant::now())? {
+            let tick = match daemon.tick(Instant::now()) {
+                Ok(tick) => tick,
+                Err(error) => {
+                    drop(preview_tunnel.take());
+                    daemon.shutdown_workers()?;
+                    let reason = if let DaemonError::Network(failure) = &error {
+                        match failure.http_status {
+                            Some(403) => "Device 绑定已吊销；服务已停止。".to_owned(),
+                            Some(401) => "Device 身份认证失败；服务已停止。".to_owned(),
+                            _ => error.to_string(),
+                        }
+                    } else {
+                        error.to_string()
+                    };
+                    if matches!(&error, DaemonError::Network(failure) if matches!(failure.http_status, Some(401 | 403)))
+                    {
+                        crate::remote_auth::record_remote_failure(
+                            &DeviceStore::open(&config.data_directory)?,
+                            &reason,
+                        )?;
+                    }
+                    append_log(&config.data_directory, &reason)?;
+                    return Err(DeviceServiceError::Daemon(error));
+                }
+            };
+            let ready_in = match tick {
                 TickOutcome::Waiting { ready_in } => ready_in,
                 TickOutcome::Retrying { after, reason } => {
                     if last_retry.as_deref() != Some(reason.as_str()) {
@@ -307,6 +400,7 @@ fn run_device_service_until(
                     enrolled.identity().client_node_id(),
                     enrolled.current_instance_id(),
                     preview_registry.clone(),
+                    transport.clone(),
                 )?;
                 worker_lane_wired = true;
                 let enrolled = load_device_identity(&DeviceStore::open(&config.data_directory)?)?
@@ -319,6 +413,7 @@ fn run_device_service_until(
                     &origin,
                     &enrolled,
                     preview_registry.clone(),
+                    auth.clone(),
                 )?);
                 append_log(&config.data_directory, "local worker lane ready")?;
             }
@@ -331,27 +426,28 @@ fn start_preview_tunnel(
     origin: &str,
     identity: &IdentityRecord,
     registry: AuthorizedPreviewSourceRegistry,
+    auth: Option<crate::remote_auth::DeviceRemoteAuth>,
 ) -> Result<PreviewTunnelSupervisor, DeviceServiceError> {
-    PreviewTunnelSupervisor::start(
+    PreviewTunnelSupervisor::start_with_auth(
         preview_tunnel_endpoint(origin)?,
         identity.identity().client_node_id().to_owned(),
         registry,
+        auth,
     )
     .map_err(DeviceServiceError::from)
 }
 
 fn preview_tunnel_endpoint(server_url: &str) -> Result<String, DeviceServiceError> {
-    let uri = http::Uri::from_str(server_url).map_err(|_| {
-        DeviceServiceError::InvalidConfig("server URL is not a valid URI".to_owned())
-    })?;
-    if uri.scheme_str() != Some("http") || uri.authority().is_none() {
-        return Err(DeviceServiceError::InvalidConfig(
-            "preview tunnel requires an http server origin".to_owned(),
-        ));
-    }
+    let origin = server_origin(server_url)?;
+    let uri = http::Uri::from_str(&origin).expect("validated origin");
+    let scheme = if uri.scheme_str() == Some("https") {
+        "wss"
+    } else {
+        "ws"
+    };
     Ok(format!(
-        "ws://{}{PREVIEW_TUNNEL_PATH}",
-        uri.authority().expect("authority checked")
+        "{scheme}://{}{PREVIEW_TUNNEL_PATH}",
+        uri.authority().expect("validated authority")
     ))
 }
 
@@ -362,11 +458,13 @@ fn wire_worker_lane(
     client_node_id: &str,
     client_instance_id: &str,
     preview_sources: AuthorizedPreviewSourceRegistry,
+    transport: Arc<dyn crate::ExchangeTransport>,
 ) -> Result<(), DeviceServiceError> {
     let supervisor = SessionSupervisor::new(
         service_worker_supervisor_config(server_origin, client_node_id, client_instance_id),
         DeviceStore::open(data_directory)?,
     )?;
+    supervisor.set_worker_relay_transport(transport);
     daemon.set_worker_supervisor(supervisor.clone());
     daemon.recover_worker_stop_intents()?;
     daemon
@@ -411,7 +509,7 @@ fn service_worker_supervisor_config(
         model_route: None,
         worker_binary_path: None,
         max_concurrent_worker_sessions: 0,
-        stop_grace_period: Duration::from_secs(10),
+        stop_grace_period: Duration::from_secs(20),
     }
 }
 
@@ -483,7 +581,18 @@ pub fn device_service_status(data_directory: &Path) -> DeviceServiceStatus {
         .ok()
         .and_then(|value| value.trim().parse::<u32>().ok())
         .filter(|pid| process_is_alive(*pid));
+    let binding = if data_directory.join("device-client.sqlite3").is_file() {
+        DeviceStore::open(data_directory).ok().and_then(|store| {
+            crate::remote_auth::load_remote_binding(&store)
+                .ok()
+                .flatten()
+        })
+    } else {
+        None
+    };
     DeviceServiceStatus {
+        server_url: binding.as_ref().map(|binding| binding.server_url.clone()),
+        authorization_failure: binding.and_then(|binding| binding.failure_reason),
         running: pid.is_some(),
         pid,
         restart_pending: data_directory.join(RESTART_FILE).is_file(),
@@ -564,39 +673,11 @@ impl Drop for ServiceLease {
 }
 
 fn exchange_endpoint(server_url: &str) -> Result<String, DeviceServiceError> {
-    let uri = http::Uri::from_str(server_url).map_err(|_| {
-        DeviceServiceError::InvalidConfig("server URL is not a valid URI".to_owned())
-    })?;
-    if uri.scheme_str() != Some("http") || uri.authority().is_none() {
-        return Err(DeviceServiceError::InvalidConfig(
-            "server URL must be an absolute http:// URL".to_owned(),
-        ));
-    }
-    match uri.path() {
-        "" | "/" => Ok(format!(
-            "http://{}{EXCHANGE_PATH}",
-            uri.authority().expect("authority checked")
-        )),
-        EXCHANGE_PATH if uri.query().is_none() => Ok(server_url.to_owned()),
-        _ => Err(DeviceServiceError::InvalidConfig(format!(
-            "server URL path must be / or {EXCHANGE_PATH}"
-        ))),
-    }
+    Ok(format!("{}{EXCHANGE_PATH}", server_origin(server_url)?))
 }
 
 fn server_origin(server_url: &str) -> Result<String, DeviceServiceError> {
-    let uri = http::Uri::from_str(server_url).map_err(|_| {
-        DeviceServiceError::InvalidConfig("server URL is not a valid URI".to_owned())
-    })?;
-    if uri.scheme_str() != Some("http") || uri.authority().is_none() {
-        return Err(DeviceServiceError::InvalidConfig(
-            "server URL must be an absolute http:// URL".to_owned(),
-        ));
-    }
-    Ok(format!(
-        "http://{}",
-        uri.authority().expect("authority checked")
-    ))
+    crate::remote_auth::server_origin(server_url).map_err(DeviceServiceError::Store)
 }
 
 fn prepare_data_directory(path: &Path) -> Result<(), DeviceServiceError> {
@@ -656,7 +737,7 @@ fn stamp() -> String {
         .to_string()
 }
 
-fn device_identity_seed(display_name: &str) -> DeviceIdentitySeed {
+pub fn device_identity_seed(display_name: &str) -> DeviceIdentitySeed {
     let (platform, architecture) = release_target();
     DeviceIdentitySeed {
         display_name: display_name.to_owned(),
@@ -742,7 +823,7 @@ mod tests {
         let _ = fs::remove_dir_all(&root);
         let config = DeviceServiceConfig {
             data_directory: root.clone(),
-            server_url: "http://server.example:8443".to_owned(),
+            server_url: "http://127.0.0.1:8443".to_owned(),
             server_display_name: "Server".to_owned(),
             device_display_name: "Device".to_owned(),
         };
@@ -778,7 +859,7 @@ mod tests {
             })
             .expect("authorized occupancy");
         let mut config = service_worker_supervisor_config(
-            "http://server.example:8443",
+            "http://127.0.0.1:8443",
             "cnd_SERVICE_DEVICE",
             "cix_SERVICE_INSTANCE",
         );
@@ -868,13 +949,14 @@ mod tests {
     }
 
     #[test]
-    fn service_requires_http_and_canonical_exchange_path() {
-        assert!(exchange_endpoint("https://server.example:8080").is_err());
+    fn service_accepts_https_and_canonical_exchange_path() {
+        assert!(exchange_endpoint("https://server.example:8080").is_ok());
+        assert!(exchange_endpoint("http://server.example:8080").is_err());
         assert_eq!(
-            exchange_endpoint("http://server.example:8443").expect("origin"),
-            "http://server.example:8443/internal/v1/client/exchange"
+            exchange_endpoint("http://127.0.0.1:8443").expect("origin"),
+            "http://127.0.0.1:8443/internal/v1/client/exchange"
         );
-        assert!(exchange_endpoint("http://server.example:8443/other").is_err());
+        assert!(exchange_endpoint("http://127.0.0.1:8443/other").is_err());
     }
 
     #[test]

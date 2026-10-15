@@ -22,6 +22,7 @@ const CLIENT_TO_SERVER_KINDS = Object.freeze([
   'client.worker.reconcile',
   'client.candidate.retained',
   'client.candidate.apply_result',
+  'client.application.reconciled',
   'client.command_ack',
   'client.provider.report',
   'client.extension.report',
@@ -82,6 +83,7 @@ const FENCED_KINDS = Object.freeze(new Set([
   'client.worker.stop',
   'client.candidate.retained',
   'client.candidate.apply_result',
+  'client.application.reconciled',
   'client.candidate.apply',
 ]))
 
@@ -218,7 +220,7 @@ const invalidFiles = readdirSync(invalidDir, { withFileTypes: true })
   .sort()
 
 test('kind registry matches the ClientControlPort plan verbatim', () => {
-  assert.equal(CLIENT_TO_SERVER_KINDS.length, 18)
+  assert.equal(CLIENT_TO_SERVER_KINDS.length, 19)
   assert.equal(SERVER_TO_CLIENT_KINDS.length, 11)
   assert.equal(new Set(ALL_KINDS).size, ALL_KINDS.length)
 })

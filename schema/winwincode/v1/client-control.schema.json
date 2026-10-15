@@ -357,7 +357,8 @@
         "candidate_missing",
         "permission_denied",
         "discarded",
-        "failed"
+        "failed",
+        "outcome_unknown"
       ],
       "title": "LocalApplyResult",
       "description": "Terminal outcome of one local apply attempt; every attempt writes a LocalApplyReceipt."
@@ -1137,6 +1138,9 @@
         "candidateCommit": {
           "$ref": "#/$defs/GitCommitSha"
         },
+        "baseCommit": {
+          "$ref": "#/$defs/GitCommitSha"
+        },
         "localRefName": {
           "$ref": "#/$defs/GitRefName"
         },
@@ -1155,13 +1159,14 @@
         "candidateRef",
         "repositoryBindingId",
         "candidateCommit",
+        "baseCommit",
         "localRefName",
         "state",
         "createdAt",
         "revision"
       ],
       "title": "LocalCandidateReceipt",
-      "description": "Client-issued proof that a candidate commit is frozen under a stable local git ref before worktree cleanup. Ownership: Device Client issued, Control Plane audited.",
+      "description": "Client-issued proof that a candidate commit and its original repository base are retained under a stable local git ref before worktree cleanup. Ownership: Device Client issued, Control Plane audited.",
       "x-owner": "device-client-issued-control-plane-audited"
     },
     "LocalApplyReceipt": {
@@ -2663,6 +2668,18 @@
         },
         "idempotencyKey": {
           "$ref": "#/$defs/IdempotencyKey"
+        },
+        "applicationId": {
+          "$ref": "#/$defs/LocalApplyReceiptId"
+        },
+        "approvalId": {
+          "$ref": "#/$defs/IdempotencyKey"
+        },
+        "candidateDigest": {
+          "$ref": "#/$defs/ApplicationCandidateDigest"
+        },
+        "reconciledRetry": {
+          "type": "boolean"
         }
       },
       "required": [
@@ -2682,7 +2699,11 @@
         "strategy",
         "requesterUserId",
         "expectedRevision",
-        "idempotencyKey"
+        "idempotencyKey",
+        "applicationId",
+        "approvalId",
+        "candidateDigest",
+        "reconciledRetry"
       ],
       "title": "client.candidate.apply",
       "description": "Applies a retained candidate onto its target branch; the Device Client verifies the candidate ref, expected HEAD, working-tree policy, fencing, and permissions before writing and answers with client.candidate.apply_result.",
@@ -3087,7 +3108,8 @@
         "client.repository.register",
         "client.repository.registered",
         "client.managed_app.command",
-        "client.managed_app.status"
+        "client.managed_app.status",
+        "client.application.reconciled"
       ],
       "title": "ClientControlMessageKind",
       "description": "Every ClientControlPort message kind: sixteen client-to-control-plane kinds followed by eleven control-plane-to-client kinds, exactly as frozen by the ClientControlPort v1 plan."
@@ -3188,6 +3210,9 @@
         },
         {
           "$ref": "#/$defs/ClientManagedAppStatusMessage"
+        },
+        {
+          "$ref": "#/$defs/ClientApplicationReconciledMessage"
         }
       ]
     },
@@ -3584,6 +3609,169 @@
         "processBootDigest"
       ],
       "description": "Authenticated Device proof of an exact launch process closure; current reporter instance is distinct from the original launch instance."
+    },
+    "ApplicationReconciliationOutcome": {
+      "type": "string",
+      "enum": [
+        "applied",
+        "not_started",
+        "outcome_unknown"
+      ],
+      "description": "Observed result of an interrupted application under its current recovery authorization."
+    },
+    "ApplicationCandidateDigest": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "description": "SHA-256 of the canonical repository binding, base commit and content-addressed candidate commit tuple."
+    },
+    "ClientApplicationReconciledMessage": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "const": "client.application.reconciled"
+        },
+        "schemaVersion": {
+          "$ref": "./domain.schema.json#/$defs/SchemaVersion"
+        },
+        "messageId": {
+          "$ref": "#/$defs/ClientControlMessageId"
+        },
+        "clientNodeId": {
+          "$ref": "#/$defs/ClientNodeId"
+        },
+        "clientInstanceId": {
+          "$ref": "#/$defs/ClientInstanceId"
+        },
+        "sequence": {
+          "$ref": "#/$defs/ClientExchangeSequence"
+        },
+        "occurredAt": {
+          "$ref": "./domain.schema.json#/$defs/Instant"
+        },
+        "occupancyLeaseId": {
+          "$ref": "#/$defs/ClientOccupancyLeaseId"
+        },
+        "occupancyFencingToken": {
+          "$ref": "#/$defs/OccupancyFencingToken"
+        },
+        "expectedRevision": {
+          "$ref": "./domain.schema.json#/$defs/Revision"
+        },
+        "idempotencyKey": {
+          "$ref": "#/$defs/IdempotencyKey"
+        },
+        "applicationId": {
+          "$ref": "#/$defs/LocalApplyReceiptId"
+        },
+        "approvalId": {
+          "$ref": "#/$defs/IdempotencyKey"
+        },
+        "originalEpoch": {
+          "$ref": "#/$defs/OccupancyFencingToken"
+        },
+        "repositoryBindingId": {
+          "$ref": "#/$defs/RepositoryBindingId"
+        },
+        "candidateRef": {
+          "$ref": "#/$defs/CandidateRef"
+        },
+        "candidateDigest": {
+          "$ref": "#/$defs/ApplicationCandidateDigest"
+        },
+        "baseCommit": {
+          "$ref": "#/$defs/GitCommitSha"
+        },
+        "targetBranch": {
+          "$ref": "#/$defs/GitRefName"
+        },
+        "outcome": {
+          "$ref": "#/$defs/ApplicationReconciliationOutcome"
+        },
+        "resultCommit": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/GitCommitSha"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "kind",
+        "schemaVersion",
+        "messageId",
+        "clientNodeId",
+        "clientInstanceId",
+        "sequence",
+        "occurredAt",
+        "occupancyLeaseId",
+        "occupancyFencingToken",
+        "expectedRevision",
+        "idempotencyKey",
+        "applicationId",
+        "approvalId",
+        "originalEpoch",
+        "repositoryBindingId",
+        "candidateRef",
+        "candidateDigest",
+        "baseCommit",
+        "targetBranch",
+        "outcome",
+        "resultCommit"
+      ],
+      "title": "client.application.reconciled",
+      "description": "Reports Git reconciliation of an original application under current occupancy authorization. Historical evidence alone does not authorize a write.",
+      "x-direction": "client-to-control-plane",
+      "x-authority": "candidate-write",
+      "x-message-class": "command"
+    },
+    "CandidateApplicationStatus": {
+      "type": "string",
+      "enum": [
+        "applying",
+        "applied",
+        "stale",
+        "awaiting_retry",
+        "blocked",
+        "failed"
+      ],
+      "description": "Durable application status exposed to the Device owner. awaiting_retry requires an explicit retry; blocked retains an unknown Git outcome."
+    },
+    "CandidateApplicationProjection": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "applicationId": {
+          "$ref": "#/$defs/LocalApplyReceiptId"
+        },
+        "approvalId": {
+          "$ref": "#/$defs/IdempotencyKey"
+        },
+        "baseCommit": {
+          "$ref": "#/$defs/GitCommitSha"
+        },
+        "candidateDigest": {
+          "$ref": "#/$defs/ApplicationCandidateDigest"
+        },
+        "targetBranch": {
+          "$ref": "#/$defs/GitRefName"
+        },
+        "status": {
+          "$ref": "#/$defs/CandidateApplicationStatus"
+        }
+      },
+      "required": [
+        "applicationId",
+        "approvalId",
+        "baseCommit",
+        "candidateDigest",
+        "targetBranch",
+        "status"
+      ],
+      "description": "Persistent application and approval identity with the exact original target used for explicit recovery."
     }
   }
 }

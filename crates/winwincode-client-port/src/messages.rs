@@ -258,6 +258,32 @@ pub struct ClientCandidateApplyResultPayload {
     pub receipt: LocalApplyReceipt,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ApplicationReconciliationOutcome {
+    Applied,
+    NotStarted,
+    OutcomeUnknown,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ClientApplicationReconciledPayload {
+    #[serde(flatten)]
+    pub occupancy: OccupancyCommandContext,
+    pub application_id: String,
+    pub approval_id: String,
+    #[serde(with = "crate::wire::fencing_token")]
+    pub original_epoch: u64,
+    pub repository_binding_id: String,
+    pub candidate_ref: String,
+    pub candidate_digest: String,
+    pub base_commit: String,
+    pub target_branch: String,
+    pub outcome: ApplicationReconciliationOutcome,
+    pub result_commit: Option<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct ClientCommandAckPayload {
     #[serde(rename = "commandKind")]
@@ -322,6 +348,8 @@ pub enum ClientToServerMessage {
     CandidateRetained(ClientCandidateRetainedPayload),
     #[serde(rename = "client.candidate.apply_result")]
     CandidateApplyResult(ClientCandidateApplyResultPayload),
+    #[serde(rename = "client.application.reconciled")]
+    ApplicationReconciled(ClientApplicationReconciledPayload),
     #[serde(rename = "client.command_ack")]
     CommandAck(ClientCommandAckPayload),
     #[serde(rename = "client.managed_app.status")]
@@ -388,6 +416,14 @@ pub struct ServerWorkerStopPayload {
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct ServerCandidateApplyPayload {
+    #[serde(rename = "applicationId")]
+    pub application_id: String,
+    #[serde(rename = "approvalId")]
+    pub approval_id: String,
+    #[serde(rename = "candidateDigest")]
+    pub candidate_digest: String,
+    #[serde(rename = "reconciledRetry")]
+    pub reconciled_retry: bool,
     #[serde(flatten)]
     pub occupancy: OccupancyCommandContext,
     #[serde(rename = "candidateRef")]
@@ -482,7 +518,7 @@ mod tests {
         "occupancyFencingToken",
     ];
 
-    const FENCED_KINDS: [&str; 11] = [
+    const FENCED_KINDS: [&str; 12] = [
         "client.occupancy.ack",
         "client.occupancy.rejected",
         "client.occupancy.offer",
@@ -493,6 +529,7 @@ mod tests {
         "client.worker.stop",
         "client.candidate.retained",
         "client.candidate.apply_result",
+        "client.application.reconciled",
         "client.candidate.apply",
     ];
 
@@ -590,6 +627,7 @@ mod tests {
             candidate_ref: "cand_01j2".to_owned(),
             repository_binding_id: "rb_01j2".to_owned(),
             candidate_commit: "89abcdef0123456789abcdef0123456789abcdef".to_owned(),
+            base_commit: "0123456789abcdef0123456789abcdef01234567".to_owned(),
             local_ref_name: "refs/winwincode/candidates/cand_01j2".to_owned(),
             state: LocalCandidateState::Retained,
             created_at: "2026-01-02T12:30:00.000Z".to_owned(),
@@ -938,6 +976,22 @@ mod tests {
                 }),
             ),
             (
+                "client.application.reconciled",
+                ClientToServerMessage::ApplicationReconciled(ClientApplicationReconciledPayload {
+                    occupancy: occupancy.clone(),
+                    application_id: "lar_01j2".to_owned(),
+                    approval_id: "approval-test".to_owned(),
+                    original_epoch: 1,
+                    repository_binding_id: "rb_01j2".to_owned(),
+                    candidate_ref: "cand_01j2".to_owned(),
+                    candidate_digest: format!("sha256:{}", "a".repeat(64)),
+                    base_commit: "0123456789abcdef0123456789abcdef01234567".to_owned(),
+                    target_branch: "main".to_owned(),
+                    outcome: ApplicationReconciliationOutcome::Applied,
+                    result_commit: Some("0123456789abcdef0123456789abcdef01234567".to_owned()),
+                }),
+            ),
+            (
                 "client.command_ack",
                 ClientToServerMessage::CommandAck(ClientCommandAckPayload {
                     command_kind: ClientControlMessageKind::WorkerLaunch,
@@ -1007,6 +1061,10 @@ mod tests {
             (
                 "client.candidate.apply",
                 ServerToClientMessage::CandidateApply(ServerCandidateApplyPayload {
+                    application_id: "lar_01j2".to_owned(),
+                    approval_id: "approval-test".to_owned(),
+                    candidate_digest: format!("sha256:{}", "a".repeat(64)),
+                    reconciled_retry: false,
                     occupancy: occupancy.clone(),
                     candidate_ref: "cand_01j2".to_owned(),
                     repository_binding_id: "rb_01j2".to_owned(),
@@ -1058,7 +1116,7 @@ mod tests {
 
     #[test]
     fn command_and_fencing_contexts_follow_the_schema_classification() {
-        assert_eq!(FENCED_KINDS.len(), 11, "exactly 11 fenced kinds");
+        assert_eq!(FENCED_KINDS.len(), 12, "exactly 12 fenced kinds");
         assert_eq!(CONTEXT_FREE_KINDS.len(), 6, "exactly 6 context-free kinds");
 
         let messages: Vec<(&str, serde_json::Value)> = all_client_to_server_messages()
@@ -1076,14 +1134,14 @@ mod tests {
                     }),
             )
             .collect();
-        assert_eq!(messages.len(), 23, "every fixture kind is represented");
+        assert_eq!(messages.len(), 24, "every fixture kind is represented");
 
         let plain_commands = messages.len() - FENCED_KINDS.len() - CONTEXT_FREE_KINDS.len();
         assert_eq!(plain_commands, 6, "exactly 6 plain command kinds");
         assert_eq!(
             FENCED_KINDS.len() + plain_commands,
-            17,
-            "11 fenced + 6 plain = the 17 command kinds"
+            18,
+            "12 fenced + 6 plain = the 18 command kinds"
         );
 
         for (kind, value) in &messages {

@@ -11,6 +11,7 @@ include = ["src/**", "tests/**", "Cargo.toml"]
 
 [features]
 default = ["local-worker"]
+test-support = []
 local-worker = [
   "dep:winwincode-codex",
   "dep:winwincode-local",
@@ -20,8 +21,10 @@ local-worker = [
 [dependencies]
 argon2.workspace = true
 axum.workspace = true
-axum-server.workspace = true
+axum-server = { workspace = true, features = ["tls-rustls"] }
 base64.workspace = true
+codex-utils-rustls-provider = { path = "../../third_party/codex/codex-rs/utils/rustls-provider" }
+ed25519-dalek = "=2.2.0"
 futures.workspace = true
 getrandom.workspace = true
 http.workspace = true
@@ -44,6 +47,8 @@ winwincode-storage.workspace = true
 winwincode-worker = { path = "../winwincode-worker", optional = true }
 
 [dev-dependencies]
+rcgen.workspace = true
+rustls.workspace = true
 winwincode-codex = { path = "../winwincode-codex", features = ["test-support"] }
 winwincode-delivery = { workspace = true, features = ["test-support"] }
 tokio = { workspace = true, features = ["io-util", "macros", "net", "signal"] }

@@ -1713,6 +1713,30 @@
         "codex-rs/exec-server/src/process_sandbox_tests.rs",
         "codex-rs/external-agent-migration/src/service_tests/plugins/marketplaces.rs"
       ]
+    },
+    {
+      "id": "codex-tool-review-supervised-process-shutdown",
+      "file": "upstream/patches/codex/0121-tool-review-supervised-process-shutdown.patch",
+      "planned": false,
+      "patchSha256": "0613f74504c5649f79d674b5561b6168e5a2d595a916f5d2c5eec78fa52f9727",
+      "targets": [
+        "codex-rs/core/src/session/handlers.rs",
+        "codex-rs/core/src/unified_exec/mod.rs",
+        "codex-rs/core/src/unified_exec/process_manager.rs",
+        "codex-rs/core/src/unified_exec/mod_tests.rs",
+        "codex-rs/core/src/spawn.rs",
+        "codex-rs/core/src/exec.rs",
+        "codex-rs/utils/pty/src/process_group.rs",
+        "codex-rs/utils/pty/src/pipe.rs",
+        "codex-rs/utils/pty/src/pty.rs",
+        "codex-rs/utils/pty/src/process.rs",
+        "codex-rs/utils/pty/src/tests.rs",
+        "codex-rs/core/src/shell_snapshot.rs",
+        "codex-rs/hooks/src/engine/command_runner.rs",
+        "codex-rs/rmcp-client/src/stdio_server_launcher.rs",
+        "codex-rs/rmcp-client/src/http_headers.rs",
+        "codex-rs/git-utils/src/git_process.rs"
+      ]
     }
   ],
   "licenseObligations": {

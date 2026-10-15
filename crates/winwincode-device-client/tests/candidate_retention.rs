@@ -275,9 +275,10 @@ fn write_candidate_ref(repository: &Path, commit: &str) {
     );
 }
 
-fn retention(commit: &str, binding: &str, stamp: &str) -> CandidateRetention {
+fn retention(commit: &str, base_commit: &str, binding: &str, stamp: &str) -> CandidateRetention {
     CandidateRetention {
         candidate_commit: commit.to_owned(),
+        base_commit: base_commit.to_owned(),
         repository_binding_id: binding.to_owned(),
         worker_session_id: SESSION.to_owned(),
         local_git_ref: format!("refs/winwincode/candidates/{commit}"),
@@ -380,7 +381,7 @@ fn seeded_daemon(name: &str, state: &Scenario) -> DeviceDaemon {
     map_binding(&mut store, &state.repository, BINDING);
     record_candidate_retention(
         &mut store,
-        &retention(&state.candidate_commit, BINDING, STAMP),
+        &retention(&state.candidate_commit, &state.base_commit, BINDING, STAMP),
     )
     .expect("the retention should record");
     mirror_the_lease(&mut store);
@@ -722,7 +723,7 @@ fn a_discard_fails_closed_without_an_occupancy_mirror() {
     map_binding(&mut store, &state.repository, BINDING);
     record_candidate_retention(
         &mut store,
-        &retention(&state.candidate_commit, BINDING, STAMP),
+        &retention(&state.candidate_commit, &state.base_commit, BINDING, STAMP),
     )
     .expect("the retention should record");
     store.close().expect("store should close");
@@ -761,13 +762,24 @@ fn the_retention_policy_discards_the_oldest_active_beyond_the_limit() {
     write_candidate_ref(&state.repository, &first);
     write_candidate_ref(&state.repository, &second);
     let mut daemon = mapped_daemon("policy-sweep", &state);
-    record_candidate_retention(daemon.store_mut(), &retention(&first, BINDING, STAMP))
-        .expect("the oldest retention records");
-    record_candidate_retention(daemon.store_mut(), &retention(&second, BINDING, MID_STAMP))
-        .expect("the middle retention records");
     record_candidate_retention(
         daemon.store_mut(),
-        &retention(&state.candidate_commit, BINDING, NEW_STAMP),
+        &retention(&first, &state.base_commit, BINDING, STAMP),
+    )
+    .expect("the oldest retention records");
+    record_candidate_retention(
+        daemon.store_mut(),
+        &retention(&second, &state.base_commit, BINDING, MID_STAMP),
+    )
+    .expect("the middle retention records");
+    record_candidate_retention(
+        daemon.store_mut(),
+        &retention(
+            &state.candidate_commit,
+            &state.base_commit,
+            BINDING,
+            NEW_STAMP,
+        ),
     )
     .expect("the newest retention records");
 
@@ -834,13 +846,24 @@ fn failed_and_terminal_rows_are_never_counted_by_the_policy() {
     write_candidate_ref(&state.repository, &failed);
     write_candidate_ref(&state.repository, &applied);
     let mut daemon = mapped_daemon("policy-classes", &state);
-    record_candidate_retention(daemon.store_mut(), &retention(&failed, BINDING, STAMP))
-        .expect("the failed retention records");
-    record_candidate_retention(daemon.store_mut(), &retention(&applied, BINDING, MID_STAMP))
-        .expect("the applied retention records");
     record_candidate_retention(
         daemon.store_mut(),
-        &retention(&state.candidate_commit, BINDING, NEW_STAMP),
+        &retention(&failed, &state.base_commit, BINDING, STAMP),
+    )
+    .expect("the failed retention records");
+    record_candidate_retention(
+        daemon.store_mut(),
+        &retention(&applied, &state.base_commit, BINDING, MID_STAMP),
+    )
+    .expect("the applied retention records");
+    record_candidate_retention(
+        daemon.store_mut(),
+        &retention(
+            &state.candidate_commit,
+            &state.base_commit,
+            BINDING,
+            NEW_STAMP,
+        ),
     )
     .expect("the active retention records");
     progress_to(daemon.store_mut(), &failed, LocalCandidateState::Failed);
@@ -865,11 +888,19 @@ fn a_policy_sweep_stops_fail_closed_when_a_discard_is_refused() {
     let oldest = add_candidate_commit(&state.repository, "oldest candidate");
     write_candidate_ref(&state.repository, &oldest);
     let mut daemon = mapped_daemon("policy-fail-closed", &state);
-    record_candidate_retention(daemon.store_mut(), &retention(&oldest, BINDING, STAMP))
-        .expect("the oldest retention records");
     record_candidate_retention(
         daemon.store_mut(),
-        &retention(&state.candidate_commit, BINDING, NEW_STAMP),
+        &retention(&oldest, &state.base_commit, BINDING, STAMP),
+    )
+    .expect("the oldest retention records");
+    record_candidate_retention(
+        daemon.store_mut(),
+        &retention(
+            &state.candidate_commit,
+            &state.base_commit,
+            BINDING,
+            NEW_STAMP,
+        ),
     )
     .expect("the newest retention records");
     let branch = create_branch(&mut daemon, &oldest);
@@ -952,8 +983,11 @@ fn gc_matrix(name: &str) -> GcMatrix {
         (applied_unmapped, UNMAPPED_BINDING, STAMP),
         (discarded_unacked, BINDING, STAMP),
     ] {
-        retain_candidate(&mut daemon, &retention(commit, binding, stamp))
-            .expect("the retention should record and report");
+        retain_candidate(
+            &mut daemon,
+            &retention(commit, &state.base_commit, binding, stamp),
+        )
+        .expect("the retention should record and report");
     }
     let mut store = daemon.into_store();
     acknowledge_through(&mut store, 3);
@@ -962,12 +996,12 @@ fn gc_matrix(name: &str) -> GcMatrix {
     let mut daemon = resumed_daemon(&format!("{name}-progress"), &state.root);
     record_candidate_retention(
         daemon.store_mut(),
-        &retention(applied_recent, BINDING, RECENT_STAMP),
+        &retention(applied_recent, &state.base_commit, BINDING, RECENT_STAMP),
     )
     .expect("the recent retention records");
     record_candidate_retention(
         daemon.store_mut(),
-        &retention(retained_past, BINDING, STAMP),
+        &retention(retained_past, &state.base_commit, BINDING, STAMP),
     )
     .expect("the retained retention records");
     for (commit, target) in [
@@ -1086,7 +1120,7 @@ fn gc_resumes_after_a_crash_between_ref_deletion_and_bookkeeping() {
     let mut daemon = seeded_daemon("gc-crash", &state);
     retain_candidate(
         &mut daemon,
-        &retention(&state.candidate_commit, BINDING, STAMP),
+        &retention(&state.candidate_commit, &state.base_commit, BINDING, STAMP),
     )
     .expect("the retention should record and report");
     let mut store = daemon.into_store();
@@ -1131,7 +1165,7 @@ fn gc_prunes_objects_only_behind_the_policy_switch() {
     let mut daemon = seeded_daemon("gc-prune", &state);
     retain_candidate(
         &mut daemon,
-        &retention(&state.candidate_commit, BINDING, STAMP),
+        &retention(&state.candidate_commit, &state.base_commit, BINDING, STAMP),
     )
     .expect("the retention should record and report");
     let mut store = daemon.into_store();
@@ -1172,7 +1206,7 @@ fn gc_prunes_objects_only_behind_the_policy_switch() {
     let mut daemon = seeded_daemon("gc-prune-on", &state);
     retain_candidate(
         &mut daemon,
-        &retention(&state.candidate_commit, BINDING, STAMP),
+        &retention(&state.candidate_commit, &state.base_commit, BINDING, STAMP),
     )
     .expect("the retention should record and report");
     let mut store = daemon.into_store();

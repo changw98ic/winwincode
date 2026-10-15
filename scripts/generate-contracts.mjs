@@ -657,6 +657,7 @@ function renderControlPlaneClient(context, digest) {
   }
   const runtimeSchemas = reachableRuntimeSchemas(context, [
     'AuthSessionResponse',
+    'CandidateApplicationProjection',
     'CommandAcceptedResponse',
     'CommandCompletedResponse',
     'CommandRequest',
@@ -665,6 +666,9 @@ function renderControlPlaneClient(context, digest) {
     'ControlPlaneWebSocketSubscribeStartAt',
     'DeliveryDetailProjection',
     'DeviceProviderView',
+    'DevicePairingResponse',
+    'DeviceRevokeResponse',
+    'DeviceAuthErrorResponse',
     'DeviceRepositoryRegistrationReceipt',
     'DeviceExtensionView',
     'ControlPlaneWebSocketServerFrame',

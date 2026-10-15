@@ -17,7 +17,9 @@ use std::os::unix::process::CommandExt;
 
 use time::OffsetDateTime;
 
-use crate::daemon::{LeaseWorkerController, WorkerCapacitySnapshot, WorkerCapacitySource};
+use crate::daemon::{
+    ExchangeTransport, LeaseWorkerController, WorkerCapacitySnapshot, WorkerCapacitySource,
+};
 use crate::fencing::{FencedCommandKind, FencingGuard, FencingRejection, FencingVerdict};
 use crate::store::{DeviceStore, DeviceStoreError, WorkerProcessRecord};
 use crate::worker_logs::{
@@ -56,7 +58,7 @@ impl Default for SupervisorConfig {
             model_route: None,
             worker_binary_path: None,
             max_concurrent_worker_sessions: 0,
-            stop_grace_period: Duration::from_secs(10),
+            stop_grace_period: Duration::from_secs(20),
         }
     }
 }
@@ -234,6 +236,7 @@ struct SupervisorInner {
     store: Mutex<DeviceStore>,
     children: Mutex<BTreeMap<String, TrackedChild>>,
     worker_logs: WorkerLogRecorder,
+    worker_relay_transport: Mutex<Option<Arc<dyn ExchangeTransport>>>,
 }
 
 #[derive(Clone)]
@@ -265,6 +268,7 @@ impl SessionSupervisor {
                 store: Mutex::new(store),
                 children: Mutex::new(BTreeMap::new()),
                 worker_logs,
+                worker_relay_transport: Mutex::new(None),
             }),
         })
     }
@@ -319,6 +323,9 @@ impl SessionSupervisor {
         let status = Command::new(self.resolve_worker_binary()?)
             .arg("--recover-interrupted-calls")
             .arg(&config_path)
+            .env_remove("WWC_DEVICE_CA_FILE")
+            .env_remove("WWC_DEVICE_PAIRING_TOKEN")
+            .env_remove("WWC_DEVICE_SERVER_URL")
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(recovery_stderr)
@@ -345,12 +352,31 @@ impl SessionSupervisor {
         Ok(self.lock_store().worker_processes()?)
     }
 
+    pub fn set_worker_relay_transport(&self, transport: Arc<dyn ExchangeTransport>) {
+        *self
+            .inner
+            .worker_relay_transport
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = Some(transport);
+    }
+
     pub fn shutdown(&self) -> Result<(), SupervisorError> {
-        let sessions: Vec<String> = self.lock_children().keys().cloned().collect();
-        for session in sessions {
-            self.stop_with_fencing(&session, true, false)?;
+        let mut failure = None;
+        for record in self.worker_processes()? {
+            if record.state == WORKER_STATE_RUNNING {
+                match self.stop_with_fencing(&record.worker_session_id, true, false) {
+                    Ok(stopped) => {
+                        if let Err(error) = self.recover_terminated_calls(&stopped) {
+                            failure.get_or_insert(error);
+                        }
+                    }
+                    Err(error) => {
+                        failure.get_or_insert(error);
+                    }
+                }
+            }
         }
-        Ok(())
+        failure.map_or(Ok(()), Err)
     }
 
     pub fn count_worker_processes_in_state(&self, state: &str) -> Result<u64, SupervisorError> {
@@ -516,6 +542,9 @@ impl SessionSupervisor {
         command
             .arg(MANAGED_SESSION_ARG)
             .arg(config_path)
+            .env_remove("WWC_DEVICE_CA_FILE")
+            .env_remove("WWC_DEVICE_PAIRING_TOKEN")
+            .env_remove("WWC_DEVICE_SERVER_URL")
             .current_dir(request.worker_root)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -557,9 +586,15 @@ impl SessionSupervisor {
         let node = self.inner.config.client_node_id.clone();
         let worker = request.worker_id.to_owned();
         let instance = request.worker_instance_id.to_owned();
+        let transport = self
+            .inner
+            .worker_relay_transport
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone();
         thread::spawn(move || {
             use winwincode_client_port::worker_relay::{
-                DeviceWorkerRelayRequest, WorkerRelayRequest, WorkerRelayResponse,
+                DeviceWorkerRelayRequest, WorkerRelayRequest,
             };
             for line in BufReader::new(output).lines() {
                 let Ok(line) = line else { break };
@@ -572,20 +607,7 @@ impl SessionSupervisor {
                     worker_instance_id: instance.clone(),
                     request,
                 };
-                let response = serde_json::to_vec(&payload)
-                    .map_err(|error| error.to_string())
-                    .and_then(|body| {
-                        crate::http::post_json(&endpoint, &body, Duration::from_secs(10), &|| true)
-                            .map_err(|error| error.to_string())
-                    })
-                    .and_then(|body| {
-                        serde_json::from_slice::<WorkerRelayResponse>(&body)
-                            .map_err(|error| error.to_string())
-                    })
-                    .unwrap_or_else(|error| WorkerRelayResponse {
-                        status: 502,
-                        body: serde_json::json!({"error": error}).to_string(),
-                    });
+                let response = relay_worker_request(&endpoint, transport.as_deref(), &payload);
                 if serde_json::to_writer(&mut input, &response).is_err()
                     || input.write_all(b"\n").is_err()
                     || input.flush().is_err()
@@ -782,6 +804,10 @@ impl SessionSupervisor {
             }
             for (worker_session_id, _, _) in &finished {
                 if let Some(tracked) = children.remove(worker_session_id) {
+                    if let Err(error) = retire_child_group(tracked.child.id(), self.stop_grace()) {
+                        children.insert(worker_session_id.clone(), tracked);
+                        return Err(error);
+                    }
                     join_log_readers(tracked.log_readers);
                 }
             }
@@ -924,7 +950,7 @@ impl SessionSupervisor {
                 });
                 continue;
             }
-            match self.stop(&row.worker_session_id, true) {
+            match self.stop_with_fencing(&row.worker_session_id, true, false) {
                 Ok(final_row) => outcomes.push(WorkerStopOutcome {
                     worker_session_id: final_row.worker_session_id,
                     stopped: true,
@@ -1007,6 +1033,49 @@ impl SessionSupervisor {
     }
 }
 
+fn relay_worker_request(
+    endpoint: &str,
+    transport: Option<&dyn ExchangeTransport>,
+    payload: &winwincode_client_port::worker_relay::DeviceWorkerRelayRequest,
+) -> winwincode_client_port::worker_relay::WorkerRelayResponse {
+    use winwincode_client_port::worker_relay::WorkerRelayResponse;
+    use winwincode_network::{Acceptance, ErrorKind, NetworkFailure, Phase};
+    let protocol_error = || {
+        let mut failure = NetworkFailure::new(
+            ErrorKind::ProtocolInvalid,
+            Acceptance::ResponseReceived,
+            Phase::Decode,
+        )
+        .with_diagnostic(winwincode_network::NetworkDiagnostic::new(
+            winwincode_network::DiagnosticCode::JsonSchema,
+        ));
+        failure.http_status = Some(200);
+        failure
+    };
+    let result = serde_json::to_vec(payload)
+        .map_err(|_| {
+            NetworkFailure::new(
+                ErrorKind::RequestInvalid,
+                Acceptance::NotSent,
+                Phase::Connect,
+            )
+        })
+        .and_then(|body| {
+            transport
+                .map_or_else(
+                    || crate::http::post_json(endpoint, &body, Duration::from_secs(10), &|| true),
+                    |transport| transport.worker_exchange(&body),
+                )
+                .map_err(|error| error.network_failure())
+        })
+        .and_then(|body| serde_json::from_slice(&body).map_err(|_| protocol_error()));
+    result.unwrap_or_else(|failure| WorkerRelayResponse {
+        status: failure.http_status.unwrap_or(502),
+        body: String::new(),
+        failure: Some(failure),
+    })
+}
+
 fn helper_executable() -> Result<PathBuf, SupervisorError> {
     let path = std::env::var_os("WWC_WORKER_HELPER_EXECUTABLE")
         .map_or_else(
@@ -1083,15 +1152,9 @@ fn validate_config(config: &SupervisorConfig) -> Result<(), SupervisorError> {
 }
 
 fn validate_server_origin(origin: &str) -> Result<(), SupervisorError> {
-    let uri: http::Uri = origin
-        .parse()
-        .map_err(|_| SupervisorError::invalid("server origin must be an HTTP URL"))?;
-    if uri.scheme_str() != Some("http") || uri.authority().is_none() {
-        return Err(SupervisorError::invalid(
-            "server origin must be an HTTP URL",
-        ));
-    }
-    Ok(())
+    crate::remote_auth::server_origin(origin)
+        .map(|_| ())
+        .map_err(|error| SupervisorError::invalid(error.to_string()))
 }
 
 fn validate_request(request: SpawnRequest<'_>) -> Result<(), SupervisorError> {
@@ -1325,6 +1388,21 @@ fn join_log_readers(readers: Vec<thread::JoinHandle<()>>) {
     }
 }
 
+fn retire_child_group(pid: u32, grace: Duration) -> Result<(), SupervisorError> {
+    let target = ProcessSignalTarget::Group(pid);
+    if process_group_is_empty(target) == Some(true) {
+        return Ok(());
+    }
+    if (!signal_process(target, "KILL") && process_group_is_empty(target) != Some(true))
+        || wait_for_group_empty(target, Instant::now() + grace) != StopOutcome::Stopped
+    {
+        return Err(SupervisorError::Spawn {
+            reason: format!("terminated Worker {pid} still owns live subprocesses"),
+        });
+    }
+    Ok(())
+}
+
 fn stop_observation(status: Option<ExitStatus>) -> (&'static str, Option<i64>) {
     match status {
         Some(status) => match status.code() {
@@ -1348,8 +1426,10 @@ fn stop_registered_process(
     graceful: bool,
     grace: Duration,
 ) -> StopOutcome {
-    if probe_process(record.pid, &record.process_start_identity) != ProcessProbe::Alive {
-        return StopOutcome::AlreadyGone;
+    match probe_process(record.pid, &record.process_start_identity) {
+        ProcessProbe::Alive => {}
+        ProcessProbe::Gone => return StopOutcome::AlreadyGone,
+        ProcessProbe::Unknown => return StopOutcome::Unverifiable,
     }
     let Some(target) = validated_process_group_target(record.pid) else {
         return StopOutcome::Unverifiable;
@@ -1605,6 +1685,229 @@ mod tests {
             .is_ok_and(|status| status.success())
     }
 
+    fn http_relay_fixture(
+        responses: Vec<(u16, Option<u64>, String)>,
+    ) -> (String, thread::JoinHandle<Vec<Vec<u8>>>) {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let endpoint = format!(
+            "http://{}/internal/v1/client/worker-exchange",
+            listener.local_addr().unwrap()
+        );
+        let task = thread::spawn(move || {
+            let mut requests = Vec::new();
+            for (status, retry_after, body) in responses {
+                let (mut stream, _) = listener.accept().unwrap();
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(5)))
+                    .unwrap();
+                let mut reader = BufReader::new(stream.try_clone().unwrap());
+                let mut line = String::new();
+                reader.read_line(&mut line).unwrap();
+                let mut length = 0;
+                loop {
+                    line.clear();
+                    reader.read_line(&mut line).unwrap();
+                    if line == "\r\n" {
+                        break;
+                    }
+                    if let Some((name, value)) = line.split_once(':')
+                        && name.eq_ignore_ascii_case("content-length")
+                    {
+                        length = value.trim().parse().unwrap();
+                    }
+                }
+                let mut request = vec![0; length];
+                reader.read_exact(&mut request).unwrap();
+                requests.push(request);
+                let retry = retry_after.map_or(String::new(), |seconds| {
+                    format!("Retry-After: {seconds}\r\n")
+                });
+                write!(stream, "HTTP/1.1 {status} fixture\r\n{retry}Content-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();
+            }
+            requests
+        });
+        (endpoint, task)
+    }
+
+    #[test]
+    fn worker_relay_preserves_permanent_http_and_protocol_failures() {
+        use winwincode_client_port::worker_relay::{DeviceWorkerRelayRequest, WorkerRelayRequest};
+        use winwincode_network::ErrorKind;
+        for (status, body, expected) in [
+            (401, "denied", ErrorKind::Authentication),
+            (403, "denied", ErrorKind::Authorization),
+            (404, "missing", ErrorKind::RequestInvalid),
+            (413, "too large", ErrorKind::RequestInvalid),
+            (
+                200,
+                "<html>proxy failure</html>",
+                ErrorKind::ProtocolInvalid,
+            ),
+        ] {
+            let (endpoint, server) = http_relay_fixture(vec![(status, None, body.into())]);
+            let response = relay_worker_request(
+                &endpoint,
+                None,
+                &DeviceWorkerRelayRequest {
+                    client_node_id: NODE.into(),
+                    worker_id: WORKER_ID.into(),
+                    worker_instance_id: WORKER_INSTANCE.into(),
+                    request: WorkerRelayRequest::Exchange {
+                        body: "registration".into(),
+                    },
+                },
+            );
+            let failure = response.failure.unwrap();
+            assert_eq!(failure.kind, expected);
+            assert!(!failure.retryable() || failure.phase == winwincode_network::Phase::Decode);
+            assert_eq!(failure.http_status, Some(status));
+            assert_eq!(server.join().unwrap().len(), 1);
+        }
+        let inner = winwincode_client_port::worker_relay::WorkerRelayResponse {
+            status: 400,
+            body: "inner rejection".into(),
+            failure: None,
+        };
+        let (endpoint, server) =
+            http_relay_fixture(vec![(200, None, serde_json::to_string(&inner).unwrap())]);
+        let response = relay_worker_request(
+            &endpoint,
+            None,
+            &DeviceWorkerRelayRequest {
+                client_node_id: NODE.into(),
+                worker_id: WORKER_ID.into(),
+                worker_instance_id: WORKER_INSTANCE.into(),
+                request: WorkerRelayRequest::Exchange {
+                    body: "registration".into(),
+                },
+            },
+        );
+        assert_eq!(response, inner);
+        server.join().unwrap();
+    }
+
+    #[tokio::test]
+    #[allow(clippy::too_many_lines)]
+    async fn worker_relay_retries_the_same_message_after_http_backoff_and_keeps_cancel() {
+        use std::os::unix::net::UnixStream;
+        use winwincode_client_port::worker_relay::{
+            DeviceWorkerRelayRequest, WorkerRelayRequest, WorkerRelayResponse,
+        };
+        use winwincode_worker::WorkerExecutionPort;
+        use winwincode_worker::composition::{
+            ExecutionPortCore, ExecutionPortMessage, FrameDirection, RemoteTransportAdapter,
+            TypedFrame,
+        };
+        use winwincode_worker::remote_transport::{RemoteWorkerPort, RemoteWorkerPortError};
+        struct Core;
+        impl ExecutionPortCore for Core {
+            type Output = ();
+            type Error = std::convert::Infallible;
+            fn accept(&mut self, _: &ExecutionPortMessage) -> Result<(), Self::Error> {
+                Ok(())
+            }
+        }
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../tests/fixtures/contracts/execution-port.valid.json"
+        ))
+        .unwrap();
+        let message = |kind| {
+            serde_json::from_value::<ExecutionPortMessage>(
+                fixture["messages"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .find(|message| message["kind"] == kind)
+                    .unwrap()
+                    .clone(),
+            )
+            .unwrap()
+        };
+        let register = message("worker.register");
+        let ExecutionPortMessage::WorkerRegisterMessage(registration) = &register else {
+            unreachable!()
+        };
+        let cancel = message("job.cancel");
+        let ExecutionPortMessage::JobCancelMessage(cancellation) = &cancel else {
+            unreachable!()
+        };
+        let frame = RemoteTransportAdapter::<Core>::encode(
+            &TypedFrame::new(FrameDirection::ControlPlaneToWorker, cancel.clone()).unwrap(),
+        )
+        .unwrap();
+        let body = serde_json::json!({
+            "schemaVersion": "execution-port.remote-exchange.v2", "frameAccepted": true,
+            "serverTime": "2026-10-15T00:00:00.000Z",
+            "deliveries": [{"deliveryId": cancellation.message_id, "frame": frame}]
+        })
+        .to_string();
+        let success = serde_json::to_string(&WorkerRelayResponse {
+            status: 200,
+            body,
+            failure: None,
+        })
+        .unwrap();
+        let (endpoint, server) = http_relay_fixture(vec![
+            (503, Some(1), String::new()),
+            (429, Some(1), String::new()),
+            (200, None, success),
+        ]);
+        let (worker, device) = UnixStream::pair().unwrap();
+        let relay = thread::spawn(move || {
+            let mut output = device.try_clone().unwrap();
+            for line in BufReader::new(device).lines() {
+                let request = serde_json::from_str::<WorkerRelayRequest>(&line.unwrap()).unwrap();
+                let response = relay_worker_request(
+                    &endpoint,
+                    None,
+                    &DeviceWorkerRelayRequest {
+                        client_node_id: NODE.into(),
+                        worker_id: WORKER_ID.into(),
+                        worker_instance_id: WORKER_INSTANCE.into(),
+                        request,
+                    },
+                );
+                serde_json::to_writer(&mut output, &response).unwrap();
+                output.write_all(b"\n").unwrap();
+                output.flush().unwrap();
+            }
+        });
+        let (mut port, handle) = RemoteWorkerPort::with_io(
+            registration.worker_id.clone(),
+            registration.worker_instance_id.clone(),
+            BufReader::new(worker.try_clone().unwrap()),
+            worker,
+        );
+        let started = Instant::now();
+        for (status, delay) in [(503, 5300), (429, 10300)] {
+            let RemoteWorkerPortError::Network(failure) =
+                port.send(register.clone()).await.unwrap_err()
+            else {
+                panic!("transient HTTP must retry")
+            };
+            assert_eq!(failure.http_status, Some(status));
+            assert_eq!(failure.retry_after_ms, Some(1000));
+            assert!(matches!(
+                port.send(register.clone()).await,
+                Err(RemoteWorkerPortError::Network(_))
+            ));
+            assert!(handle.terminal_error().is_none());
+            tokio::time::sleep(Duration::from_millis(delay)).await;
+        }
+        port.send(register).await.unwrap();
+        assert!(started.elapsed() >= Duration::from_secs(2));
+        assert!(matches!(
+            handle.next_control().unwrap(),
+            Some((_, ExecutionPortMessage::JobCancelMessage(_)))
+        ));
+        drop(port);
+        let requests = server.join().unwrap();
+        assert_eq!(requests.len(), 3);
+        assert_eq!(requests[0], requests[1]);
+        assert_eq!(requests[1], requests[2]);
+        relay.join().unwrap();
+    }
+
     #[test]
     fn process_group_signal_stops_only_the_owned_group() {
         let spawn = || {
@@ -1713,6 +2016,7 @@ mod tests {
                 assert_eq!(request.worker_instance_id, WORKER_INSTANCE);
                 assert_eq!(request.request, expected);
                 let response = serde_json::to_string(&WorkerRelayResponse {
+                    failure: None,
                     status: 202,
                     body: "relayed".into(),
                 })
@@ -2038,6 +2342,68 @@ mod tests {
             .expect("a later occupancy advances the mirror");
         let again = supervisor.stop("wss_ONE", true).expect("second stop");
         assert_eq!(again.state, WORKER_STATE_EXITED);
+    }
+
+    #[test]
+    fn reaping_a_killed_worker_stops_its_surviving_subprocesses() {
+        let bin_root = temp_root("reap-tree");
+        let binary = bin_root.join("winwincode-worker");
+        write_executable_script(&binary, TREE_RUNNING_BODY);
+        let (supervisor, root) = supervisor_with_mirror("reap-tree", &binary, LEASE, 7);
+        let source = root.join("repo");
+        let data = root.join("data");
+        let worker_root = root.join("worker-root");
+        let SpawnOutcome::Started(handle) = supervisor
+            .spawn(spawn_request(
+                "wss_REAP_TREE",
+                WORKER_INSTANCE,
+                &source,
+                &data,
+                &worker_root,
+            ))
+            .unwrap()
+        else {
+            panic!("worker starts")
+        };
+        let _guard = StopOnDrop::watch(&supervisor, "wss_REAP_TREE");
+        wait_for_ready_marker(&data, "wss_REAP_TREE");
+        let child_pid: u32 = fs::read_to_string(data.join("child-pid"))
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+        assert!(process_alive(child_pid));
+        assert!(
+            Command::new("/bin/kill")
+                .args(["-KILL", &handle.pid.to_string()])
+                .status()
+                .unwrap()
+                .success()
+        );
+        let deadline = Instant::now() + Duration::from_secs(3);
+        loop {
+            if !supervisor.reap().unwrap().is_empty() {
+                break;
+            }
+            assert!(Instant::now() < deadline, "killed Worker was not reaped");
+            thread::sleep(STOP_POLL_INTERVAL);
+        }
+        assert!(!matches!(
+            observe_process(child_pid),
+            ProcessObservation::Boot { working: true, .. }
+        ));
+        assert_eq!(
+            process_group_is_empty(ProcessSignalTarget::Group(handle.pid)),
+            Some(true)
+        );
+        assert_ne!(
+            supervisor
+                .worker_process("wss_REAP_TREE")
+                .unwrap()
+                .unwrap()
+                .state,
+            WORKER_STATE_RUNNING
+        );
     }
 
     #[test]
@@ -2811,9 +3177,9 @@ mod tests {
             .expect("mirror advances");
 
         let mut bad_config = test_config(&binary);
-        bad_config.server_origin = "https://127.0.0.1:8443".to_owned();
+        bad_config.server_origin = "http://server.example:8443".to_owned();
         let error = SessionSupervisor::new(bad_config, DeviceStore::open(&root).expect("open"))
-            .expect_err("https origin must refuse");
+            .expect_err("remote cleartext origin must refuse");
         assert!(error.to_string().contains("HTTP"), "{error}");
 
         drop(SessionSupervisor::new(test_config(&binary), store).expect("builds"));

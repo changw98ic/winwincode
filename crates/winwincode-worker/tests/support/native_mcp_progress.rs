@@ -521,6 +521,7 @@ pub(super) async fn run() {
             serde_json::to_writer(
                 &mut output,
                 &WorkerRelayResponse {
+                    failure: None,
                     status: 200,
                     body: String::from_utf8(body).unwrap(),
                 },

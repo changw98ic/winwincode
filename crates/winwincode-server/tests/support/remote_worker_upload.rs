@@ -294,16 +294,19 @@ async fn scenario(chunks: usize) {
         .unwrap(),
     ));
     let metrics = Arc::new(Mutex::new(Metrics::default()));
-    let exchange = Arc::new(ProductionRemoteWorkerExchange::new(
-        &root,
-        serde_json::from_value(super::repository_scope_json(1)).unwrap(),
-        scheduler,
-        ArtifactIngress {
-            store: store.clone(),
-            metrics: metrics.clone(),
-            receipts: HashMap::new(),
-        },
-    ));
+    let exchange = Arc::new(
+        ProductionRemoteWorkerExchange::new(
+            &root,
+            serde_json::from_value(super::repository_scope_json(1)).unwrap(),
+            scheduler,
+            ArtifactIngress {
+                store: store.clone(),
+                metrics: metrics.clone(),
+                receipts: HashMap::new(),
+            },
+        )
+        .with_clock(Arc::new(super::FixedClock(1_800_000_000_000, now.clone()))),
+    );
     let (worker_wire, server_wire) = std::os::unix::net::UnixStream::pair().unwrap();
     let worker_input = worker_wire.try_clone().unwrap();
     let worker_id = config.worker_id.clone();
@@ -372,6 +375,7 @@ async fn scenario(chunks: usize) {
                 let response = winwincode_client_port::worker_relay::WorkerRelayResponse {
                     status: 200,
                     body: String::from_utf8(response).unwrap(),
+                    failure: None,
                 };
                 serde_json::to_writer(&mut output, &response).unwrap();
                 output.write_all(b"\n").unwrap();

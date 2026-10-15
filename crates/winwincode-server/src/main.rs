@@ -83,13 +83,15 @@ fn load_production_startup() -> Result<ProductionStartup, Box<dyn std::error::Er
         Ok(mode) if mode == "local-open" => true,
         Ok(mode) if mode == "password" => false,
         Ok(_) => return Err("WWC_SERVER_AUTH_MODE must be local-open or password".into()),
-        Err(env::VarError::NotPresent) => config.bind_address().ip().is_loopback(),
+        Err(env::VarError::NotPresent) => !config.remote(),
         Err(error) => return Err(error.into()),
     };
+    if local_open && config.remote() {
+        return Err("local-open is restricted to a local HTTP loopback entry".into());
+    }
     let auth_bootstrap = match env::var("WWC_SERVER_BOOTSTRAP_PROOF") {
         Ok(proof) if !proof.is_empty() => Some(AuthSessionBootstrap::new(proof)?),
-        _ if local_open => None,
-        _ => return Err("WWC_SERVER_BOOTSTRAP_PROOF is required for password mode".into()),
+        _ => None,
     };
     let auth_config = AuthSessionConfig::new(
         optional_duration_seconds("WWC_SERVER_BOOTSTRAP_WINDOW_SECONDS", 10 * 60)?,
@@ -260,6 +262,17 @@ fn resolved_owner(
 
 async fn run() -> Result<(), Box<dyn std::error::Error>> {
     let startup = load_production_startup()?;
+    let (sessions, owner) = open_accounts_authority(
+        &startup.config,
+        &startup.repository_scope,
+        startup.auth_bootstrap.clone(),
+        startup.auth_config,
+    )?;
+    if owner.is_none() {
+        winwincode_server::wait_for_owner_initialization(startup.config.clone(), sessions).await?;
+    } else {
+        drop(sessions);
+    }
     let composition = open_production_application(startup)?;
     Box::pin(run_composed_server(composition)).await
 }
@@ -540,6 +553,19 @@ fn environment_config() -> Result<ServerConfig, Box<dyn std::error::Error>> {
     let bind_address: SocketAddr =
         required_environment_or("WWC_SERVER_BIND", "127.0.0.1:8443")?.parse()?;
     let public_url = required_environment_or("WWC_SERVER_PUBLIC_URL", "http://127.0.0.1:8443")?;
+    let advertised_endpoint: http::Uri = public_url.parse()?;
+    let public_host = advertised_endpoint
+        .host()
+        .ok_or("WWC_SERVER_PUBLIC_URL requires a host")?;
+    let local_public_host = public_host == "localhost"
+        || public_host
+            .trim_start_matches('[')
+            .trim_end_matches(']')
+            .parse::<std::net::IpAddr>()
+            .is_ok_and(|host| host.is_loopback());
+    if advertised_endpoint.scheme_str() != Some("https") && !local_public_host {
+        return Err("a non-loopback WWC_SERVER_PUBLIC_URL requires HTTPS".into());
+    }
     let data_directory = match env::var_os("WWC_SERVER_DATA_DIRECTORY") {
         Some(directory) => PathBuf::from(directory),
         None => match env::var_os("WINWINCODE_HOME") {
@@ -556,13 +582,36 @@ fn environment_config() -> Result<ServerConfig, Box<dyn std::error::Error>> {
     .filter(|origin| !origin.is_empty())
     .map(str::to_owned)
     .collect();
-    let config = ServerConfig::new(
+    let mut config = ServerConfig::new(
         bind_address,
         public_url,
         allowed_origins,
         data_directory,
         Duration::from_secs(30),
     )?;
+    match (
+        env::var_os("WWC_SERVER_TLS_CERTIFICATE"),
+        env::var_os("WWC_SERVER_TLS_PRIVATE_KEY"),
+    ) {
+        (Some(certificate), Some(private_key)) => {
+            config = config.with_tls_pem(certificate.into(), private_key.into())?;
+        }
+        (None, None) => {}
+        _ => {
+            return Err(
+                "both WWC_SERVER_TLS_CERTIFICATE and WWC_SERVER_TLS_PRIVATE_KEY are required"
+                    .into(),
+            );
+        }
+    }
+    match env::var("WWC_SERVER_TLS_PROXY") {
+        Ok(value) if value == "loopback" => {
+            config = config.with_loopback_tls_proxy()?;
+        }
+        Ok(_) => return Err("WWC_SERVER_TLS_PROXY must be loopback".into()),
+        Err(env::VarError::NotPresent) => {}
+        Err(error) => return Err(error.into()),
+    }
     match env::var("WWC_SERVER_PREVIEW_PUBLIC_URL") {
         Ok(origin) if !origin.is_empty() => Ok(config.with_preview_public_url(origin)?),
         Ok(_) | Err(env::VarError::NotPresent) => Ok(config),

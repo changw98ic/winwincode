@@ -34,6 +34,7 @@ async fn worker_retains_the_status_forwarded_by_device() {
         (400, ErrorKind::RequestInvalid),
         (401, ErrorKind::Authentication),
         (403, ErrorKind::Authorization),
+        (404, ErrorKind::RequestInvalid),
         (413, ErrorKind::RequestInvalid),
         (429, ErrorKind::RateLimited),
         (503, ErrorKind::ServerTransient),
@@ -43,18 +44,19 @@ async fn worker_retains_the_status_forwarded_by_device() {
             unreachable!()
         };
         let mut response = serde_json::to_vec(&WorkerRelayResponse {
+            failure: None,
             status,
             body: "SYNTHETIC_PRIVATE_RESPONSE".into(),
         })
         .unwrap();
         response.push(b'\n');
-        let (mut port, _) = RemoteWorkerPort::with_io(
+        let (mut port, handle) = RemoteWorkerPort::with_io(
             event.lease.worker_id.clone(),
             event.lease.worker_instance_id.clone(),
             Cursor::new(response),
             Vec::new(),
         );
-        let error = port.send(message).await.unwrap_err();
+        let error = port.send(message.clone()).await.unwrap_err();
         let failure = match error {
             RemoteWorkerPortError::Network(failure)
             | RemoteWorkerPortError::NetworkExhausted(failure) => failure,
@@ -65,6 +67,11 @@ async fn worker_retains_the_status_forwarded_by_device() {
         assert_eq!(failure.acceptance, Acceptance::ResponseReceived);
         assert_eq!(failure.phase, Phase::ResponseHeaders);
         assert!(!failure.to_string().contains("SYNTHETIC_PRIVATE"));
+        if !failure.retryable() {
+            assert_eq!(error, RemoteWorkerPortError::NetworkExhausted(failure));
+            assert_eq!(handle.terminal_error(), Some(error));
+            assert_eq!(port.send(message).await, Err(error));
+        }
     }
 }
 

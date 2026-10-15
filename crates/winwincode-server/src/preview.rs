@@ -148,6 +148,18 @@ impl PreviewApplication {
             .is_some_and(|host| host.eq_ignore_ascii_case(&self.authority))
     }
 
+    pub(crate) fn disconnect_device(&self, node: &str) {
+        if let Ok(mut state) = self.lock_broker() {
+            state.connections.remove(node);
+            state
+                .accesses
+                .retain(|_, access| access.client_node_id != node);
+            state
+                .pending
+                .retain(|_, request| request.client_node_id != node);
+        }
+    }
+
     pub(crate) async fn serve_tunnel(&self, client_node_id: String, mut socket: WebSocket) {
         let registration = tokio::time::timeout(REGISTER_TIMEOUT, socket.next()).await;
         let Ok(Some(Ok(Message::Text(text)))) = registration else {
@@ -172,8 +184,13 @@ impl PreviewApplication {
         };
         let (outbound, mut requests) = mpsc::channel(MAX_PENDING_REQUESTS);
         let generation = self.register_connection(&client_node_id, sources, outbound);
+        let mut authority_check = tokio::time::interval(Duration::from_millis(250));
         loop {
             tokio::select! {
+                _=authority_check.tick()=> {
+                    let active=SqliteStorage::open(&self.data_directory).ok().and_then(|mut storage|storage.client_node_registry().ok().and_then(|registry|registry.snapshot(&client_node_id).ok().flatten())).is_some_and(|node|node.presence_state!=winwincode_storage::ClientPresenceState::Revoked);
+                    if !active {break;}
+                }
                 request = requests.recv() => {
                     let Some(request) = request else { break };
                     let Ok(text) = serde_json::to_string(&request) else { break };

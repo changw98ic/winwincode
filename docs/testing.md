@@ -44,6 +44,10 @@
 
 `pnpm verify` 包含上述确定性链路验证。真实编程任务验收应另行使用正式 Client、Device 和真实 Provider 执行，并保存实际模型、调用事实、候选改动和独立验证证据。Provider 配置步骤见 [部署指南](operations/deploy.md)。
 
+### 发布报告中的进程证据
+
+production API 报告保存完整的 `artifacts.sourceSeal` 七字段和 `deviceWorkerLifecycle`。后者记录初始 Worker 被终止、新 Worker 完成任务，以及另一条活跃 Worker 跨 Server 重启存活后完成独立任务。受管 Worker 在任务完成后正常退出。进程身份同时绑定 PID 和启动身份。执行身份通过原始 dispatch authority 关联 Worker、Worker instance、ProductSession 和执行任务。启动进程的 WorkerSession 与执行任务的 canonical WorkerSession 分别保存。两次完成必须属于不同执行任务和 ProductSession。字段与发布门禁见 [发布指南](operations/release.md#构建和验证流程)。这些本机 fixture 检查不能单独证明远程两机部署。
+
 ## 文档验证
 
 `pnpm verify:docs` 依次运行仓库格式检查、`tests/docs-check.test.mjs` 和 `scripts/check-docs.mjs`。检查器测试使用临时目录。这个命令不启动 Client、Rust、真实 Provider 或浏览器构建。
@@ -155,6 +159,63 @@ node --experimental-test-module-mocks --test --test-concurrency=1 tests/<name>.t
 ```
 
 定向验证通过后，再由主线门禁覆盖完整组合。
+
+## 远程 Device 验证
+
+远程验证覆盖绑定、身份恢复、HTTPS/WSS、取消、断线重连、吊销和候选应用恢复。先准备相同 `CARGO_TARGET_DIR` 下的内核辅助进程，再选择相关检查：
+
+```sh
+cargo test --all-features --locked -p winwincode-device-client --lib remote_auth::tests::
+cargo test --all-features --locked -p winwincode-device-client --lib http::
+cargo test --all-features --locked -p winwincode-device-client --lib preview::tests::authentication_refreshes_one_challenge_and_revocation_stops
+cargo test --all-features --locked -p winwincode-server --lib device_auth::tests::
+cargo test --all-features --locked -p winwincode-server --test device_auth
+cargo test --all-features --locked -p winwincode-storage --lib device_auth::tests::
+cargo test --all-features --locked -p winwincode-device-client --test apply_engine
+```
+
+Device 的绑定测试使用本机 HTTP fixture 丢弃成功响应。重开数据目录后，它核对原请求、原私钥、原意图和原 Server URL。TLS 测试运行真实 TLS listener，分别检查显式 CA 成功、未知 CA 拒绝和主机名不匹配拒绝。Server 和 Storage 测试核对挑战单次消费、绑定事务原子性、幂等回执和永久吊销。这些检查使用 fixture，不能代替真实两机证据。
+
+仅启用 `test-support` 时，`WWC_DEVICE_TEST_EXIT_BEFORE_BIND_RECEIPT_SAVE=1` 会让 `device bind` 在成功响应校验完成、保存本地回执之前以状态 `86` 退出。随后移除该变量，使用相同数据目录重跑绑定。进程级验收须核对 Server 已有一个绑定、本地仍保存原 pending 请求、恢复后返回原回执。这验证客户端收成功响应后崩溃的恢复。
+
+真实 TCP 丢响应使用隔离验收 Server 的 `test-support` 构建。启动时设置 `WWC_TEST_DROP_FIRST_DEVICE_BIND_RESPONSE=1`。该进程会在首次成功绑定提交后截断响应流，并保留数据库中的原回执。stderr 输出 `winwincode-server: test-support dropped committed device binding response`。同一进程只注入一次。`tests/device_auth.rs::committed_binding_survives_real_response_transport_failure` 核对真实连接失败、原回执恢复和唯一绑定。该网络故障与 Device 的 `exit(86)` 是两个独立故障点。
+
+候选应用的 `WWC_TEST_APPLICATION_CRASH_POINT=after_started` 和 `after_repository_commit` 也只用于 `test-support`。前者验证 journal 已落盘而仓库未写入时的恢复。后者验证仓库提交已产生而完成回执尚未保存时的恢复。报告必须同时保存审批、基线、应用 ID、提交尾注和当前 epoch 的 reconciled 结果。
+
+真实两机验收须使用独立的 Server 主机和 Device 主机。验收至少保存以下证据：
+
+- 两端精确源码版本、二进制摘要、对外 HTTPS 地址与证书校验结果。
+- 首次绑定与响应丢失后的同一绑定回执、Server 公钥记录和 Device 稳定请求 ID。
+- 已绑定 Device 重启后的签名交换与任务执行结果。
+- 在线取消、断网后租约到期、重连后的旧执行围栏和 Worker 真实退出身份。
+- 常规关闭与突发 `SIGKILL` 分别记录主进程、后代和工具独立进程组的退出。完整退出结论同时核对这些身份。
+- `worker-crash-process-closure` 记录 Worker 崩溃后的受管工具进程关闭。`device.toolTty` 选择本次实际验证的 pipe 或 PTY 变体。
+- 在线吊销与离线吊销后的停机、明确失败原因和恢复连接后的拒绝结果。
+- 候选应用前后崩溃的 journal、Git 事实和当前授权下的恢复裁决。
+
+两机 runner 是 `scripts/run-remote-device-fault-acceptance.mjs`。两端需要 Node.js 24、Git、相同源码快照和已构建的产品程序。Server 主机运行该脚本，并通过已配置 host key 的 SSH 访问 Device。Device 使用独立的验收目录和验收仓库。脚本会启动和终止验收进程，并写入该仓库。
+
+先生成待执行计划：
+
+```sh
+node scripts/run-remote-device-fault-acceptance.mjs --plan --output /private/remote-acceptance-plan.json
+```
+
+计划报告保留所有项目为 pending，并以状态 `2` 退出。正式执行使用权限为 `0600` 的普通 JSON 配置文件：
+
+```sh
+node scripts/run-remote-device-fault-acceptance.mjs --config /private/remote-acceptance.json --output /private/remote-acceptance-report.json
+```
+
+配置的 `schemaVersion` 为 `1`。`server` 指定 HTTPS `url`、浏览器 `origin`、`tlsMode`、Owner `username`、密码环境变量名 `passwordEnvironment`、本端只读 `database` 路径、实际运行的 Server `binary` 绝对路径与 `pid`，并可指定 `caFile`。真实 TCP 丢响应还需要 `logFile`，以核对本次新增的截断响应 marker。`tlsMode` 使用 `direct` 或 `loopback-proxy`；后者还需要回环 HTTP `backendUrl`。`device` 指定 `sshHost`、源码目录 `checkout`、程序目录 `binaryDirectory` 和新建的、位于源码目录外的独立验收目录 `directory`。
+
+`binaryDirectory` 和 Server 程序所在目录都必须包含四个产品程序及 `winwincode-api-production.source.json`。两端通过 `verifyApiProductionSourceSeal` 将完整制品与当前源码绑定。`device.toolTty` 可设为 `true` 或 `false`；一次运行只声明实际执行的 PTY 或 pipe 变体。
+
+故障钩子需要启用 `test-support` 的 Server 与 Device 构建，并设置配置中的 `testSupport: true`。离线场景还需要 `networkFault.disconnect`、`networkFault.reconnect` 命令参数数组和 `preservesSsh: true`。这些命令应只阻断 Device 到验收 Server 的业务连接，并保留 SSH。`maxOfflineWaitMillis` 默认是 `120000`。实际租约期限超出等待预算时，离线场景保持 pending。完整校验规则由脚本的 `validateRemoteFaultConfiguration` 维护。
+
+runner 核对两端操作系统主机身份、源码 commit、API 来源摘要、runner/fixture 文件摘要，以及本端实际 Server 进程映射。报告还保存十个执行依赖的源码摘要和 `acceptanceLogicSha256`。报告的模型证据标为 `fixture`。每个场景独立记录 passed、failed 或 pending。缺少网络注入或未实际命中故障钩子的场景保留 pending；整体报告为 incomplete，并以状态 `2` 退出。实际运行失败返回 `1`，所有必需场景通过才返回 `0`。
+
+实际运行前，各项状态应为 pending。当前本机 fixture 和单元测试尚未证明真实两机验收通过。涉及编程任务质量时，还必须按下一节使用真实 Provider。
 
 ## 真实任务与 fixture
 

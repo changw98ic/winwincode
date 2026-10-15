@@ -128,6 +128,15 @@ impl std::error::Error for ExchangeTransportError {}
 
 pub trait ExchangeTransport: Send + Sync {
     fn exchange(&self, request_bytes: &[u8]) -> Result<Vec<u8>, ExchangeTransportError>;
+    fn worker_exchange(&self, _request_bytes: &[u8]) -> Result<Vec<u8>, ExchangeTransportError> {
+        Err(ExchangeTransportError::from_network(
+            winwincode_network::NetworkFailure::new(
+                winwincode_network::ErrorKind::RequestInvalid,
+                winwincode_network::Acceptance::NotSent,
+                winwincode_network::Phase::Connect,
+            ),
+        ))
+    }
     fn exchange_authorized(
         &self,
         request_bytes: &[u8],
@@ -468,6 +477,55 @@ impl DeviceDaemon {
         Ok(())
     }
 
+    fn stop_occupancy_workers(&self, occupancy_lease_id: &str) -> Result<u64, DaemonError> {
+        if let Some(supervisor) = &self.worker_supervisor {
+            let outcomes = supervisor
+                .stop_lease_workers(occupancy_lease_id)
+                .map_err(|error| DaemonError::Protocol(error.to_string()))?;
+            if let Some(error) = outcomes.iter().find_map(|outcome| outcome.error.as_ref()) {
+                return Err(DaemonError::Protocol(error.clone()));
+            }
+            return Ok(outcomes.iter().filter(|outcome| outcome.stopped).count() as u64);
+        }
+        Ok(self
+            .lease_worker_controller
+            .as_ref()
+            .map_or(0, |controller| {
+                controller.stop_lease_workers(occupancy_lease_id) as u64
+            }))
+    }
+
+    fn stop_fenced_workers(&self, occupancy_lease_id: &str, token: u64) -> Result<(), DaemonError> {
+        let Some(supervisor) = &self.worker_supervisor else {
+            return Ok(());
+        };
+        for worker in supervisor
+            .worker_processes()
+            .map_err(|error| DaemonError::Protocol(error.to_string()))?
+        {
+            if worker.state != crate::supervisor::WORKER_STATE_RUNNING {
+                continue;
+            }
+            let current = self
+                .process_closure_for_record(&worker)
+                .is_some_and(|closure| {
+                    worker.occupancy_lease_id == occupancy_lease_id
+                        && closure.occupancy_fencing_token == token
+                });
+            if !current {
+                supervisor
+                    .stop_recovered(
+                        &worker.worker_session_id,
+                        &worker.worker_id,
+                        &worker.occupancy_lease_id,
+                        true,
+                    )
+                    .map_err(|error| DaemonError::Protocol(error.to_string()))?;
+            }
+        }
+        Ok(())
+    }
+
     #[must_use]
     pub fn store_mut(&mut self) -> &mut DeviceStore {
         &mut self.store
@@ -716,7 +774,7 @@ impl DeviceDaemon {
                 } => ready_in,
                 TickOutcome::Exchanged { .. } => Duration::ZERO,
             };
-            Self::sleep_interruptibly(ready_in, shutdown);
+            Self::sleep_interruptibly(ready_in.min(Duration::from_millis(25)), shutdown);
         }
         Ok(self.status.clone())
     }
@@ -726,6 +784,23 @@ impl DeviceDaemon {
     }
 
     fn tick_authorized(
+        &mut self,
+        now: Instant,
+        can_start: &(dyn Fn() -> bool + Sync),
+    ) -> Result<TickOutcome, DaemonError> {
+        if let Some(supervisor) = &self.worker_supervisor {
+            supervisor
+                .reap()
+                .map_err(|error| DaemonError::Protocol(error.to_string()))?;
+        }
+        let result = self.exchange_tick(now, can_start);
+        if matches!(&result, Err(DaemonError::Network(_))) {
+            self.shutdown_workers()?;
+        }
+        result
+    }
+
+    fn exchange_tick(
         &mut self,
         now: Instant,
         can_start: &(dyn Fn() -> bool + Sync),
@@ -1224,12 +1299,46 @@ impl DeviceDaemon {
                 SequenceVerdict::Accept
             ) && let ServerToClientMessage::CandidateApply(payload) = &envelope.message
             {
-                if envelope.client_node_id != self.node_id
-                    || envelope.client_instance_id != self.instance_id
-                {
+                if envelope.client_node_id != self.node_id {
                     return Err(DownlinkFailure::Retriable(
-                        "candidate command belongs to another device instance".into(),
+                        "candidate command belongs to another device".into(),
                     ));
+                }
+                let current = self.occupancy_mirror.as_ref();
+                let stamp = &payload.occupancy;
+                let current_authority = current.is_some_and(|mirror| {
+                    mirror.holder_user_id.as_deref() == Some(payload.requester_user_id.as_str())
+                        && mirror.mirror_revision == stamp.command.expected_revision
+                }) && matches!(
+                    self.fencing_guard().authorize_command(
+                        FencedCommandKind::CandidateApply,
+                        &stamp.occupancy_lease_id,
+                        stamp.occupancy_fencing_token
+                    ),
+                    FencingVerdict::Authorized(_)
+                );
+                if envelope.client_instance_id != self.instance_id || !current_authority {
+                    let current_revision = current.map(|mirror| mirror.mirror_revision);
+                    self.enqueue(command_ack_message(
+                        ClientControlMessageKind::CandidateApply,
+                        &envelope.message_id,
+                        CommandAckStatus::RejectedStaleFencingToken,
+                        current_revision,
+                        Some(ClientControlError {
+                            code: if envelope.client_instance_id == self.instance_id {
+                                ClientControlErrorCode::StaleFencingToken
+                            } else {
+                                ClientControlErrorCode::DeviceInstanceChanged
+                            },
+                            message: "the candidate command has obsolete execution authority"
+                                .into(),
+                            retryable: false,
+                        }),
+                    ))
+                    .map_err(DownlinkFailure::Fatal)?;
+                    self.advance_downlink_cursor(&envelope)?;
+                    accepted += 1;
+                    continue;
                 }
                 self.apply_candidate_command(payload)
                     .map_err(DownlinkFailure::Fatal)?;
@@ -1494,6 +1603,10 @@ impl DeviceDaemon {
             crate::apply_engine::apply_candidate_to_branch(
                 self,
                 &crate::apply_engine::CandidateApplyRequest {
+                    application_id: payload.application_id.clone(),
+                    approval_id: payload.approval_id.clone(),
+                    candidate_digest: payload.candidate_digest.clone(),
+                    reconciled_retry: payload.reconciled_retry,
                     repository_binding_id: payload.repository_binding_id.clone(),
                     candidate_ref: payload.candidate_ref.clone(),
                     target_branch: payload.target_branch.clone(),
@@ -1504,6 +1617,18 @@ impl DeviceDaemon {
                 },
                 &root,
             )
+            .map(|_| ())
+            .or_else(|error| {
+                if matches!(
+                    error.kind(),
+                    crate::apply_engine::CandidateApplyErrorKind::ReconciliationRequired
+                        | crate::apply_engine::CandidateApplyErrorKind::OutcomeUnknown
+                ) {
+                    Ok(())
+                } else {
+                    Err(error)
+                }
+            })
             .map_err(|error| DaemonError::Protocol(error.to_string()))?;
         }
         Ok(())
@@ -1650,6 +1775,8 @@ impl DeviceDaemon {
     fn ack_occupancy_mirror(&mut self, record: &OccupancyMirrorRecord) -> Result<(), DaemonError> {
         self.occupancy_mirror = Some(record.clone());
         self.enqueue(occupancy_ack_message(record))?;
+        crate::apply_engine::report_recovered_applications(self)
+            .map_err(|error| DaemonError::Protocol(error.to_string()))?;
         self.status.occupancy_offers_acked += 1;
         Ok(())
     }
@@ -1754,16 +1881,15 @@ impl DeviceDaemon {
         let status = match outcome {
             OccupancyReleaseIntentOutcome::Recorded(_) => {
                 self.status.occupancy_release_intents_recorded += 1;
-                if payload.mode == ClientOccupancyReleaseMode::CancelTasksAndRelease
-                    && let Some(controller) = self.lease_worker_controller.as_ref()
-                {
-                    stopped = u64::try_from(controller.stop_lease_workers(&mirror_lease))
-                        .unwrap_or(u64::MAX);
-                }
                 CommandAckStatus::Accepted
             }
             OccupancyReleaseIntentOutcome::Duplicate(_) => CommandAckStatus::Duplicate,
         };
+        if payload.mode == ClientOccupancyReleaseMode::CancelTasksAndRelease
+            && (status == CommandAckStatus::Accepted || self.worker_supervisor.is_some())
+        {
+            stopped = self.stop_occupancy_workers(&mirror_lease)?;
+        }
         self.status.workers_stopped_on_release += stopped;
         ack(self, status, None, mirror_revision)
     }
@@ -1797,6 +1923,7 @@ impl DeviceDaemon {
                 .occupancy_mirror
                 .as_ref()
                 .map_or(0, |mirror| mirror.mirror_revision);
+            self.stop_fenced_workers(&stamp.occupancy_lease_id, stamp.occupancy_fencing_token)?;
             return ack(self, CommandAckStatus::Duplicate, None, revision);
         }
         let current_revision = self
@@ -1834,6 +1961,7 @@ impl DeviceDaemon {
             Ok(OccupancyMirrorAdvance::Advanced(record)) => {
                 self.occupancy_mirror = Some(record.clone());
                 self.status.occupancy_force_fences_applied += 1;
+                self.stop_fenced_workers(&stamp.occupancy_lease_id, stamp.occupancy_fencing_token)?;
                 ack(
                     self,
                     CommandAckStatus::Accepted,

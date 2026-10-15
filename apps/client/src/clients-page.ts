@@ -45,6 +45,8 @@ interface ClientCardRefs {
   readonly notice: HTMLElement
   readonly occupancy: ClientOccupancyControls | null
   readonly select: HTMLButtonElement
+  readonly revoke: HTMLButtonElement
+  readonly revokeConfirmation: HTMLElement
 }
 
 function element<K extends keyof HTMLElementTagNameMap>(
@@ -91,6 +93,15 @@ export function mountClientsPage(options: ClientsPageOptions): ClientsPage {
   const status = element(document, 'p', 'wwc-clients-status')
   const error = element(document, 'p', 'wwc-clients-error')
   const form = element(document, 'form', 'wwc-clients-add-form')
+  const pairing = element(document, 'section', 'wwc-clients-pairing')
+  const pairingHeading = element(document, 'h3', 'wwc-clients-add-heading')
+  const pairingHint = element(document, 'p', 'wwc-clients-pairing-hint')
+  const pair = element(document, 'button', 'wwc-clients-pair')
+  const pairingDetails = element(document, 'div', 'wwc-clients-pairing-details')
+  const pairingExpiry = element(document, 'p', 'wwc-clients-pairing-expiry')
+  const pairingCommand = element(document, 'textarea', 'wwc-clients-control wwc-clients-pairing-command')
+  const managementStatus = element(document, 'p', 'wwc-clients-management-status')
+  const refreshDevices = element(document, 'button', 'wwc-clients-refresh')
   const formHeading = element(document, 'p', 'wwc-clients-add-heading')
   const idLabel = element(document, 'label', 'wwc-clients-label')
   const idInput = element(document, 'input', 'wwc-clients-control wwc-clients-id-input')
@@ -104,6 +115,7 @@ export function mountClientsPage(options: ClientsPageOptions): ClientsPage {
   let clearedAfterSuccess = false
   let selectedClientId: string | null = null
   let latestDevices: readonly ControlPlaneDeviceSummary[] = []
+  let latestSnapshot = options.model.state
 
   region.setAttribute('aria-label', '执行设备')
   region.hidden = true
@@ -114,6 +126,24 @@ export function mountClientsPage(options: ClientsPageOptions): ClientsPage {
   error.setAttribute('role', 'alert')
   error.hidden = true
   error.id = 'wwc-clients-error'
+
+  pairingHeading.textContent = '配对远程执行设备'
+  pairingHint.textContent = '由 Owner 生成配对令牌。在执行任务的电脑上运行绑定命令，再启动 Device。'
+  pair.type = 'button'
+  pair.textContent = '生成配对令牌'
+  pair.addEventListener('click', () => { void options.model.createDevicePairing() })
+  pairingCommand.readOnly = true
+  pairingCommand.rows = 5
+  pairingCommand.setAttribute('aria-label', '远程设备绑定命令')
+  const commandHint = element(document, 'p', 'wwc-clients-pairing-command-hint')
+  commandHint.textContent = '将 /ABS/ca.pem 替换为该电脑上的 Server CA 证书绝对路径。令牌仅用于初次绑定。'
+  pairingDetails.append(pairingExpiry, pairingCommand, commandHint)
+  pairingDetails.hidden = true
+  managementStatus.setAttribute('role', 'status')
+  refreshDevices.type = 'button'
+  refreshDevices.textContent = '刷新设备列表'
+  refreshDevices.addEventListener('click', () => { void options.model.refresh() })
+  pairing.append(pairingHeading, pairingHint, pair, pairingDetails, managementStatus, refreshDevices)
 
   formHeading.textContent = '接入执行设备'
   formHeading.id = 'wwc-clients-add-heading'
@@ -150,7 +180,7 @@ export function mountClientsPage(options: ClientsPageOptions): ClientsPage {
   empty.textContent = '还没有执行设备。先在上方连接你的设备。'
   empty.hidden = true
 
-  region.append(heading, form, status, error, empty, list)
+  region.append(heading, pairing, form, status, error, empty, list)
   options.root.replaceChildren(region)
 
   const cardCollection = mountKeyedCollection<ControlPlaneDeviceSummary, string, HTMLElement>({
@@ -178,6 +208,7 @@ export function mountClientsPage(options: ClientsPageOptions): ClientsPage {
       const select = element(document, 'button', 'wwc-clients-card-select')
       select.type = 'button'
       select.textContent = '仓库'
+      select.hidden = options.onDeviceSelect === undefined
       select.setAttribute('aria-pressed', 'false')
       select.addEventListener('click', () => {
         selectedClientId = selectedClientId === device.clientId ? null : device.clientId
@@ -185,10 +216,37 @@ export function mountClientsPage(options: ClientsPageOptions): ClientsPage {
         options.onDeviceSelect?.(selectedClientId)
       })
       actions.append(select)
+      const revoke = element(document, 'button', 'wwc-clients-card-revoke')
+      revoke.type = 'button'
+      revoke.textContent = '永久吊销此设备'
+      const revokeConfirmation = element(document, 'div', 'wwc-clients-revoke-confirmation')
+      revokeConfirmation.hidden = true
+      const revokeHint = element(document, 'p', 'wwc-clients-revoke-hint')
+      revokeHint.textContent = '吊销后，该设备无法继续连接 Server。重新接入需要 Owner 生成新的配对令牌。'
+      const confirmRevoke = element(document, 'button', 'wwc-clients-confirm-revoke')
+      confirmRevoke.type = 'button'
+      confirmRevoke.textContent = '确认永久吊销'
+      const cancelRevoke = element(document, 'button', 'wwc-clients-cancel-revoke')
+      cancelRevoke.type = 'button'
+      cancelRevoke.textContent = '取消'
+      let pendingRevokeNodeId: string | null = null
+      revoke.addEventListener('click', () => {
+        pendingRevokeNodeId = latestDevices.find(item => item.clientId === device.clientId)?.clientNodeId ?? null
+        revokeConfirmation.hidden = pendingRevokeNodeId === null
+      })
+      cancelRevoke.addEventListener('click', () => { revokeConfirmation.hidden = true })
+      confirmRevoke.addEventListener('click', () => {
+        const current = latestDevices.find(item => item.clientId === device.clientId)
+        revokeConfirmation.hidden = true
+        if (current?.clientNodeId !== pendingRevokeNodeId || pendingRevokeNodeId === null) return
+        void options.model.revokeDevice(pendingRevokeNodeId)
+      })
+      revokeConfirmation.append(revokeHint, confirmRevoke, cancelRevoke)
+      actions.append(revoke, revokeConfirmation)
       card.append(name, presence, stateText, capacity, heartbeat, version, actions, notice)
       const refs: ClientCardRefs = {
         card, clientId: device.clientId, name, presence, stateText,
-        capacity, heartbeat, version, actions, notice, occupancy, select,
+        capacity, heartbeat, version, actions, notice, occupancy, select, revoke, revokeConfirmation,
       }
       cards.set(card, refs)
       updateCard(refs, device)
@@ -214,7 +272,20 @@ export function mountClientsPage(options: ClientsPageOptions): ClientsPage {
     refs.capacity.textContent = `容量 ${device.capacityUsed} / ${device.capacityTotal}`
     refs.heartbeat.textContent = relativeHeartbeatText(device.lastHeartbeatAt, now())
     refs.version.textContent = `版本 ${device.version}`
-    refs.occupancy?.update(device)
+    const revoked = device.clientNodeId !== undefined
+      && latestSnapshot.revokedNodeIds.includes(device.clientNodeId)
+    refs.occupancy?.update(revoked ? { ...device, presence: 'locked' } : device)
+    refs.select.disabled = revoked
+    refs.revoke.hidden = device.clientNodeId === undefined
+    refs.revoke.disabled = latestSnapshot.revokingNodeId !== null || revoked
+    refs.revoke.textContent = revoked ? '已永久吊销' : '永久吊销此设备'
+    if (revoked) {
+      refs.revokeConfirmation.hidden = true
+      refs.stateText.textContent = '设备已永久吊销'
+      refs.presence.textContent = '已吊销'
+      refs.presence.dataset.tone = 'danger'
+      refs.card.setAttribute('aria-label', `${device.displayName}: 设备已永久吊销`)
+    }
   }
 
   function applySelection(): void {
@@ -240,6 +311,18 @@ export function mountClientsPage(options: ClientsPageOptions): ClientsPage {
 
   function render(snapshot: ClientsViewModelState): void {
     if (closed) return
+    latestSnapshot = snapshot
+    pair.disabled = snapshot.pairingStatus === 'creating'
+    pair.textContent = snapshot.pairingStatus === 'creating' ? '正在生成…' : '生成配对令牌'
+    pairingDetails.hidden = snapshot.pairing === null
+    pairingExpiry.textContent = snapshot.pairing === null ? ''
+      : `令牌有效期至 ${new Date(snapshot.pairing.expiresAt).toLocaleString('zh-CN')}`
+    const quote = (value: string) => `'${value.replace(/'/gu, `'\\''`)}'`
+    pairingCommand.value = snapshot.pairing === null ? ''
+      : `WWC_DEVICE_PAIRING_TOKEN=${quote(snapshot.pairing.pairingToken)} wwc device bind --server-url ${quote(options.model.serverUrl ?? 'https://HOST')} --ca-file /ABS/ca.pem\nwwc device serve`
+    managementStatus.textContent = snapshot.managementMessage
+    managementStatus.hidden = snapshot.managementMessage.length === 0
+    refreshDevices.disabled = snapshot.devicesStatus === 'loading'
     const busy = snapshot.status === 'submitting'
     if (snapshot.status === 'succeeded' && !clearedAfterSuccess) {
       clearedAfterSuccess = true
@@ -326,6 +409,7 @@ export function mountClientsPage(options: ClientsPageOptions): ClientsPage {
       cardCollection.close()
       idInput.value = ''
       codeInput.value = ''
+      pairingCommand.value = ''
       form.removeEventListener('submit', onConnect)
       idInput.removeEventListener('input', onIdEdit)
       codeInput.removeEventListener('input', onCodeEdit)

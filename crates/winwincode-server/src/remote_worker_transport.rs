@@ -3,7 +3,7 @@
 use std::collections::HashMap;
 use std::fmt;
 use std::path::PathBuf;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use sha2::{Digest, Sha256};
 use winwincode_control_plane::{
@@ -17,7 +17,9 @@ use winwincode_execution_port::transport::{
     RemoteExchangeRequest, RemoteExchangeResponse, RemoteTransportAdapter, TypedFrame,
     execution_message_id,
 };
-use winwincode_storage::{SqliteStorage, WorkerPoolId, WorkerRegistryScope};
+use winwincode_storage::{
+    ExecutionLeaseRecord, ExecutionRegistry, SqliteStorage, WorkerPoolId, WorkerRegistryScope,
+};
 
 use crate::{RepositoryRuntimeScheduler, RuntimeControlOutbound, RuntimeSupervisorError};
 
@@ -155,6 +157,40 @@ fn suppress_confirmed_redelivery(message: &ExecutionPortMessage) -> bool {
 }
 
 impl RemoteDeliveryQueue {
+    fn retain_live_leases(
+        &self,
+        registry: &ExecutionRegistry<'_>,
+        now: &Instant,
+    ) -> Result<(), RemoteWorkerTransportError> {
+        let mut pending = self
+            .pending
+            .lock()
+            .map_err(|_| RemoteWorkerTransportError::unavailable())?;
+        let retained = pending
+            .iter()
+            .map(|(_, _, _, frame)| queued_execution_is_live(frame, registry, now))
+            .collect::<Result<Vec<_>, _>>()?;
+        let mut retained = retained.into_iter();
+        pending.retain(|_| retained.next().unwrap_or(false));
+        Ok(())
+    }
+
+    fn retain_active_instances(
+        &self,
+        active: &std::collections::HashSet<(WorkerId, WorkerInstanceId)>,
+    ) -> Result<(), RemoteWorkerTransportError> {
+        self.pending
+            .lock()
+            .map_err(|_| RemoteWorkerTransportError::unavailable())?
+            .retain(|(worker, instance, _, _)| {
+                active.contains(&(worker.clone(), instance.clone()))
+            });
+        self.confirmed
+            .lock()
+            .map_err(|_| RemoteWorkerTransportError::unavailable())?
+            .retain(|identity, _| active.contains(identity));
+        Ok(())
+    }
     fn prepare_ingress(
         &self,
         request: &RemoteExchangeRequest,
@@ -223,19 +259,34 @@ impl RemoteDeliveryQueue {
         Ok(())
     }
 
+    #[cfg(test)]
     fn snapshot(
         &self,
         worker_id: &WorkerId,
         instance_id: &WorkerInstanceId,
     ) -> Result<Vec<RemoteExchangeDelivery>, RemoteWorkerTransportError> {
+        self.snapshot_at(
+            worker_id,
+            instance_id,
+            &Instant("2026-10-15T00:00:00.000Z".into()),
+        )
+    }
+
+    fn snapshot_at(
+        &self,
+        worker_id: &WorkerId,
+        instance_id: &WorkerInstanceId,
+        server_time: &Instant,
+    ) -> Result<Vec<RemoteExchangeDelivery>, RemoteWorkerTransportError> {
         let pending = self.pending.lock().map_err(|_| {
             RemoteWorkerTransportError::new("remote Worker delivery queue is unavailable")
         })?;
         let mut deliveries = Vec::new();
-        let mut bytes = RemoteExchangeResponse::with_acceptance(Vec::new(), false)
-            .and_then(|response| response.encode())
-            .map_err(RemoteWorkerTransportError::frame_error)?
-            .len();
+        let mut bytes =
+            RemoteExchangeResponse::with_acceptance_at(Vec::new(), false, server_time.clone())
+                .and_then(|response| response.encode())
+                .map_err(RemoteWorkerTransportError::frame_error)?
+                .len();
         for (_, _, delivery_id, frame) in pending
             .iter()
             .filter(|(target, instance, _, _)| target == worker_id && instance == instance_id)
@@ -302,6 +353,47 @@ impl RemoteDeliveryQueue {
         pending.push((worker_id.clone(), instance_id.clone(), delivery_id, frame));
         Ok(())
     }
+}
+
+fn queued_execution_is_live(
+    frame: &[u8],
+    registry: &ExecutionRegistry<'_>,
+    now: &Instant,
+) -> Result<bool, RemoteWorkerTransportError> {
+    let frame = RemoteTransportAdapter::<NoopCore>::decode(frame)
+        .map_err(RemoteWorkerTransportError::frame_error)?;
+    let (lease, payload_digest) = match frame.message() {
+        ExecutionPortMessage::JobDispatchMessage(message) => {
+            (&message.lease, Some(&message.job.payload_digest))
+        }
+        ExecutionPortMessage::LeaseRenewMessage(message) => (&message.lease, None),
+        _ => return Ok(true),
+    };
+    if lease.expires_at.0 <= now.0 {
+        return Ok(false);
+    }
+    let current = registry
+        .load_live_lease(&lease.job_id, now)
+        .map_err(|_| RemoteWorkerTransportError::unavailable())?;
+    let Some(current) = current else {
+        return Ok(false);
+    };
+    let period = ExecutionLeaseRecord {
+        job_id: lease.job_id.clone(),
+        lease_id: lease.lease_id.clone(),
+        payload_digest: payload_digest.unwrap_or(&current.payload_digest).clone(),
+        worker_id: lease.worker_id.clone(),
+        worker_instance_id: lease.worker_instance_id.clone(),
+        attempt: u64::try_from(lease.attempt)
+            .map_err(|_| RemoteWorkerTransportError::invalid_frame())?,
+        fencing_token: lease.fencing_token.clone(),
+        issued_at: lease.issued_at.clone(),
+        expires_at: lease.expires_at.clone(),
+    };
+    registry
+        .load_live_lease_for_period(&period, now)
+        .map(|lease| lease.is_some())
+        .map_err(|_| RemoteWorkerTransportError::unavailable())
 }
 
 fn separate_heartbeat_receipt_identity(
@@ -379,9 +471,21 @@ pub struct ProductionRemoteWorkerExchange<Core> {
     scheduler: Mutex<RepositoryRuntimeScheduler>,
     core: Mutex<Core>,
     queue: RemoteDeliveryQueue,
+    clock: Arc<dyn crate::StandaloneApplicationClock>,
 }
 
 impl<Core> ProductionRemoteWorkerExchange<Core> {
+    fn reclaim_terminated_queues(&self, now: &Instant) -> Result<(), RemoteWorkerTransportError> {
+        let active = SqliteStorage::open(&self.data_directory)
+            .map_err(|_| RemoteWorkerTransportError::unavailable())?
+            .active_remote_worker_instances(&now.0)
+            .map_err(|_| RemoteWorkerTransportError::unavailable())?
+            .into_iter()
+            .map(|(worker, instance)| (WorkerId(worker), WorkerInstanceId(instance)))
+            .collect();
+        self.queue.retain_active_instances(&active)
+    }
+
     #[must_use]
     pub fn new(
         data_directory: impl Into<PathBuf>,
@@ -396,7 +500,14 @@ impl<Core> ProductionRemoteWorkerExchange<Core> {
             scheduler: Mutex::new(scheduler),
             core: Mutex::new(core),
             queue: RemoteDeliveryQueue::default(),
+            clock: Arc::new(crate::SystemStandaloneApplicationClock),
         }
+    }
+
+    #[must_use]
+    pub fn with_clock(mut self, clock: Arc<dyn crate::StandaloneApplicationClock>) -> Self {
+        self.clock = clock;
+        self
     }
 }
 
@@ -409,6 +520,8 @@ where
         let _gate = self.exchange_gate.lock().map_err(|_| {
             RemoteWorkerTransportError::new("remote Worker exchange is unavailable")
         })?;
+        let now = self.clock.now_instant();
+        self.reclaim_terminated_queues(&now)?;
         self.scheduler
             .lock()
             .map_err(|_| RemoteWorkerTransportError::new("remote Worker scheduler is unavailable"))?
@@ -504,6 +617,7 @@ where
         let _gate = self.exchange_gate.lock().map_err(|_| {
             RemoteWorkerTransportError::new("remote Worker exchange is unavailable")
         })?;
+        self.reclaim_terminated_queues(&now)?;
         let request = RemoteExchangeRequest::decode(request_body)
             .map_err(RemoteWorkerTransportError::frame_error)?;
         if request.worker_id().0 != worker_id
@@ -569,13 +683,24 @@ where
         {
             eprintln!("remote Worker scheduler drive after exchange failed: {error}");
         }
-        let deliveries = self
-            .queue
-            .snapshot(request.worker_id(), request.worker_instance_id())?;
+        let server_time = self.clock.now_instant();
+        let mut storage = SqliteStorage::open(&self.data_directory)
+            .map_err(|_| RemoteWorkerTransportError::unavailable())?;
+        self.queue.retain_live_leases(
+            &storage
+                .execution_registry()
+                .map_err(|_| RemoteWorkerTransportError::unavailable())?,
+            &server_time,
+        )?;
+        let deliveries = self.queue.snapshot_at(
+            request.worker_id(),
+            request.worker_instance_id(),
+            &server_time,
+        )?;
         let response = if request.supports_acceptance_receipt() {
-            RemoteExchangeResponse::with_acceptance(deliveries, frame_accepted)
+            RemoteExchangeResponse::with_acceptance_at(deliveries, frame_accepted, server_time)
         } else {
-            RemoteExchangeResponse::new(deliveries)
+            RemoteExchangeResponse::new_at(deliveries, server_time)
         }
         .map_err(RemoteWorkerTransportError::frame_error)?;
         response
@@ -873,6 +998,155 @@ mod tests {
             .clone();
         value["messageId"] = serde_json::json!(format!("xmsg_{seed:026}"));
         serde_json::from_value(value).unwrap()
+    }
+
+    fn lease_message(kind: &str, seed: usize, expires_at: &str) -> ExecutionPortMessage {
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../tests/fixtures/contracts/execution-port.valid.json"
+        ))
+        .unwrap();
+        let mut value = fixture["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|value| value["kind"] == kind)
+            .unwrap()
+            .clone();
+        value["messageId"] = serde_json::json!(format!("xmsg_{seed:026}"));
+        value["lease"]["issuedAt"] = serde_json::json!("2026-10-15T00:00:00.000Z");
+        value["lease"]["expiresAt"] = serde_json::json!(expires_at);
+        serde_json::from_value(value).unwrap()
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)]
+    fn queued_execution_controls_expire_without_rewriting_the_original_frames() {
+        let mut nonce = [0_u8; 8];
+        getrandom::fill(&mut nonce).unwrap();
+        let directory = std::env::temp_dir().join(format!(
+            "wwc-remote-lease-queue-{}-{}",
+            std::process::id(),
+            u64::from_ne_bytes(nonce)
+        ));
+        let mut storage = SqliteStorage::open(&directory).unwrap();
+        storage.execution_registry().unwrap();
+        let database = rusqlite::Connection::open(storage.database_path()).unwrap();
+        let dispatch = lease_message("job.dispatch", 801, "2026-10-15T00:00:10.000Z");
+        let renewal = lease_message("lease.renew", 802, "2026-10-15T00:00:20.000Z");
+        let ExecutionPortMessage::JobDispatchMessage(message) = &dispatch else {
+            unreachable!()
+        };
+        let initial = ExecutionLeaseRecord {
+            job_id: message.lease.job_id.clone(),
+            lease_id: message.lease.lease_id.clone(),
+            payload_digest: message.job.payload_digest.clone(),
+            worker_id: message.lease.worker_id.clone(),
+            worker_instance_id: message.lease.worker_instance_id.clone(),
+            attempt: u64::try_from(message.lease.attempt).unwrap(),
+            fencing_token: message.lease.fencing_token.clone(),
+            issued_at: message.lease.issued_at.clone(),
+            expires_at: message.lease.expires_at.clone(),
+        };
+        let mut current = initial.clone();
+        current.expires_at = Instant("2026-10-15T00:00:20.000Z".into());
+        database
+            .execute(
+                "INSERT INTO execution_leases VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9)",
+                rusqlite::params![
+                    current.job_id.0,
+                    current.lease_id.0,
+                    current.payload_digest.0,
+                    current.worker_id.0,
+                    current.worker_instance_id.0,
+                    i64::try_from(current.attempt).unwrap(),
+                    current.fencing_token.0,
+                    current.issued_at.0,
+                    current.expires_at.0
+                ],
+            )
+            .unwrap();
+        for (seed, period) in [&initial, &current].into_iter().enumerate() {
+            let receipt = serde_json::json!({"status":"accepted","lease":period,"replayed":false});
+            database.execute(
+                "INSERT INTO execution_lease_request_receipts VALUES ('claim',?1,?2,'fixture',?3)",
+                rusqlite::params![period.job_id.0,format!("req_{seed:026}"),serde_json::to_string(&receipt).unwrap()],
+            ).unwrap();
+        }
+        let queue = RemoteDeliveryQueue::default();
+        let worker = initial.worker_id.clone();
+        let instance = initial.worker_instance_id.clone();
+        queue.enqueue_for(&worker, &instance, dispatch).unwrap();
+        queue
+            .enqueue_for(&worker, &instance, renewal.clone())
+            .unwrap();
+        let original = queue.snapshot(&worker, &instance).unwrap();
+        let mut stale = renewal.clone();
+        let ExecutionPortMessage::LeaseRenewMessage(message) = &mut stale else {
+            unreachable!()
+        };
+        message.message_id = ExecutionMessageId(format!("xmsg_{:026}", 803));
+        message.lease.fencing_token.0 = "41".into();
+        queue.enqueue_for(&worker, &instance, stale).unwrap();
+        let mut unknown_period = renewal;
+        let ExecutionPortMessage::LeaseRenewMessage(message) = &mut unknown_period else {
+            unreachable!()
+        };
+        message.message_id = ExecutionMessageId(format!("xmsg_{:026}", 804));
+        message.lease.expires_at.0 = "2026-10-15T00:00:19.000Z".into();
+        queue
+            .enqueue_for(&worker, &instance, unknown_period)
+            .unwrap();
+        queue
+            .retain_live_leases(
+                &storage.execution_registry().unwrap(),
+                &Instant("2026-10-15T00:00:05.000Z".into()),
+            )
+            .unwrap();
+        assert_eq!(queue.snapshot(&worker, &instance).unwrap(), original);
+        queue
+            .retain_live_leases(
+                &storage.execution_registry().unwrap(),
+                &Instant("2026-10-15T00:00:10.000Z".into()),
+            )
+            .unwrap();
+        assert_eq!(queue.snapshot(&worker, &instance).unwrap(), original[1..]);
+        queue
+            .retain_live_leases(
+                &storage.execution_registry().unwrap(),
+                &Instant("2026-10-15T00:00:20.000Z".into()),
+            )
+            .unwrap();
+        assert!(queue.snapshot(&worker, &instance).unwrap().is_empty());
+        drop(database);
+        Box::new(storage).close().unwrap();
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn terminal_instances_reclaim_pending_and_confirmed_without_dropping_live_instances() {
+        let queue = RemoteDeliveryQueue::default();
+        let worker = WorkerId("wrk_00000000000000000000000001".into());
+        let active = WorkerInstanceId("wki_00000000000000000000000001".into());
+        let terminal = WorkerInstanceId("wki_00000000000000000000000002".into());
+        for instance in [&active, &terminal] {
+            queue
+                .enqueue_for(&worker, instance, cancel_message(701))
+                .unwrap();
+            let first = queue.snapshot(&worker, instance).unwrap();
+            queue
+                .acknowledge(&worker, instance, &[first[0].delivery_id.clone()])
+                .unwrap();
+            queue
+                .enqueue_for(&worker, instance, cancel_message(702))
+                .unwrap();
+        }
+        let live = std::collections::HashSet::from([(worker.clone(), active.clone())]);
+        queue.retain_active_instances(&live).unwrap();
+        assert_eq!(queue.snapshot(&worker, &active).unwrap().len(), 1);
+        assert!(queue.snapshot(&worker, &terminal).unwrap().is_empty());
+        let confirmed = queue.confirmed.lock().unwrap();
+        assert!(confirmed.contains_key(&(worker.clone(), active.clone())));
+        assert!(!confirmed.contains_key(&(worker, terminal)));
     }
 
     #[test]

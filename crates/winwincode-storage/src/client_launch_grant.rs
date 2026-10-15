@@ -1970,6 +1970,77 @@ mod tests {
     }
 
     #[test]
+    fn remote_queue_authority_retains_offline_instance_until_trusted_exit() {
+        let directory = temporary_directory("remote-queue-authority");
+        let mut storage = SqliteStorage::open(&directory).unwrap();
+        let holder = user_id(3);
+        let (node, lease, binding, token) = seed_happy_path(&mut storage, 101, &holder);
+        let command = issuance(
+            111,
+            &node,
+            &format!("cix_{}", crockford(102)),
+            &holder,
+            &lease,
+            token,
+            &binding,
+            120,
+        );
+        storage
+            .worker_launch_grant_ledger()
+            .unwrap()
+            .issue(&command, &unit_instant("2026-01-01T00:02:00.000Z"))
+            .unwrap();
+        storage
+            .worker_launch_grant_ledger()
+            .unwrap()
+            .settle_launch_ack(
+                &settlement(111, &lease, token, 120, true, None),
+                &unit_instant("2026-01-01T00:02:01.000Z"),
+            )
+            .unwrap();
+        let current = storage
+            .client_node_registry()
+            .unwrap()
+            .snapshot(&node)
+            .unwrap()
+            .unwrap();
+        storage
+            .client_node_registry()
+            .unwrap()
+            .update_presence(&node, crate::ClientPresenceState::Offline, current.revision)
+            .unwrap();
+        let active = storage
+            .active_remote_worker_instances("2026-01-01T02:00:00.000Z")
+            .unwrap();
+        assert_eq!(
+            active,
+            vec![(
+                command.worker_id.clone(),
+                command.worker_instance_id.clone()
+            )]
+        );
+        storage
+            .worker_launch_grant_ledger()
+            .unwrap()
+            .observe_trusted_exit(
+                &node,
+                command.worker_session_id(),
+                &command.worker_instance_id,
+                &lease,
+                &unit_instant("2026-01-01T02:00:01.000Z"),
+            )
+            .unwrap();
+        assert!(
+            storage
+                .active_remote_worker_instances("2026-01-01T02:00:02.000Z")
+                .unwrap()
+                .is_empty()
+        );
+        drop(storage);
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
     fn issuance_validates_canonical_identities_and_bounds() {
         assert!(issuance_command(&grant_id(1), 1).is_ok());
         let good = issuance(

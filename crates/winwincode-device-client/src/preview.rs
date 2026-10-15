@@ -14,9 +14,9 @@ use futures::{SinkExt as _, StreamExt as _};
 use http::header::{HeaderName, HeaderValue};
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 use tokio::net::TcpStream;
-use tokio_tungstenite::connect_async;
 use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest as _;
+use tokio_tungstenite::{Connector, connect_async_tls_with_config};
 use winwincode_client_port::preview::{
     DevicePreviewFrame, MAX_PREVIEW_BODY_BYTES, MAX_PREVIEW_HEADERS, PREVIEW_TUNNEL_SCHEMA_VERSION,
     PreviewHeader, PreviewSourceDescriptor, PreviewSourceMode, ServerPreviewFrame,
@@ -139,6 +139,7 @@ pub struct PreviewTunnelClient {
     endpoint: String,
     client_node_id: String,
     registry: AuthorizedPreviewSourceRegistry,
+    auth: Option<crate::remote_auth::DeviceRemoteAuth>,
 }
 
 impl PreviewTunnelClient {
@@ -148,11 +149,7 @@ impl PreviewTunnelClient {
         sources: impl IntoIterator<Item = AuthorizedPreviewSource>,
     ) -> Result<Self, PreviewTunnelError> {
         let endpoint = endpoint.into();
-        if !endpoint.starts_with("ws://") {
-            return Err(PreviewTunnelError::new(
-                "preview tunnel endpoint must use ws://",
-            ));
-        }
+        validate_preview_endpoint(&endpoint)?;
         let client_node_id = client_node_id.into();
         if !portable_identifier(&client_node_id) {
             return Err(PreviewTunnelError::new(
@@ -176,6 +173,7 @@ impl PreviewTunnelClient {
         Ok(Self {
             endpoint,
             client_node_id,
+            auth: None,
             registry: {
                 let registry = AuthorizedPreviewSourceRegistry::default();
                 for source in indexed.into_values() {
@@ -192,11 +190,7 @@ impl PreviewTunnelClient {
         registry: AuthorizedPreviewSourceRegistry,
     ) -> Result<Self, PreviewTunnelError> {
         let endpoint = endpoint.into();
-        if !endpoint.starts_with("ws://") {
-            return Err(PreviewTunnelError::new(
-                "preview tunnel endpoint must use ws://",
-            ));
-        }
+        validate_preview_endpoint(&endpoint)?;
         let client_node_id = client_node_id.into();
         if !portable_identifier(&client_node_id) {
             return Err(PreviewTunnelError::new(
@@ -207,13 +201,21 @@ impl PreviewTunnelClient {
             endpoint,
             client_node_id,
             registry,
+            auth: None,
         })
+    }
+
+    #[must_use]
+    pub fn with_device_auth(mut self, auth: crate::remote_auth::DeviceRemoteAuth) -> Self {
+        self.auth = Some(auth);
+        self
     }
 
     pub async fn run_once(&self) -> Result<(), PreviewTunnelError> {
         self.run_once_with_stop(None).await
     }
 
+    #[allow(clippy::too_many_lines)]
     async fn run_once_with_stop(
         &self,
         stop: Option<&AtomicBool>,
@@ -223,8 +225,43 @@ impl PreviewTunnelClient {
                 "preview tunnel has no authorized sources",
             ));
         }
-        let request = self.websocket_request()?;
-        let connect = tokio::time::timeout(IO_TIMEOUT, connect_async(request));
+        let mut request = self.websocket_request()?;
+        let connector = if let Some(auth) = &self.auth {
+            let auth = auth.clone();
+            let path = request
+                .uri()
+                .path_and_query()
+                .map_or("/", http::uri::PathAndQuery::as_str)
+                .to_owned();
+            let headers = tokio::task::spawn_blocking(move || {
+                auth.authorization_headers("GET", &path, &[], IO_TIMEOUT, &|| true)
+            })
+            .await
+            .map_err(|_| PreviewTunnelError::new("preview authorization failed"))?
+            .map_err(|error| PreviewTunnelError::network(error.network_failure()))?;
+            for (name, value) in headers {
+                request.headers_mut().insert(
+                    HeaderName::from_bytes(name.as_bytes()).map_err(|_| {
+                        PreviewTunnelError::new("preview authorization header invalid")
+                    })?,
+                    HeaderValue::from_str(&value).map_err(|_| {
+                        PreviewTunnelError::new("preview authorization header invalid")
+                    })?,
+                );
+            }
+            if auth_roots(self.auth.as_ref()).is_empty() {
+                None
+            } else {
+                Some(preview_tls_connector(auth_roots(self.auth.as_ref()))?)
+            }
+        } else {
+            None
+        };
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let connect = tokio::time::timeout(
+            IO_TIMEOUT,
+            connect_async_tls_with_config(request, None, false, connector),
+        );
         let connect = tokio::select! {
             result = connect => result,
             () = wait_for_stop(stop) => return Ok(()),
@@ -384,8 +421,18 @@ impl PreviewTunnelSupervisor {
         client_node_id: impl Into<String>,
         registry: AuthorizedPreviewSourceRegistry,
     ) -> Result<Self, PreviewTunnelError> {
-        let client =
+        Self::start_with_auth(endpoint, client_node_id, registry, None)
+    }
+
+    pub fn start_with_auth(
+        endpoint: impl Into<String>,
+        client_node_id: impl Into<String>,
+        registry: AuthorizedPreviewSourceRegistry,
+        auth: Option<crate::remote_auth::DeviceRemoteAuth>,
+    ) -> Result<Self, PreviewTunnelError> {
+        let mut client =
             PreviewTunnelClient::with_registry(endpoint, client_node_id, registry.clone())?;
+        client.auth = auth;
         let stop = Arc::new(AtomicBool::new(false));
         let thread_stop = Arc::clone(&stop);
         let thread = thread::Builder::new()
@@ -491,6 +538,10 @@ fn preview_retry_delay(
     attempt: &mut u32,
     connections: &mut u32,
 ) -> Option<Duration> {
+    if failure.http_status == Some(401) && *attempt == 1 {
+        *attempt += 1;
+        return Some(Duration::ZERO);
+    }
     let disconnected = failure.acceptance == winwincode_network::Acceptance::NotSent
         && matches!(
             failure.kind,
@@ -780,6 +831,41 @@ fn decode_chunked(mut body: &[u8]) -> Result<Vec<u8>, PreviewTunnelError> {
     }
 }
 
+fn validate_preview_endpoint(endpoint: &str) -> Result<(), PreviewTunnelError> {
+    let http_endpoint = if let Some(rest) = endpoint.strip_prefix("wss://") {
+        format!("https://{rest}")
+    } else if let Some(rest) = endpoint.strip_prefix("ws://") {
+        format!("http://{rest}")
+    } else {
+        return Err(PreviewTunnelError::new(
+            "preview tunnel requires wss:// or loopback ws://",
+        ));
+    };
+    crate::http::validate_endpoint(&http_endpoint)
+        .map_err(|_| PreviewTunnelError::new("preview tunnel requires wss:// or loopback ws://"))
+}
+
+fn auth_roots(auth: Option<&crate::remote_auth::DeviceRemoteAuth>) -> &[Vec<u8>] {
+    auth.map_or(&[], crate::remote_auth::DeviceRemoteAuth::ca_roots)
+}
+
+fn preview_tls_connector(roots: &[Vec<u8>]) -> Result<Connector, PreviewTunnelError> {
+    let mut store = rustls::RootCertStore::empty();
+    for root in roots {
+        store
+            .add(rustls::pki_types::CertificateDer::from(root.clone()))
+            .map_err(|_| PreviewTunnelError::new("preview CA root is invalid"))?;
+    }
+    let config = rustls::ClientConfig::builder_with_provider(Arc::new(
+        rustls::crypto::ring::default_provider(),
+    ))
+    .with_safe_default_protocol_versions()
+    .map_err(|_| PreviewTunnelError::new("preview TLS configuration is invalid"))?
+    .with_root_certificates(store)
+    .with_no_client_auth();
+    Ok(Connector::Rustls(Arc::new(config)))
+}
+
 fn safe_forward_header(header: &PreviewHeader) -> bool {
     let Ok(name) = HeaderName::from_bytes(header.name.as_bytes()) else {
         return false;
@@ -959,6 +1045,29 @@ mod tests {
             mode: PreviewSourceMode::Live,
             candidate_commit: None,
         }
+    }
+
+    #[test]
+    fn authentication_refreshes_one_challenge_and_revocation_stops() {
+        let mut attempt = 1;
+        let mut connections = 0;
+        let expired = winwincode_network::NetworkFailure::http(401, None);
+        assert_eq!(
+            preview_retry_delay(expired, &mut attempt, &mut connections),
+            Some(Duration::ZERO)
+        );
+        assert_eq!(
+            preview_retry_delay(expired, &mut attempt, &mut connections),
+            None
+        );
+        assert_eq!(
+            preview_retry_delay(
+                winwincode_network::NetworkFailure::http(403, None),
+                &mut attempt,
+                &mut connections
+            ),
+            None
+        );
     }
 
     #[test]

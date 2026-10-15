@@ -19,6 +19,178 @@ use std::io;
 
 use tokio::process::Child;
 
+#[cfg(unix)]
+pub struct ProcessGroupLifeline {
+    reader: std::os::unix::net::UnixStream,
+    writer: std::os::unix::net::UnixStream,
+    descriptor_limit: libc::c_int,
+}
+
+#[cfg(unix)]
+impl ProcessGroupLifeline {
+    /// Configure a single-use command and retain this owner through its child lifetime.
+    pub fn configure_command(command: &mut std::process::Command) -> io::Result<Self> {
+        use std::os::unix::process::CommandExt;
+        let lifeline = Self::new()?;
+        let fds = lifeline.child_fds();
+        unsafe {
+            command.pre_exec(move || {
+                detach_from_tty()?;
+                guard_process_group_lifetime(fds)
+            });
+        }
+        Ok(lifeline)
+    }
+
+    pub fn new() -> io::Result<Self> {
+        use std::os::fd::AsRawFd;
+        use std::os::fd::FromRawFd;
+        let (reader, writer) = std::os::unix::net::UnixStream::pair()?;
+        let above_stdio = |stream: std::os::unix::net::UnixStream| {
+            let fd = unsafe { libc::fcntl(stream.as_raw_fd(), libc::F_DUPFD_CLOEXEC, 3) };
+            if fd == -1 {
+                Err(io::Error::last_os_error())
+            } else {
+                Ok(unsafe { std::os::unix::net::UnixStream::from_raw_fd(fd) })
+            }
+        };
+        let reader = above_stdio(reader)?;
+        let writer = above_stdio(writer)?;
+        let mut limit = libc::rlimit {
+            rlim_cur: 0,
+            rlim_max: 0,
+        };
+        if unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &raw mut limit) } == -1 {
+            return Err(io::Error::last_os_error());
+        }
+        let mut descriptor_limit = limit.rlim_cur.min(libc::c_int::MAX as _) as libc::c_int;
+        // Existing descriptors can exceed a subsequently lowered soft limit.
+        // Collect this bound before fork; no allocation or directory I/O is
+        // allowed in the guardian's post-fork branch.
+        for entry in std::fs::read_dir("/dev/fd")? {
+            if let Some(fd) = entry?
+                .file_name()
+                .to_str()
+                .and_then(|name| name.parse::<libc::c_int>().ok())
+            {
+                descriptor_limit = descriptor_limit.max(fd.saturating_add(1));
+            }
+        }
+        Ok(Self {
+            reader,
+            writer,
+            descriptor_limit,
+        })
+    }
+
+    pub fn child_fds(&self) -> (libc::c_int, libc::c_int, libc::c_int) {
+        use std::os::fd::AsRawFd;
+        (
+            self.reader.as_raw_fd(),
+            self.writer.as_raw_fd(),
+            self.descriptor_limit,
+        )
+    }
+
+    pub fn into_writer(self) -> std::os::unix::net::UnixStream {
+        self.writer
+    }
+}
+
+/// Install after setsid and before exec. The owner alone retains the writer.
+/// Double-fork so a shell's `wait` cannot wait for its own lifetime guardian.
+#[cfg(unix)]
+pub fn guard_process_group_lifetime(
+    (reader, writer, descriptor_limit): (libc::c_int, libc::c_int, libc::c_int),
+) -> io::Result<()> {
+    // All work after fork must remain async-signal-safe, including closing the
+    // CLOEXEC error pipe that std::process::spawn is waiting to see close.
+    unsafe {
+        libc::close(writer);
+        let mut ready = [-1; 2];
+        if libc::pipe(ready.as_mut_ptr()) == -1 {
+            return Err(io::Error::last_os_error());
+        }
+        let intermediate = libc::fork();
+        if intermediate == -1 {
+            libc::close(ready[0]);
+            libc::close(ready[1]);
+            return Err(io::Error::last_os_error());
+        }
+        if intermediate == 0 {
+            let guardian = libc::fork();
+            if guardian != 0 {
+                libc::close(ready[1]);
+                let mut byte = 0u8;
+                let mut count;
+                loop {
+                    count = libc::read(ready[0], (&raw mut byte).cast(), 1);
+                    if count != -1
+                        || io::Error::last_os_error().kind() != io::ErrorKind::Interrupted
+                    {
+                        break;
+                    }
+                }
+                libc::_exit(if guardian != -1 && count == 1 { 0 } else { 1 });
+            }
+            libc::close(ready[0]);
+            for signal in [libc::SIGHUP, libc::SIGINT, libc::SIGQUIT, libc::SIGTERM] {
+                libc::signal(signal, libc::SIG_IGN);
+            }
+            if libc::dup2(reader, libc::STDIN_FILENO) == -1 {
+                libc::killpg(0, libc::SIGKILL);
+                libc::_exit(1);
+            }
+            #[cfg(target_os = "linux")]
+            let closed = libc::syscall(libc::SYS_close_range, 1u32, (ready[1] - 1) as u32, 0u32)
+                == 0
+                && libc::syscall(libc::SYS_close_range, (ready[1] + 1) as u32, u32::MAX, 0u32) == 0;
+            #[cfg(not(target_os = "linux"))]
+            let closed = false;
+            if !closed {
+                for fd in 1..descriptor_limit {
+                    if fd != ready[1] {
+                        libc::close(fd);
+                    }
+                }
+            }
+            let mut byte = 0u8;
+            if libc::write(ready[1], (&raw const byte).cast(), 1) != 1 {
+                libc::killpg(0, libc::SIGKILL);
+                libc::_exit(1);
+            }
+            libc::close(ready[1]);
+            loop {
+                let count = libc::read(libc::STDIN_FILENO, (&raw mut byte).cast(), 1);
+                if count == -1 && io::Error::last_os_error().kind() == io::ErrorKind::Interrupted {
+                    continue;
+                }
+                if count <= 0 {
+                    libc::killpg(0, libc::SIGKILL);
+                    libc::_exit(1);
+                }
+            }
+        }
+        libc::close(ready[0]);
+        libc::close(ready[1]);
+        let mut status = 0;
+        loop {
+            if libc::waitpid(intermediate, &raw mut status, 0) >= 0 {
+                break;
+            }
+            let error = io::Error::last_os_error();
+            if error.kind() != io::ErrorKind::Interrupted {
+                return Err(error);
+            }
+        }
+        libc::close(reader);
+        if status != 0 {
+            return Err(io::Error::from_raw_os_error(libc::EIO));
+        }
+    }
+    Ok(())
+}
+
 #[cfg(target_os = "linux")]
 /// Ensure the child receives SIGTERM when the original parent dies.
 ///

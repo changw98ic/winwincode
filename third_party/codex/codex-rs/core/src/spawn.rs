@@ -49,7 +49,15 @@ pub(crate) struct SpawnChildRequest<'a> {
     pub env: HashMap<String, String>,
 }
 
-pub(crate) async fn spawn_child_async(request: SpawnChildRequest<'_>) -> std::io::Result<Child> {
+pub(crate) struct SpawnedChild {
+    pub child: Child,
+    #[cfg(unix)]
+    pub _lifeline: Option<std::os::unix::net::UnixStream>,
+}
+
+pub(crate) async fn spawn_child_async(
+    request: SpawnChildRequest<'_>,
+) -> std::io::Result<SpawnedChild> {
     let SpawnChildRequest {
         program,
         args,
@@ -92,6 +100,12 @@ pub(crate) async fn spawn_child_async(request: SpawnChildRequest<'_>) -> std::io
     // to also be terminated.
 
     #[cfg(unix)]
+    let lifeline = matches!(stdio_policy, StdioPolicy::RedirectForShellTool)
+        .then(codex_utils_pty::process_group::ProcessGroupLifeline::new)
+        .transpose()?;
+    #[cfg(unix)]
+    let lifeline_fds = lifeline.as_ref().map(|lifeline| lifeline.child_fds());
+    #[cfg(unix)]
     unsafe {
         let detach_from_tty = matches!(stdio_policy, StdioPolicy::RedirectForShellTool);
         #[cfg(target_os = "linux")]
@@ -99,6 +113,9 @@ pub(crate) async fn spawn_child_async(request: SpawnChildRequest<'_>) -> std::io
         cmd.pre_exec(move || {
             if detach_from_tty {
                 codex_utils_pty::process_group::detach_from_tty()?;
+            }
+            if let Some(fds) = lifeline_fds {
+                codex_utils_pty::process_group::guard_process_group_lifetime(fds)?;
             }
 
             // This relies on prctl(2), so it only works on Linux.
@@ -133,5 +150,9 @@ pub(crate) async fn spawn_child_async(request: SpawnChildRequest<'_>) -> std::io
         }
     }
 
-    cmd.kill_on_drop(true).spawn()
+    Ok(SpawnedChild {
+        child: cmd.kill_on_drop(true).spawn()?,
+        #[cfg(unix)]
+        _lifeline: lifeline.map(|lifeline| lifeline.into_writer()),
+    })
 }

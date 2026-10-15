@@ -51,6 +51,10 @@ import type {
   WorkItemId,
   DeliveryId,
   DeliveryDetailProjection,
+  DevicePairingResponse,
+  DeviceRevokeResponse,
+  ClientNodeId,
+  CandidateApplicationProjection,
   WorkItemsCreateCommand,
   WorkItemsCreateItem,
   WorkRunStartCommand,
@@ -731,6 +735,7 @@ export type ControlPlaneDeviceOccupancy =
 
 export interface ControlPlaneDeviceSummary {
   readonly clientId: string
+  readonly clientNodeId?: string
   readonly displayName: string
   readonly presence: ControlPlaneDevicePresence
   readonly occupancy: ControlPlaneDeviceOccupancy
@@ -896,8 +901,14 @@ function deviceSummaryValue(value: unknown): ControlPlaneDeviceSummary {
   ) {
     throw invalidDeviceListError()
   }
+  if (value.clientNodeId !== undefined
+    && (typeof value.clientNodeId !== 'string' || !/^cnd_[0-9A-HJKMNP-TV-Z]{26}$/u.test(value.clientNodeId))) {
+    throw invalidDeviceListError()
+  }
   return Object.freeze({
     clientId: value.clientId,
+    ...(typeof value.clientNodeId === 'string' && value.clientNodeId.length > 0
+      ? { clientNodeId: value.clientNodeId } : {}),
     displayName: value.displayName,
     presence: presence as ControlPlaneDevicePresence,
     occupancy: occupancy as ControlPlaneDeviceOccupancy,
@@ -934,6 +945,8 @@ function deviceListResponse(source: string): readonly ControlPlaneDeviceSummary[
 }
 
 export interface ControlPlaneClientDirectory extends ControlPlaneClient {
+  createDevicePairing(options?: ControlPlaneRequestOptions): Promise<DevicePairingResponse>
+  revokeDevice(clientNodeId: string, options?: ControlPlaneRequestOptions): Promise<DeviceRevokeResponse>
   addClient(
     input: ControlPlaneClientConnectInput,
     options?: ControlPlaneRequestOptions,
@@ -957,6 +970,30 @@ export function createControlPlaneClientDirectory(options: {
   const injectedAddClient = injected.addClient
   const injectedListClients = injected.listClients
   const injectedListRepositories = injected.listRepositories
+
+  async function deviceManagementRequest(
+    path: string,
+    expectedStatus: number,
+    requestOptions?: ControlPlaneRequestOptions,
+  ): Promise<Record<string, unknown>> {
+    try {
+      const response = await directoryRequest(path, 'POST', JSON.stringify({
+        schemaVersion: CONTROL_PLANE_SCHEMA_VERSION,
+      }), requestOptions?.signal)
+      const source = await response.text()
+      if (!response.ok) throw withResponseFailure(clientDirectoryBoundaryError(response.status, source), response)
+      let value: unknown
+      try { value = JSON.parse(source) } catch { throw invalidDeviceListError() }
+      if (response.status !== expectedStatus || !isRecord(value)
+        || value.schemaVersion !== CONTROL_PLANE_SCHEMA_VERSION) throw invalidDeviceListError()
+      return value
+    } catch (error) {
+      if (signalIsAborted(requestOptions?.signal)) throw cancelledError(null)
+      if (error instanceof ControlPlaneClientError) throw error
+      throw new ControlPlaneClientError({ kind: 'network', code: 'DEVICE_MANAGEMENT_FAILED',
+        message: 'The Device management request failed.', requestId: null, retryable: true, cause: error })
+    }
+  }
 
   async function directoryRequest(
     path: string,
@@ -1050,6 +1087,28 @@ export function createControlPlaneClientDirectory(options: {
 
   const directory: ControlPlaneClientDirectory = {
     serverUrl: options.client.serverUrl,
+    async createDevicePairing(requestOptions) {
+      if (typeof injected.createDevicePairing === 'function') {
+        return injected.createDevicePairing.call(options.client, requestOptions)
+      }
+      const value = await deviceManagementRequest('/api/v1/devices/pairing', 201, requestOptions)
+      if (typeof value.pairingToken !== 'string' || value.pairingToken.length < 8
+        || value.pairingToken.length > 200 || typeof value.expiresAt !== 'string'
+        || !RFC3339_INSTANT.test(value.expiresAt) || Number.isNaN(Date.parse(value.expiresAt))) {
+        throw invalidDeviceListError()
+      }
+      return Object.freeze({ schemaVersion: CONTROL_PLANE_SCHEMA_VERSION,
+        pairingToken: value.pairingToken, expiresAt: value.expiresAt })
+    },
+    async revokeDevice(clientNodeId, requestOptions) {
+      if (!/^cnd_[0-9A-HJKMNP-TV-Z]{26}$/u.test(clientNodeId)) throw invalidDeviceListError()
+      if (typeof injected.revokeDevice === 'function') {
+        return injected.revokeDevice.call(options.client, clientNodeId, requestOptions)
+      }
+      const value = await deviceManagementRequest(`/api/v1/devices/${encodeURIComponent(clientNodeId)}/revoke`, 200, requestOptions)
+      if (value.clientNodeId !== clientNodeId || typeof value.revoked !== 'boolean') throw invalidDeviceListError()
+      return Object.freeze({ schemaVersion: CONTROL_PLANE_SCHEMA_VERSION, clientNodeId: clientNodeId as ClientNodeId, revoked: value.revoked })
+    },
     restore(requestOptions) {
       return options.client.restore(requestOptions)
     },
@@ -1740,6 +1799,7 @@ export type ControlPlaneCandidateApplyResult =
   | 'permission_denied'
   | 'discarded'
   | 'failed'
+  | 'outcome_unknown'
 
 export interface ControlPlaneCandidateApplyReceipt {
   readonly localApplyReceiptId: string
@@ -1760,13 +1820,17 @@ export interface ControlPlaneCandidateSummary {
   readonly candidateRef: string
   readonly repositoryBindingId: string
   readonly candidateCommit: string
+  readonly baseCommit: string
   readonly localRefName: string
   readonly state: ControlPlaneCandidateState
   readonly createdAt: string
   readonly revision: number
   readonly branchName: string | null
   readonly history: readonly ControlPlaneCandidateApplyReceipt[]
+  readonly application: ControlPlaneCandidateApplication | null
 }
+
+export type ControlPlaneCandidateApplication = CandidateApplicationProjection
 
 export interface ControlPlaneCandidateReadInput {
   readonly clientId: string
@@ -1854,6 +1918,7 @@ const CANDIDATE_APPLY_RESULT_VALUES: readonly string[] = Object.freeze([
   'permission_denied',
   'discarded',
   'failed',
+  'outcome_unknown',
 ])
 
 const CLIENT_CANDIDATES_BRANCH_PATH = '/api/v1/clients/candidates/branch'
@@ -2023,6 +2088,14 @@ function candidateApplyReceiptValue(value: unknown): ControlPlaneCandidateApplyR
   })
 }
 
+function candidateApplicationValue(value: unknown): ControlPlaneCandidateApplication | null {
+  if (value === null || value === undefined) return null
+  if (!isRecord(value) || !matchesCanonicalSchema('CandidateApplicationProjection', value)) {
+    throw invalidCandidateResponseError()
+  }
+  return Object.freeze(value) as ControlPlaneCandidateApplication
+}
+
 function candidateSummaryValue(value: unknown): ControlPlaneCandidateSummary {
   if (!isRecord(value)) throw invalidCandidateResponseError()
   const state = value.state
@@ -2046,12 +2119,14 @@ function candidateSummaryValue(value: unknown): ControlPlaneCandidateSummary {
     candidateRef: value.candidateRef,
     repositoryBindingId: value.repositoryBindingId,
     candidateCommit: candidateShaValue(value.candidateCommit),
+    baseCommit: candidateShaValue(value.baseCommit),
     localRefName: value.localRefName,
     state: state as ControlPlaneCandidateState,
     createdAt: candidateInstantValue(value.createdAt),
     revision: candidateRevisionValue(value.revision),
     branchName: candidateNullableText(value.branchName),
     history: Object.freeze(value.history.map(candidateApplyReceiptValue)),
+    application: candidateApplicationValue(value.application),
   })
 }
 

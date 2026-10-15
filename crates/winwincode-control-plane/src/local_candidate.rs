@@ -129,6 +129,18 @@ impl<'storage> LocalCandidateService<'storage> {
             .record_apply_result(settlement, now)?)
     }
 
+    pub fn record_reconciled_apply_result(
+        &mut self,
+        settlement: &LocalApplySettlement,
+        now: &Instant,
+    ) -> Result<(LocalApplyReceiptRecord, LocalCandidateReceiptRecord), LocalCandidateServiceError>
+    {
+        Ok(self
+            .storage
+            .local_candidate_ledger()?
+            .record_reconciled_apply_result(settlement, now)?)
+    }
+
     pub fn candidate_snapshot(
         &mut self,
         local_candidate_receipt_id: &str,
@@ -173,6 +185,7 @@ impl<'storage> LocalCandidateService<'storage> {
 
 #[cfg(test)]
 mod tests {
+    const TEST_BASE_COMMIT: &str = "0123456789abcdef0123456789abcdef01234567";
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -265,6 +278,7 @@ mod tests {
             binding,
             format!("refs/winwincode/candidates/candidate-{ref_seed}"),
             COMMIT,
+            TEST_BASE_COMMIT,
             format!("refs/winwincode/candidates/candidate-{ref_seed}"),
         )
         .expect("retained command")
@@ -391,6 +405,7 @@ mod tests {
             binding.as_str(),
             "refs/winwincode/candidates/candidate-51",
             COMMIT,
+            TEST_BASE_COMMIT,
             "refs/winwincode/candidates/candidate-51",
         )
         .expect_err("non-canonical id must fail");
@@ -402,6 +417,7 @@ mod tests {
             binding.as_str(),
             "/absolute/path".to_owned(),
             COMMIT,
+            TEST_BASE_COMMIT,
             "refs/winwincode/candidates/candidate-52",
         )
         .expect_err("a path can never be a candidate ref");

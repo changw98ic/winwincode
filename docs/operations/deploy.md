@@ -97,7 +97,7 @@ Server 数据默认保存在 `$HOME/.winwincode/server`。设置 `WINWINCODE_HOM
 | 变量 | 默认值或用途 |
 | --- | --- |
 | `WWC_SERVER_BIND` | `127.0.0.1:8443`。 |
-| `WWC_SERVER_PUBLIC_URL` | `http://127.0.0.1:8443`。HTTP origin。 |
+| `WWC_SERVER_PUBLIC_URL` | `http://127.0.0.1:8443`。Browser 和 Device 使用的对外 origin。 |
 | `WWC_SERVER_ALLOWED_ORIGINS` | `http://127.0.0.1:8080,http://localhost:8080`。逗号分隔的浏览器 origin。 |
 | `WWC_SERVER_PREVIEW_PUBLIC_URL` | 可选。预览使用的独立 origin。 |
 | `WWC_SERVER_DATA_DIRECTORY` | 覆盖 Server 数据目录。 |
@@ -108,7 +108,10 @@ Server 数据默认保存在 `$HOME/.winwincode/server`。设置 `WINWINCODE_HOM
 | `WWC_SERVER_WORKSPACE_ID` | `wsp_00000000000000000000000000`。 |
 | `WWC_SERVER_PROJECT_ID` | `prj_00000000000000000000000000`。 |
 | `WWC_SERVER_REPOSITORY_ID` | `rep_00000000000000000000000000`。 |
-| `WWC_SERVER_AUTH_MODE` | 回环监听默认 `local-open`。其他监听默认 `password`。可显式指定。 |
+| `WWC_SERVER_AUTH_MODE` | 本机回环 HTTP 默认 `local-open`。远程模式默认 `password`。 |
+| `WWC_SERVER_TLS_CERTIFICATE` | Server 直接终止 TLS 时使用的 PEM 证书。 |
+| `WWC_SERVER_TLS_PRIVATE_KEY` | 与证书配套的 PEM 私钥。 |
+| `WWC_SERVER_TLS_PROXY` | 显式设为 `loopback` 时，使用受保护的回环 TLS 代理后端。 |
 | `WWC_SERVER_BOOTSTRAP_PROOF` | `password` 模式的 Owner 初始化证明。 |
 | `WWC_SERVER_BOOTSTRAP_WINDOW_SECONDS` | `600`。 |
 | `WWC_SERVER_SESSION_TTL_SECONDS` | `28800`。 |
@@ -127,7 +130,7 @@ GitHub 发布是可选功能。`GITHUB_REPOSITORY`、`GITHUB_CREDENTIAL_REFERENC
 
 本机默认使用 `local-open`。Server 在空数据目录中自动建立 Owner，浏览器可以直接使用。
 
-`password` 模式需要 `WWC_SERVER_BOOTSTRAP_PROOF`。当前生产组合要求 Owner 在开始监听前已经存在。全新数据目录的 password 初始化，以及 local-open Owner 转为 password 登录的运维流程，仍需后续实现。
+全新数据目录的 `password` 模式需要 `WWC_SERVER_BOOTSTRAP_PROOF`。Server 先监听 Owner 初始化入口。Owner 初始化完成后，Server 启动完整产品服务。初始化使用与正式服务相同的传输配置。操作见 [远程 Server 与 Device](#远程-server-与-device)。已有 local-open Owner 转换为 password 登录仍需要专门的账户运维流程。
 
 `local-open` 将能访问 Server 的本机进程视为同一信任域。默认监听和 Compose 发布端口均限定在宿主回环地址。网络边界见[安全模型](../security-model.md)。
 
@@ -138,6 +141,90 @@ curl --fail --show-error http://127.0.0.1:8443/health
 ```
 
 就绪时返回 HTTP 200，JSON 中的 `status` 为 `ready`。内部应用不可用时返回 HTTP 503。该端点报告 Server 版本、协议 schema 和主要 API 路径。Device 和 Provider 的状态在浏览器设备页检查。
+
+## 远程 Server 与 Device
+
+Server 和 Device 可以位于两台机器。Device 主动连接 Server。Browser 使用 Server 的对外地址。Device 机器需要保留仓库、Provider 数据、Worker 和内核辅助进程。
+
+### 配置 HTTPS
+
+直接 TLS 示例使用 `https://server.example:8443`。部署时，把示例域名和 `/private/...` 路径替换为实际值。证书须覆盖该域名。证书、私钥和数据目录使用部署主机上的绝对路径。
+
+```sh
+export WWC_SERVER_BIND=0.0.0.0:8443
+export WWC_SERVER_PUBLIC_URL=https://server.example:8443
+export WWC_SERVER_ALLOWED_ORIGINS=https://app.example
+export WWC_SERVER_AUTH_MODE=password
+export WWC_SERVER_TLS_CERTIFICATE=/private/tls/server-chain.pem
+export WWC_SERVER_TLS_PRIVATE_KEY=/private/tls/server-key.pem
+export WWC_SERVER_DATA_DIRECTORY=/private/winwincode/server
+export WWC_SERVER_BOOTSTRAP_PROOF='<initialization-proof>'
+./target/debug/winwincode-server
+```
+
+代理终止 TLS 时，将应用监听地址设为回环 IP，例如 `127.0.0.1:8443`。对外 URL 仍为 HTTPS。设置 `WWC_SERVER_TLS_PROXY=loopback`，由受保护的本机代理转发到该监听地址。直接 TLS 和代理模式选择其一。远程模式拒绝 `local-open`。应用依据显式配置确认 TLS 边界，不依赖转发头。
+
+浏览器静态资源也应通过允许的 HTTPS origin 提供。将 Client 的 `serverUrl` 配置为 `WWC_SERVER_PUBLIC_URL`。`WWC_SERVER_BIND` 只控制应用监听地址。
+
+### 初始化 Owner
+
+在另一个终端设置相同的 `WWC_SERVER_BOOTSTRAP_PROOF`，并在 bootstrap 窗口内调用 Owner 初始化入口。请求使用允许的 Origin 和该 Bearer proof。默认窗口为启动后的 600 秒。请求正文保存在权限受限的本机文件，例如 `/private/owner-bootstrap.json`：
+
+```json
+{"schemaVersion":"winwincode/v1","username":"owner","password":"<owner-password>"}
+```
+
+以下命令中的 CA 文件用于校验 Server 证书。使用公共受信任证书时，可省略 `--cacert`。
+
+```sh
+umask 077
+chmod 600 /private/owner-bootstrap.json
+curl --fail-with-body --show-error \
+  --cacert /private/tls/root-ca.pem \
+  --header 'Origin: https://app.example' \
+  --header "Authorization: Bearer ${WWC_SERVER_BOOTSTRAP_PROOF}" \
+  --header 'Content-Type: application/json' \
+  --cookie-jar /private/owner.cookies \
+  --data-binary @/private/owner-bootstrap.json \
+  https://server.example:8443/api/v1/auth/session
+```
+
+首次初始化返回 HTTP 201，并建立 Owner 会话。Server 随后切换到完整服务。再次检查 HTTPS `/health`，等待 `status` 为 `ready`。初始化期间的业务请求可能返回 503。后续登录调用同一路径，提交用户名、密码和 Origin。普通登录不携带 bootstrap Bearer proof。Owner 建立后可从服务配置中移除 bootstrap proof，再重启 Server。
+
+### 绑定远程 Device
+
+Owner 使用已登录会话创建 10 分钟内有效的配对令牌：
+
+```sh
+curl --fail-with-body --show-error \
+  --cacert /private/tls/root-ca.pem \
+  --header 'Origin: https://app.example' \
+  --header 'Content-Type: application/json' \
+  --cookie /private/owner.cookies \
+  --data '{"schemaVersion":"winwincode/v1"}' \
+  https://server.example:8443/api/v1/devices/pairing
+```
+
+在 Device 机器上，把响应中的 `pairingToken` 放入 `WWC_DEVICE_PAIRING_TOKEN`，然后运行：
+
+```sh
+export WWC_DEVICE_PAIRING_TOKEN='<pairing-token>'
+./target/debug/wwc device bind \
+  --server-url https://server.example:8443 \
+  --ca-file /private/tls/root-ca.pem \
+  --data-dir /private/winwincode/device-client \
+  --json
+unset WWC_DEVICE_PAIRING_TOKEN
+./target/debug/wwc device serve --data-dir /private/winwincode/device-client
+```
+
+`device bind` 成功时输出 `requestId`、`clientNodeId`、`publicClientId`、`ownerUserId` 和 `boundAt`。Device 在发出请求前保存密钥、Server URL 和稳定绑定请求。若成功响应丢失，重跑 `device bind --data-dir /private/winwincode/device-client --json`。Device 会复用原密钥、令牌和绑定意图，恢复原绑定。
+
+已绑定 Device 的 `serve` 使用保存的 Server URL、身份和 CA。重启时无需重新配对。`--ca-file` 或 `WWC_DEVICE_CA_FILE` 可以显式配置 CA。Device 在起点解析证书，并验证主机名。Worker 的私有管道仍由 Device 创建和监管。
+
+后续仓库和 Provider 配置沿用 [接入 Device Client](#接入-device-client) 的流程。使用自定义数据目录时，各管理命令都传相同的 `--data-dir`。
+
+Owner 吊销设备时，向 `/api/v1/devices/<clientNodeId>/revoke` 发送带 Owner 会话的 POST 请求，正文为 `{"schemaVersion":"winwincode/v1"}`。在线 Device 确认吊销后停止 Worker。离线 Device 由本地租约截止时间限制继续执行。`device status --data-dir ... --json` 的 `device.service.authorizationFailure` 和 `device logs` 提供失败原因。两机故障验收步骤见 [测试指南](../testing.md#远程-device-验证)。
 
 ## 部署浏览器 Client
 
@@ -174,7 +261,7 @@ globalThis.__WINWINCODE_CLIENT_CONFIG__ = Object.freeze({
 ./target/debug/wwc device serve
 ```
 
-Device 默认连接 `http://127.0.0.1:8443`。数据目录默认是 `$HOME/.winwincode/device-client`。设置 `WINWINCODE_HOME` 后使用 `<WINWINCODE_HOME>/device-client`。`WWC_DEVICE_DATA_DIRECTORY` 或 `--data-dir` 可以覆盖数据目录。`WWC_DEVICE_SERVER_URL` 或 `--server-url` 可以覆盖 Server 地址。
+Device 默认连接 `http://127.0.0.1:8443`。数据目录默认是 `$HOME/.winwincode/device-client`。设置 `WINWINCODE_HOME` 后使用 `<WINWINCODE_HOME>/device-client`。`WWC_DEVICE_DATA_DIRECTORY` 或 `--data-dir` 可以覆盖数据目录。首次本机启动可用 `WWC_DEVICE_SERVER_URL` 或 `--server-url` 指定 Server 地址。已绑定远程 Device 优先复用保存的 Server URL。
 
 Device Client 以前台进程运行。它启动并监管 Worker。Worker 通过 stdin/stdout JSON-lines 与父 Device 通信，Device 将交换请求转发给 Server。Worker 的启动参数由 Device 写入 `managed-session.json`。
 
@@ -249,7 +336,9 @@ corepack pnpm build
 
 ## Docker Compose
 
-Compose 在容器中运行 Server 和 Web。Device Client 在宿主机器上运行，以访问宿主仓库和 Provider 数据。
+Compose 在容器中运行 Server 和 Web。Device Client 在宿主机器上运行，以访问宿主仓库和 Provider 数据。Server 使用 host networking 监听宿主回环地址。
+
+该配置适用于 Linux Docker Engine。Docker Desktop 需要 4.34 或更高版本，并在 Settings → Resources → Network 启用 Enable host networking，再应用并重启。该功能与 Enhanced Container Isolation 不兼容。平台要求见 [Docker host networking 文档](https://docs.docker.com/engine/network/drivers/host/)。未启用该功能时，使用 [本机二进制部署](#准备-server)。
 
 先在宿主完成源码构建，然后执行：
 
@@ -260,7 +349,7 @@ docker compose up --build -d
 
 访问 `http://127.0.0.1:8080`。按照[接入 Device Client](#接入-device-client)生成连接码、连接设备、注册宿主仓库和配置 Provider。
 
-Server 容器监听 `0.0.0.0:8443`，Compose 将端口发布到宿主 `127.0.0.1:8443`。浏览器和宿主 Device 都使用宿主地址 `http://127.0.0.1:8443`。Web 容器只提供静态资源，浏览器自行连接 Server。容器内健康检查的 `127.0.0.1` 指向该容器自身。
+Server 容器通过 host networking 监听 `127.0.0.1:${WWC_SERVER_PORT:-8443}`。浏览器和宿主 Device 都使用该宿主 HTTP 地址。Web 端口仍发布到宿主回环地址。Web 容器只提供静态资源，浏览器自行连接 Server。Server 健康检查使用相同的回环地址和端口。
 
 `backend-data` 卷保存 Server 数据。Compose 把 `${WWC_SERVER_REPOSITORY_ROOT:-.}` 绑定到容器 `/workspace/repository`。默认使用当前仓库目录。该目录需要包含可在容器内读取的 Git 元数据。Git worktree 的 `.git` 文件可能指向宿主上的外部目录；这种情况下，设置 `WWC_SERVER_REPOSITORY_ROOT` 指向普通 clone。
 
@@ -282,7 +371,7 @@ Device Client 的主要数据包括：
 - `providers/providers.sqlite3`。
 - `worker-sessions/`、`execution-workspaces/`、日志和临时运行状态。
 
-`control-plane.sqlite3` 和 `device-client.sqlite3` 分别由 `SqliteStorage` 与 `DeviceStore` 的 `initialize_schema` 检查 `user_version`，在同一事务内初始化和校验。版本不匹配时拒绝打开。这个行为不能推广到其他产品数据库。
+`control-plane.sqlite3` 当前 schema 为 `8`，`device-client.sqlite3` 当前 schema 为 `11`。两者分别由 `SqliteStorage` 与 `DeviceStore` 的 `initialize_schema` 检查 `user_version`，在同一事务内初始化和校验。版本不匹配时拒绝打开。这个行为不能推广到其他产品数据库。
 
 Gate 决策和运行追踪还会检查持久化 JSON 的字段结构。SQLite 版本匹配不代表这些记录可读。恢复备份时须使用与记录结构匹配的程序。
 

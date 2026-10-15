@@ -23,6 +23,8 @@ import {
   RUST_RELEASE_ARTIFACTS,
   ReleaseArtifactError,
   canonicalJson,
+  assertReleaseApiReport,
+  apiProductionSourceSealSummary,
   createReleaseBuildEnvironment,
   createReleaseArtifactManifest,
   createReleaseReport,
@@ -38,6 +40,7 @@ import {
   releaseSourceSha256,
 } from '../scripts/release-source-contract.mjs'
 import { capturedStandardOutput } from '../scripts/child-process-output.mjs'
+import vm from 'node:vm'
 
 const root = resolve(import.meta.dirname, '..')
 const workspaceVersion = JSON.parse(readFileSync(join(root, 'package.json'), 'utf8')).version
@@ -233,16 +236,87 @@ test('release runner leaves the complete workspace gate to mainline and runs one
   assert.match(runner, /'--server-binary', paths\['winwincode-server'\]/u)
   assert.match(runner, /'--worker-binary', paths\['winwincode-worker'\]/u)
   assert.match(runner, /const runtimeRoot = resolve\(buildRoot, 'api-production-runtime'\)/u)
-  assert.match(runner, /report\.flow\?\.chat\?\.status !== 'Completed'/u)
-  assert.match(runner, /report\.flow\?\.strongflow\?\.status !== 'done'/u)
-  assert.match(runner, /report\.flow\?\.strongflow\?\.verdictStatus !== 'pass'/u)
-  assert.match(runner, /report\.remoteWorker\?\.terminalAfterWorkerRestart !== true/u)
-  assert.match(runner, /report\.remoteWorker\?\.terminalAfterServerRestart !== true/u)
+  assert.match(runner, /assertReleaseApiReport\(report, sourceSeal\.seal\)/u)
   const coldReplay = runner.lastIndexOf('resetCargoTarget(cargoTarget)')
   const replay = runner.indexOf("label: 'replay'")
   const api = runner.indexOf('  runReleaseApiVertical(buildRoot, primaryRustSnapshot)')
   const stage = runner.indexOf('  stageArtifacts(artifactRoot, primaryRustSnapshot, clientSnapshot)')
   assert.equal(api < coldReplay && coldReplay < replay && replay < stage, true)
+})
+
+function releaseApiFixture() {
+  const seal = Object.fromEntries([
+    'helperBinarySha256', 'cliBinarySha256', 'workerBinarySha256',
+    'serverBinarySha256', 'sourceSha256', 'trackedDiffSha256',
+  ].map((key, index) => [key, `sha256:${String(index).repeat(64)}`]))
+  seal.gitHead = sourceCommit
+  const initial = { workerSessionId: 'initial-session', workerId: 'initial-worker',
+    workerInstanceId: 'initial-instance', pid: 100, processStartIdentity: 'linux-100' }
+  const restarted = { workerSessionId: 'restarted-session', workerId: 'restarted-worker',
+    workerInstanceId: 'restarted-instance', pid: 101, processStartIdentity: 'linux-101' }
+  const serverRestartWorker = { workerSessionId: 'server-restart-session', workerId: 'server-restart-worker',
+    workerInstanceId: 'server-restart-instance', pid: 102, processStartIdentity: 'linux-102' }
+  const completion = (worker, suffix) => ({ jobId: `job-${suffix}`, productSessionId: `product-${suffix}`,
+    executionWorkerSessionId: `execution-${suffix}`, processWorkerSessionId: worker.workerSessionId,
+    workerId: worker.workerId, workerInstanceId: worker.workerInstanceId, leaseId: `lease-${suffix}`,
+    attempt: 1, fencingToken: '1', jobState: 'completed' })
+  const runner = readFileSync(join(root, 'scripts/run-api-production-vertical.mjs'), 'utf8')
+  const expression = runner.match(/sourceSeal: (\{\n        gitHead:[\s\S]*?\n      \}),\n      workerBinarySha256/u)?.[1]
+  assert.ok(expression, 'extract the real API report producer projection')
+  const sourceSeal = JSON.parse(JSON.stringify(vm.runInNewContext(`(${expression})`, { sourceSeal: { seal } })))
+  return { seal, report: { schemaVersion: 'winwincode.api-production-vertical.v1',
+    execution: 'device-worker-only', devicePath: { complete: true },
+    health: { initial: 'ready', afterRestart: 'ready' },
+    flow: { chat: { status: 'Completed' }, cancel: { state: 'cancelled' },
+      strongflow: { status: 'done', verdictStatus: 'pass' } },
+    deterministic: { contentEqual: true }, restart: { messageBytesStable: true, deliveryBytesStable: true },
+    artifacts: { sourceSeal, workerBinarySha256: seal.workerBinarySha256 },
+    deviceWorkerLifecycle: { initial, restarted, stopped: true,
+      terminalAfterWorkerRestart: true, workerRestartCompletion: completion(restarted, 'worker-restart'),
+      serverRestartWorker, survivedServerRestart: structuredClone(serverRestartWorker),
+      terminalAfterServerRestart: true, serverRestartCompletion: completion(serverRestartWorker, 'server-restart') },
+  } }
+}
+
+test('the API report producer satisfies both strict release report consumers', () => {
+  const { seal, report } = releaseApiFixture()
+  assert.deepEqual(report.artifacts.sourceSeal, apiProductionSourceSealSummary(seal))
+  assert.doesNotThrow(() => assertReleaseApiReport(report, seal))
+  for (const path of ['scripts/stage-product-release.mjs', 'scripts/run-release-artifact-gate.mjs']) {
+    const consumer = readFileSync(join(root, path), 'utf8')
+    assert.match(consumer, /assertReleaseApiReport\(/u)
+  }
+})
+
+test('release API reports reject missing, stale and invented lifecycle or source evidence', () => {
+  const { seal, report } = releaseApiFixture()
+  const mutations = [
+    value => { delete value.artifacts.sourceSeal.cliBinarySha256 },
+    value => { value.artifacts.sourceSeal.workerBinarySha256 = `sha256:${'f'.repeat(64)}` },
+    value => { value.artifacts.sourceSeal.extra = true },
+    value => { value.artifacts.workerBinarySha256 = `sha256:${'f'.repeat(64)}` },
+    value => { value.execution = 'server-local' },
+    value => { value.devicePath.complete = false },
+    value => { delete value.deviceWorkerLifecycle },
+    value => { value.deviceWorkerLifecycle.stopped = false },
+    value => { value.deviceWorkerLifecycle.restarted.pid = value.deviceWorkerLifecycle.initial.pid },
+    value => { value.deviceWorkerLifecycle.survivedServerRestart.processStartIdentity = 'reused-pid' },
+    value => { value.deviceWorkerLifecycle.terminalAfterWorkerRestart = false },
+    value => { value.deviceWorkerLifecycle.terminalAfterServerRestart = false },
+    value => { delete value.deviceWorkerLifecycle.serverRestartWorker },
+    value => { value.deviceWorkerLifecycle.serverRestartCompletion.jobId = value.deviceWorkerLifecycle.workerRestartCompletion.jobId },
+    value => { value.deviceWorkerLifecycle.serverRestartCompletion.productSessionId = value.deviceWorkerLifecycle.workerRestartCompletion.productSessionId },
+    value => { value.deviceWorkerLifecycle.serverRestartCompletion.processWorkerSessionId = value.deviceWorkerLifecycle.restarted.workerSessionId },
+    value => { value.deviceWorkerLifecycle.workerRestartCompletion.jobState = 'running' },
+    value => { value.deviceWorkerLifecycle.workerRestartCompletion.workerInstanceId = 'other-instance' },
+    value => { value.deviceWorkerLifecycle.initial.pid = -1 },
+    value => { value.restart.deliveryBytesStable = false },
+  ]
+  for (const mutate of mutations) {
+    const changed = structuredClone(report)
+    mutate(changed)
+    assert.throws(() => assertReleaseApiReport(changed, seal))
+  }
 })
 
 test('release runner cold-builds twice at one physical Cargo target outside its snapshot', () => {

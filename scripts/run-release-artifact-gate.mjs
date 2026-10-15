@@ -18,6 +18,7 @@ import {
   RELEASE_ARTIFACT_MANIFEST,
   RELEASE_CHECKSUMS,
   RUST_RELEASE_ARTIFACTS,
+  assertReleaseApiReport,
   canonicalJson,
   createReleaseBuildEnvironment,
   createReleaseArtifactManifest,
@@ -235,30 +236,6 @@ function stageArtifacts(artifactRoot, rustBuildResult, clientSnapshot) {
   }
 }
 
-function assertReleaseApiReport(report) {
-  if (report?.health?.initial !== 'ready' || report.health.afterRestart !== 'ready') {
-    throw new Error('release API vertical did not keep the Server ready across restart')
-  }
-  if (report.flow?.chat?.status !== 'Completed'
-    || report.flow?.cancel?.state !== 'cancelled'
-    || report.flow?.strongflow?.status !== 'done'
-    || report.flow?.strongflow?.verdictStatus !== 'pass') {
-    throw new Error('release API vertical did not complete Chat, cancel and StrongFlow')
-  }
-  if (report.deterministic?.contentEqual !== true
-    || report.restart?.messageBytesStable !== true
-    || report.restart?.deliveryBytesStable !== true) {
-    throw new Error('release API vertical was not byte-stable across repeat and restart')
-  }
-  if (report.remoteWorker?.terminalAfterWorkerRestart !== true
-    || report.remoteWorker?.terminalAfterServerRestart !== true
-    || !Number.isInteger(report.remoteWorker.restartedPid)
-    || report.remoteWorker.restartedPid === report.remoteWorker.initialPid
-    || report.remoteWorker.survivedServerRestartPid !== report.remoteWorker.restartedPid) {
-    throw new Error('release API vertical did not prove the remote Worker restart boundary')
-  }
-}
-
 function runReleaseApiVertical(buildRoot, rustBuildResult) {
   const runtimeRoot = resolve(buildRoot, 'api-production-runtime')
   const binaryRoot = resolve(runtimeRoot, 'bin')
@@ -271,7 +248,7 @@ function runReleaseApiVertical(buildRoot, rustBuildResult) {
     chmodSync(path, 0o755)
     return [artifact.binaryName, path]
   }))
-  writeApiProductionSourceSeal({
+  const sourceSeal = writeApiProductionSourceSeal({
     root,
     serverBinary: paths['winwincode-server'],
     helperExecutable: paths['winwincode-kernel-helper'],
@@ -283,7 +260,7 @@ function runReleaseApiVertical(buildRoot, rustBuildResult) {
     '--worker-binary', paths['winwincode-worker'],
     '--directory', fixtureRoot,
   ], { capture: true, env: process.env }))
-  assertReleaseApiReport(report)
+  assertReleaseApiReport(report, sourceSeal.seal)
   run(process.execPath, [
     '--test', '--test-name-pattern=public API cancellation closes',
     'tests/api-production-vertical.test.mjs',

@@ -8,7 +8,9 @@ use std::sync::{Arc, Mutex};
 use serde::Deserialize;
 use serde::Serialize;
 use serde_json::Value;
+use serde_json::json;
 use sha2::{Digest, Sha256};
+use winwincode_client_port::candidate_application::candidate_application_digest;
 use winwincode_client_port::domain::ApplyResult;
 use winwincode_client_port::domain::ApplyStrategy;
 use winwincode_client_port::domain::ClientArchitecture;
@@ -35,6 +37,9 @@ use winwincode_client_port::messages::ClientToServerEnvelope;
 use winwincode_client_port::messages::ClientToServerMessage;
 use winwincode_client_port::messages::ServerToClientEnvelope;
 use winwincode_client_port::messages::ServerToClientMessage;
+use winwincode_client_port::messages::{
+    ApplicationReconciliationOutcome, ClientApplicationReconciledPayload,
+};
 use winwincode_control_plane::AccessGrantService;
 use winwincode_control_plane::ClientOccupancyService;
 use winwincode_control_plane::ClientRegistryService;
@@ -390,7 +395,19 @@ impl ClientExchangeApplication {
         if client_ack > cursors.server_to_client_ack_sequence.max(outbox_high_water) {
             return Err(ClientExchangeError::invalid_request());
         }
-        let effective_instance = record
+        if record.current_instance_id.is_none()
+            && record.presence_state == ClientPresenceState::PendingEnrollment
+        {
+            let first = envelopes
+                .first()
+                .filter(|envelope| matches!(envelope.message, ClientToServerMessage::Hello(_)))
+                .ok_or(ClientExchangeError::authentication())?;
+            supersede_instance(storage, &record, first, now)?;
+        }
+        let effective_instance = ClientRegistryService::new(storage)
+            .snapshot(node_id)
+            .map_err(|_| ClientExchangeError::unavailable())?
+            .ok_or(ClientExchangeError::authentication())?
             .current_instance_id
             .clone()
             .ok_or(ClientExchangeError::unavailable())?;
@@ -733,6 +750,9 @@ fn command_identity(
             &payload.occupancy.command.idempotency_key
         }
         ClientToServerMessage::CandidateApplyResult(payload) => {
+            &payload.occupancy.command.idempotency_key
+        }
+        ClientToServerMessage::ApplicationReconciled(payload) => {
             &payload.occupancy.command.idempotency_key
         }
         ClientToServerMessage::ProviderReport(_)
@@ -1090,6 +1110,16 @@ fn apply_effect_with_status(
             .map_err(|_| ClientExchangeError::unavailable())?;
             settle_candidate_apply_result(storage, node_id, payload, now)?;
             Ok(())
+        }
+        ClientToServerMessage::ApplicationReconciled(payload) => {
+            crate::client_occupancy::observe_client_mirror_revision(
+                data_directory,
+                node_id,
+                payload.occupancy.command.expected_revision,
+                now,
+            )
+            .map_err(|_| ClientExchangeError::unavailable())?;
+            settle_application_reconciled(storage, node_id, payload, now)
         }
         ClientToServerMessage::CommandAck(payload) => {
             observe_command_ack_revision(data_directory, node_id, payload, now)
@@ -1594,6 +1624,7 @@ fn settle_candidate_retained(
         receipt.repository_binding_id.clone(),
         receipt.candidate_ref.clone(),
         receipt.candidate_commit.clone(),
+        receipt.base_commit.clone(),
         receipt.local_ref_name.clone(),
     ) else {
         return Err(rejected_command(None));
@@ -1609,6 +1640,7 @@ fn settle_candidate_retained(
     Ok(())
 }
 
+#[allow(clippy::too_many_lines)]
 fn settle_candidate_apply_result(
     storage: &mut SqliteStorage,
     node_id: &str,
@@ -1625,16 +1657,71 @@ fn settle_candidate_apply_result(
                     && lease.fencing_token == payload.occupancy.occupancy_fencing_token
             })
     };
-    if !fenced {
-        return Err(rejected_command(None));
-    }
     let receipt = &payload.receipt;
-    let mut candidates = LocalCandidateService::new(storage);
-    let Some(candidate) = candidates
+    let Some(candidate) = LocalCandidateService::new(storage)
         .candidate_for_ref(node_id, &receipt.candidate_ref)
         .map_err(|_| ClientExchangeError::unavailable())?
     else {
         return Err(rejected_command(None));
+    };
+    let application = if receipt.strategy == ApplyStrategy::CreateBranch {
+        if !fenced {
+            return Err(rejected_command(None));
+        }
+        None
+    } else {
+        let application = storage
+            .candidate_application(&receipt.local_apply_receipt_id)
+            .map_err(|_| ClientExchangeError::unavailable())?
+            .ok_or_else(|| rejected_command(None))?;
+        let original_authority = application.original_lease_id
+            == payload.occupancy.occupancy_lease_id
+            && application.original_epoch == payload.occupancy.occupancy_fencing_token;
+        let retry_authority = application.retry_lease_id.as_deref()
+            == Some(payload.occupancy.occupancy_lease_id.as_str())
+            && application.retry_epoch == Some(payload.occupancy.occupancy_fencing_token);
+        if application.client_node_id != node_id
+            || application.local_candidate_receipt_id != candidate.local_candidate_receipt_id
+            || application.repository_binding_id != receipt.repository_binding_id
+            || application.candidate_ref != receipt.candidate_ref
+            || application.base_commit != receipt.expected_head
+            || application.target_branch != receipt.target_branch
+            || application.strategy != storage_strategy(receipt.strategy).as_str()
+            || application.candidate_digest
+                != candidate_application_digest(
+                    &receipt.repository_binding_id,
+                    &receipt.expected_head,
+                    &candidate.candidate_commit,
+                )
+            || !(original_authority || retry_authority)
+        {
+            return Err(rejected_command(None));
+        }
+        let fact =
+            serde_json::to_string(receipt).map_err(|_| ClientExchangeError::unavailable())?;
+        storage
+            .record_candidate_application_fact(
+                &application.application_id,
+                if fenced {
+                    "application.finished"
+                } else {
+                    "application.fact"
+                },
+                payload.occupancy.occupancy_fencing_token,
+                &fact,
+                &now.0,
+            )
+            .map_err(|_| ClientExchangeError::unavailable())?;
+        if !fenced {
+            return Ok(());
+        }
+        if receipt.result == ApplyResult::OutcomeUnknown {
+            storage
+                .note_candidate_application_outcome(&application.application_id, "outcome_unknown")
+                .map_err(|_| ClientExchangeError::unavailable())?;
+            return Ok(());
+        }
+        Some(application)
     };
     let Ok(settlement) = LocalApplySettlement::try_new(
         receipt.local_apply_receipt_id.clone(),
@@ -1651,8 +1738,8 @@ fn settle_candidate_apply_result(
     ) else {
         return Err(rejected_command(None));
     };
-    candidates
-        .record_apply_result(&settlement, now)
+    LocalCandidateService::new(storage)
+        .record_reconciled_apply_result(&settlement, now)
         .map_err(|error| {
             domain_command_error(matches!(
                 error.kind(),
@@ -1660,6 +1747,112 @@ fn settle_candidate_apply_result(
                     | winwincode_control_plane::LocalCandidateServiceErrorKind::CorruptState
             ))
         })?;
+    if let Some(application) = application {
+        let result = json!({ "result": storage_result(receipt.result).as_str(),
+            "resultCommit": receipt.resulting_commit, "conflictArtifactRef": receipt.conflict_artifact_ref }).to_string();
+        storage
+            .settle_candidate_application(
+                &application.application_id,
+                storage_result(receipt.result).as_str(),
+                &result,
+            )
+            .map_err(|_| rejected_command(None))?;
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_lines)]
+fn settle_application_reconciled(
+    storage: &mut SqliteStorage,
+    node_id: &str,
+    payload: &ClientApplicationReconciledPayload,
+    now: &Instant,
+) -> Result<(), ClientExchangeError> {
+    let current = ClientOccupancyService::new(storage)
+        .active_lease_for_node(node_id)
+        .map_err(|_| ClientExchangeError::unavailable())?;
+    if !current.is_some_and(|lease| {
+        lease.occupancy_lease_id == payload.occupancy.occupancy_lease_id
+            && lease.fencing_token == payload.occupancy.occupancy_fencing_token
+    }) {
+        return Err(rejected_command(None));
+    }
+    let application = storage
+        .candidate_application(&payload.application_id)
+        .map_err(|_| ClientExchangeError::unavailable())?
+        .ok_or_else(|| rejected_command(None))?;
+    if application.client_node_id != node_id
+        || application.approval_id != payload.approval_id
+        || application.original_epoch != payload.original_epoch
+        || application.repository_binding_id != payload.repository_binding_id
+        || application.candidate_ref != payload.candidate_ref
+        || application.candidate_digest != payload.candidate_digest
+        || application.base_commit != payload.base_commit
+        || application.target_branch != payload.target_branch
+        || payload.original_epoch > payload.occupancy.occupancy_fencing_token
+    {
+        return Err(rejected_command(None));
+    }
+    let outcome = match payload.outcome {
+        ApplicationReconciliationOutcome::Applied => "applied",
+        ApplicationReconciliationOutcome::NotStarted => "not_started",
+        ApplicationReconciliationOutcome::OutcomeUnknown => "outcome_unknown",
+    };
+    if (outcome == "applied") != payload.result_commit.is_some() {
+        return Err(rejected_command(None));
+    }
+    let fact = serde_json::to_string(payload).map_err(|_| ClientExchangeError::unavailable())?;
+    storage
+        .record_candidate_application_fact(
+            &payload.application_id,
+            "application.reconciled",
+            payload.occupancy.occupancy_fencing_token,
+            &fact,
+            &now.0,
+        )
+        .map_err(|_| ClientExchangeError::unavailable())?;
+    if outcome != "applied" {
+        storage
+            .note_candidate_application_outcome(&payload.application_id, outcome)
+            .map_err(|_| ClientExchangeError::unavailable())?;
+        return Ok(());
+    }
+    let strategy = match application.strategy.as_str() {
+        "fast_forward" => LocalApplyStrategy::FastForward,
+        "cherry_pick" => LocalApplyStrategy::CherryPick,
+        "merge" => LocalApplyStrategy::Merge,
+        _ => return Err(rejected_command(None)),
+    };
+    let result = json!({"result":"applied", "resultCommit":payload.result_commit,
+        "conflictArtifactRef":null})
+    .to_string();
+    if application.result_json.is_some() {
+        return if application.result_json.as_deref() == Some(result.as_str()) {
+            Ok(())
+        } else {
+            Err(rejected_command(None))
+        };
+    }
+    let settlement = LocalApplySettlement::try_new(
+        application.application_id.clone(),
+        application.local_candidate_receipt_id,
+        node_id,
+        application.repository_binding_id,
+        application.candidate_ref,
+        application.target_branch,
+        application.base_commit,
+        strategy,
+        LocalApplyResult::Applied,
+        payload.result_commit.clone(),
+        None,
+    )
+    .map_err(|_| rejected_command(None))?;
+    LocalCandidateService::new(storage)
+        .record_reconciled_apply_result(&settlement, now)
+        .map_err(|_| rejected_command(None))?;
+    storage
+        .settle_candidate_application(&application.application_id, "applied", &result)
+        .map_err(|_| rejected_command(None))?;
     Ok(())
 }
 
@@ -1684,6 +1877,7 @@ const fn storage_result(result: ApplyResult) -> LocalApplyResult {
         ApplyResult::PermissionDenied => LocalApplyResult::PermissionDenied,
         ApplyResult::Discarded => LocalApplyResult::Discarded,
         ApplyResult::Failed => LocalApplyResult::Failed,
+        ApplyResult::OutcomeUnknown => LocalApplyResult::OutcomeUnknown,
     }
 }
 
@@ -1897,6 +2091,7 @@ mod tests {
                     candidate_ref: "cand_1".to_owned(),
                     repository_binding_id: "rb_1".to_owned(),
                     candidate_commit: "0123456789abcdef0123456789abcdef01234567".to_owned(),
+                    base_commit: "0123456789abcdef0123456789abcdef01234567".into(),
                     local_ref_name: "refs/winwincode/candidates/cand_1".to_owned(),
                     state: winwincode_client_port::domain::LocalCandidateState::Retained,
                     created_at: "2026-01-02T12:00:00.000Z".to_owned(),
@@ -1904,7 +2099,7 @@ mod tests {
                 },
             }),
             ClientToServerMessage::CandidateApplyResult(ClientCandidateApplyResultPayload {
-                occupancy,
+                occupancy: occupancy.clone(),
                 receipt: winwincode_client_port::domain::LocalApplyReceipt {
                     local_apply_receipt_id: "lar_1".to_owned(),
                     candidate_ref: "cand_1".to_owned(),
@@ -1919,8 +2114,21 @@ mod tests {
                     revision: 1,
                 },
             }),
+            ClientToServerMessage::ApplicationReconciled(ClientApplicationReconciledPayload {
+                occupancy,
+                application_id: "lar_1".into(),
+                approval_id: "apr_1".into(),
+                original_epoch: 1,
+                repository_binding_id: "rb_1".into(),
+                candidate_ref: "cand_1".into(),
+                candidate_digest: "sha256:aa".into(),
+                base_commit: "0123456789abcdef0123456789abcdef01234567".into(),
+                target_branch: "main".into(),
+                outcome: ApplicationReconciliationOutcome::Applied,
+                result_commit: Some("0123456789abcdef0123456789abcdef01234567".into()),
+            }),
         ];
-        assert_eq!(commands.len(), 9, "the client command kinds");
+        assert_eq!(commands.len(), 10, "the client command kinds");
         for message in &commands {
             let identity = command_identity(message, "sha256:dd");
             assert_eq!(

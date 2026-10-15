@@ -26,6 +26,8 @@ use winwincode_worker::workspace_runtime::{JobWorkspaceRuntime, ObservationModel
 use winwincode_worker::{WorkerConfig, WorkerLifecycleState, WorkerMain};
 
 const WORKER_TOKIO_STACK_BYTES: usize = 16 * 1024 * 1024;
+const WORKER_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(10);
+const WORKER_CORE_STOP_TIMEOUT: Duration = Duration::from_secs(5);
 
 const USAGE: &str = "usage: winwincode-worker [--check|--managed-session <config-file>|--version]";
 
@@ -160,6 +162,25 @@ where
     Ok(())
 }
 
+async fn shutdown_worker<Port, Codex>(worker: &mut WorkerMain<Port, Codex>, now: Instant)
+where
+    Port: winwincode_codex::WorkerExecutionPort,
+    Codex: winwincode_codex::CodexCoreAdapter + Send + 'static,
+{
+    if let Ok(Ok(report)) =
+        tokio::time::timeout(WORKER_SHUTDOWN_TIMEOUT, Box::pin(worker.shutdown(now))).await
+        && report.codex_failures == 0
+    {
+        return;
+    }
+    if !matches!(
+        tokio::time::timeout(WORKER_CORE_STOP_TIMEOUT, worker.stop_execution()).await,
+        Ok(Ok(()))
+    ) {
+        eprintln!("winwincode-worker: execution cleanup remains unconfirmed");
+    }
+}
+
 #[allow(
     clippy::too_many_lines,
     reason = "the composition owns registration, control delivery, and bounded shutdown"
@@ -224,16 +245,19 @@ async fn run_worker(bootstrap: WorkerBootstrap) -> Result<(), Box<dyn std::error
     let registration = tokio::select! {
         result = Box::pin(register_until_active(&mut worker, &handle, &started_at)) => Some(result),
         () = interrupt.wait() => None,
+        error = handle.wait_for_terminal_error() => {
+            Some(Err(error.into()))
+        },
     };
     match registration {
         Some(Ok(())) => {}
         Some(Err(error)) => {
-            let _ = Box::pin(worker.shutdown(now_instant()?)).await;
+            shutdown_worker(&mut worker, now_instant()?).await;
             return Err(error);
         }
         None => {
             handle.close();
-            let _ = Box::pin(worker.shutdown(now_instant()?)).await;
+            shutdown_worker(&mut worker, now_instant()?).await;
             return Ok(());
         }
     }
@@ -245,9 +269,11 @@ async fn run_worker(bootstrap: WorkerBootstrap) -> Result<(), Box<dyn std::error
     drive.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut observed_drive_failures = Vec::new();
     let mut interrupted = false;
+    let mut drive_error = None;
     loop {
         tokio::select! {
             () = interrupt.wait() => { interrupted = true; break; },
+            _ = handle.wait_for_terminal_error() => { break; },
             _ = drive.tick() => {
                 let step = async {
                 if worker.transport_failure().is_some() { return Ok(true); }
@@ -271,8 +297,16 @@ async fn run_worker(bootstrap: WorkerBootstrap) -> Result<(), Box<dyn std::error
                 winwincode_worker::mechanism_timing::record("drive_exit", &serde_json::json!({}));
                 Ok::<_, Box<dyn std::error::Error>>(exit_after_work && worker.work_drained())
                 };
-                let Some(result) = interrupt.until_interrupt(step).await else { interrupted = true; break; };
-                if result? { break; }
+                let result = tokio::select! {
+                    result = interrupt.until_interrupt(step) => result,
+                    _ = handle.wait_for_terminal_error() => None,
+                };
+                let Some(result) = result else { interrupted = handle.terminal_error().is_none(); break; };
+                match result {
+                    Ok(true) => break,
+                    Ok(false) => {},
+                    Err(error) => { drive_error = Some(error); break; },
+                }
             }
         }
         if handle.terminal_error().is_some()
@@ -282,15 +316,20 @@ async fn run_worker(bootstrap: WorkerBootstrap) -> Result<(), Box<dyn std::error
             break;
         }
     }
-    if interrupted {
+    if (interrupted || drive_error.is_some() || worker.transport_failure().is_some())
+        && handle.terminal_error().is_none()
+    {
         handle.close();
     }
-    let _ = Box::pin(worker.shutdown(now_instant()?)).await;
+    shutdown_worker(&mut worker, now_instant()?).await;
     if interrupted {
         return Ok(());
     }
     if let Some(error) = handle.terminal_error() {
         return Err(error.into());
+    }
+    if let Some(error) = drive_error {
+        return Err(error);
     }
     if let Some(error) = worker
         .transport_failure()

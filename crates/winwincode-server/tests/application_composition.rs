@@ -143,7 +143,7 @@ impl EventPublisher for RecordingPublisher {
     }
 }
 
-struct FixedClock(u64);
+struct FixedClock(u64, winwincode_domain::Instant);
 
 impl StandaloneApplicationClock for FixedClock {
     fn now_millis(&self) -> u64 {
@@ -151,7 +151,7 @@ impl StandaloneApplicationClock for FixedClock {
     }
 
     fn now_instant(&self) -> winwincode_domain::Instant {
-        winwincode_domain::Instant("2027-01-15T08:00:00.000Z".to_owned())
+        self.1.clone()
     }
 }
 
@@ -258,7 +258,10 @@ fn compose_application(
         storage,
         worker_outbound,
         hub,
-        Arc::new(FixedClock(1_800_000_000_000)),
+        Arc::new(FixedClock(
+            1_800_000_000_000,
+            winwincode_domain::Instant("2027-01-15T08:00:00.000Z".into()),
+        )),
         execution_config(1),
     )
 }
@@ -303,7 +306,10 @@ fn composition_rejects_a_control_plane_from_another_database() {
         storage,
         worker_outbound,
         hub,
-        Arc::new(FixedClock(1_800_000_000_000)),
+        Arc::new(FixedClock(
+            1_800_000_000_000,
+            winwincode_domain::Instant("2027-01-15T08:00:00.000Z".into()),
+        )),
         execution_config(1),
     );
     let Err(error) = result else {
@@ -335,7 +341,10 @@ fn composition_rejects_a_control_plane_from_another_database() {
         storage,
         foreign_worker_outbound,
         hub,
-        Arc::new(FixedClock(1_800_000_000_000)),
+        Arc::new(FixedClock(
+            1_800_000_000_000,
+            winwincode_domain::Instant("2027-01-15T08:00:00.000Z".into()),
+        )),
         execution_config(1),
     );
     let Err(error) = result else {
@@ -1160,7 +1169,8 @@ fn production_backpressure_returns_pages_without_accepting_the_upstream_frame() 
         serde_json::from_value(repository_scope_json(1)).unwrap(),
         scheduler,
         FloodRemoteCore(recorded.clone()),
-    );
+    )
+    .with_clock(Arc::new(FixedClock(1_800_000_000_000, now.clone())));
     let send = |message: ExecutionPortMessage, acknowledgements, v2: bool| {
         let frame = TypedFrame::new(FrameDirection::WorkerToControlPlane, message).expect("frame");
         let bytes = RemoteTransportAdapter::<RecordingRemoteCore>::encode(&frame).expect("encoded");
@@ -1190,6 +1200,7 @@ fn production_backpressure_returns_pages_without_accepting_the_upstream_frame() 
     })).expect("register frame");
     let registration =
         RemoteExchangeResponse::decode(&send(register, vec![], true).expect("register")).unwrap();
+    assert_eq!(registration.server_time(), &now);
     let registration_id = registration.deliveries()[0].delivery_id.clone();
     let heartbeat: ExecutionPortMessage = serde_json::from_value(serde_json::json!({
         "kind":"worker.heartbeat", "schemaVersion":SchemaVersion::WinwincodeV1, "messageId":id("xmsg",2),
@@ -1280,7 +1291,8 @@ fn relayed_heartbeat_reaches_shared_core_after_session_routing() {
         serde_json::from_value(repository_scope_json(1)).unwrap(),
         scheduler,
         RecordingRemoteCore(recorded.clone()),
-    );
+    )
+    .with_clock(Arc::new(FixedClock(1_800_000_000_000, now.clone())));
     let send = |message: ExecutionPortMessage| {
         let frame = TypedFrame::new(FrameDirection::WorkerToControlPlane, message).expect("frame");
         let bytes = RemoteTransportAdapter::<RecordingRemoteCore>::encode(&frame).expect("encoded");
@@ -1470,13 +1482,15 @@ mod heartbeat_gap {
             Duration::from_secs(10),
         )
         .unwrap();
-        let exchange: Arc<dyn RemoteWorkerExchangePort> =
-            Arc::new(ProductionRemoteWorkerExchange::new(
+        let exchange: Arc<dyn RemoteWorkerExchangePort> = Arc::new(
+            ProductionRemoteWorkerExchange::new(
                 &root,
                 serde_json::from_value(super::repository_scope_json(1)).unwrap(),
                 scheduler,
                 HeartbeatCore(SqliteStorage::open(&root).unwrap(), now.clone()),
-            ));
+            )
+            .with_clock(Arc::new(super::FixedClock(1_800_000_000_000, now.clone()))),
+        );
         let state = Arc::new(Mutex::new(WireState::default()));
         let wire = LossyWire {
             exchange,

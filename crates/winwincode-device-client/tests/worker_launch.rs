@@ -106,6 +106,7 @@ struct ServerSim {
     state: Mutex<ServerState>,
     downlink: Mutex<VecDeque<Vec<Value>>>,
     next_sequence: AtomicU64,
+    failure_status: AtomicU64,
 }
 
 impl ServerSim {
@@ -114,6 +115,7 @@ impl ServerSim {
             state: Mutex::new(ServerState::default()),
             downlink: Mutex::new(VecDeque::new()),
             next_sequence: AtomicU64::new(1),
+            failure_status: AtomicU64::new(0),
         }
     }
 
@@ -154,6 +156,12 @@ impl ServerSim {
 
 impl ExchangeTransport for ServerSim {
     fn exchange(&self, request_bytes: &[u8]) -> Result<Vec<u8>, ExchangeTransportError> {
+        let status = self.failure_status.load(Ordering::Acquire);
+        if status != 0 {
+            return Err(ExchangeTransportError::from_network(
+                winwincode_network::NetworkFailure::http(u16::try_from(status).unwrap(), None),
+            ));
+        }
         let request: ExchangeRequest = serde_json::from_slice(request_bytes)
             .map_err(|error| ExchangeTransportError::new(format!("fake decode: {error}")))?;
         let (ack, frames) = {
@@ -1104,6 +1112,111 @@ fn the_written_config_is_accepted_by_the_real_worker_entry_reader() {
 
 fn json_str(value: &str) -> Value {
     Value::String(value.to_owned())
+}
+
+#[test]
+#[allow(clippy::too_many_lines)]
+fn authentication_failure_and_force_fence_stop_the_worker_process_group() {
+    for cause in ["401", "403", "force-fence"] {
+        let root = temporary_directory(cause);
+        let sim = Arc::new(ServerSim::new());
+        let (store, identity) = open_enrolled(&root);
+        let instance_id = identity.current_instance_id().to_owned();
+        let mut daemon =
+            DeviceDaemon::start(daemon_config(), store, sim.clone(), &identity).unwrap();
+        let lane = WorkerLane::open(&root, &instance_id, cause);
+        write_executable_script(
+            lane.supervisor
+                .config()
+                .worker_binary_path
+                .as_ref()
+                .unwrap(),
+            &format!(
+                "if [ \"$1\" = --managed-session ]; then\n  sleep 30 &\n  echo $! > \"$(dirname \"$2\")/child-pid\"\nfi\n{LONG_RUNNING_BODY}"
+            ),
+        );
+        daemon.set_worker_supervisor(lane.supervisor.clone());
+        daemon.set_worker_launch_material_source(lane.material.clone());
+        sim.queue_downlink(offer(LEASE, 7));
+        drive_until(&mut daemon, |daemon| daemon.occupancy_mirror().is_some());
+        sim.queue_downlink(launch(
+            occupancy_stamp(1, "tree-launch", LEASE, 7),
+            grant(&instance_id, LEASE, 7),
+        ));
+        drive_until(&mut daemon, |daemon| {
+            daemon.status().worker_launches_accepted == 1
+        });
+        wait_for_ready_marker(&lane.directories().data_directory);
+        let process = lane
+            .supervisor
+            .worker_process(WORKER_SESSION)
+            .unwrap()
+            .unwrap();
+        let recovery_config = retain_empty_provider_store_for_recovery(&lane);
+        let child_pid =
+            fs::read_to_string(lane.directories().data_directory.join("child-pid")).unwrap();
+        assert!(
+            std::process::Command::new("/bin/kill")
+                .args(["-0", child_pid.trim()])
+                .status()
+                .unwrap()
+                .success()
+        );
+        if cause == "force-fence" {
+            sim.queue_downlink(force_fence(occupancy_stamp(1, "tree-fence", LEASE, 9)));
+            drive_until(&mut daemon, |daemon| {
+                daemon.status().occupancy_force_fences_applied == 1
+            });
+        } else {
+            sim.failure_status
+                .store(cause.parse().unwrap(), Ordering::Release);
+            let deadline = Instant::now() + Duration::from_secs(3);
+            loop {
+                if matches!(
+                    daemon.tick(Instant::now()),
+                    Err(winwincode_device_client::DaemonError::Network(_))
+                ) {
+                    break;
+                }
+                assert!(
+                    Instant::now() < deadline,
+                    "authentication failure was not terminal"
+                );
+                thread::sleep(Duration::from_millis(2));
+            }
+        }
+        assert_ne!(
+            lane.supervisor
+                .worker_process(WORKER_SESSION)
+                .unwrap()
+                .unwrap()
+                .state,
+            WORKER_STATE_RUNNING
+        );
+        if cause != "force-fence" {
+            assert_eq!(
+                fs::read_to_string(recovery_config.with_extension("json.recovery-request"))
+                    .unwrap(),
+                recovery_config.to_str().unwrap()
+            );
+        }
+        let output = std::process::Command::new("/bin/ps")
+            .args(["-axo", "pgid=,stat="])
+            .output()
+            .unwrap();
+        let group = process.pid.to_string();
+        assert!(
+            String::from_utf8_lossy(&output.stdout).lines().all(|line| {
+                let mut fields = line.split_whitespace();
+                fields.next() != Some(group.as_str())
+                    || fields.next().is_none_or(|state| state.starts_with('Z'))
+            }),
+            "{cause} left a live Worker subprocess"
+        );
+        daemon.into_store().close().unwrap();
+        drop(lane);
+        cleanup(&root);
+    }
 }
 
 #[test]

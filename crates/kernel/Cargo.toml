@@ -31,6 +31,9 @@ serde_json.workspace = true
 tokio.workspace = true
 winwincode-execution-port.workspace = true
 
+[target.'cfg(target_os = "linux")'.dependencies]
+tempfile = "=3.27.0"
+
 [dev-dependencies]
 rusqlite.workspace = true
 sha2.workspace = true

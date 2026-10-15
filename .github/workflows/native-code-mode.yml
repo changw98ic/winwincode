@@ -160,28 +160,8 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          cargo build --locked --release -p winwincode-kernel-helper --target "${{ matrix.target }}"
+          cargo test --locked --release -p winwincode-kernel-helper --test entrypoints --target "${{ matrix.target }}"
           helper="${GITHUB_WORKSPACE}/target/${{ matrix.target }}/release/winwincode-kernel-helper"
-          node --input-type=module - "${helper}" <<'NODE'
-          import assert from 'node:assert/strict'
-          import { execFileSync } from 'node:child_process'
-          import { createHash } from 'node:crypto'
-          import { readFileSync, statSync } from 'node:fs'
-          const helper = process.argv[2]
-          assert.ok(statSync(helper).size <= 64 * 1024 * 1024, 'helper exceeds the production image limit')
-          const expected = {
-            protocol: 'winwincode-kernel-helper',
-            version: 1,
-            packageVersion: JSON.parse(readFileSync('package.json', 'utf8')).version,
-          }
-          const query = flag => JSON.parse(execFileSync(helper, [flag], { encoding: 'utf8' }))
-          assert.deepEqual(query('--winwincode-helper-handshake'), expected)
-          const source = readFileSync('crates/helper/src/main.rs')
-          assert.deepEqual(query('--winwincode-helper-identity'), {
-            ...expected,
-            sourceSha256: `sha256:${createHash('sha256').update(source).digest('hex')}`,
-          })
-          NODE
           WINWINCODE_CODE_MODE_TEST_HELPER="${helper}" node scripts/run-native-kernel-acceptance.mjs cargo test --locked -p winwincode-kernel --test code_mode_kernel --target "${{ matrix.target }}"
 
       - name: Retain failed macOS Kernel startup evidence

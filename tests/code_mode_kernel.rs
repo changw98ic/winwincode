@@ -272,8 +272,6 @@ impl Fixture {
             "build the product helper before this test"
         );
         std::fs::copy(product_helper, root.join("helper")).unwrap();
-        #[cfg(target_os = "linux")]
-        std::fs::hard_link(root.join("helper"), root.join("codex-linux-sandbox")).unwrap();
         let mcp = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("../../tests/fixtures/code-mode-mcp.mjs");
         let mcp_arg = serde_json::to_string(&mcp.canonicalize().unwrap()).unwrap();
@@ -297,10 +295,25 @@ impl Fixture {
     }
 
     fn kernel_options(&self) -> KernelOptions {
-        let mut options = KernelOptions::new(self.0.join("home"), self.0.join("helper"));
-        options.linux_sandbox_executable =
-            cfg!(target_os = "linux").then(|| self.0.join("codex-linux-sandbox"));
-        options
+        KernelOptions::new(self.0.join("home"), self.0.join("helper"))
+    }
+
+    fn helper_process_groups(&self) -> Vec<(u32, u32)> {
+        let output = std::process::Command::new("/bin/ps")
+            .args(["-axo", "pid=,ppid=,pgid=,args="])
+            .output()
+            .unwrap();
+        let executable = self.0.join("helper").to_string_lossy().into_owned();
+        String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .filter_map(|line| {
+                let mut fields = line.split_whitespace();
+                let pid = fields.next()?.parse().ok()?;
+                let parent: u32 = fields.next()?.parse().ok()?;
+                let group = fields.next()?.parse().ok()?;
+                (parent == std::process::id() && line.contains(&executable)).then_some((pid, group))
+            })
+            .collect()
     }
 
     fn configure_cancellation_mcp(&self) {
@@ -710,6 +723,7 @@ async fn assert_blocked_mcp_wait(fixture: &Fixture, kernel: &Kernel, session_id:
     .expect("interrupt reaches a real blocked MCP call while functions.wait is active");
 }
 
+#[allow(clippy::too_many_lines)]
 fn assert_interrupt_closes_native_cell(
     source: &'static str,
     blocked_mcp: bool,
@@ -761,6 +775,17 @@ fn assert_interrupt_closes_native_cell(
             if blocked_mcp {
                 assert_blocked_mcp_wait(&fixture, &kernel, &session.session_id).await;
             }
+            let helper_groups = if shutdown_immediately {
+                let groups = fixture.helper_process_groups();
+                assert!(
+                    !groups.is_empty(),
+                    "the blocked cell must own a real helper process"
+                );
+                assert!(groups.iter().all(|(pid, group)| pid == group));
+                groups
+            } else {
+                Vec::new()
+            };
             kernel.interrupt(&session.session_id).await.unwrap();
             if !shutdown_immediately {
                 wait_for_kind(&kernel, &session.session_id, "turn_aborted").await;
@@ -787,6 +812,19 @@ fn assert_interrupt_closes_native_cell(
                 .unwrap();
             assert_eq!(final_cell["fact"]["lifecycle"], "closed");
             kernel.shutdown().await.unwrap();
+            if shutdown_immediately {
+                tokio::time::timeout(Duration::from_secs(3), async {
+                    loop {
+                        let live = fixture.helper_process_groups();
+                        if helper_groups.iter().all(|prior| !live.contains(prior)) {
+                            break;
+                        }
+                        tokio::time::sleep(Duration::from_millis(20)).await;
+                    }
+                })
+                .await
+                .expect("Kernel shutdown must reap its real helper process groups");
+            }
             if blocked_mcp {
                 fixture.assert_no_mcp_phase("after");
             }

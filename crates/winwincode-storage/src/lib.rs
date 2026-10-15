@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 mod artifact;
+mod candidate_applications;
 mod client_connect;
 mod client_downlink;
 mod client_launch_grant;
@@ -8,6 +9,7 @@ mod client_occupancy;
 mod client_registry;
 mod control_plane_instances;
 mod delivery;
+mod device_auth;
 mod device_execution_binding;
 mod device_execution_recovery;
 pub use device_execution_recovery::stage_device_execution_recovery;
@@ -45,6 +47,7 @@ pub use artifact::{
     ArtifactStorageSourcePage, ArtifactStore, ArtifactWriteReceipt, FakeArtifactObjectStore,
     LocalArtifactObjectStore, MAX_ARTIFACT_RANGE_BYTES,
 };
+pub use candidate_applications::CandidateApplicationRecord;
 pub use client_connect::{
     AccessGrantIssuance, AccessGrantRecord, AccessGrantState, AttemptDimension,
     ClientConnectLedger, ClientConnectStoreError, ClientConnectStoreErrorKind, ConnectAttemptState,
@@ -80,6 +83,7 @@ pub use delivery::{
     delivery_candidate_source, delivery_dispatch_authority, delivery_execution_replacement,
     delivery_rework_candidate_source,
 };
+pub use device_auth::{DeviceAuthStoreError, DeviceBindingWrite};
 pub use device_execution_binding::{
     DeviceBindingReceipt, DeviceExecutionBindingIssuance, DeviceExecutionBindingLedger,
     DeviceExecutionBindingRecord, DeviceExecutionBindingRelease, DeviceExecutionBindingState,
@@ -233,7 +237,7 @@ use winwincode_domain::{
 };
 
 const DATABASE_FILE_NAME: &str = "control-plane.sqlite3";
-pub const CONTROL_PLANE_SCHEMA_VERSION: i64 = 7;
+pub const CONTROL_PLANE_SCHEMA_VERSION: i64 = 8;
 static SQLITE_OPEN_LOCKS: OnceLock<Mutex<HashMap<PathBuf, Weak<Mutex<()>>>>> = OnceLock::new();
 thread_local! {
     static SQLITE_OPEN_BUSY_DEADLINE: Cell<Option<StdInstant>> = const { Cell::new(None) };
@@ -4201,6 +4205,8 @@ fn initialize_schema(connection: &mut Connection) -> Result<(), StorageError> {
             create_pending_audit_event_schema(&transaction)?;
             git_candidate_retention::create_schema(&transaction)?;
             managed_app::create_schema(&transaction)?;
+            candidate_applications::create_schema(&transaction)?;
+            device_auth::create_schema(&transaction)?;
             transaction
                 .pragma_update(None, "user_version", CONTROL_PLANE_SCHEMA_VERSION)
                 .map_err(sql_error)?;
@@ -4217,6 +4223,8 @@ fn initialize_schema(connection: &mut Connection) -> Result<(), StorageError> {
     validate_public_event_context_schema(&transaction)?;
     validate_pending_audit_event_schema(&transaction)?;
     git_candidate_retention::validate_schema(&transaction)?;
+    candidate_applications::validate_schema(&transaction)?;
+    device_auth::validate_schema(&transaction)?;
     transaction.commit().map_err(sql_error)
 }
 

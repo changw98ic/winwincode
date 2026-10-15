@@ -8,7 +8,7 @@ import { copyFileSync, cpSync, existsSync, mkdirSync, readFileSync, statSync, wr
 import { resolve } from 'node:path'
 
 import { deviceClientSbom } from './build-device-client-release.mjs'
-import { canonicalJson, descriptorsBelow, sourceIdentity, targetConfiguration } from './release-artifact-contract.mjs'
+import { assertReleaseApiReport, canonicalJson, descriptorsBelow, sourceIdentity, targetConfiguration } from './release-artifact-contract.mjs'
 import { verifyApiProductionSourceSeal } from './run-api-production-vertical.mjs'
 import { dynamicLibraryAllowed, inspectExecutable, scanReleaseArtifactContent } from './verify-release-artifact-security.mjs'
 import { reviewReleaseFindings } from './review-release-findings.mjs'
@@ -42,21 +42,7 @@ const seal = verifyApiProductionSourceSeal({
   helperExecutable: resolve(binaryRoot, 'winwincode-kernel-helper'),
 })
 const apiReport = JSON.parse(readFileSync(resolve(root, '.cache/release-api-report.json'), 'utf8'))
-assert.equal(apiReport.execution, 'device-worker-only')
-assert.equal(apiReport.devicePath?.complete, true)
-assert.equal(apiReport.health?.initial, 'ready')
-assert.equal(apiReport.health?.afterRestart, 'ready')
-assert.equal(apiReport.flow?.chat?.status, 'Completed')
-assert.equal(apiReport.flow?.cancel?.state, 'cancelled')
-assert.equal(apiReport.flow?.strongflow?.status, 'done')
-assert.equal(apiReport.flow?.strongflow?.verdictStatus, 'pass')
-assert.equal(apiReport.deterministic?.contentEqual, true)
-assert.equal(apiReport.restart?.messageBytesStable, true)
-assert.equal(apiReport.restart?.deliveryBytesStable, true)
-assert.deepEqual(apiReport.artifacts?.sourceSeal, Object.fromEntries([
-  'gitHead', 'helperBinarySha256', 'cliBinarySha256', 'workerBinarySha256',
-  'serverBinarySha256', 'sourceSha256', 'trackedDiffSha256',
-].map(key => [key, seal.seal[key]])), 'API report source seal must match the verified release source and executables')
+assertReleaseApiReport(apiReport, seal.seal)
 cpSync(resolve(root, 'apps/client/dist/public'), resolve(artifactRoot, 'client'), { recursive: true })
 const clientVersion = JSON.parse(readFileSync(resolve(artifactRoot, 'client/version.json'), 'utf8'))
 const source = sourceIdentity(root, sourceCommit, sourceDateEpoch)
@@ -79,6 +65,7 @@ writeFileSync(resolve(artifactRoot, 'verification/api-production.json'), canonic
   messageBytesStable: apiReport.restart.messageBytesStable,
   deliveryBytesStable: apiReport.restart.deliveryBytesStable,
   sourceSeal: apiReport.artifacts.sourceSeal,
+  deviceWorkerLifecycle: apiReport.deviceWorkerLifecycle,
 }))
 writeFileSync(resolve(artifactRoot, 'verification/source-seal.json'), canonicalJson(seal.seal))
 writeFileSync(resolve(artifactRoot, 'sbom.json'), canonicalJson(deviceClientSbom(root)))

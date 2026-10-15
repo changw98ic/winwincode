@@ -1,0 +1,648 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.winwincode.dev/winwincode/v1/device-auth.schema.json",
+  "title": "WinWinCode remote Device authentication v1",
+  "description": "Owner-authorized device pairing and persistent Ed25519 identity for remote transport. Local private Worker pipes retain their execution-context binding.",
+  "$ref": "#/$defs/DeviceBindRequest",
+  "$defs": {
+    "DevicePairingRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "schemaVersion": {
+          "$ref": "./domain.schema.json#/$defs/SchemaVersion"
+        }
+      },
+      "required": [
+        "schemaVersion"
+      ],
+      "description": "Creates a short-lived pairing token for the authenticated Owner."
+    },
+    "DevicePairingResponse": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "schemaVersion": {
+          "$ref": "./domain.schema.json#/$defs/SchemaVersion"
+        },
+        "pairingToken": {
+          "type": "string",
+          "minLength": 8,
+          "maxLength": 200
+        },
+        "expiresAt": {
+          "$ref": "./domain.schema.json#/$defs/Instant"
+        }
+      },
+      "required": [
+        "schemaVersion",
+        "pairingToken",
+        "expiresAt"
+      ],
+      "description": "Pairing material is used for initial binding only."
+    },
+    "DeviceChallengeRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "schemaVersion": {
+          "$ref": "./domain.schema.json#/$defs/SchemaVersion"
+        },
+        "publicKey": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9+/]{43}$"
+        }
+      },
+      "required": [
+        "schemaVersion",
+        "publicKey"
+      ],
+      "description": "Requests a single-use challenge for an Ed25519 device public key encoded in standard Base64 without padding."
+    },
+    "DeviceChallengeResponse": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "schemaVersion": {
+          "$ref": "./domain.schema.json#/$defs/SchemaVersion"
+        },
+        "challengeId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200
+        },
+        "challenge": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200
+        },
+        "expiresAt": {
+          "$ref": "./domain.schema.json#/$defs/Instant"
+        }
+      },
+      "required": [
+        "schemaVersion",
+        "challengeId",
+        "challenge",
+        "expiresAt"
+      ],
+      "description": "Single-use challenge bound to the requesting public key and expiration."
+    },
+    "DeviceBindingIntent": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "displayName": {
+          "$ref": "./client-control.schema.json#/$defs/ClientDisplayName"
+        },
+        "platform": {
+          "$ref": "./client-control.schema.json#/$defs/ClientPlatformTarget"
+        },
+        "architecture": {
+          "$ref": "./client-control.schema.json#/$defs/ClientArchitecture"
+        },
+        "clientVersion": {
+          "$ref": "./client-control.schema.json#/$defs/ClientVersion"
+        }
+      },
+      "required": [
+        "displayName",
+        "platform",
+        "architecture",
+        "clientVersion"
+      ],
+      "description": "Stable binding intent retained by the Device before its first binding request."
+    },
+    "DeviceBindRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "schemaVersion": {
+          "$ref": "./domain.schema.json#/$defs/SchemaVersion"
+        },
+        "requestId": {
+          "$ref": "./client-control.schema.json#/$defs/IdempotencyKey"
+        },
+        "pairingToken": {
+          "type": "string",
+          "minLength": 8,
+          "maxLength": 200
+        },
+        "publicKey": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9+/]{43}$"
+        },
+        "intent": {
+          "$ref": "#/$defs/DeviceBindingIntent"
+        }
+      },
+      "required": [
+        "schemaVersion",
+        "requestId",
+        "pairingToken",
+        "publicKey",
+        "intent"
+      ],
+      "description": "The same request ID, public key and intent recover the original binding after response loss. The request requires proof of possession of that key."
+    },
+    "DeviceBindResponse": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "schemaVersion": {
+          "$ref": "./domain.schema.json#/$defs/SchemaVersion"
+        },
+        "requestId": {
+          "$ref": "./client-control.schema.json#/$defs/IdempotencyKey"
+        },
+        "clientNodeId": {
+          "$ref": "./client-control.schema.json#/$defs/ClientNodeId"
+        },
+        "publicClientId": {
+          "$ref": "./client-control.schema.json#/$defs/PublicClientId"
+        },
+        "ownerUserId": {
+          "$ref": "./domain.schema.json#/$defs/UserId"
+        },
+        "boundAt": {
+          "$ref": "./domain.schema.json#/$defs/Instant"
+        }
+      },
+      "required": [
+        "schemaVersion",
+        "requestId",
+        "clientNodeId",
+        "publicClientId",
+        "ownerUserId",
+        "boundAt"
+      ],
+      "description": "Persisted result of the atomic pairing-token consumption and device binding."
+    },
+    "DeviceRevokeRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "schemaVersion": {
+          "$ref": "./domain.schema.json#/$defs/SchemaVersion"
+        }
+      },
+      "required": [
+        "schemaVersion"
+      ],
+      "description": "Revokes a device for the authenticated Owner."
+    },
+    "DeviceRevokeResponse": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "schemaVersion": {
+          "$ref": "./domain.schema.json#/$defs/SchemaVersion"
+        },
+        "clientNodeId": {
+          "$ref": "./client-control.schema.json#/$defs/ClientNodeId"
+        },
+        "revoked": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "schemaVersion",
+        "clientNodeId",
+        "revoked"
+      ],
+      "description": "Confirms permanent revocation of this binding and invalidation of its active authorization."
+    },
+    "DeviceAuthErrorResponse": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "schemaVersion": {
+          "$ref": "./domain.schema.json#/$defs/SchemaVersion"
+        },
+        "code": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 100
+        }
+      },
+      "required": [
+        "schemaVersion",
+        "code"
+      ],
+      "description": "Machine-readable device authentication, revocation or binding error."
+    }
+  },
+  "x-winwincode-semantics": {
+    "signatureEncoding": "standard Base64 without padding",
+    "signatureInput": [
+      "winwincode.device-auth.v1",
+      "challengeId",
+      "challenge",
+      "UPPER_METHOD",
+      "exact_path",
+      "clientNodeId_or_empty",
+      "sha256hex(raw_body)"
+    ],
+    "signatureSerialization": "compact UTF-8 JSON array",
+    "challenge": "single use, sixty-second lifetime, bound to publicKey",
+    "bindingRetry": "same requestId, publicKey and intent with a fresh signed challenge returns the stored binding; revoked bindings remain revoked",
+    "workerTransport": "Device-owned private stdio; no remote Worker authentication credential"
+  },
+  "x-winwincode-openapi": {
+    "securitySchemes": {
+      "devicePublicKey": {
+        "type": "apiKey",
+        "in": "header",
+        "name": "x-winwincode-device-public-key"
+      },
+      "deviceChallengeId": {
+        "type": "apiKey",
+        "in": "header",
+        "name": "x-winwincode-device-challenge-id"
+      },
+      "deviceSignature": {
+        "type": "apiKey",
+        "in": "header",
+        "name": "x-winwincode-device-signature"
+      }
+    },
+    "paths": {
+      "/api/v1/devices/pairing": {
+        "post": {
+          "operationId": "createDevicePairing",
+          "requestBody": {
+            "required": true,
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/$defs/DevicePairingRequest"
+                }
+              }
+            }
+          },
+          "responses": {
+            "201": {
+              "description": "Completed.",
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/$defs/DevicePairingResponse"
+                  }
+                }
+              }
+            },
+            "400": {
+              "description": "Invalid request.",
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/$defs/DeviceAuthErrorResponse"
+                  }
+                }
+              }
+            },
+            "401": {
+              "description": "Device or Owner authentication required.",
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/$defs/DeviceAuthErrorResponse"
+                  }
+                }
+              }
+            },
+            "403": {
+              "description": "Device revoked or permission denied.",
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/$defs/DeviceAuthErrorResponse"
+                  }
+                }
+              }
+            },
+            "404": {
+              "description": "RESOURCE_NOT_FOUND",
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/$defs/DeviceAuthErrorResponse"
+                  }
+                }
+              }
+            },
+            "409": {
+              "description": "Conflicting binding request or state.",
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/$defs/DeviceAuthErrorResponse"
+                  }
+                }
+              }
+            },
+            "503": {
+              "description": "SERVICE_UNAVAILABLE",
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/$defs/DeviceAuthErrorResponse"
+                  }
+                }
+              }
+            }
+          },
+          "security": [
+            {
+              "sessionCookie": []
+            }
+          ]
+        }
+      },
+      "/internal/v1/device/challenge": {
+        "post": {
+          "operationId": "createDeviceChallenge",
+          "requestBody": {
+            "required": true,
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/$defs/DeviceChallengeRequest"
+                }
+              }
+            }
+          },
+          "responses": {
+            "200": {
+              "description": "Completed.",
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/$defs/DeviceChallengeResponse"
+                  }
+                }
+              }
+            },
+            "400": {
+              "description": "Invalid request.",
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/$defs/DeviceAuthErrorResponse"
+                  }
+                }
+              }
+            },
+            "401": {
+              "description": "Device or Owner authentication required.",
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/$defs/DeviceAuthErrorResponse"
+                  }
+                }
+              }
+            },
+            "403": {
+              "description": "Device revoked or permission denied.",
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/$defs/DeviceAuthErrorResponse"
+                  }
+                }
+              }
+            },
+            "404": {
+              "description": "RESOURCE_NOT_FOUND",
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/$defs/DeviceAuthErrorResponse"
+                  }
+                }
+              }
+            },
+            "409": {
+              "description": "Conflicting binding request or state.",
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/$defs/DeviceAuthErrorResponse"
+                  }
+                }
+              }
+            },
+            "503": {
+              "description": "SERVICE_UNAVAILABLE",
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/$defs/DeviceAuthErrorResponse"
+                  }
+                }
+              }
+            }
+          },
+          "security": []
+        }
+      },
+      "/internal/v1/device/bind": {
+        "post": {
+          "operationId": "bindDevice",
+          "requestBody": {
+            "required": true,
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/$defs/DeviceBindRequest"
+                }
+              }
+            }
+          },
+          "responses": {
+            "200": {
+              "description": "Completed.",
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/$defs/DeviceBindResponse"
+                  }
+                }
+              }
+            },
+            "400": {
+              "description": "Invalid request.",
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/$defs/DeviceAuthErrorResponse"
+                  }
+                }
+              }
+            },
+            "401": {
+              "description": "Device or Owner authentication required.",
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/$defs/DeviceAuthErrorResponse"
+                  }
+                }
+              }
+            },
+            "403": {
+              "description": "Device revoked or permission denied.",
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/$defs/DeviceAuthErrorResponse"
+                  }
+                }
+              }
+            },
+            "404": {
+              "description": "RESOURCE_NOT_FOUND",
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/$defs/DeviceAuthErrorResponse"
+                  }
+                }
+              }
+            },
+            "409": {
+              "description": "Conflicting binding request or state.",
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/$defs/DeviceAuthErrorResponse"
+                  }
+                }
+              }
+            },
+            "503": {
+              "description": "SERVICE_UNAVAILABLE",
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/$defs/DeviceAuthErrorResponse"
+                  }
+                }
+              }
+            }
+          },
+          "security": [
+            {
+              "devicePublicKey": [],
+              "deviceChallengeId": [],
+              "deviceSignature": []
+            }
+          ]
+        }
+      },
+      "/api/v1/devices/{client_node_id}/revoke": {
+        "post": {
+          "operationId": "revokeDevice",
+          "requestBody": {
+            "required": true,
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/$defs/DeviceRevokeRequest"
+                }
+              }
+            }
+          },
+          "responses": {
+            "200": {
+              "description": "Completed.",
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/$defs/DeviceRevokeResponse"
+                  }
+                }
+              }
+            },
+            "400": {
+              "description": "Invalid request.",
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/$defs/DeviceAuthErrorResponse"
+                  }
+                }
+              }
+            },
+            "401": {
+              "description": "Device or Owner authentication required.",
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/$defs/DeviceAuthErrorResponse"
+                  }
+                }
+              }
+            },
+            "403": {
+              "description": "Device revoked or permission denied.",
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/$defs/DeviceAuthErrorResponse"
+                  }
+                }
+              }
+            },
+            "404": {
+              "description": "RESOURCE_NOT_FOUND",
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/$defs/DeviceAuthErrorResponse"
+                  }
+                }
+              }
+            },
+            "409": {
+              "description": "Conflicting binding request or state.",
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/$defs/DeviceAuthErrorResponse"
+                  }
+                }
+              }
+            },
+            "503": {
+              "description": "SERVICE_UNAVAILABLE",
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/$defs/DeviceAuthErrorResponse"
+                  }
+                }
+              }
+            }
+          },
+          "security": [
+            {
+              "sessionCookie": []
+            }
+          ],
+          "parameters": [
+            {
+              "name": "client_node_id",
+              "in": "path",
+              "required": true,
+              "schema": {
+                "$ref": "./client-control.schema.json#/$defs/ClientNodeId"
+              }
+            }
+          ]
+        }
+      }
+    }
+  }
+}

@@ -2626,6 +2626,10 @@ where
         Ok(())
     }
 
+    pub async fn stop_execution(&mut self) -> Result<(), WorkerError> {
+        self.codex.shutdown().await.map_err(|_| codex_model_error())
+    }
+
     pub async fn shutdown(&mut self, now: Instant) -> Result<WorkerShutdownReport, WorkerError> {
         if matches!(
             self.lifecycle,
@@ -2635,6 +2639,12 @@ where
                 WorkerErrorCode::InvalidLifecycle,
                 "Worker is already terminal",
             ));
+        }
+        for active in self.active.values_mut() {
+            active.lifecycle = ActiveJobLifecycle::Cancelling;
+            self.codex
+                .fence_thread(&active.codex_thread_id, &now)
+                .map_err(|_| codex_model_error())?;
         }
         let candidate_authorities = self
             .pending_candidates

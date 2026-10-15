@@ -154,6 +154,7 @@ pub enum ApplyResult {
     PermissionDenied,
     Discarded,
     Failed,
+    OutcomeUnknown,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -339,6 +340,8 @@ pub enum ClientControlMessageKind {
     CandidateRetained,
     #[serde(rename = "client.candidate.apply_result")]
     CandidateApplyResult,
+    #[serde(rename = "client.application.reconciled")]
+    ApplicationReconciled,
     #[serde(rename = "client.command_ack")]
     CommandAck,
     #[serde(rename = "client.occupancy.offer")]
@@ -601,6 +604,8 @@ pub struct LocalCandidateReceipt {
     pub repository_binding_id: String,
     #[serde(rename = "candidateCommit")]
     pub candidate_commit: String,
+    #[serde(rename = "baseCommit")]
+    pub base_commit: String,
     #[serde(rename = "localRefName")]
     pub local_ref_name: String,
     pub state: LocalCandidateState,
@@ -896,6 +901,7 @@ mod tests {
                 "candidateRef": "cand_01j2",
                 "repositoryBindingId": "rb_01j2",
                 "candidateCommit": "89abcdef0123456789abcdef0123456789abcdef",
+                "baseCommit": "0123456789abcdef0123456789abcdef01234567",
                 "localRefName": "refs/winwincode/candidates/cand_01j2",
                 "state": "retained",
                 "createdAt": "2026-01-02T12:30:00Z",

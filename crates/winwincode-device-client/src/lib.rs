@@ -17,6 +17,7 @@ pub(crate) fn canonical_rfc3339(time: OffsetDateTime) -> String {
     )
 }
 
+mod application_journal;
 pub mod apply_engine;
 pub mod candidate_branch;
 pub mod candidate_registry;
@@ -29,6 +30,7 @@ pub mod identity;
 pub mod managed_app;
 pub mod path_confinement;
 pub mod preview;
+pub mod remote_auth;
 pub mod repository;
 pub mod repository_exchange;
 pub mod repository_git;
@@ -88,6 +90,10 @@ pub use preview::{
     AuthorizedPreviewSource, AuthorizedPreviewSourceRegistry, PreviewTunnelClient,
     PreviewTunnelError, PreviewTunnelSupervisor,
 };
+pub use remote_auth::{
+    DeviceBindConfig, DeviceBindOutcome, DeviceRemoteAuth, bind_device, load_ca_roots,
+    load_remote_binding,
+};
 pub use repository::{
     RegistrationOptions, RegistrationRejection, RepositoryBindingSummary, RepositoryRegistration,
     RepositoryRegistryError, RepositoryRemoval, RepositoryRevalidation, list_bindings,
@@ -100,6 +106,7 @@ pub use repository_git::{
 pub use service::{
     DeviceServiceConfig, DeviceServiceError, DeviceServiceStatus, device_service_logs,
     device_service_status, request_device_service_restart, run_device_service,
+    run_device_service_with_ca,
 };
 pub use store::{
     CLIENT_STORE_SCHEMA_VERSION, ClientInboxCursor, ClientInboxCursorUpdate, ClientOutboxEntry,

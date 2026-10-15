@@ -17,6 +17,10 @@
     "targetBranch": "winwincode/demo-task-9f2c",
     "expectedHead": "a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0",
     "strategy": "create_branch",
-    "requestedByUserId": "usr_00000000000000000000000a"
+    "requestedByUserId": "usr_00000000000000000000000a",
+    "applicationId": "lar_00000000000000000000000001",
+    "approvalId": "idem-candidate-approval-0001",
+    "candidateDigest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "reconciledRetry": false
   }
 }

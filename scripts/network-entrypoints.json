@@ -241,6 +241,17 @@
       "owner": "Node logical HTTPS request with fixed serialized body"
     },
     {
+      "file": "scripts/run-remote-device-fault-acceptance.mjs",
+      "operations": [
+        "secureAcceptanceRequestOnce",
+        "secureAcceptanceRequest("
+      ],
+      "policyMarkers": [
+        "executeRequest"
+      ],
+      "owner": "remote acceptance logical request; mutations reconcile before replay"
+    },
+    {
       "file": "scripts/verify-mainline-release-source.mjs",
       "operations": [
         "requestFetch"

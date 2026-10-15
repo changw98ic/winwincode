@@ -18,6 +18,7 @@ use tokio::io::AsyncWriteExt;
 use tokio::net::TcpStream;
 use tokio::sync::mpsc;
 use winwincode_api::generated::{OrganizationScope, OrganizationScopeKind, Scope};
+use winwincode_client_port::candidate_application::candidate_application_digest;
 use winwincode_client_port::domain::ApplyResult;
 use winwincode_client_port::domain::ApplyStrategy;
 use winwincode_client_port::domain::ClientArchitecture;
@@ -34,6 +35,9 @@ use winwincode_client_port::messages::ClientToServerEnvelope;
 use winwincode_client_port::messages::ClientToServerMessage;
 use winwincode_client_port::messages::CommandContext;
 use winwincode_client_port::messages::OccupancyCommandContext;
+use winwincode_client_port::messages::{
+    ApplicationReconciliationOutcome, ClientApplicationReconciledPayload,
+};
 use winwincode_control_plane::ClientOccupancyService;
 use winwincode_control_plane::ClientRegistryService;
 use winwincode_control_plane::ConnectCodeService;
@@ -45,9 +49,10 @@ use winwincode_server::{
     UserAccountService, start_server_with_remote_worker,
 };
 use winwincode_storage::{
-    AccessGrantIssuance, ConnectCodeConsume, ConnectCodePublication, GrantTrustMode,
-    OccupancyClaim, OccupancyLeaseState, RepositoryAccessGrantIssuance, RepositoryAvailability,
-    RepositoryBindingProjection, RepositoryDirtyState, RepositoryGrantPermissions, SqliteStorage,
+    AccessGrantIssuance, CandidateApplicationRecord, ConnectCodeConsume, ConnectCodePublication,
+    GrantTrustMode, OccupancyClaim, OccupancyLeaseState, RepositoryAccessGrantIssuance,
+    RepositoryAvailability, RepositoryBindingProjection, RepositoryDirtyState,
+    RepositoryGrantPermissions, SqliteStorage,
 };
 
 const BOOTSTRAP_PROOF: &str = "client-candidate-test-bootstrap";
@@ -60,6 +65,7 @@ const SCHEMA_VERSION: &str = "winwincode/v1";
 const VALID_UNTIL: &str = "2100-01-01T00:00:00.000Z";
 const T0: &str = "2026-09-04T12:00:00.000Z";
 const RESULTING_COMMIT: &str = "1234567890abcdef1234567890abcdef12345678";
+const FIXTURE_BASE_COMMIT: &str = "0123456789abcdef0123456789abcdef01234567";
 
 static NEXT_DIRECTORY: AtomicU64 = AtomicU64::new(1);
 static NEXT_CODE_ID: AtomicU64 = AtomicU64::new(1);
@@ -624,6 +630,7 @@ async fn send_retained(
             candidate_ref: format!("refs/winwincode/candidates/{commit}"),
             repository_binding_id: binding_id.to_owned(),
             candidate_commit: commit.to_owned(),
+            base_commit: FIXTURE_BASE_COMMIT.into(),
             local_ref_name: format!("refs/winwincode/candidates/{commit}"),
             state: LocalCandidateState::Retained,
             created_at: T0.to_owned(),
@@ -662,14 +669,14 @@ async fn send_apply_result(
                 lease_id,
                 token,
                 1,
-                &format!("candidate-apply-result-{receipt_id}"),
+                &format!("candidate-apply-result-{receipt_id}-{lease_id}-{token}"),
             ),
             receipt: winwincode_client_port::domain::LocalApplyReceipt {
                 local_apply_receipt_id: receipt_id.to_owned(),
                 candidate_ref: format!("refs/winwincode/candidates/{commit}"),
                 repository_binding_id: binding_id.to_owned(),
                 target_branch: "main".to_owned(),
-                expected_head: commit.to_owned(),
+                expected_head: FIXTURE_BASE_COMMIT.into(),
                 strategy: ApplyStrategy::CherryPick,
                 result,
                 resulting_commit,
@@ -687,6 +694,88 @@ async fn send_apply_result(
         ),
     )
     .await;
+    assert!(status.starts_with("HTTP/1.1 200"), "{status}");
+}
+
+#[allow(clippy::too_many_arguments)]
+fn stage_application_approval(
+    directory: &Path,
+    node: &str,
+    owner: &str,
+    lease: &str,
+    epoch: u64,
+    binding: &str,
+    commit: &str,
+    strategy: &str,
+) -> CandidateApplicationRecord {
+    let mut storage = SqliteStorage::open(directory).unwrap();
+    let candidate = winwincode_control_plane::LocalCandidateService::new(&mut storage)
+        .candidate_for_ref(node, &candidate_ref_of(commit))
+        .unwrap()
+        .unwrap();
+    storage
+        .grant_candidate_application(&CandidateApplicationRecord {
+            application_id: fresh_receipt_id("lar_"),
+            approval_id: fresh_receipt_id("apr_"),
+            client_node_id: node.into(),
+            local_candidate_receipt_id: candidate.local_candidate_receipt_id,
+            repository_binding_id: binding.into(),
+            candidate_ref: candidate_ref_of(commit),
+            candidate_digest: candidate_application_digest(binding, &candidate.base_commit, commit),
+            base_commit: candidate.base_commit,
+            target_branch: "main".into(),
+            strategy: strategy.into(),
+            original_lease_id: lease.into(),
+            original_epoch: epoch,
+            requester_user_id: owner.into(),
+            created_at: T0.into(),
+            result_json: None,
+            outcome: None,
+            retry_lease_id: None,
+            retry_epoch: None,
+        })
+        .unwrap()
+}
+
+async fn send_application_reconciliation(
+    address: std::net::SocketAddr,
+    directory: &Path,
+    application: &CandidateApplicationRecord,
+    current_lease: &str,
+    current_epoch: u64,
+    outcome: ApplicationReconciliationOutcome,
+) {
+    let message =
+        ClientToServerMessage::ApplicationReconciled(ClientApplicationReconciledPayload {
+            occupancy: occupancy_stamp(
+                current_lease,
+                current_epoch,
+                1,
+                &format!("reconcile-{}-{current_epoch}", application.application_id),
+            ),
+            application_id: application.application_id.clone(),
+            approval_id: application.approval_id.clone(),
+            original_epoch: application.original_epoch,
+            repository_binding_id: application.repository_binding_id.clone(),
+            candidate_ref: application.candidate_ref.clone(),
+            candidate_digest: application.candidate_digest.clone(),
+            base_commit: application.base_commit.clone(),
+            target_branch: application.target_branch.clone(),
+            outcome,
+            result_commit: (outcome == ApplicationReconciliationOutcome::Applied)
+                .then(|| RESULTING_COMMIT.into()),
+        });
+    let sequence = next_client_sequence(directory, &application.client_node_id);
+    let request = exchange_request(
+        &[frame(
+            &application.client_node_id,
+            DEVICE_INSTANCE,
+            sequence,
+            message,
+        )],
+        downlink_ack_cursor(directory, &application.client_node_id),
+    );
+    let (status, _) = post_exchange(address, &request).await;
     assert!(status.starts_with("HTTP/1.1 200"), "{status}");
 }
 
@@ -713,6 +802,7 @@ enum ApplyVerdict {
     BaseStale,
 }
 
+#[allow(clippy::too_many_lines)]
 fn spawn_candidate_responder(
     data_directory: PathBuf,
     address: std::net::SocketAddr,
@@ -776,7 +866,14 @@ fn spawn_candidate_responder(
                     }
                     ApplyVerdict::BaseStale => (ApplyResult::BaseStale, None),
                 };
-                let receipt_id = fresh_receipt_id("lar_");
+                let receipt_id = if strategy == ApplyStrategy::CreateBranch {
+                    fresh_receipt_id("lar_")
+                } else {
+                    payload["applicationId"]
+                        .as_str()
+                        .expect("approved application id")
+                        .to_owned()
+                };
                 let apply_result = ClientToServerMessage::CandidateApplyResult(
                     ClientCandidateApplyResultPayload {
                         occupancy: occupancy_stamp(
@@ -1335,7 +1432,161 @@ async fn apply_chain_settles_both_outcomes_and_repeats_the_original_receipt() {
 
 #[tokio::test]
 #[allow(clippy::too_many_lines)]
-async fn superseded_apply_tickets_are_refused_and_the_current_token_settles() {
+async fn failed_downlink_publication_rolls_back_approval_and_retry_across_restart() {
+    for retry in [false, true] {
+        let directory = test_directory("candidate-publication-rollback");
+        let auth_directory = test_directory("candidate-publication-rollback-auth");
+        let running = start_server(&directory, &auth_directory).await;
+        let address = running.local_address();
+        let (cookie, owner) = initialize_and_login_owner(address).await;
+        let (node, public) = enroll_online_device(address, &directory).await;
+        consume_code_as(
+            &directory,
+            &node,
+            &publish_connect_code(&directory, &node, "78787878"),
+            &owner,
+        );
+        let binding = stage_visible_binding(&directory, &node, &owner);
+        let (lease, epoch) = stage_occupied_lease(&directory, &node, &owner);
+        let commit = "0f9e8d7c6b5a4938271605f4e3d2c1b0a9988776";
+        send_retained(
+            address, &directory, &node, &lease, epoch, 1, &binding, commit,
+        )
+        .await;
+        let original = if retry {
+            let application = stage_application_approval(
+                &directory, &node, &owner, &lease, epoch, &binding, commit, "merge",
+            );
+            send_application_reconciliation(
+                address,
+                &directory,
+                &application,
+                &lease,
+                epoch,
+                ApplicationReconciliationOutcome::NotStarted,
+            )
+            .await;
+            Some(application)
+        } else {
+            None
+        };
+        let database = directory.join("control-plane.sqlite3");
+        let connection = rusqlite::Connection::open(&database).unwrap();
+        connection.execute_batch(
+            "CREATE TRIGGER interrupt_candidate_publication BEFORE INSERT ON client_downlink_frames
+             WHEN json_extract(NEW.frame, '$.kind') = 'client.candidate.apply'
+             BEGIN
+               SELECT CASE WHEN NOT EXISTS (
+                 SELECT 1 FROM candidate_applications a
+                 WHERE a.application_id = json_extract(NEW.frame, '$.payload.applicationId')
+                   AND a.approval_id = json_extract(NEW.frame, '$.payload.approvalId')
+               ) THEN RAISE(ABORT, 'approval must precede the fault') END;
+               SELECT RAISE(ABORT, 'injected fault after approval before downlink publication');
+             END;",
+        ).unwrap();
+        let body = apply_body(
+            &public,
+            &candidate_ref_of(commit),
+            &binding,
+            "main",
+            FIXTURE_BASE_COMMIT,
+        );
+        let response = http_request(
+            address,
+            &cookie_post("/api/v1/clients/candidates/apply", &body, &cookie),
+        )
+        .await;
+        assert_eq!(status_of(&response), "503", "{response}");
+        drop(connection);
+        running.shutdown().await.unwrap();
+        let storage = SqliteStorage::open(&directory).unwrap();
+        let retained = storage
+            .candidate_application_for_candidate(&node, &candidate_ref_of(commit))
+            .unwrap();
+        if let Some(original) = &original {
+            let retained = retained.unwrap();
+            assert_eq!(retained.application_id, original.application_id);
+            assert_eq!(retained.outcome.as_deref(), Some("not_started"));
+            assert_eq!(retained.retry_lease_id, None);
+            assert_eq!(retained.retry_epoch, None);
+        } else {
+            assert!(
+                retained.is_none(),
+                "failed publication cannot leave an applying approval"
+            );
+        }
+        drop(storage);
+        let connection = rusqlite::Connection::open(&database).unwrap();
+        let approvals: i64 = connection
+            .query_row(
+                "SELECT count(*) FROM candidate_application_events WHERE kind='approval.granted'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(approvals, i64::from(retry));
+        let queued: i64 = connection.query_row(
+            "SELECT count(*) FROM client_downlink_frames WHERE json_extract(frame, '$.kind')='client.candidate.apply'", [], |row| row.get(0),
+        ).unwrap();
+        assert_eq!(queued, 0);
+        connection
+            .execute_batch("DROP TRIGGER interrupt_candidate_publication")
+            .unwrap();
+        drop(connection);
+        let restarted = start_server(&directory, &auth_directory).await;
+        let address = restarted.local_address();
+        walk_hello(address, &directory, &node, DEVICE_INSTANCE).await;
+        let listing = http_request(
+            address,
+            &cookie_get(&format!("/api/v1/clients/{public}/candidates"), &cookie),
+        )
+        .await;
+        assert_eq!(status_of(&listing), "200", "{listing}");
+        let application = &response_body(&listing)["candidates"][0]["application"];
+        if retry {
+            assert_eq!(application["status"], "awaiting_retry");
+        } else {
+            assert!(application.is_null());
+        }
+        let responder = spawn_candidate_responder(
+            directory.clone(),
+            address,
+            node.clone(),
+            downlink_ack_cursor(&directory, &node),
+            next_client_sequence(&directory, &node),
+            ApplyVerdict::Applied,
+        );
+        let response = http_request(
+            address,
+            &cookie_post("/api/v1/clients/candidates/apply", &body, &cookie),
+        )
+        .await;
+        assert_eq!(status_of(&response), "201", "{response}");
+        let value = response_body(&response);
+        assert_eq!(value["receipt"]["result"], "applied");
+        if let Some(original) = original {
+            assert_eq!(
+                value["receipt"]["localApplyReceiptId"],
+                original.application_id
+            );
+            let storage = SqliteStorage::open(&directory).unwrap();
+            let applied = storage
+                .candidate_application(&original.application_id)
+                .unwrap()
+                .unwrap();
+            assert_eq!(applied.retry_lease_id.as_deref(), Some(lease.as_str()));
+            assert_eq!(applied.retry_epoch, Some(epoch));
+        }
+        responder.abort();
+        restarted.shutdown().await.unwrap();
+        let _ = std::fs::remove_dir_all(&directory);
+        let _ = std::fs::remove_dir_all(&auth_directory);
+    }
+}
+
+#[tokio::test]
+#[allow(clippy::too_many_lines)]
+async fn approved_old_results_are_facts_and_only_current_reconciliation_settles() {
     let data_directory = test_directory("candidates-fencing");
     let auth_directory = test_directory("candidates-fencing-sessions");
     let running = start_server(&data_directory, &auth_directory).await;
@@ -1364,6 +1615,16 @@ async fn superseded_apply_tickets_are_refused_and_the_current_token_settles() {
     )
     .await;
 
+    let application = stage_application_approval(
+        &data_directory,
+        &node,
+        &owner_id,
+        &first_lease,
+        first_token,
+        &binding,
+        commit,
+        "cherry_pick",
+    );
     release_lease(&data_directory, &first_lease, first_token);
     let (second_lease, second_token) = stage_occupied_lease(&data_directory, &node, &owner_id);
     assert!(second_token > first_token, "tokens are strictly monotonic");
@@ -1374,7 +1635,7 @@ async fn superseded_apply_tickets_are_refused_and_the_current_token_settles() {
         &node,
         &first_lease,
         first_token,
-        &fresh_receipt_id("lar_"),
+        &application.application_id,
         &binding,
         commit,
         ApplyResult::Applied,
@@ -1397,7 +1658,7 @@ async fn superseded_apply_tickets_are_refused_and_the_current_token_settles() {
         &node,
         &second_lease,
         second_token - 1,
-        &fresh_receipt_id("lar_"),
+        &application.application_id,
         &binding,
         commit,
         ApplyResult::Applied,
@@ -1409,17 +1670,13 @@ async fn superseded_apply_tickets_are_refused_and_the_current_token_settles() {
         0
     );
 
-    send_apply_result(
+    send_application_reconciliation(
         address,
         &data_directory,
-        &node,
+        &application,
         &second_lease,
         second_token,
-        &fresh_receipt_id("lar_"),
-        &binding,
-        commit,
-        ApplyResult::Applied,
-        Some(RESULTING_COMMIT.to_owned()),
+        ApplicationReconciliationOutcome::Applied,
     )
     .await;
     assert_eq!(
@@ -1430,6 +1687,19 @@ async fn superseded_apply_tickets_are_refused_and_the_current_token_settles() {
     assert_eq!(
         candidate_state(&data_directory, &node, &candidate_ref_of(commit)).expect("candidate"),
         "applied"
+    );
+    send_application_reconciliation(
+        address,
+        &data_directory,
+        &application,
+        &second_lease,
+        second_token,
+        ApplicationReconciliationOutcome::Applied,
+    )
+    .await;
+    assert_eq!(
+        apply_history_len(&data_directory, &node, &candidate_ref_of(commit)),
+        1
     );
 
     running.shutdown().await.expect("shutdown");
@@ -1520,6 +1790,185 @@ async fn discard_settles_terminal_and_idempotent() {
     assert_eq!(wire_code(&response), "WRONG_STATE");
 
     running.shutdown().await.expect("shutdown");
+    let _ = std::fs::remove_dir_all(&data_directory);
+    let _ = std::fs::remove_dir_all(&auth_directory);
+}
+
+#[tokio::test]
+async fn reconciled_application_records_the_commit_and_preserves_a_discarded_candidate() {
+    let data_directory = test_directory("candidates-reconcile-terminal");
+    let auth_directory = test_directory("candidates-reconcile-terminal-auth");
+    let running = start_server(&data_directory, &auth_directory).await;
+    let address = running.local_address();
+    let (cookie, owner) = initialize_and_login_owner(address).await;
+    let (node, public) = enroll_online_device(address, &data_directory).await;
+    consume_code_as(
+        &data_directory,
+        &node,
+        &publish_connect_code(&data_directory, &node, "56565656"),
+        &owner,
+    );
+    let binding = stage_visible_binding(&data_directory, &node, &owner);
+    let (old_lease, old_epoch) = stage_occupied_lease(&data_directory, &node, &owner);
+    let commit = "0f9e8d7c6b5a4938271605f4e3d2c1b0a9988776";
+    send_retained(
+        address,
+        &data_directory,
+        &node,
+        &old_lease,
+        old_epoch,
+        1,
+        &binding,
+        commit,
+    )
+    .await;
+    let application = stage_application_approval(
+        &data_directory,
+        &node,
+        &owner,
+        &old_lease,
+        old_epoch,
+        &binding,
+        commit,
+        "cherry_pick",
+    );
+    release_lease(&data_directory, &old_lease, old_epoch);
+    let (lease, epoch) = stage_occupied_lease(&data_directory, &node, &owner);
+    let response = http_request(
+        address,
+        &cookie_post(
+            "/api/v1/clients/candidates/discard",
+            &branch_body(&public, &candidate_ref_of(commit), &binding),
+            &cookie,
+        ),
+    )
+    .await;
+    assert_eq!(status_of(&response), "200", "{response}");
+    send_application_reconciliation(
+        address,
+        &data_directory,
+        &application,
+        &lease,
+        epoch,
+        ApplicationReconciliationOutcome::Applied,
+    )
+    .await;
+    assert_eq!(
+        candidate_state(&data_directory, &node, &candidate_ref_of(commit)).as_deref(),
+        Some("discarded")
+    );
+    assert_eq!(
+        apply_history_len(&data_directory, &node, &candidate_ref_of(commit)),
+        2
+    );
+    let storage = SqliteStorage::open(&data_directory).unwrap();
+    assert_eq!(
+        storage
+            .candidate_application(&application.application_id)
+            .unwrap()
+            .unwrap()
+            .outcome
+            .as_deref(),
+        Some("applied")
+    );
+    running.shutdown().await.unwrap();
+    let _ = std::fs::remove_dir_all(&data_directory);
+    let _ = std::fs::remove_dir_all(&auth_directory);
+}
+
+#[tokio::test]
+async fn an_unknown_application_is_visible_as_blocked_and_cannot_be_retried() {
+    let data_directory = test_directory("candidates-reconcile-unknown");
+    let auth_directory = test_directory("candidates-reconcile-unknown-auth");
+    let running = start_server(&data_directory, &auth_directory).await;
+    let address = running.local_address();
+    let (cookie, owner) = initialize_and_login_owner(address).await;
+    let (node, public) = enroll_online_device(address, &data_directory).await;
+    consume_code_as(
+        &data_directory,
+        &node,
+        &publish_connect_code(&data_directory, &node, "67676767"),
+        &owner,
+    );
+    let binding = stage_visible_binding(&data_directory, &node, &owner);
+    let (old_lease, old_epoch) = stage_occupied_lease(&data_directory, &node, &owner);
+    let commit = "0f9e8d7c6b5a4938271605f4e3d2c1b0a9988776";
+    send_retained(
+        address,
+        &data_directory,
+        &node,
+        &old_lease,
+        old_epoch,
+        1,
+        &binding,
+        commit,
+    )
+    .await;
+    let application = stage_application_approval(
+        &data_directory,
+        &node,
+        &owner,
+        &old_lease,
+        old_epoch,
+        &binding,
+        commit,
+        "cherry_pick",
+    );
+    release_lease(&data_directory, &old_lease, old_epoch);
+    let (lease, epoch) = stage_occupied_lease(&data_directory, &node, &owner);
+    send_application_reconciliation(
+        address,
+        &data_directory,
+        &application,
+        &lease,
+        epoch,
+        ApplicationReconciliationOutcome::OutcomeUnknown,
+    )
+    .await;
+    let response = http_request(
+        address,
+        &cookie_get(&format!("/api/v1/clients/{public}/candidates"), &cookie),
+    )
+    .await;
+    assert_eq!(
+        response_body(&response)["candidates"][0]["application"]["status"],
+        "blocked"
+    );
+    let before = downlink_ack_cursor(&data_directory, &node);
+    let response = http_request(
+        address,
+        &cookie_post(
+            "/api/v1/clients/candidates/apply",
+            &apply_body(
+                &public,
+                &candidate_ref_of(commit),
+                &binding,
+                "main",
+                &application.base_commit,
+            ),
+            &cookie,
+        ),
+    )
+    .await;
+    assert_eq!(status_of(&response), "409", "{response}");
+    assert_eq!(wire_code(&response), "WRONG_STATE");
+    assert_eq!(downlink_ack_cursor(&data_directory, &node), before);
+    assert_eq!(
+        candidate_state(&data_directory, &node, &candidate_ref_of(commit)).as_deref(),
+        Some("retained")
+    );
+    let mut storage = SqliteStorage::open(&data_directory).unwrap();
+    assert!(
+        storage
+            .note_candidate_application_outcome(&application.application_id, "not_started")
+            .is_err()
+    );
+    assert!(
+        storage
+            .authorize_candidate_application_retry(&application.application_id, &lease, epoch)
+            .is_err()
+    );
+    running.shutdown().await.unwrap();
     let _ = std::fs::remove_dir_all(&data_directory);
     let _ = std::fs::remove_dir_all(&auth_directory);
 }

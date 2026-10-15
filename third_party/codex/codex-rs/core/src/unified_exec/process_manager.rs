@@ -461,6 +461,12 @@ impl UnifiedExecProcessManager {
         request: ExecCommandRequest,
         context: &UnifiedExecContext,
     ) -> Result<ExecCommandToolOutput, UnifiedExecError> {
+        if self.process_store.lock().await.closed {
+            self.release_process_id(request.process_id).await;
+            return Err(UnifiedExecError::create_process(
+                "execution session is shutting down".to_string(),
+            ));
+        }
         let cwd = request.cwd.clone();
         let process = self
             .open_session_with_sandbox(&request, cwd.clone(), context)
@@ -478,6 +484,19 @@ impl UnifiedExecProcessManager {
             metrics_sidecar,
         } = attempt;
         let process = Arc::new(process);
+        {
+            let mut store = self.process_store.lock().await;
+            if store.closed {
+                process.terminate();
+                store.reserved_process_ids.remove(&request.process_id);
+                return Err(UnifiedExecError::create_process(
+                    "execution session is shutting down".to_string(),
+                ));
+            }
+            store
+                .starting_processes
+                .insert(request.process_id, Arc::clone(&process));
+        }
         let network_denial_monitor = deferred_network_approval.as_ref().map(|deferred| {
             terminate_process_on_network_denial(
                 Arc::clone(&process),
@@ -1023,15 +1042,20 @@ impl UnifiedExecProcessManager {
         };
         let pruned_entry = {
             let mut store = self.process_store.lock().await;
-            let pruned_entry = Self::prune_processes_if_needed(&mut store);
-            store.processes.insert(process_id, entry);
-            pruned_entry
+            store.starting_processes.remove(&process_id);
+            if store.closed {
+                Some(entry)
+            } else {
+                let pruned_entry = Self::prune_processes_if_needed(&mut store);
+                store.processes.insert(process_id, entry);
+                pruned_entry
+            }
         };
         // prune_processes_if_needed runs while holding process_store; do async
         // network-approval cleanup only after dropping that lock.
         if let Some(pruned_entry) = pruned_entry {
-            unregister_network_approval_for_entry(&pruned_entry).await;
             pruned_entry.process.terminate();
+            unregister_network_approval_for_entry(&pruned_entry).await;
         }
 
         spawn_exit_watcher(
@@ -1520,20 +1544,39 @@ impl UnifiedExecProcessManager {
     }
 
     pub(crate) async fn terminate_all_processes(&self) {
-        let entries: Vec<ProcessEntry> = {
+        self.close_processes(false).await;
+    }
+
+    pub(crate) async fn shutdown(&self) {
+        self.close_processes(true).await;
+    }
+
+    async fn close_processes(&self, closed: bool) {
+        let (entries, starting): (Vec<ProcessEntry>, Vec<Arc<UnifiedExecProcess>>) = {
             let mut processes = self.process_store.lock().await;
+            processes.closed |= closed;
             let entries: Vec<ProcessEntry> = processes
                 .processes
                 .drain()
                 .map(|(_, entry)| entry)
                 .collect();
             processes.reserved_process_ids.clear();
-            entries
+            let starting = processes
+                .starting_processes
+                .drain()
+                .map(|(_, process)| process)
+                .collect();
+            (entries, starting)
         };
+        for process in starting {
+            process.terminate();
+        }
 
+        for entry in &entries {
+            entry.process.terminate();
+        }
         for entry in entries {
             unregister_network_approval_for_entry(&entry).await;
-            entry.process.terminate();
         }
     }
 

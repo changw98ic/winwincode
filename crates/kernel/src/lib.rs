@@ -646,6 +646,23 @@ pub const CODEX_PATCH_SET: &[&str] = &[
     "upstream/patches/codex/0102-exact-input-call-routing.patch",
     "upstream/patches/codex/0103-private-input-recovery-store.patch",
     "upstream/patches/codex/0104-input-recovery-dispatch-and-pages.patch",
+    "upstream/patches/codex/0105-host-model-retry-semantics.patch",
+    "upstream/patches/codex/0106-required-tool-fact-storage-fatal.patch",
+    "upstream/patches/codex/0107-terminal-core-error-rollout.patch",
+    "upstream/patches/codex/0108-mcp-timeout-and-test-runtime.patch",
+    "upstream/patches/codex/0109-execution-terminal-cause-and-drain.patch",
+    "upstream/patches/codex/0110-model-authority-expiry-cause.patch",
+    "upstream/patches/codex/0111-tool-call-request-result-pairs.patch",
+    "upstream/patches/codex/0112-tool-review-handoff-receipt-order.patch",
+    "upstream/patches/codex/0113-tool-review-shutdown-owner-release.patch",
+    "upstream/patches/codex/0114-tool-review-call-pair-regressions.patch",
+    "upstream/patches/codex/0115-app-server-internal-error-schema.patch",
+    "upstream/patches/codex/0116-tool-review-output-result-reference.patch",
+    "upstream/patches/codex/0117-shared-tool-fatal-storage.patch",
+    "upstream/patches/codex/0118-guardian-transcript-test-registration.patch",
+    "upstream/patches/codex/0119-native-fixture-transport-lifecycle.patch",
+    "upstream/patches/codex/0120-native-fixture-network-isolation.patch",
+    "upstream/patches/codex/0121-tool-review-supervised-process-shutdown.patch",
 ];
 
 const ROLE_SESSION_POLICY_SCHEMA_VERSION: u32 = 2;
@@ -989,6 +1006,25 @@ pub struct Kernel {
     host_action_approvals: bool,
     runtime: Arc<Mutex<Option<Arc<Runtime>>>>,
     closed: AtomicBool,
+    #[cfg(target_os = "linux")]
+    _linux_sandbox_alias: Option<tempfile::TempDir>,
+}
+
+#[cfg(target_os = "linux")]
+fn install_linux_sandbox_alias(
+    home: &Path,
+    executable: &Path,
+) -> KernelResult<(PathBuf, tempfile::TempDir)> {
+    let install = || -> std::io::Result<_> {
+        let executable = executable.canonicalize()?;
+        let directory = tempfile::Builder::new()
+            .prefix(".linux-sandbox-")
+            .tempdir_in(home.canonicalize()?)?;
+        let alias = directory.path().join("codex-linux-sandbox");
+        std::os::unix::fs::symlink(executable, &alias)?;
+        Ok((alias, directory))
+    };
+    install().map_err(|error| KernelFailure::new("LINUX_SANDBOX_ALIAS_FAILED", error.to_string()))
 }
 
 impl Kernel {
@@ -1012,6 +1048,16 @@ impl Kernel {
                 format!("{}: {error}", options.home.display()),
             )
         })?;
+        #[cfg(target_os = "linux")]
+        let linux_sandbox_alias = options
+            .linux_sandbox_executable
+            .as_ref()
+            .map(|executable| install_linux_sandbox_alias(&options.home, executable))
+            .transpose()?;
+        #[cfg(target_os = "linux")]
+        if let Some((alias, _directory)) = &linux_sandbox_alias {
+            options.linux_sandbox_executable = Some(alias.clone());
+        }
         Ok(Self {
             options,
             model_port,
@@ -1019,6 +1065,8 @@ impl Kernel {
             host_action_approvals: false,
             runtime: Arc::new(Mutex::new(None)),
             closed: AtomicBool::new(false),
+            #[cfg(target_os = "linux")]
+            _linux_sandbox_alias: linux_sandbox_alias.map(|(_alias, directory)| directory),
         })
     }
 
@@ -2608,6 +2656,23 @@ mod tests {
         "upstream/patches/codex/0102-exact-input-call-routing.patch",
         "upstream/patches/codex/0103-private-input-recovery-store.patch",
         "upstream/patches/codex/0104-input-recovery-dispatch-and-pages.patch",
+        "upstream/patches/codex/0105-host-model-retry-semantics.patch",
+        "upstream/patches/codex/0106-required-tool-fact-storage-fatal.patch",
+        "upstream/patches/codex/0107-terminal-core-error-rollout.patch",
+        "upstream/patches/codex/0108-mcp-timeout-and-test-runtime.patch",
+        "upstream/patches/codex/0109-execution-terminal-cause-and-drain.patch",
+        "upstream/patches/codex/0110-model-authority-expiry-cause.patch",
+        "upstream/patches/codex/0111-tool-call-request-result-pairs.patch",
+        "upstream/patches/codex/0112-tool-review-handoff-receipt-order.patch",
+        "upstream/patches/codex/0113-tool-review-shutdown-owner-release.patch",
+        "upstream/patches/codex/0114-tool-review-call-pair-regressions.patch",
+        "upstream/patches/codex/0115-app-server-internal-error-schema.patch",
+        "upstream/patches/codex/0116-tool-review-output-result-reference.patch",
+        "upstream/patches/codex/0117-shared-tool-fatal-storage.patch",
+        "upstream/patches/codex/0118-guardian-transcript-test-registration.patch",
+        "upstream/patches/codex/0119-native-fixture-transport-lifecycle.patch",
+        "upstream/patches/codex/0120-native-fixture-network-isolation.patch",
+        "upstream/patches/codex/0121-tool-review-supervised-process-shutdown.patch",
     ];
 
     #[test]
@@ -2647,6 +2712,102 @@ mod tests {
         } else {
             assert_eq!(options.linux_sandbox_executable, None);
         }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn kernel_linux_sandbox_alias_survives_legacy_bwrap_reentry() {
+        use std::os::unix::fs::PermissionsExt as _;
+        use std::os::unix::process::CommandExt as _;
+        use std::process::Command;
+
+        let root = tempfile::tempdir().unwrap();
+        let helper = std::env::var_os("WWC_WORKER_HELPER_EXECUTABLE").map_or_else(
+            || {
+                std::env::current_exe()
+                    .unwrap()
+                    .parent()
+                    .unwrap()
+                    .parent()
+                    .unwrap()
+                    .join("winwincode-kernel-helper")
+            },
+            std::path::PathBuf::from,
+        );
+        let bwrap = Command::new("/bin/sh")
+            .args(["-c", "command -v bwrap"])
+            .output()
+            .unwrap();
+        assert!(bwrap.status.success(), "system bwrap is required");
+        let bwrap = String::from_utf8(bwrap.stdout).unwrap().trim().to_owned();
+        let help = Command::new(&bwrap).arg("--help").output().unwrap();
+        let help = format!(
+            "{}{}",
+            String::from_utf8_lossy(&help.stdout),
+            String::from_utf8_lossy(&help.stderr)
+        );
+        let kernel = Kernel::new(
+            KernelOptions::new(root.path().join("home"), helper.clone()),
+            Arc::new(UnusedModelPort),
+            Arc::new(RejectingKernelActionGate),
+        )
+        .unwrap();
+        let alias = kernel.options.linux_sandbox_executable.clone().unwrap();
+        assert!(alias.is_absolute());
+        assert_eq!(
+            alias.canonicalize().unwrap(),
+            helper.canonicalize().unwrap()
+        );
+        let quote = |value: &str| format!("'{}'", value.replace('\'', "'\\''"));
+        let profile =
+            serde_json::to_string(&codex_protocol::models::PermissionProfile::read_only()).unwrap();
+        for supports_argv0 in [false, true] {
+            if supports_argv0 && !help.contains("--argv0") {
+                continue;
+            }
+            let path = root.path().join(format!("bwrap-{supports_argv0}"));
+            std::fs::create_dir(&path).unwrap();
+            let log = path.join("calls");
+            let options = if supports_argv0 { " --argv0" } else { "" };
+            let shim = path.join("bwrap");
+            std::fs::write(
+                &shim,
+                format!(
+                    "#!/bin/sh\nif [ \"$1\" = --help ]; then printf '%s\\n' '--as-pid-1 --perms{options}'; exit 0; fi\nprintf '%s\\n' \"$*\" >> {}\nexec {} \"$@\"\n",
+                    quote(log.to_str().unwrap()),
+                    quote(&bwrap),
+                ),
+            )
+            .unwrap();
+            std::fs::set_permissions(&shim, std::fs::Permissions::from_mode(0o755)).unwrap();
+            let argv0 = if alias.file_name().unwrap() == "codex-linux-sandbox" {
+                alias.as_os_str()
+            } else {
+                std::ffi::OsStr::new("codex-linux-sandbox")
+            };
+            let output = Command::new(&alias)
+                .arg0(argv0)
+                .arg("--sandbox-policy-cwd")
+                .arg(root.path())
+                .arg("--permission-profile")
+                .arg(&profile)
+                .args(["--no-proc", "--", "/bin/echo", "sandbox-reentry"])
+                .env("PATH", &path)
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "argv0={supports_argv0}: {output:?}"
+            );
+            assert_eq!(output.stdout, b"sandbox-reentry\n");
+            assert_eq!(
+                std::fs::read_to_string(log).unwrap().contains("--argv0"),
+                supports_argv0
+            );
+        }
+        assert_eq!(alias.file_name().unwrap(), "codex-linux-sandbox");
+        drop(kernel);
+        assert!(!alias.exists());
     }
 
     #[test]

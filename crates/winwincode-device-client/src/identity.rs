@@ -176,19 +176,7 @@ pub fn adopt_enrollment(
 ) -> Result<(), DeviceStoreError> {
     validate_identifier(device_id, "device id")?;
     validate_identifier(adopted_at, "adopted at")?;
-    if !is_canonical_prefixed_id(&issued.client_node_id, "cnd_") {
-        return Err(DeviceStoreError::invalid(
-            "issued clientNodeId is not a canonical cnd_ identity",
-        ));
-    }
-    let public_client_id = &issued.public_client_id;
-    if !(9..=12).contains(&public_client_id.len())
-        || !public_client_id.bytes().all(|byte| byte.is_ascii_digit())
-    {
-        return Err(DeviceStoreError::invalid(
-            "issued publicClientId must contain 9 to 12 digits",
-        ));
-    }
+    validate_issued_enrollment(issued)?;
     let connection = store.connection_mut()?;
     let transaction = connection
         .transaction_with_behavior(TransactionBehavior::Immediate)
@@ -225,6 +213,25 @@ pub fn adopt_enrollment(
         ));
     }
     transaction.commit().map_err(sql_error)
+}
+
+pub(crate) fn validate_issued_enrollment(
+    issued: &IssuedEnrollment,
+) -> Result<(), DeviceStoreError> {
+    if !is_canonical_prefixed_id(&issued.client_node_id, "cnd_") {
+        return Err(DeviceStoreError::invalid(
+            "issued clientNodeId is not a canonical cnd_ identity",
+        ));
+    }
+    let public_client_id = &issued.public_client_id;
+    if !(9..=12).contains(&public_client_id.len())
+        || !public_client_id.bytes().all(|byte| byte.is_ascii_digit())
+    {
+        return Err(DeviceStoreError::invalid(
+            "issued publicClientId must contain 9 to 12 digits",
+        ));
+    }
+    Ok(())
 }
 
 fn load_or_create_identity(
