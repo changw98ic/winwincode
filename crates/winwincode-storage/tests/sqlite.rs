@@ -11,12 +11,12 @@ use winwincode_domain::{
     RequestId, Sha256Digest, UserId, WorkerId, WorkerInstanceId, WorkerSessionId, WorkspaceId,
 };
 use winwincode_storage::{
-    AggregateJournalKey, AggregateJournalPublication, AggregateJournalRecord, CommitReceipt,
-    DispatchResultRequest, DispatchResultStatus, EXECUTION_PROTOCOL_VERSION,
-    ExecutionAuthorityCommitGuard, ExecutionDispatchAuthority, ExecutionJobRecord,
-    ExecutionJobState, ExecutionJobSubmission, ExecutionLeaseRecord, ExecutionLeaseTerminalOutcome,
-    ExecutionLeaseTerminalRequest, ExecutionQueueScope, LoadedAggregateJournal,
-    MAX_STATE_MUTATION_BYTES_PER_COMMIT, MAX_STATE_MUTATION_PAYLOAD_BYTES,
+    AggregateJournalKey, AggregateJournalPublication, AggregateJournalRecord,
+    CONTROL_PLANE_SCHEMA_VERSION, CommitReceipt, DispatchResultRequest, DispatchResultStatus,
+    EXECUTION_PROTOCOL_VERSION, ExecutionAuthorityCommitGuard, ExecutionDispatchAuthority,
+    ExecutionJobRecord, ExecutionJobState, ExecutionJobSubmission, ExecutionLeaseRecord,
+    ExecutionLeaseTerminalOutcome, ExecutionLeaseTerminalRequest, ExecutionQueueScope,
+    LoadedAggregateJournal, MAX_STATE_MUTATION_BYTES_PER_COMMIT, MAX_STATE_MUTATION_PAYLOAD_BYTES,
     MAX_STATE_MUTATIONS_PER_COMMIT, NewOutboxEvent, OutboxEvent, PendingAuditEvent,
     ProductStateStorage, ProjectionEventCursor, ProjectionEventStream, ProjectionEventStreamKey,
     ProjectionReadCut, PublicEventActor, PublicEventScope, PublicEventSource, ReceiptActorKey,
@@ -1437,8 +1437,9 @@ fn startup_rejects_a_database_from_a_newer_schema_version() {
     fs::create_dir_all(&root).expect("test directory should exist");
     let database_path = root.join("control-plane.sqlite3");
     let connection = Connection::open(&database_path).expect("test database should open");
+    let version = CONTROL_PLANE_SCHEMA_VERSION + 1;
     connection
-        .pragma_update(None, "user_version", 8)
+        .pragma_update(None, "user_version", version)
         .expect("test schema version should be written");
     connection.close().expect("test database should close");
 
@@ -1446,13 +1447,17 @@ fn startup_rejects_a_database_from_a_newer_schema_version() {
         panic!("a newer schema must not be silently downgraded");
     };
 
-    assert!(error.to_string().contains("unsupported schema version 8"));
+    assert!(
+        error
+            .to_string()
+            .contains(&format!("unsupported schema version {version}"))
+    );
     fs::remove_dir_all(root).expect("rejected database should have no open connection");
 }
 
 #[test]
 fn unpublished_schema_versions_are_refused_without_rewriting_state_or_receipts() {
-    for version in 1..7 {
+    for version in 1..CONTROL_PLANE_SCHEMA_VERSION {
         let root = temporary_directory("unsupported-schema");
         let mut storage = SqliteStorage::open(&root).expect("current storage");
         storage

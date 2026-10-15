@@ -11,9 +11,9 @@ use std::time::Duration;
 
 use winwincode_client_port::worker_relay::{WorkerRelayRequest, WorkerRelayResponse};
 use winwincode_codex::WorkerExecutionPort;
-use winwincode_domain::{ExecutionMessageId, SessionIdentity, WorkerId, WorkerInstanceId};
+use winwincode_domain::{ExecutionMessageId, WorkerId, WorkerInstanceId};
 use winwincode_execution_port::generated::{
-    ExecutionLeaseStamp, ExecutionPortMessage, JobOutcomeAckMessage, JobOutcomeMessage,
+    ExecutionPortMessage, JobOutcomeAckMessage, JobOutcomeMessage,
 };
 use winwincode_execution_port::transport::{
     FrameDirection, RemoteExchangeRequest, RemoteExchangeResponse, RemoteTransportAdapter,
@@ -191,7 +191,6 @@ struct SharedRemoteState {
     acknowledgements: Vec<ExecutionMessageId>,
     terminal_error: Option<RemoteWorkerPortError>,
     lease_deadlines: BTreeMap<String, (String, std::time::Instant)>,
-    terminal_authorities: BTreeMap<String, (ExecutionLeaseStamp, SessionIdentity)>,
     pending_renewals: BTreeMap<String, (String, String, std::time::Instant)>,
 }
 
@@ -351,7 +350,6 @@ impl RemoteWorkerTransportHandle {
                 acknowledgements: Vec::new(),
                 terminal_error: None,
                 lease_deadlines: BTreeMap::new(),
-                terminal_authorities: BTreeMap::new(),
                 pending_renewals: BTreeMap::new(),
             })),
         }
@@ -403,12 +401,7 @@ impl RemoteWorkerTransportHandle {
                 .get(&job_id)
                 .is_some_and(|(prior, _)| expires_at > *prior)
         {
-            state
-                .lease_deadlines
-                .insert(job_id.clone(), (expires_at.clone(), deadline));
-            if let Some((lease, _)) = state.terminal_authorities.get_mut(&job_id) {
-                lease.expires_at.0.clone_from(&expires_at);
-            }
+            state.lease_deadlines.insert(job_id, (expires_at, deadline));
         }
         if !state.acknowledgements.contains(&id) {
             state.acknowledgements.push(id);
@@ -463,7 +456,6 @@ impl RemoteWorkerPort {
             acknowledgements: Vec::new(),
             terminal_error: None,
             lease_deadlines: BTreeMap::new(),
-            terminal_authorities: BTreeMap::new(),
             pending_renewals: BTreeMap::new(),
         }));
         (
@@ -519,15 +511,6 @@ impl RemoteWorkerPort {
                 }
                 Some(acknowledgement)
             } else {
-                if !state
-                    .terminal_authorities
-                    .get(&outcome.lease.job_id.0)
-                    .is_some_and(|(lease, identity)| {
-                        lease == &outcome.lease && identity == &outcome.session_identity
-                    })
-                {
-                    return Err(RemoteWorkerPortError::Rejected);
-                }
                 None
             };
             (queued, state.acknowledgements_for_exchange())
@@ -653,28 +636,12 @@ impl RemoteWorkerPort {
             _ => None,
         };
         let terminal = completed_job.is_some();
-        let binding = match &message {
-            ExecutionPortMessage::SessionBindingMessage(binding) => {
-                Some((binding.lease.clone(), binding.session_identity.clone()))
-            }
-            _ => None,
-        };
         let result = self.exchange_inner(message).await;
-        if result.is_ok()
-            && let Some((lease, identity)) = binding
-            && let Ok(mut state) = self.state.lock()
-        {
-            state
-                .terminal_authorities
-                .entry(lease.job_id.0.clone())
-                .or_insert((lease, identity));
-        }
         if result.is_ok()
             && let Some(job_id) = completed_job
             && let Ok(mut state) = self.state.lock()
         {
             state.lease_deadlines.remove(&job_id);
-            state.terminal_authorities.remove(&job_id);
             state
                 .pending_renewals
                 .retain(|_, (pending_job, _, _)| *pending_job != job_id);
@@ -865,28 +832,101 @@ fn remote_frame_error(
 mod tests {
     use super::*;
 
-    #[tokio::test]
-    #[allow(clippy::too_many_lines)]
-    async fn expired_execution_can_close_its_retained_terminal_without_reopening_controls() {
+    fn fixture_message(kind: &str) -> ExecutionPortMessage {
         let fixture: serde_json::Value = serde_json::from_str(include_str!(
             "../../../tests/fixtures/contracts/execution-port.valid.json"
         ))
         .unwrap();
-        let message = |kind: &str| -> ExecutionPortMessage {
-            serde_json::from_value(
-                fixture["messages"]
-                    .as_array()
-                    .unwrap()
-                    .iter()
-                    .find(|message| message["kind"] == kind)
-                    .unwrap()
-                    .clone(),
-            )
-            .unwrap()
-        };
-        let ExecutionPortMessage::JobOutcomeMessage(outcome) = message("job.outcome") else {
+        serde_json::from_value(
+            fixture["messages"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|message| message["kind"] == kind)
+                .unwrap()
+                .clone(),
+        )
+        .unwrap()
+    }
+
+    fn relay_responses(responses: Vec<Vec<ExecutionPortMessage>>) -> Vec<u8> {
+        let mut input = Vec::new();
+        for messages in responses {
+            let deliveries = messages
+                .into_iter()
+                .map(
+                    |message| winwincode_execution_port::transport::RemoteExchangeDelivery {
+                        delivery_id: winwincode_execution_port::transport::execution_message_id(
+                            &message,
+                        )
+                        .unwrap(),
+                        frame: RemoteTransportAdapter::<NoopCore>::encode(
+                            &TypedFrame::new(FrameDirection::ControlPlaneToWorker, message)
+                                .unwrap(),
+                        )
+                        .unwrap(),
+                    },
+                )
+                .collect();
+            let response = WorkerRelayResponse {
+                status: 200,
+                body: String::from_utf8(
+                    RemoteExchangeResponse::with_acceptance(deliveries, true)
+                        .unwrap()
+                        .encode()
+                        .unwrap(),
+                )
+                .unwrap(),
+                failure: None,
+            };
+            input.extend_from_slice(&serde_json::to_vec(&response).unwrap());
+            input.push(b'\n');
+        }
+        input
+    }
+
+    #[tokio::test]
+    async fn expired_execution_can_close_its_retained_terminal_without_reopening_controls() {
+        Box::pin(close_terminal_after_renewal_before_binding(false)).await;
+    }
+
+    #[tokio::test]
+    async fn expired_execution_can_close_a_previously_sent_terminal_without_acknowledgement() {
+        Box::pin(close_terminal_after_renewal_before_binding(true)).await;
+    }
+
+    #[allow(clippy::too_many_lines)]
+    async fn close_terminal_after_renewal_before_binding(terminal_sent_before_expiry: bool) {
+        let message = fixture_message;
+        let ExecutionPortMessage::JobOutcomeMessage(mut outcome) = message("job.outcome") else {
             panic!("terminal fixture")
         };
+        let mut dispatch_result = message("job.dispatch_result");
+        let mut binding = message("session.binding");
+        let ExecutionPortMessage::LeaseRenewMessage(mut renewal) = message("lease.renew") else {
+            panic!("renewal fixture")
+        };
+        let now = time::OffsetDateTime::now_utc();
+        let original_expiry = (now + time::Duration::minutes(1))
+            .format(&time::format_description::well_known::Rfc3339)
+            .unwrap();
+        let renewed_expiry = (now + time::Duration::minutes(2))
+            .format(&time::format_description::well_known::Rfc3339)
+            .unwrap();
+        for message in [&mut dispatch_result, &mut binding] {
+            match message {
+                ExecutionPortMessage::JobDispatchResultMessage(result) => {
+                    result.lease.expires_at.0.clone_from(&original_expiry);
+                }
+                ExecutionPortMessage::SessionBindingMessage(binding) => {
+                    binding.lease.expires_at.0.clone_from(&original_expiry);
+                }
+                _ => unreachable!(),
+            }
+        }
+        outcome.lease.expires_at.0.clone_from(&renewed_expiry);
+        renewal.lease.clone_from(&outcome.lease);
+        renewal.prior_expires_at.0.clone_from(&original_expiry);
         let ExecutionPortMessage::JobOutcomeAckMessage(mut acknowledgement) =
             message("job.outcome_ack")
         else {
@@ -904,34 +944,15 @@ mod tests {
             ExecutionPortMessage::JobOutcomeAckMessage(foreign),
             ExecutionPortMessage::JobOutcomeAckMessage(acknowledgement.clone()),
         ];
-        let deliveries = controls
-            .into_iter()
-            .map(
-                |message| winwincode_execution_port::transport::RemoteExchangeDelivery {
-                    delivery_id: winwincode_execution_port::transport::execution_message_id(
-                        &message,
-                    )
-                    .unwrap(),
-                    frame: RemoteTransportAdapter::<NoopCore>::encode(
-                        &TypedFrame::new(FrameDirection::ControlPlaneToWorker, message).unwrap(),
-                    )
-                    .unwrap(),
-                },
-            )
-            .collect();
-        let response = WorkerRelayResponse {
-            status: 200,
-            body: String::from_utf8(
-                RemoteExchangeResponse::with_acceptance(deliveries, true)
-                    .unwrap()
-                    .encode()
-                    .unwrap(),
-            )
-            .unwrap(),
-            failure: None,
-        };
-        let mut input = serde_json::to_vec(&response).unwrap();
-        input.push(b'\n');
+        let mut responses = vec![
+            vec![ExecutionPortMessage::LeaseRenewMessage(renewal.clone())],
+            Vec::new(),
+        ];
+        if terminal_sent_before_expiry {
+            responses.push(Vec::new());
+        }
+        responses.push(controls.to_vec());
+        let input = relay_responses(responses);
         let (mut port, handle) = RemoteWorkerPort::with_io(
             outcome.lease.worker_id.clone(),
             outcome.lease.worker_instance_id.clone(),
@@ -941,15 +962,39 @@ mod tests {
         handle.state.lock().unwrap().lease_deadlines.insert(
             outcome.lease.job_id.0.clone(),
             (
-                outcome.lease.expires_at.0.clone(),
+                original_expiry,
+                std::time::Instant::now() + Duration::from_mins(1),
+            ),
+        );
+        port.send(dispatch_result).await.unwrap();
+        let (renewal_id, received_renewal) = handle.next_control().unwrap().unwrap();
+        assert_eq!(
+            received_renewal,
+            ExecutionPortMessage::LeaseRenewMessage(renewal)
+        );
+        handle.confirm(renewal_id).unwrap();
+        assert_eq!(
+            handle.state.lock().unwrap().lease_deadlines[&outcome.lease.job_id.0].0,
+            renewed_expiry
+        );
+        port.send(binding).await.unwrap();
+        if terminal_sent_before_expiry {
+            port.send(ExecutionPortMessage::JobOutcomeMessage(outcome.clone()))
+                .await
+                .unwrap();
+        }
+        handle.state.lock().unwrap().lease_deadlines.insert(
+            if terminal_sent_before_expiry {
+                "job_00000000000000000000000004".into()
+            } else {
+                outcome.lease.job_id.0.clone()
+            },
+            (
+                renewed_expiry,
                 std::time::Instant::now()
                     .checked_sub(Duration::from_secs(1))
                     .unwrap(),
             ),
-        );
-        handle.state.lock().unwrap().terminal_authorities.insert(
-            outcome.lease.job_id.0.clone(),
-            (outcome.lease.clone(), outcome.session_identity.clone()),
         );
         let expired = handle.wait_for_terminal_error().await;
         assert_eq!(
@@ -965,7 +1010,7 @@ mod tests {
         let ExecutionPortMessage::JobOutcomeMessage(changed_outcome) = &mut changed.message else {
             panic!("terminal delivery")
         };
-        changed_outcome.lease.fencing_token.0 = "999".into();
+        changed_outcome.lease.worker_instance_id.0 = "wki_00000000000000000000000999".into();
         assert_eq!(
             port.close_retained_terminal(&changed).await,
             Err(RemoteWorkerPortError::Rejected)
@@ -988,7 +1033,6 @@ mod tests {
         });
         {
             let mut state = handle.state.lock().unwrap();
-            state.terminal_authorities.clear();
             state.inbox.push_back((
                 rejection.message_id.clone(),
                 ExecutionPortMessage::JobOutcomeAckMessage(rejection.clone()),
@@ -997,10 +1041,6 @@ mod tests {
         assert_eq!(
             port.close_retained_terminal(&delivery).await.unwrap(),
             Some(rejection)
-        );
-        handle.state.lock().unwrap().terminal_authorities.insert(
-            outcome.lease.job_id.0.clone(),
-            (outcome.lease.clone(), outcome.session_identity.clone()),
         );
         assert_eq!(
             port.close_retained_terminal(&delivery).await,
@@ -1011,6 +1051,196 @@ mod tests {
             delivery.message,
             ExecutionPortMessage::JobOutcomeMessage(outcome)
         );
+    }
+
+    #[tokio::test]
+    #[allow(clippy::too_many_lines)]
+    async fn expired_terminal_cleanup_keeps_failed_pending_and_settles_later_outcomes() {
+        use winwincode_codex::{
+            CodexCoreAdapter, ExecutionMode, ObserverMode, ProductionCodexAdapter,
+            ProductionCodexConfig, ProductionCodexOptions,
+        };
+        use winwincode_execution_port::generated::JobOutcomeAckMessageStatus;
+
+        let ExecutionPortMessage::WorkerRegisterMessage(registration) =
+            fixture_message("worker.register")
+        else {
+            panic!("registration fixture")
+        };
+        let ExecutionPortMessage::JobDispatchMessage(dispatch) = fixture_message("job.dispatch")
+        else {
+            panic!("dispatch fixture")
+        };
+        let ExecutionPortMessage::JobOutcomeMessage(original) = fixture_message("job.outcome")
+        else {
+            panic!("terminal fixture")
+        };
+        let outcomes = (0..3)
+            .map(|index| {
+                let mut outcome = original.clone();
+                outcome.message_id.0 = format!("xmsg_{:026}", index + 100);
+                outcome.lease.job_id.0 = format!("job_{:026}", index + 100);
+                outcome.lease.lease_id.0 = format!("lse_{:026}", index + 100);
+                outcome.worker_session_id.0 = format!("wsn_{:026}", index + 100);
+                outcome.session_identity.worker_session_id = outcome.worker_session_id.clone();
+                outcome.session_identity.codex_thread_id.0 = format!("cdx_{:026}", index + 100);
+                outcome.outcome.codex_thread_id =
+                    Some(outcome.session_identity.codex_thread_id.clone());
+                outcome
+            })
+            .collect::<Vec<_>>();
+        let acknowledgements = outcomes[1..]
+            .iter()
+            .enumerate()
+            .map(|(index, outcome)| {
+                let ExecutionPortMessage::JobOutcomeAckMessage(mut ack) =
+                    fixture_message("job.outcome_ack")
+                else {
+                    panic!("terminal acknowledgement fixture")
+                };
+                ack.message_id.0 = format!("xmsg_{:026}", index + 200);
+                ack.lease.clone_from(&outcome.lease);
+                ack.worker_session_id.clone_from(&outcome.worker_session_id);
+                ack.session_identity.clone_from(&outcome.session_identity);
+                if index == 0 {
+                    ack.status = JobOutcomeAckMessageStatus::RejectedStaleFencingToken;
+                    ack.error = Some(winwincode_execution_port::generated::ExecutionPortError {
+                        code: winwincode_execution_port::generated::ExecutionPortErrorCode::StaleFencingToken,
+                        message: "the original owner was replaced".into(),
+                        retryable: false,
+                    });
+                }
+                vec![ExecutionPortMessage::JobOutcomeAckMessage(ack)]
+            })
+            .collect();
+        let mut input = serde_json::to_vec(&WorkerRelayResponse {
+            status: 200,
+            body: "{}".into(),
+            failure: None,
+        })
+        .unwrap();
+        input.push(b'\n');
+        input.extend_from_slice(&relay_responses(acknowledgements));
+        let (port, handle) = RemoteWorkerPort::with_io(
+            registration.worker_id.clone(),
+            registration.worker_instance_id.clone(),
+            std::io::Cursor::new(input),
+            Vec::new(),
+        );
+        let directory = tempfile::tempdir().unwrap();
+        let data_directory = directory.path().join("codex");
+        let config = ProductionCodexConfig::try_new(ProductionCodexOptions {
+            data_directory: data_directory.clone(),
+            helper_executable: std::env::current_exe().unwrap(),
+            provider: None,
+            model: None,
+            gateway_route: winwincode_execution_port::generated::ModelGatewayRoute {
+                capability: "reasoning".into(),
+                route: "fixture".into(),
+            },
+            registered_capabilities: registration.capabilities.clone(),
+            discovered_capabilities: Vec::new(),
+            execution_mode: ExecutionMode::React,
+            observer_mode: ObserverMode::Off,
+        })
+        .unwrap();
+        let codex = ProductionCodexAdapter::open(config.clone()).unwrap();
+        let sources = directory.path().join("sources");
+        std::fs::create_dir_all(&sources).unwrap();
+        let mut worker = crate::WorkerMain::new(
+            crate::WorkerConfig {
+                worker_id: registration.worker_id,
+                worker_instance_id: registration.worker_instance_id,
+                started_at: registration.sent_at,
+                capabilities: registration.capabilities,
+            },
+            port,
+            codex,
+            crate::workspace_runtime::JobWorkspaceRuntime::open(
+                directory.path().join("workspaces"),
+                sources,
+            )
+            .unwrap(),
+        );
+        worker.lifecycle = crate::WorkerLifecycleState::Stopped;
+        for outcome in &outcomes {
+            worker
+                .codex
+                .retain_execution_delivery(&ExecutionPortMessage::JobOutcomeMessage(
+                    outcome.clone(),
+                ))
+                .unwrap();
+            worker.dispatches.insert(
+                outcome.lease.job_id.0.clone(),
+                crate::DispatchRecord {
+                    snapshot: None,
+                    run_key: crate::CodexRunKey {
+                        job_id: outcome.lease.job_id.clone(),
+                        attempt: outcome.lease.attempt,
+                        fencing_token: outcome.lease.fencing_token.clone(),
+                        payload_digest: dispatch.job.payload_digest.clone(),
+                    },
+                    job_digest: dispatch.job.payload_digest.clone(),
+                    worker_session_id: outcome.worker_session_id.clone(),
+                    codex_thread_id: outcome.session_identity.codex_thread_id.clone(),
+                    replacement_authority: None,
+                    terminal: true,
+                    submission_started: true,
+                },
+            );
+        }
+        handle.state.lock().unwrap().lease_deadlines.insert(
+            outcomes[2].lease.job_id.0.clone(),
+            (
+                outcomes[2].lease.expires_at.0.clone(),
+                std::time::Instant::now(),
+            ),
+        );
+        let expired = handle.wait_for_terminal_error().await;
+        assert_eq!(
+            Box::pin(worker.close_expired_terminal_outbox(outcomes[2].sent_at.clone())).await,
+            Ok(false)
+        );
+        assert_eq!(handle.terminal_error(), Some(expired));
+        assert_eq!(handle.next_control(), Err(expired));
+        drop(worker);
+        let mut reopened = ProductionCodexAdapter::open(config).unwrap();
+        let pending = reopened.pending_execution_deliveries().unwrap();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(
+            pending[0].message,
+            ExecutionPortMessage::JobOutcomeMessage(outcomes[0].clone())
+        );
+        assert!(
+            reopened
+                .execution_delivery_is_rejected(&outcomes[1].message_id.0)
+                .unwrap()
+        );
+        let database =
+            rusqlite::Connection::open(data_directory.join("worker-codex.sqlite3")).unwrap();
+        let rejected: (Vec<u8>, i64) = database
+            .query_row(
+                "SELECT original_frame,rejected FROM execution_delivery_disposition WHERE delivery_id=?1",
+                [&outcomes[1].message_id.0],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(rejected.1, 1);
+        assert_eq!(
+            rejected.0,
+            serde_json::to_vec(&ExecutionPortMessage::JobOutcomeMessage(
+                outcomes[1].clone()
+            ))
+            .unwrap()
+        );
+        let remaining: i64 = database
+            .query_row(
+                "SELECT COUNT(*) FROM execution_outbox WHERE delivery_id=?1",
+                [&outcomes[2].message_id.0],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(remaining, 0);
     }
 
     #[tokio::test]
@@ -1339,7 +1569,6 @@ mod tests {
             acknowledgements: vec![sent.clone(), suffix.clone()],
             terminal_error: None,
             lease_deadlines: BTreeMap::new(),
-            terminal_authorities: BTreeMap::new(),
             pending_renewals: BTreeMap::new(),
         };
         let response = RemoteExchangeResponse::with_acceptance(vec![delivery], false).unwrap();
@@ -1397,7 +1626,6 @@ mod tests {
                 .collect(),
             terminal_error: None,
             lease_deadlines: BTreeMap::new(),
-            terminal_authorities: BTreeMap::new(),
             pending_renewals: BTreeMap::new(),
         };
         let first = state.acknowledgements_for_exchange();

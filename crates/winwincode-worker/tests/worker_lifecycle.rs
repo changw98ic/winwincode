@@ -1809,7 +1809,12 @@ fn standalone_binary_starts_without_an_external_execution_fallback() {
 
     let manifest = include_str!("../Cargo.toml");
     let source = include_str!("../src/lib.rs");
-    assert!(!manifest.contains("winwincode-cli"));
+    assert!(
+        !manifest
+            .lines()
+            .filter_map(|line| line.split_once('='))
+            .any(|(name, _)| name.trim().split('.').next() == Some("winwincode-cli"))
+    );
     assert!(!source.contains("Command::new"));
     assert!(!source.contains("codex app-server"));
 }

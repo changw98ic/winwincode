@@ -43,28 +43,40 @@ where
                         && record.codex_thread_id == outcome.session_identity.codex_thread_id
                 })
             {
-                return Err(worker_error(
-                    WorkerErrorCode::InvalidDispatchAuthority,
-                    "retained terminal differs from this stopped execution",
-                ));
-            }
-            let Some(acknowledgement) = self
-                .port
-                .close_retained_terminal(&delivery)
-                .await
-                .map_err(|_| execution_port_error())?
-            else {
                 complete = false;
                 continue;
-            };
-            self.codex
-                .record_execution_delivery_sent(&delivery.delivery_id)
-                .map_err(|_| codex_model_error())?;
-            Box::pin(self.apply_control(
-                &ExecutionPortMessage::JobOutcomeAckMessage(acknowledgement),
-                now.clone(),
-            ))
-            .await?;
+            }
+            let result = async {
+                let Some(acknowledgement) = self
+                    .port
+                    .close_retained_terminal(&delivery)
+                    .await
+                    .map_err(|_| execution_port_error())?
+                else {
+                    return Ok(false);
+                };
+                if matches!(
+                    acknowledgement.status,
+                    winwincode_execution_port::generated::JobOutcomeAckMessageStatus::Accepted
+                        | winwincode_execution_port::generated::JobOutcomeAckMessageStatus::Duplicate
+                ) {
+                    self.codex
+                        .record_execution_delivery_sent(&delivery.delivery_id)
+                        .map_err(|_| codex_model_error())?;
+                    Box::pin(self.apply_control(
+                        &ExecutionPortMessage::JobOutcomeAckMessage(acknowledgement),
+                        now.clone(),
+                    ))
+                    .await?;
+                    Ok(true)
+                } else {
+                    self.codex
+                        .record_execution_delivery_rejected(&delivery.delivery_id)
+                        .map_err(|_| codex_model_error())
+                }
+            }
+            .await;
+            complete &= result == Ok(true);
         }
         Ok(complete)
     }
