@@ -63,10 +63,10 @@ use winwincode_execution_port::generated::{
 use winwincode_storage::{
     AggregateJournalKey, AggregateJournalPublication, AggregateJournalRecord, ArtifactErrorKind,
     CandidateGitPinReceipt, CandidateGitReleaseAuthority, CandidateGitTerminalOutcome,
-    ExecutionQueueScope, GitCandidateArtifactManifest, NewOutboxEvent, ProductStateStorage,
-    ReceiptActorKey, ReceiptIdentity, ReceiptScopeKey, RepositorySchedulerClaimRequest,
-    RepositorySchedulerScope, SqliteStorage, StateCommit, WorkerSlotAuthority,
-    WorkerSlotOpenRequest, WorkerSlotResourceLimits, WorkerSlotResources,
+    ExecutionLeaseRenewal, ExecutionQueueScope, GitCandidateArtifactManifest, NewOutboxEvent,
+    ProductStateStorage, ReceiptActorKey, ReceiptIdentity, ReceiptScopeKey,
+    RepositorySchedulerClaimRequest, RepositorySchedulerScope, SqliteStorage, StateCommit,
+    WorkerSlotAuthority, WorkerSlotOpenRequest, WorkerSlotResourceLimits, WorkerSlotResources,
 };
 use winwincode_storage::{
     PublicEventActor, PublicEventScope, PublicEventSource, receipt_actor_key, receipt_scope_key,
@@ -2783,9 +2783,44 @@ fn control_plane_rebuilds_the_candidate_from_its_exact_artifact_and_successful_o
         snapshot_id: None,
         worker_session_id: binding_message.worker_session_id.clone(),
     };
-    control_plane
+    let open_ack = control_plane
         .accept_artifact_open(&scope, &open, &authority)
         .expect("artifact.open");
+    let renewed_expires_at = Instant("2027-01-15T08:01:10.000Z".into());
+    let mut renewal_storage = SqliteStorage::open(&root).expect("candidate renewal storage");
+    renewal_storage
+        .execution_registry()
+        .expect("candidate renewal registry")
+        .renew_execution_lease(&ExecutionLeaseRenewal {
+            expires_at: renewed_expires_at.clone(),
+            prior_expires_at: binding_message.lease.expires_at.clone(),
+            fencing_token: binding_message.lease.fencing_token.clone(),
+            job_id: binding_message.lease.job_id.clone(),
+            lease_id: binding_message.lease.lease_id.clone(),
+            message_id: ExecutionMessageId(canonical_id("xmsg", seed + 20)),
+            request_id: RequestId(canonical_id("req", seed + 20)),
+            sent_at: Instant("2027-01-15T08:00:09.000Z".into()),
+            worker_id: binding_message.lease.worker_id.clone(),
+            worker_instance_id: binding_message.lease.worker_instance_id.clone(),
+            attempt: u64::try_from(binding_message.lease.attempt).expect("positive attempt"),
+        })
+        .expect("renew candidate lease");
+    Box::new(renewal_storage)
+        .close()
+        .expect("candidate renewal storage close");
+    let renewed_authority = session_binding_authority(
+        active_lease_identity(
+            binding_message.lease.job_id.clone(),
+            u64::try_from(binding_message.lease.attempt).expect("positive attempt"),
+            binding_message.lease.lease_id.clone(),
+            binding_message.lease.fencing_token.clone(),
+            binding_message.lease.worker_id.clone(),
+            binding_message.lease.worker_instance_id.clone(),
+            binding_message.worker_session_id.clone(),
+        ),
+        binding_message.lease.issued_at.clone(),
+        renewed_expires_at,
+    );
     let chunk = ArtifactChunkMessage {
         artifact_id: artifact_id.clone(),
         is_final: true,
@@ -2804,11 +2839,56 @@ fn control_plane_rebuilds_the_candidate_from_its_exact_artifact_and_successful_o
         snapshot_id: None,
         worker_session_id: binding_message.worker_session_id.clone(),
     };
+    let mut direct_foreign_identity = chunk.clone();
+    direct_foreign_identity.message_id = ExecutionMessageId(canonical_id("xmsg", seed + 23));
+    direct_foreign_identity.lease.expires_at = renewed_authority.expires_at().clone();
+    direct_foreign_identity.worker_session_id = WorkerSessionId(canonical_id("wsn", seed + 23));
+    direct_foreign_identity
+        .session_identity
+        .worker_session_id
+        .clone_from(&direct_foreign_identity.worker_session_id);
+    let mut direct_foreign_ack = open_ack;
+    direct_foreign_ack.ack_sequence = ExecutionAckSequence(1);
+    direct_foreign_ack.lease = direct_foreign_identity.lease.clone();
+    direct_foreign_ack.message_id = direct_foreign_identity.message_id.clone();
+    direct_foreign_ack.worker_session_id = direct_foreign_identity.worker_session_id.clone();
+    direct_foreign_ack.session_identity = direct_foreign_identity.session_identity.clone();
+    let direct_foreign_error = control_plane
+        .pin_candidate_git_after_final_artifact_ack(
+            &scope,
+            &direct_foreign_identity,
+            &direct_foreign_ack,
+            &renewed_authority,
+        )
+        .expect_err("direct Candidate pin must reject a foreign current-period identity");
+    assert!(
+        direct_foreign_error
+            .to_string()
+            .contains("Artifact message does not match the scheduler-owned active lease")
+    );
+    let mut unaccepted_period = chunk.clone();
+    unaccepted_period.message_id = ExecutionMessageId(canonical_id("xmsg", seed + 21));
+    unaccepted_period.lease.expires_at = Instant("2027-01-15T08:01:09.000Z".into());
+    control_plane
+        .accept_artifact_chunk(&scope, &unaccepted_period, &renewed_authority)
+        .expect_err("unaccepted Artifact lease period must fail closed");
+    let mut foreign_identity = chunk.clone();
+    foreign_identity.message_id = ExecutionMessageId(canonical_id("xmsg", seed + 22));
+    foreign_identity.lease.worker_id = WorkerId(canonical_id("wrk", seed + 22));
+    control_plane
+        .accept_artifact_chunk(&scope, &foreign_identity, &renewed_authority)
+        .expect_err("foreign Artifact lease identity must fail closed");
     let final_ack = control_plane
-        .accept_artifact_chunk(&scope, &chunk, &authority)
-        .expect("artifact.chunk");
+        .accept_artifact_chunk(&scope, &chunk, &renewed_authority)
+        .expect("artifact.chunk from an accepted pre-renewal lease period");
     assert_eq!(final_ack.status, LeaseWriteStatus::Accepted);
     assert_eq!(final_ack.ack_sequence, ExecutionAckSequence(1));
+    assert_eq!(final_ack.lease, chunk.lease);
+    let duplicate_final_ack = control_plane
+        .accept_artifact_chunk(&scope, &chunk, &renewed_authority)
+        .expect("exact final Artifact retry after renewal");
+    assert_eq!(duplicate_final_ack.status, LeaseWriteStatus::Duplicate);
+    assert_eq!(duplicate_final_ack.lease, chunk.lease);
 
     let candidate_cache = root.join("delivery-sources");
     let retained_repository = candidate_cache.join("project-one");
@@ -2824,6 +2904,13 @@ fn control_plane_rebuilds_the_candidate_from_its_exact_artifact_and_successful_o
                 .expect("candidate pin lookup")
                 .expect("final Artifact acknowledgement must pin candidate")
         };
+        assert_eq!(
+            retention_storage
+                .read_candidate_git_retention_for_delivery(&candidate_cache, initial.id())
+                .expect("candidate pin listing")
+                .len(),
+            1
+        );
         Box::new(retention_storage)
             .close()
             .expect("candidate retention close");
@@ -2887,7 +2974,7 @@ fn control_plane_rebuilds_the_candidate_from_its_exact_artifact_and_successful_o
     )
     .expect("Control Plane restart");
     let replayed_final_ack = control_plane
-        .accept_artifact_chunk(&scope, &chunk, &authority)
+        .accept_artifact_chunk(&scope, &chunk, &renewed_authority)
         .expect("exact final Artifact retry");
     assert_eq!(replayed_final_ack.status, LeaseWriteStatus::Duplicate);
     let replayed_pin = {
@@ -2918,7 +3005,7 @@ fn control_plane_rebuilds_the_candidate_from_its_exact_artifact_and_successful_o
         &["update-ref", pin.reference_name(), base_commit.as_str()],
     );
     let tampered = control_plane
-        .accept_artifact_chunk(&scope, &chunk, &authority)
+        .accept_artifact_chunk(&scope, &chunk, &renewed_authority)
         .expect_err("tampered candidate ref must fail closed");
     assert!(matches!(tampered, ArtifactMessageError::Storage(_)));
     assert_eq!(

@@ -46,9 +46,11 @@
 
 约束：Device 重启使用已保存的 Server URL 和身份。一次性配对令牌只用于建立绑定。每次签名使用新的单次挑战。已吊销绑定不能通过旧请求、重启或旧令牌重新激活。
 
-源码依据：`crates/winwincode-device-client/src/remote_auth.rs::bind_device`、`crates/winwincode-storage/src/device_auth.rs::bind_device_identity`、`crates/winwincode-server/src/device_auth.rs::DeviceAuthApplication`。
+约束：Device 吊销必须在保存吊销事实的同一事务内收尾该 Device 的执行资源。系统按原 Worker 和 Worker instance 的组合关闭全部 running 或 cancelling slot，包括旧 attempt 的 slot。仍属于该实例的 Worker 标记为断开。系统同时收尾当前租约及其非终态 Job 和 admission reservation。原 Worker 不能再获得新任务。已有终态和其他 Device 的资源保持不变。无法确认的 tokens 和 cost 保持 unknown。reconciliation 保持 pending，并保留已知 tokens 下界和 Server 已观测的运行时。
 
-相关测试：Device `remote_auth::tests`；Server `device_auth::tests`；Storage `device_auth::tests::token_binding_access_and_receipt_roll_back_together`。测试支持钩子与证据边界见 [远程 Device 验证](testing.md#远程-device-验证)。
+源码依据：`crates/winwincode-device-client/src/remote_auth.rs::bind_device`、`crates/winwincode-storage/src/device_auth.rs::bind_device_identity`、`revoke_device_identity`、`settle_revoked_executions`、`crates/winwincode-storage/src/worker_session_slots.rs::fence_device_worker_sessions_in_transaction`、`crates/winwincode-server/src/device_auth.rs::DeviceAuthApplication`。
+
+相关测试：Device `remote_auth::tests`；Server `device_auth::tests`；Storage `device_auth::tests::token_binding_access_and_receipt_roll_back_together`、`revoke_closes_running_and_unaccepted_leases_without_changing_success_or_other_devices`。测试支持钩子与证据边界见 [远程 Device 验证](testing.md#远程-device-验证)。
 
 ## 租约与 fencing
 
@@ -62,6 +64,8 @@ Device 转发子 Worker 消息时绑定 Client Node、Worker、Worker instance �
 
 Server 在同一当前时间核对帧自身期限、当前 Job 租约、完整 lease 身份和已接受的历史派发或续租 period。旧 fencing、未知 period、已过期或终态租约的派发与续租从出站队列移除。保留帧沿用原始字节；本次响应时间不能改写持久化帧的发送时间。
 
+已经在原租约期合法进入 durable outbox 的 Artifact 原帧，在续租后仍按该已接受租约期校验。Server 必须把原 period 与当前续租链关联，并继续核对 Job、payload、Worker、Worker instance、attempt、fencing token 和 SessionBinding。未接受的 period 或外来身份必须失败关闭。续租不能改写原帧或其中的 lease。Server 不能仅因续租拒绝原 final Artifact 帧。ACK 回显原 lease；精确重放按重复写处理。
+
 源码依据：
 
 - `crates/winwincode-storage/src/execution_registry.rs`：`ExecutionDispatchAuthority`、`validate_fencing_token`、终态与派发校验。
@@ -71,8 +75,10 @@ Server 在同一当前时间核对帧自身期限、当前 Job 租约、完整 l
 - `crates/winwincode-codex/src/model_bridge.rs`：`SharedAuthoritySource::install_run_binding`、`validate_invocation`。
 - `crates/winwincode-server/src/remote_worker_transport.rs`：远程出站租约筛选与响应时钟。
 - `crates/winwincode-worker/src/remote_transport.rs`：`SharedRemoteState::receive_response` 的本地截止时间与重放校验。
+- `crates/winwincode-control-plane/src/execution_lease_period.rs`：`accepted_lease_window_matches` 核对已接受的续租链。
+- `crates/winwincode-control-plane/src/artifact_transaction.rs`：`ArtifactMessageContext::from_authority`、`validate_durable` 和 `validate_authority`。
 
-相关测试：`tests/execution-port-contract.test.mjs`、`tests/chat-execution-obsolete-owner-production.test.mjs`、`crates/winwincode-device-client/src/fencing.rs` 的单元测试。
+相关测试：`tests/execution-port-contract.test.mjs`、`tests/chat-execution-obsolete-owner-production.test.mjs`、`crates/winwincode-device-client/src/fencing.rs` 的单元测试、`crates/winwincode-control-plane/tests/session_binding_transaction.rs`、`crates/winwincode-control-plane/tests/durable_execution_port_ingress.rs`。
 
 ## 崩溃恢复与新 attempt
 

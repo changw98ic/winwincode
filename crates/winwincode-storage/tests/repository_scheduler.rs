@@ -472,7 +472,7 @@ fn full_durable_resources_reoffer_the_original_dispatch_without_claiming_queued_
     let restored = storage
         .repository_scheduler()
         .expect("scheduler")
-        .claim_next_with_capacity(&request, false)
+        .claim_admitted_next_with_capacity(&request, false, None)
         .expect("restore at full capacity")
         .expect("original dispatch must remain deliverable");
     assert!(restored.recovered);
@@ -530,7 +530,7 @@ fn full_durable_resources_reoffer_the_original_dispatch_without_claiming_queued_
         storage
             .repository_scheduler()
             .expect("scheduler")
-            .claim_next_with_capacity(&replacement_request, false)
+            .claim_admitted_next_with_capacity(&replacement_request, false, None)
             .expect("a replacement needs new capacity")
             .is_none()
     );

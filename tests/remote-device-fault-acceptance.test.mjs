@@ -2,17 +2,18 @@
 
 import assert from 'node:assert/strict'
 import { execFileSync, spawn, spawnSync } from 'node:child_process'
+import { createHash } from 'node:crypto'
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { createServer } from 'node:https'
 import { tmpdir } from 'node:os'
-import { join, resolve } from 'node:path'
+import { basename, join, resolve } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import test from 'node:test'
 import vm from 'node:vm'
 
-import { createCertificate } from '../scripts/run-api-production-vertical.mjs'
+import { createCertificate, waitForDeviceWorkerRegistered } from '../scripts/run-api-production-vertical.mjs'
 import { waitFor } from '../scripts/device-production-fixture.mjs'
-import { REMOTE_FAULT_SCENARIOS, emptyRemoteFaultReport, finalizeRemoteFaultReport,
+import { REMOTE_FAULT_SCENARIOS, RemoteApi, assertRevokedDeviceExecutionResources, deviceSnapshot, emptyRemoteFaultReport, finalizeRemoteFaultReport,
   fixtureCommandCell, observeProcessWitnesses, readFixtureCommandEvidence, remoteOperationCommand, secureAcceptanceRequest, taskProcessWitnesses,
   validateRemoteFaultConfiguration } from '../scripts/run-remote-device-fault-acceptance.mjs'
 
@@ -24,6 +25,92 @@ function configuration() {
   device: { sshHost: 'acceptance@device.example.invalid', checkout: '/opt/winwincode',
     binaryDirectory: '/opt/winwincode-bin', directory: '/private/wwc-acceptance-fixture' } }
 }
+
+test('Worker registration retries only the original RESOURCE_NOT_FOUND response', async () => {
+  const api = new RemoteApi(configuration().server, 'fixture-password')
+  let attempts = 0
+  api.request = async (_path, { body }) => {
+    assert.deepEqual(body.page, { cursor: null, limit: 1 })
+    attempts += 1
+    return attempts === 1
+      ? { status: 404, json: { error: { code: 'RESOURCE_NOT_FOUND' } } }
+      : { status: 200, json: { requestId: body.requestId, result: {
+        id: 'fixture-worker', state: 'enabled', lastHeartbeatAt: '2026-10-15T00:00:00Z',
+      } } }
+  }
+  const client = { query: async (...args) => ({ result: await api.query(...args) }) }
+  const worker = await waitForDeviceWorkerRegistered(client, { workerId: 'fixture-worker' }, 5000)
+  assert.equal(worker.id, 'fixture-worker')
+  assert.equal(attempts, 2)
+  api.request = async () => ({ status: 403, json: { error: { code: 'PERMISSION_DENIED' } } })
+  await assert.rejects(waitForDeviceWorkerRegistered(client, { workerId: 'fixture-worker' }, 5000),
+    { code: 'PERMISSION_DENIED', status: 403 })
+  await assert.rejects(api.command('session.cancel', 0, {}), { code: 'PERMISSION_DENIED', status: 403 })
+})
+
+test('Device outbox evidence compares the message digest and retains the exact envelope digest', () => {
+  const directory = mkdtempSync(join(tmpdir(), 'wwc-remote-outbox-'))
+  mkdirSync(join(directory, 'device-data'))
+  const database = new DatabaseSync(join(directory, 'device-data/device-client.sqlite3'))
+  database.exec(`CREATE TABLE remote_device_binding(request_id,client_node_id,public_client_id,bound_at,failure_reason,pairing_token);
+    CREATE TABLE worker_process_registry(worker_session_id,worker_id,worker_instance_id,pid,process_start_identity,state,exit_code);
+    CREATE TABLE occupancy_mirror(occupancy_lease_id,fencing_token);
+    CREATE TABLE device_identity(current_instance_id);
+    CREATE TABLE client_outbox(message_id,envelope_sequence,kind,payload,published);
+    CREATE TABLE candidate_applications(application_id,approval_id,candidate_ref,base_commit,original_epoch,finished_receipt_json,recovery_outcome);`)
+  const message = { kind: 'hello', payload: { clientNodeId: 'fixture-device', displayName: '验收 Device' } }
+  const envelope = JSON.stringify({ schemaVersion: 'winwincode/v1', messageId: 'fixture-frame', sequence: 24, ...message })
+  const sha256 = bytes => `sha256:${createHash('sha256').update(bytes).digest('hex')}`
+  database.prepare('INSERT INTO client_outbox VALUES(?,?,?,?,?)').run('fixture-frame', 24, 'hello', Buffer.from(envelope), 0)
+  database.close()
+  try {
+    const [frame] = deviceSnapshot({ directory }).outbox
+    assert.equal(frame.payloadDigest, sha256(JSON.stringify(message)))
+    assert.equal(frame.envelopeDigest, sha256(envelope))
+    assert.notEqual(frame.payloadDigest, frame.envelopeDigest)
+    assert.equal(frame.published, 0)
+  } finally { rmSync(directory, { recursive: true, force: true }) }
+})
+
+test('revocation requires Server resources to close and keeps interrupted usage unknown', () => {
+  const lease = { jobId: 'job-fixture', leaseId: 'lease-fixture', workerId: 'worker-fixture',
+    workerInstanceId: 'instance-fixture', attempt: 1, fencingToken: 'fence-fixture', jobState: 'running',
+    leaseOutcome: null, slotState: 'running', admissionState: 'running', actualTokens: null, actualCostMicrounits: null }
+  const before = { leases: [lease], workers: [{ workerId: lease.workerId, workerInstanceId: lease.workerInstanceId,
+    health: 'healthy' }], slots: [] }
+  const after = { leases: [{ ...lease, jobState: 'failed', leaseOutcome: 'cancelled', slotState: 'recovery_failed',
+    admissionState: 'released', releaseReason: 'cancelled', accountingStatus: 'pending',
+    terminalUsage: { accountingStatus: 'unknown', tokens: null, costMicrounits: null, knownTokens: 2 } }],
+  workers: [{ ...before.workers[0], health: 'timed_out' }], slots: [] }
+  assert.throws(() => assertRevokedDeviceExecutionResources(before, before), /close the execution job/u)
+  assert.doesNotThrow(() => assertRevokedDeviceExecutionResources(before, after))
+  for (const mutate of [
+    value => { value.leases = [] },
+    value => { value.leases[0].slotState = 'running' },
+    value => { value.leases[0].admissionState = 'running' },
+    value => { value.leases[0].terminalUsage.tokens = 0 },
+    value => { value.workers[0].health = 'healthy' },
+    value => { value.slots.push({ workerSessionId: 'old-session', leaseId: 'old-lease', attempt: 1, state: 'running' }) },
+  ]) {
+    const changed = structuredClone(after); mutate(changed)
+    assert.throws(() => assertRevokedDeviceExecutionResources(before, changed))
+  }
+  const completed = { ...lease, leaseId: 'completed-lease', jobId: 'completed-job', jobState: 'completed',
+    leaseOutcome: 'completed', slotState: 'completed', admissionState: 'settled', actualTokens: 7,
+    accountingStatus: 'pending', terminalUsage: { accountingStatus: 'known', tokens: 7, costMicrounits: null } }
+  before.leases.push(completed); after.leases.push(structuredClone(completed))
+  assert.doesNotThrow(() => assertRevokedDeviceExecutionResources(before, after))
+  after.leases[1].accountingStatus = 'settled'
+  assert.doesNotThrow(() => assertRevokedDeviceExecutionResources(before, after))
+  after.leases[1].terminalUsage = { accountingStatus: 'unknown', tokens: null, costMicrounits: null }
+  assert.throws(() => assertRevokedDeviceExecutionResources(before, after))
+  after.leases[1].terminalUsage = structuredClone(completed.terminalUsage)
+  after.leases[1].actualTokens = 0
+  assert.throws(() => assertRevokedDeviceExecutionResources(before, after))
+  const failed = { ...completed, jobState: 'failed', leaseOutcome: 'failed', slotState: 'failed' }
+  assert.throws(() => assertRevokedDeviceExecutionResources({ ...before, leases: [failed] },
+    { ...after, leases: [{ ...failed, leaseOutcome: 'cancelled' }] }))
+})
 
 test('remote acceptance configuration requires TLS, a non-loopback SSH host and isolated Device data', () => {
   assert.doesNotThrow(() => validateRemoteFaultConfiguration(configuration()))
@@ -85,6 +172,16 @@ test('process witnesses select the exact Worker descendants while preserving unr
   ] }
   assert.deepEqual(taskProcessWitnesses(snapshot, { workerSessionId: 'fixture-session' }).map(item => item.pid), [11, 12, 13])
   assert.throws(() => taskProcessWitnesses(snapshot, { workerSessionId: 'wrong-session' }))
+})
+
+test('acceptance SSH reuses an explicitly configured control socket', () => {
+  const value = configuration()
+  value.device.controlPath = '/private/ssh control/socket'
+  validateRemoteFaultConfiguration(value)
+  const arguments_ = remoteOperationCommand(value.device)
+  assert.deepEqual(arguments_.slice(4, 7), ['-S', value.device.controlPath, value.device.sshHost])
+  value.device.controlPath = 'relative-socket'
+  assert.throws(() => validateRemoteFaultConfiguration(value))
 })
 
 test('process witnesses include reparented guardians only in positively owned process groups', () => {
@@ -186,7 +283,9 @@ test('process closure evidence still detects a real fixture child after its pare
         env: { ...process.env, LC_ALL: 'C' } }).trim().replace(/\s+/gu, ' ')
     }
     const witnesses = [{ pid: childPid, start }]
-    assert.equal(observeProcessWitnesses(witnesses).alive.length, 1)
+    const observed = observeProcessWitnesses(witnesses).alive
+    assert.equal(observed.length, 1)
+    assert.equal(observed[0].executable, basename(process.execPath))
     parent.kill('SIGKILL')
     await waitFor(() => parent.signalCode === 'SIGKILL', 'fixture parent reaped', 5000, 10)
     assert.equal(observeProcessWitnesses(witnesses).alive.length, 1,

@@ -873,75 +873,15 @@ impl<'storage> ExecutionAdmission<'storage> {
         request: &ExecutionReservationRelease,
         usage: Option<&winwincode_execution_port::generated::ExecutionOutcomeUsage>,
     ) -> Result<ExecutionAdmissionReceipt, ExecutionAdmissionError> {
-        validate_release(request)?;
-        let scope_key = reservation_scope_key(&request.scope, &request.worker_pool_id)?;
-        let request_digest = if let Some(usage) = usage {
-            digest(&(request, usage))?
-        } else {
-            digest(request)?
-        };
         let transaction = self
             .storage
             .connection_mut()
             .map_err(storage_error)?
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(sql_error)?;
-        if let Some(receipt) = replay_receipt(
-            &transaction,
-            &scope_key,
-            &request.request_id,
-            &request_digest,
-        )? {
-            transaction.commit().map_err(sql_error)?;
-            return Ok(receipt);
-        }
-        let current = load_scoped_reservation(
-            &transaction,
-            &request.scope,
-            &request.worker_pool_id,
-            &request.job_id,
-        )?
-        .ok_or_else(|| ExecutionAdmissionError::invalid("execution reservation does not exist"))?;
-        if !matches!(
-            current.state,
-            ExecutionReservationState::Queued | ExecutionReservationState::Running
-        ) {
-            return Err(ExecutionAdmissionError::invalid(
-                "terminal execution reservation cannot be released",
-            ));
-        }
-        validate_revision_time(&current, request.expected_revision, &request.released_at)?;
-        transition_reservation(
-            &transaction,
-            &request.job_id,
-            request.expected_revision,
-            current.state,
-            ExecutionReservationState::Released,
-            &request.released_at,
-            current.started_at.as_ref(),
-            Some(&request.released_at),
-            Some(request.reason),
-        )?;
-        if let Some(usage) = usage {
-            let usage_json = serde_json::to_string(usage).map_err(|_| {
-                ExecutionAdmissionError::invalid("terminal accounting cannot be encoded")
-            })?;
-            transaction.execute("INSERT INTO execution_admission_reconciliation (job_id,terminal_request_id,terminal_usage_json,accounting_status) VALUES (?1,?2,?3,'pending')",
-                params![request.job_id.0,request.request_id.0,usage_json]).map_err(sql_error)?;
-        }
-        finish_mutation(
-            &transaction,
-            &scope_key,
-            &request.scope,
-            &request.worker_pool_id,
-            &request.job_id,
-            &request.request_id,
-            &request_digest,
-        )
-        .and_then(|receipt| {
-            transaction.commit().map_err(sql_error)?;
-            Ok(receipt)
-        })
+        let receipt = release_reservation_in_transaction(&transaction, request, usage)?;
+        transaction.commit().map_err(sql_error)?;
+        Ok(receipt)
     }
 
     pub fn load_retained_terminal_usage(
@@ -2330,6 +2270,68 @@ fn stored_reservation_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<StoredRes
         terminal_at: row.get(22)?,
         release_reason: row.get(23)?,
     })
+}
+
+pub(crate) fn release_reservation_in_transaction(
+    connection: &Connection,
+    request: &ExecutionReservationRelease,
+    usage: Option<&winwincode_execution_port::generated::ExecutionOutcomeUsage>,
+) -> Result<ExecutionAdmissionReceipt, ExecutionAdmissionError> {
+    validate_release(request)?;
+    let scope_key = reservation_scope_key(&request.scope, &request.worker_pool_id)?;
+    let request_digest = if let Some(usage) = usage {
+        digest(&(request, usage))?
+    } else {
+        digest(request)?
+    };
+    if let Some(receipt) =
+        replay_receipt(connection, &scope_key, &request.request_id, &request_digest)?
+    {
+        return Ok(receipt);
+    }
+    let current = load_scoped_reservation(
+        connection,
+        &request.scope,
+        &request.worker_pool_id,
+        &request.job_id,
+    )?
+    .ok_or_else(|| ExecutionAdmissionError::invalid("execution reservation does not exist"))?;
+    if !matches!(
+        current.state,
+        ExecutionReservationState::Queued | ExecutionReservationState::Running
+    ) {
+        return Err(ExecutionAdmissionError::invalid(
+            "terminal execution reservation cannot be released",
+        ));
+    }
+    validate_revision_time(&current, request.expected_revision, &request.released_at)?;
+    transition_reservation(
+        connection,
+        &request.job_id,
+        request.expected_revision,
+        current.state,
+        ExecutionReservationState::Released,
+        &request.released_at,
+        current.started_at.as_ref(),
+        Some(&request.released_at),
+        Some(request.reason),
+    )?;
+    if let Some(usage) = usage {
+        let usage_json = serde_json::to_string(usage).map_err(|_| {
+            ExecutionAdmissionError::invalid("terminal accounting cannot be encoded")
+        })?;
+        connection.execute("INSERT INTO execution_admission_reconciliation (job_id,terminal_request_id,terminal_usage_json,accounting_status) VALUES (?1,?2,?3,'pending')",
+            params![request.job_id.0,request.request_id.0,usage_json]).map_err(sql_error)?;
+    }
+    finish_mutation(
+        connection,
+        &scope_key,
+        &request.scope,
+        &request.worker_pool_id,
+        &request.job_id,
+        &request.request_id,
+        &request_digest,
+    )
 }
 
 pub(crate) fn load_reservation_by_job_in_transaction(

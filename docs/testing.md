@@ -194,7 +194,7 @@ Device 的绑定测试使用本机 HTTP fixture 丢弃成功响应。重开数�
 - 在线取消、断网后租约到期、重连后的旧执行围栏和 Worker 真实退出身份。
 - 常规关闭与突发 `SIGKILL` 分别记录主进程、后代和工具独立进程组的退出。完整退出结论同时核对这些身份。
 - `worker-crash-process-closure` 记录 Worker 崩溃后的受管工具进程关闭。`device.toolTty` 选择本次实际验证的 pipe 或 PTY 变体。
-- 在线吊销与离线吊销后的停机、明确失败原因和恢复连接后的拒绝结果。
+- 在线吊销与离线吊销后的停机、明确失败原因和恢复连接后的拒绝结果。报告同时保存 Server 吊销前后的关联 Job、lease terminal、admission reservation 与 reconciliation、原 Worker 和 Worker instance 的 active slot 事实。证据须覆盖旧 attempt 的 active slot，确认原 Worker 不再获得新任务，并确认已有终态不变。用量无法确认时，证据保留 pending reconciliation、unknown 用量和已知下界。
 - 候选应用前后崩溃的 journal、Git 事实和当前授权下的恢复裁决。
 
 两机 runner 是 `scripts/run-remote-device-fault-acceptance.mjs`。两端需要 Node.js 24、Git、相同源码快照和已构建的产品程序。Server 主机运行该脚本，并通过已配置 host key 的 SSH 访问 Device。Device 使用独立的验收目录和验收仓库。脚本会启动和终止验收进程，并写入该仓库。
@@ -211,7 +211,7 @@ node scripts/run-remote-device-fault-acceptance.mjs --plan --output /private/rem
 node scripts/run-remote-device-fault-acceptance.mjs --config /private/remote-acceptance.json --output /private/remote-acceptance-report.json
 ```
 
-配置的 `schemaVersion` 为 `1`。`server` 指定 HTTPS `url`、浏览器 `origin`、`tlsMode`、Owner `username`、密码环境变量名 `passwordEnvironment`、本端只读 `database` 路径、实际运行的 Server `binary` 绝对路径与 `pid`，并可指定 `caFile`。真实 TCP 丢响应还需要 `logFile`，以核对本次新增的截断响应 marker。`tlsMode` 使用 `direct` 或 `loopback-proxy`；后者还需要回环 HTTP `backendUrl`。`device` 指定 `sshHost`、源码目录 `checkout`、程序目录 `binaryDirectory` 和新建的、位于源码目录外的独立验收目录 `directory`。使用指定 SSH 私钥时，将本机私钥的绝对路径写入 `device.identityFile`。
+配置的 `schemaVersion` 为 `1`。`server` 指定 HTTPS `url`、浏览器 `origin`、`tlsMode`、Owner `username`、密码环境变量名 `passwordEnvironment`、本端只读 `database` 路径、实际运行的 Server `binary` 绝对路径与 `pid`，并可指定 `caFile`。真实 TCP 丢响应还需要 `logFile`，以核对本次新增的截断响应 marker。`tlsMode` 使用 `direct` 或 `loopback-proxy`；后者还需要回环 HTTP `backendUrl`。`device` 指定 `sshHost`、源码目录 `checkout`、程序目录 `binaryDirectory` 和新建的、位于源码目录外的独立验收目录 `directory`。使用指定 SSH 私钥时，将本机私钥的绝对路径写入 `device.identityFile`。`device.controlPath` 可指定本机 SSH master 控制 socket 的绝对路径。该 master 应已为同一 `sshHost` 完成 host key 校验。runner 通过 `-S <controlPath>` 复用连接，并保留 `StrictHostKeyChecking=yes`。
 
 `binaryDirectory` 和 Server 程序所在目录都必须包含四个产品程序及 `winwincode-api-production.source.json`。两端通过 `verifyApiProductionSourceSeal` 将完整制品与当前源码绑定。`device.toolTty` 可设为 `true` 或 `false`；一次运行只声明实际执行的 PTY 或 pipe 变体。
 
@@ -219,7 +219,7 @@ node scripts/run-remote-device-fault-acceptance.mjs --config /private/remote-acc
 
 runner 核对两端操作系统主机身份、源码 commit、API 来源摘要、runner/fixture 文件摘要，以及本端实际 Server 进程映射。报告还保存十个执行依赖的源码摘要和 `acceptanceLogicSha256`。报告的模型证据标为 `fixture`。每个场景独立记录 passed、failed 或 pending。缺少网络注入或未实际命中故障钩子的场景保留 pending；整体报告为 incomplete，并以状态 `2` 退出。实际运行失败返回 `1`，所有必需场景通过才返回 `0`。
 
-实际运行前，各项状态应为 pending。当前本机 fixture 和单元测试尚未证明真实两机验收通过。涉及编程任务质量时，还必须按下一节使用真实 Provider。
+实际运行前，各项状态应为 pending。真实两机验收结论必须依据本次报告中实际运行的场景组合判定。计划报告、单机 fixture、单元测试和历史报告不能替代本次两机报告。涉及编程任务质量时，还必须按下一节使用真实 Provider。
 
 ## 真实任务与 fixture
 

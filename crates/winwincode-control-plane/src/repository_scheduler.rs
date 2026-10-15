@@ -4,7 +4,8 @@ use std::fmt;
 
 use winwincode_delivery::domain::Delivery;
 use winwincode_domain::{
-    DeliveryId, Instant, RepositoryScope, SchemaVersion, SessionIdentity, WorkItemState, WorkRunId,
+    DeliveryId, ExecutionJobId, Instant, RepositoryScope, SchemaVersion, SessionIdentity,
+    WorkItemState, WorkRunId,
 };
 use winwincode_execution_port::generated::{
     ExecutionJob, ExecutionJobReplacementAuthority, ExecutionLeaseStamp, ExecutionScope,
@@ -93,6 +94,26 @@ impl<'storage> RepositoryExecutionScheduler<'storage> {
             .storage
             .repository_scheduler()?
             .claim_next_with_capacity(request, new_claim_allowed)?;
+        receipt
+            .map(|receipt| {
+                let replacement = self
+                    .storage
+                    .load_execution_scope_replacement(&receipt.job.job_id)?;
+                dispatch_message(receipt, replacement.as_ref())
+            })
+            .transpose()
+    }
+
+    pub fn claim_admitted_next_with_capacity(
+        &mut self,
+        request: &RepositorySchedulerClaimRequest,
+        new_claim_allowed: bool,
+        admitted_job_id: Option<&ExecutionJobId>,
+    ) -> Result<Option<JobDispatchMessage>, RepositoryExecutionSchedulerError> {
+        let receipt = self
+            .storage
+            .repository_scheduler()?
+            .claim_admitted_next_with_capacity(request, new_claim_allowed, admitted_job_id)?;
         receipt
             .map(|receipt| {
                 let replacement = self

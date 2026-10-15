@@ -464,7 +464,7 @@ fn new_worker_instance_replaces_a_leased_job_once_and_replays_the_same_attempt()
     let replacement = storage
         .repository_scheduler()
         .expect("scheduler")
-        .claim_next(&replacement_request)
+        .claim_admitted_next_with_capacity(&replacement_request, true, None)
         .expect("replacement claim")
         .expect("replacement dispatch");
     assert_eq!(replacement.job.job_id, original.job.job_id);

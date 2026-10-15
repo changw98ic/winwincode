@@ -1,7 +1,16 @@
 // SPDX-License-Identifier: Apache-2.0
 
-use crate::{ClientNodeRegistration, SqliteStorage, StorageError, sql_error};
-use rusqlite::{OptionalExtension, TransactionBehavior, params};
+use crate::{
+    ClientNodeRegistration, ExecutionJobState, ExecutionJobTransitionRequest,
+    ExecutionLeaseTerminalOutcome, ExecutionLeaseTerminalRequest, ExecutionReservationRelease,
+    ExecutionReservationReleaseReason, ExecutionReservationState, RepositorySchedulerScope,
+    RepositorySchedulerTerminalRequest, SqliteStorage, StorageError, execution_admission,
+    execution_queue, execution_registry, repository_scheduler, sql_error, worker_session_slots,
+};
+use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
+use sha2::{Digest, Sha256};
+use winwincode_domain::{ExecutionJobId, Instant, RequestId, WorkerId, WorkerInstanceId};
+use winwincode_execution_port::generated::ExecutionOutcomeUsage;
 
 const SCHEMA: &str = r"
 CREATE TABLE IF NOT EXISTS device_pairing_tokens (
@@ -29,7 +38,7 @@ pub(crate) fn create_schema(transaction: &rusqlite::Transaction<'_>) -> Result<(
     transaction.execute_batch(SCHEMA).map_err(sql_error)
 }
 
-pub(crate) fn validate_schema(connection: &rusqlite::Connection) -> Result<(), StorageError> {
+pub(crate) fn validate_schema(connection: &Connection) -> Result<(), StorageError> {
     for query in [
         "SELECT token_digest,owner_user_id,expires_at,consumed_request_id FROM device_pairing_tokens LIMIT 0",
         "SELECT client_node_id,public_key,owner_user_id,request_id,intent_digest,token_digest,response_json,bound_at,revoked_at FROM device_identity_bindings LIMIT 0",
@@ -296,20 +305,779 @@ impl SqliteStorage {
                 }
             }
         }
-        let exists:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='execution_leases')",[],|r|r.get(0))?;
-        let grants:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='worker_launch_grants')",[],|r|r.get(0))?;
-        if exists && grants {
-            tx.execute("UPDATE execution_leases SET expires_at=?2 WHERE EXISTS(SELECT 1 FROM worker_launch_grants g WHERE g.client_node_id=?1 AND g.worker_id=execution_leases.worker_id AND g.worker_instance_id=execution_leases.worker_instance_id)",params![node,now])?;
-        }
+        settle_revoked_executions(&tx, node, &Instant(now.to_owned()))?;
         tx.execute("INSERT INTO device_auth_events(client_node_id,kind,occurred_at) VALUES(?1,'device.revoked',?2)",params![node,now])?;
         tx.commit()?;
         Ok(())
     }
 }
 
+fn table_exists(connection: &Connection, table: &str) -> Result<bool, DeviceAuthStoreError> {
+    connection
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name=?1)",
+            [table],
+            |row| row.get(0),
+        )
+        .map_err(Into::into)
+}
+
+fn settle_revoked_executions(
+    transaction: &rusqlite::Transaction<'_>,
+    node: &str,
+    now: &Instant,
+) -> Result<(), DeviceAuthStoreError> {
+    if !table_exists(transaction, "worker_launch_grants")? {
+        return Ok(());
+    }
+    if table_exists(transaction, "execution_workers")? {
+        let workers = transaction.prepare(
+            "SELECT DISTINCT worker_id,worker_instance_id FROM worker_launch_grants WHERE client_node_id=?1",
+        )?.query_map([node], |row| Ok((WorkerId(row.get(0)?),WorkerInstanceId(row.get(1)?))))?
+            .collect::<Result<Vec<_>,_>>()?;
+        for (worker, instance) in workers {
+            execution_registry::mark_worker_disconnected_in_transaction(
+                transaction,
+                &worker,
+                &instance,
+            )?;
+        }
+    }
+    if table_exists(transaction, "worker_session_slots")? {
+        worker_session_slots::fence_device_worker_sessions_in_transaction(transaction, node, now)
+            .map_err(|_| DeviceAuthStoreError::Unavailable)?;
+    }
+    if !table_exists(transaction, "execution_leases")? {
+        return Ok(());
+    }
+    let jobs = transaction.prepare(
+        "SELECT DISTINCT l.job_id FROM execution_leases l JOIN worker_launch_grants g ON g.worker_id=l.worker_id AND g.worker_instance_id=l.worker_instance_id WHERE g.client_node_id=?1 AND NOT EXISTS(SELECT 1 FROM execution_lease_terminals t WHERE t.lease_id=l.lease_id) ORDER BY l.job_id",
+    )?.query_map([node], |row| Ok(ExecutionJobId(row.get(0)?)))?
+        .collect::<Result<Vec<_>,_>>()?;
+    for job in jobs {
+        settle_revoked_execution(transaction, node, &job, now)?;
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_lines)]
+fn settle_revoked_execution(
+    transaction: &rusqlite::Transaction<'_>,
+    node: &str,
+    job_id: &ExecutionJobId,
+    now: &Instant,
+) -> Result<(), DeviceAuthStoreError> {
+    let lease = execution_registry::load_lease_in_transaction(transaction, job_id)?
+        .ok_or(DeviceAuthStoreError::Unavailable)?;
+    let job = if table_exists(transaction, "scheduler_execution_jobs")? {
+        repository_scheduler::load_execution_job_by_id(transaction, job_id)?
+    } else {
+        None
+    };
+    if job.as_ref().is_some_and(|job| {
+        matches!(
+            job.state,
+            ExecutionJobState::Completed | ExecutionJobState::Failed
+        )
+    }) {
+        return Ok(());
+    }
+    let digest = format!(
+        "{:X}",
+        Sha256::digest(format!(
+            "winwincode.device-revocation.v1\0{node}\0{}",
+            lease.lease_id.0
+        ))
+    );
+    let request_id = RequestId(format!("req_{}", &digest[..26]));
+    let terminal = ExecutionLeaseTerminalRequest {
+        job_id: lease.job_id.clone(),
+        lease_id: lease.lease_id.clone(),
+        worker_id: lease.worker_id.clone(),
+        worker_instance_id: lease.worker_instance_id.clone(),
+        attempt: lease.attempt,
+        fencing_token: lease.fencing_token.clone(),
+        outcome: ExecutionLeaseTerminalOutcome::Cancelled,
+        terminal_at: now.clone(),
+        request_id: request_id.clone(),
+    };
+    if let Some(job) = job {
+        if job.attempt != lease.attempt || job.payload_digest != lease.payload_digest {
+            return Err(DeviceAuthStoreError::Conflict);
+        }
+        if job.state == ExecutionJobState::Leased {
+            execution_queue::transition_execution_job_in_transaction(
+                transaction,
+                &ExecutionJobTransitionRequest {
+                    scope: job.scope,
+                    job_id: job.job_id,
+                    request_id: request_id.clone(),
+                    expected_revision: job.revision,
+                    from: ExecutionJobState::Leased,
+                    to: ExecutionJobState::Failed,
+                    occurred_at: now.clone(),
+                },
+            )?;
+            execution_registry::finish_execution_lease_in_transaction(transaction, &terminal)?;
+        } else {
+            repository_scheduler::settle_terminal_in_transaction(
+                transaction,
+                &RepositorySchedulerTerminalRequest {
+                    scope: RepositorySchedulerScope {
+                        organization_id: job.scope.organization_id,
+                        workspace_id: job.scope.workspace_id,
+                        project_id: job.scope.project_id,
+                        repository_id: job.scope.repository_id,
+                    },
+                    terminal,
+                },
+            )?;
+        }
+    } else {
+        execution_registry::finish_execution_lease_in_transaction(transaction, &terminal)?;
+    }
+    if table_exists(transaction, "execution_admission_reservations")?
+        && let Some(reservation) =
+            execution_admission::load_reservation_by_job_in_transaction(transaction, job_id)
+                .map_err(|_| DeviceAuthStoreError::Unavailable)?
+        && matches!(
+            reservation.state,
+            ExecutionReservationState::Queued | ExecutionReservationState::Running
+        )
+    {
+        let runtime_millis = transaction.query_row(
+            "SELECT CAST(ROUND((julianday(?1)-julianday(?2))*86400000) AS INTEGER)",
+            params![
+                now.0,
+                reservation
+                    .started_at
+                    .as_ref()
+                    .unwrap_or(&lease.issued_at)
+                    .0
+            ],
+            |row| row.get(0),
+        )?;
+        let known_tokens = if table_exists(transaction, "execution_attempt_accounting_totals")? {
+            transaction.query_row("SELECT COALESCE(SUM(known_tokens),0) FROM execution_attempt_accounting_totals WHERE job_id=?1",[&job_id.0],|row| row.get(0))?
+        } else {
+            0
+        };
+        let usage = ExecutionOutcomeUsage::unknown(runtime_millis, known_tokens);
+        if !winwincode_execution_port::usage::valid_usage(&usage) {
+            return Err(DeviceAuthStoreError::InvalidRequest);
+        }
+        execution_admission::release_reservation_in_transaction(
+            transaction,
+            &ExecutionReservationRelease {
+                scope: reservation.scope,
+                worker_pool_id: reservation.worker_pool_id,
+                job_id: job_id.clone(),
+                request_id,
+                expected_revision: reservation.revision,
+                reason: ExecutionReservationReleaseReason::Cancelled,
+                released_at: now.clone(),
+            },
+            Some(&usage),
+        )
+        .map_err(|_| DeviceAuthStoreError::Unavailable)?;
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use crate::{
+        DispatchResultRequest, DispatchResultStatus, EXECUTION_PROTOCOL_VERSION,
+        ExecutionAdmissionBoundary, ExecutionJobSubmission, ExecutionQueueScope,
+        ExecutionRepositoryAccess, ExecutionReservationRequest, ExecutionReservationSettlement,
+        ExecutionReservationStart, RepositorySchedulerClaimRequest,
+        RepositorySchedulerDispatchResultRequest, WorkerAuthenticationIdentity,
+        WorkerHeartbeatRequest, WorkerPlatform, WorkerPoolId, WorkerRegistrationRequest,
+        WorkerSlotAuthority, WorkerSlotCloseRequest, WorkerSlotOpenRequest,
+        WorkerSlotResourceLimits, WorkerSlotResources, WorkerSlotState,
+    };
+    use winwincode_domain::{
+        CodexThreadId, ExecutionMessageId, ExecutionSequence, OrganizationId, ProductSessionId,
+        ProjectId, RepositoryId, Sha256Digest, UserId, WorkerSessionId, WorkspaceId,
+    };
+
+    fn id(prefix: &str, seed: u64) -> String {
+        format!("{prefix}_{seed:026}")
+    }
+
+    fn at(second: u64) -> Instant {
+        Instant(format!("2026-01-01T00:00:{second:02}.000Z"))
+    }
+
+    fn repository() -> RepositorySchedulerScope {
+        RepositorySchedulerScope {
+            organization_id: OrganizationId(id("org", 1)),
+            workspace_id: WorkspaceId(id("wsp", 1)),
+            project_id: ProjectId(id("prj", 1)),
+            repository_id: RepositoryId(id("rep", 1)),
+        }
+    }
+
+    fn bind_device(storage: &mut SqliteStorage, seed: u64) {
+        let token = format!("token-{seed}");
+        storage
+            .publish_device_pairing(&token, &id("usr", 1), &at(59).0)
+            .unwrap();
+        let registration = ClientNodeRegistration::try_new(
+            id("cnd", seed),
+            format!("{seed:012}"),
+            "Device",
+            "aarch64-apple-darwin",
+            "aarch64",
+            "0.2.0",
+            None,
+            4,
+        )
+        .unwrap();
+        storage
+            .bind_device_identity(&DeviceBindingWrite {
+                request_id: &id("req", seed),
+                public_key: &format!("key-{seed}"),
+                token_digest: &token,
+                intent_digest: "intent",
+                registration: &registration,
+                access_grant_id: &id("cag", seed),
+                now: &at(0).0,
+            })
+            .unwrap();
+        storage.repository_binding_ledger().unwrap();
+        storage.connection().unwrap().execute(
+            "INSERT INTO repository_bindings(repository_binding_id,client_node_id,display_name,repository_kind,dirty_state,availability,repository_fingerprint,created_at,revision) VALUES(?1,?2,'fixture','git','clean','available',?1,?3,1)",
+            params![id("rbd",seed),id("cnd",seed),at(0).0],
+        ).unwrap();
+    }
+
+    #[allow(clippy::too_many_lines)]
+    fn prepare_execution(
+        storage: &mut SqliteStorage,
+        seed: u64,
+        node: u64,
+        accepted: bool,
+        reserve_only: bool,
+    ) -> WorkerSlotAuthority {
+        let repo = repository();
+        let scope = ExecutionQueueScope {
+            organization_id: repo.organization_id.clone(),
+            workspace_id: repo.workspace_id.clone(),
+            project_id: repo.project_id.clone(),
+            repository_id: repo.repository_id.clone(),
+            product_session_id: ProductSessionId(id("psn", seed)),
+            delivery_id: None,
+        };
+        let worker = WorkerId(id("wrk", seed));
+        let instance = WorkerInstanceId(id("wki", seed));
+        let digest = Sha256Digest(format!("sha256:{}", "a".repeat(64)));
+        storage
+            .execution_registry()
+            .unwrap()
+            .register_worker(&WorkerRegistrationRequest {
+                authentication_identity: WorkerAuthenticationIdentity::LocalEmbedded {
+                    control_plane_principal: format!("device:{}", id("cnd", node)),
+                },
+                protocol_version: EXECUTION_PROTOCOL_VERSION.into(),
+                platform: WorkerPlatform::Aarch64AppleDarwin,
+                capabilities: vec!["codex".into()],
+                capability_digest: digest.clone(),
+                security_zone: "local".into(),
+                max_slots: 4,
+                message_id: ExecutionMessageId(id("xmsg", seed * 100)),
+                request_id: RequestId(id("req", seed * 100)),
+                sent_at: at(1),
+                started_at: at(1),
+                worker_id: worker.clone(),
+                worker_instance_id: instance.clone(),
+            })
+            .unwrap();
+        storage
+            .execution_registry()
+            .unwrap()
+            .record_heartbeat(&WorkerHeartbeatRequest {
+                active_leases: vec![],
+                available_slots: 4,
+                heartbeat_sequence: ExecutionSequence(1),
+                max_slots: 4,
+                running_slots: 0,
+                message_id: ExecutionMessageId(id("xmsg", seed * 100 + 1)),
+                observed_at: at(2),
+                sent_at: at(2),
+                worker_id: worker.clone(),
+                worker_instance_id: instance.clone(),
+            })
+            .unwrap();
+        storage
+            .execution_queue()
+            .unwrap()
+            .submit(&ExecutionJobSubmission {
+                scope: scope.clone(),
+                job_id: ExecutionJobId(id("job", seed)),
+                request_id: RequestId(id("req", seed * 100 + 2)),
+                payload_digest: digest.clone(),
+                dispatch_payload: format!(r#"{{"jobId":"{}"}}"#, id("job", seed)).into_bytes(),
+                attempt: if seed == 1 { 2 } else { 1 },
+                dependencies: vec![],
+                work_run_id: None,
+                submitted_at: at(2),
+            })
+            .unwrap();
+        let pool = WorkerPoolId(id("wpl", 1));
+        {
+            let mut admission = storage.execution_admission().unwrap();
+            for boundary in [
+                ExecutionAdmissionBoundary::Organization {
+                    organization_id: scope.organization_id.clone(),
+                },
+                ExecutionAdmissionBoundary::Project {
+                    organization_id: scope.organization_id.clone(),
+                    project_id: scope.project_id.clone(),
+                },
+                ExecutionAdmissionBoundary::Repository {
+                    organization_id: scope.organization_id.clone(),
+                    project_id: scope.project_id.clone(),
+                    repository_id: scope.repository_id.clone(),
+                },
+                ExecutionAdmissionBoundary::ProductSession {
+                    organization_id: scope.organization_id.clone(),
+                    project_id: scope.project_id.clone(),
+                    product_session_id: scope.product_session_id.clone(),
+                },
+                ExecutionAdmissionBoundary::WorkerPool {
+                    organization_id: scope.organization_id.clone(),
+                    worker_pool_id: pool.clone(),
+                },
+            ] {
+                admission.configure_runtime_policy(boundary, false).unwrap();
+            }
+            admission
+                .reserve(&ExecutionReservationRequest {
+                    scope: scope.clone(),
+                    user_id: UserId(id("usr", 1)),
+                    worker_pool_id: pool.clone(),
+                    job_id: ExecutionJobId(id("job", seed)),
+                    request_id: RequestId(id("req", seed * 100 + 3)),
+                    repository_access: ExecutionRepositoryAccess::ReadOnly,
+                    reserved_tokens: None,
+                    reserved_cost_microunits: None,
+                    runtime_limit_millis: None,
+                    submitted_at: at(2),
+                })
+                .unwrap();
+            if !reserve_only {
+                admission
+                    .start(&ExecutionReservationStart {
+                        scope: scope.clone(),
+                        worker_pool_id: pool,
+                        job_id: ExecutionJobId(id("job", seed)),
+                        request_id: RequestId(id("req", seed * 100 + 4)),
+                        expected_revision: 1,
+                        started_at: at(3),
+                    })
+                    .unwrap();
+            }
+        }
+        let claim = storage
+            .repository_scheduler()
+            .unwrap()
+            .claim_next(&RepositorySchedulerClaimRequest {
+                scope: repo.clone(),
+                request_id: RequestId(id("req", seed * 100 + 5)),
+                scheduler_generation: "boot-A".into(),
+                worker_id: worker.clone(),
+                worker_instance_id: instance.clone(),
+                issued_at: at(3),
+                expires_at: at(50),
+            })
+            .unwrap()
+            .unwrap();
+        assert_eq!(claim.job.job_id, ExecutionJobId(id("job", seed)));
+        let authority = WorkerSlotAuthority {
+            worker_id: worker.clone(),
+            worker_instance_id: instance.clone(),
+            worker_session_id: WorkerSessionId(id("wsn", seed)),
+            codex_thread_id: CodexThreadId(id("cdx", seed)),
+            job_id: claim.job.job_id.clone(),
+            lease_id: claim.lease.lease_id.clone(),
+            attempt: claim.lease.attempt,
+            fencing_token: claim.lease.fencing_token.clone(),
+        };
+        if !reserve_only {
+            let mut slots = storage.worker_session_slots().unwrap();
+            slots
+                .configure_resources(
+                    &worker,
+                    &instance,
+                    WorkerSlotResourceLimits {
+                        max_memory_bytes: 4,
+                        max_disk_bytes: 4,
+                        max_processes: 4,
+                    },
+                )
+                .unwrap();
+            slots
+                .open(&WorkerSlotOpenRequest {
+                    authority: authority.clone(),
+                    resources: WorkerSlotResources {
+                        memory_bytes: 1,
+                        disk_bytes: 1,
+                        process_slots: 1,
+                    },
+                    request_id: RequestId(id("req", seed * 100 + 6)),
+                    opened_at: at(4),
+                })
+                .unwrap();
+        }
+        if accepted {
+            storage
+                .repository_scheduler()
+                .unwrap()
+                .record_dispatch_result(&RepositorySchedulerDispatchResultRequest {
+                    scope: repo,
+                    dispatch: DispatchResultRequest {
+                        checked_at: at(5),
+                        expires_at: claim.lease.expires_at,
+                        issued_at: claim.lease.issued_at,
+                        fencing_token: claim.lease.fencing_token,
+                        job_id: claim.job.job_id,
+                        lease_id: claim.lease.lease_id,
+                        message_id: ExecutionMessageId(id("xmsg", seed * 100 + 7)),
+                        payload_digest: digest,
+                        request_id: RequestId(id("req", seed * 100 + 7)),
+                        sent_at: at(5),
+                        status: DispatchResultStatus::Accepted,
+                        attempt: claim.lease.attempt,
+                        error: None,
+                        worker_id: worker.clone(),
+                        worker_instance_id: instance.clone(),
+                        worker_session_id: Some(authority.worker_session_id.clone()),
+                    },
+                })
+                .unwrap();
+        }
+        storage.worker_launch_grant_ledger().unwrap();
+        storage.connection().unwrap().execute(
+            "INSERT INTO worker_launch_grants(worker_launch_grant_id,client_node_id,client_instance_id,holder_user_id,occupancy_lease_id,occupancy_fencing_token,repository_binding_id,worker_session_id,worker_id,worker_instance_id,expires_at,state,consumed_at,created_at,revision) VALUES(?1,?2,?3,?4,?5,1,?6,?7,?8,?9,?10,'consumed',?11,?11,1)",
+            params![id("wlg",seed),id("cnd",node),id("cix",node),id("usr",1),id("ocl",node),id("rbd",node),id("wsn",seed),worker.0,instance.0,at(50).0,at(1).0],
+        ).unwrap();
+        authority
+    }
+
+    fn snapshot(storage: &SqliteStorage, job: &ExecutionJobId) -> Vec<String> {
+        let connection = storage.connection().unwrap();
+        [
+            "SELECT json_array(state,attempt,revision,updated_at) FROM scheduler_execution_jobs WHERE job_id=?1",
+            "SELECT json_array(lease_id,worker_id,worker_instance_id,attempt,fencing_token,issued_at,expires_at) FROM execution_leases WHERE job_id=?1",
+            "SELECT json_array(state,revision,updated_at,terminal_at) FROM worker_session_slots WHERE job_id=?1",
+            "SELECT json_array(state,revision,updated_at,terminal_at,actual_tokens,actual_cost_microunits,actual_runtime_millis,release_reason) FROM execution_admission_reservations WHERE job_id=?1",
+        ].into_iter().map(|sql|connection.query_row(sql,[&job.0],|row|row.get(0)).unwrap()).collect()
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)]
+    fn revoke_closes_running_and_unaccepted_leases_without_changing_success_or_other_devices() {
+        let directory =
+            std::env::temp_dir().join(format!("wwc-revoke-resources-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&directory);
+        let mut storage = SqliteStorage::open(&directory).unwrap();
+        bind_device(&mut storage, 1);
+        bind_device(&mut storage, 2);
+        let running = prepare_execution(&mut storage, 1, 1, true, false);
+        let leased = prepare_execution(&mut storage, 2, 1, false, false);
+        let unstarted = prepare_execution(&mut storage, 7, 1, false, true);
+        assert!(
+            storage
+                .worker_session_slots()
+                .unwrap()
+                .load(&unstarted.worker_session_id)
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(
+            storage
+                .execution_admission()
+                .unwrap()
+                .load_reservation_by_job(&unstarted.job_id)
+                .unwrap()
+                .unwrap()
+                .state,
+            ExecutionReservationState::Queued
+        );
+        let completed = prepare_execution(&mut storage, 3, 1, true, false);
+        let other = prepare_execution(&mut storage, 4, 2, true, false);
+        let successor = prepare_execution(&mut storage, 6, 2, false, false);
+        storage
+            .connection()
+            .unwrap()
+            .execute(
+                "DELETE FROM worker_session_slots WHERE worker_session_id=?1",
+                [&successor.worker_session_id.0],
+            )
+            .unwrap();
+        storage.connection().unwrap().execute(
+            "INSERT INTO worker_session_slots SELECT ?1,?2,?3,worker_id,worker_instance_id,?4,1,'1',state,event_cursor,memory_bytes,disk_bytes,process_slots,revision,opened_at,updated_at,cancellation_requested_at,terminal_at FROM worker_session_slots WHERE worker_session_id=?5",
+            params![id("wsn",996),id("cdx",996),successor.job_id.0,id("lse",996),running.worker_session_id.0],
+        ).unwrap();
+        let successor_lease = storage
+            .execution_registry()
+            .unwrap()
+            .load_lease(&successor.job_id)
+            .unwrap()
+            .unwrap();
+        let successor_admission = storage
+            .execution_admission()
+            .unwrap()
+            .load_reservation_by_job(&successor.job_id)
+            .unwrap()
+            .unwrap();
+        storage
+            .worker_session_slots()
+            .unwrap()
+            .close(&WorkerSlotCloseRequest {
+                authority: completed.clone(),
+                request_id: RequestId(id("req", 900)),
+                expected_revision: 1,
+                outcome: WorkerSlotState::Completed,
+                closed_at: at(6),
+            })
+            .unwrap();
+        let completed_scope = execution_admission::load_reservation_by_job_in_transaction(
+            storage.connection().unwrap(),
+            &completed.job_id,
+        )
+        .unwrap()
+        .unwrap()
+        .scope;
+        storage
+            .execution_admission()
+            .unwrap()
+            .settle(&ExecutionReservationSettlement {
+                scope: completed_scope,
+                worker_pool_id: WorkerPoolId(id("wpl", 1)),
+                job_id: completed.job_id.clone(),
+                request_id: RequestId(id("req", 901)),
+                expected_revision: 2,
+                actual_tokens: 7,
+                actual_cost_microunits: Some(11),
+                actual_runtime_millis: 3000,
+                completed_at: at(6),
+            })
+            .unwrap();
+        storage
+            .repository_scheduler()
+            .unwrap()
+            .settle_terminal(&RepositorySchedulerTerminalRequest {
+                scope: repository(),
+                terminal: ExecutionLeaseTerminalRequest {
+                    job_id: completed.job_id.clone(),
+                    lease_id: completed.lease_id.clone(),
+                    worker_id: completed.worker_id.clone(),
+                    worker_instance_id: completed.worker_instance_id.clone(),
+                    attempt: completed.attempt,
+                    fencing_token: completed.fencing_token.clone(),
+                    outcome: ExecutionLeaseTerminalOutcome::Completed,
+                    terminal_at: at(6),
+                    request_id: RequestId(id("req", 902)),
+                },
+            })
+            .unwrap();
+        storage.connection().unwrap().execute(
+            "INSERT INTO worker_launch_grants SELECT ?1,client_node_id,client_instance_id,holder_user_id,occupancy_lease_id,occupancy_fencing_token,repository_binding_id,?2,?3,?4,product_session_id,work_run_id,expires_at,'expired',consumed_at,ended_at,created_at,revision FROM worker_launch_grants WHERE worker_launch_grant_id=?5",
+            params![id("wlg",999),id("wsn",999),other.worker_id.0,id("wki",999),id("wlg",1)],
+        ).unwrap();
+        let success_before = snapshot(&storage, &completed.job_id);
+        let other_before = snapshot(&storage, &other.job_id);
+        storage
+            .connection()
+            .unwrap()
+            .execute(
+                "INSERT INTO execution_attempt_accounting_totals VALUES(?1,1,9,15,9)",
+                [&running.job_id.0],
+            )
+            .unwrap();
+        storage.connection().unwrap().execute_batch("CREATE TRIGGER revoke_fault BEFORE INSERT ON execution_admission_reconciliation BEGIN SELECT RAISE(ABORT,'injected failure'); END;").unwrap();
+        assert_eq!(
+            storage.revoke_device_identity(&id("cnd", 1), &id("usr", 1), &at(10).0),
+            Err(DeviceAuthStoreError::Unavailable)
+        );
+        assert!(
+            storage
+                .device_identity_owned_by(&id("cnd", 1), &id("usr", 1))
+                .unwrap()
+        );
+        assert_eq!(
+            storage
+                .execution_registry()
+                .unwrap()
+                .load_worker(&running.worker_id)
+                .unwrap()
+                .unwrap()
+                .health,
+            crate::WorkerHealth::Healthy
+        );
+        assert_eq!(
+            storage
+                .worker_session_slots()
+                .unwrap()
+                .load(&running.worker_session_id)
+                .unwrap()
+                .unwrap()
+                .state,
+            WorkerSlotState::Running
+        );
+        storage
+            .connection()
+            .unwrap()
+            .execute_batch("DROP TRIGGER revoke_fault")
+            .unwrap();
+        storage
+            .revoke_device_identity(&id("cnd", 1), &id("usr", 1), &at(10).0)
+            .unwrap();
+        for authority in [&running, &leased, &unstarted] {
+            assert_eq!(
+                repository_scheduler::load_execution_job_by_id(
+                    storage.connection().unwrap(),
+                    &authority.job_id
+                )
+                .unwrap()
+                .unwrap()
+                .state,
+                ExecutionJobState::Failed
+            );
+            let slot = storage
+                .worker_session_slots()
+                .unwrap()
+                .load(&authority.worker_session_id)
+                .unwrap();
+            assert_eq!(
+                slot.map(|slot| slot.state),
+                if authority == &unstarted {
+                    None
+                } else {
+                    Some(WorkerSlotState::RecoveryFailed)
+                }
+            );
+            let reservation = storage
+                .execution_admission()
+                .unwrap()
+                .load_reservation_by_job(&authority.job_id)
+                .unwrap()
+                .unwrap();
+            assert_eq!(reservation.state, ExecutionReservationState::Released);
+            assert_eq!(
+                reservation.release_reason,
+                Some(ExecutionReservationReleaseReason::Cancelled)
+            );
+            assert_eq!(reservation.actual_tokens, None);
+            assert_eq!(reservation.actual_cost_microunits, None);
+            assert_eq!(reservation.actual_runtime_millis, None);
+            assert_eq!(
+                storage
+                    .execution_registry()
+                    .unwrap()
+                    .load_worker(&authority.worker_id)
+                    .unwrap()
+                    .unwrap()
+                    .health,
+                crate::WorkerHealth::TimedOut
+            );
+            let (outcome,usage,status):(String,String,String)=storage.connection().unwrap().query_row(
+                "SELECT t.outcome,a.terminal_usage_json,a.accounting_status FROM execution_lease_terminals t JOIN execution_admission_reconciliation a USING(job_id) WHERE t.lease_id=?1",[&authority.lease_id.0],|row|Ok((row.get(0)?,row.get(1)?,row.get(2)?))).unwrap();
+            assert_eq!(outcome, "cancelled");
+            assert_eq!(status, "pending");
+            let usage: ExecutionOutcomeUsage = serde_json::from_str(&usage).unwrap();
+            assert_eq!(usage.tokens, None);
+            assert_eq!(usage.cost_microunits, None);
+            assert_eq!(usage.runtime_millis, 7000);
+            assert_eq!(
+                usage.known_tokens,
+                if authority == &running { 9 } else { 0 }
+            );
+            assert_eq!(usage.accounting_status,winwincode_execution_port::generated::ExecutionOutcomeUsageAccountingStatus::Unknown);
+        }
+        assert_eq!(
+            storage
+                .worker_session_slots()
+                .unwrap()
+                .load(&WorkerSessionId(id("wsn", 996)))
+                .unwrap()
+                .unwrap()
+                .state,
+            WorkerSlotState::RecoveryFailed
+        );
+        assert_eq!(
+            storage
+                .execution_registry()
+                .unwrap()
+                .load_lease(&successor.job_id)
+                .unwrap()
+                .unwrap(),
+            successor_lease
+        );
+        assert_eq!(
+            storage
+                .execution_admission()
+                .unwrap()
+                .load_reservation_by_job(&successor.job_id)
+                .unwrap()
+                .unwrap(),
+            successor_admission
+        );
+        assert_eq!(
+            repository_scheduler::load_execution_job_by_id(
+                storage.connection().unwrap(),
+                &successor.job_id
+            )
+            .unwrap()
+            .unwrap()
+            .state,
+            ExecutionJobState::Leased
+        );
+        let after = snapshot(&storage, &running.job_id);
+        storage
+            .revoke_device_identity(&id("cnd", 1), &id("usr", 1), &at(11).0)
+            .unwrap();
+        assert_eq!(snapshot(&storage, &running.job_id), after);
+        assert_eq!(snapshot(&storage, &completed.job_id), success_before);
+        assert_eq!(snapshot(&storage, &other.job_id), other_before);
+        assert_eq!(
+            storage
+                .execution_registry()
+                .unwrap()
+                .load_worker(&other.worker_id)
+                .unwrap()
+                .unwrap()
+                .health,
+            crate::WorkerHealth::Healthy
+        );
+        let next = prepare_execution(&mut storage, 5, 2, true, false);
+        assert_eq!(
+            repository_scheduler::load_execution_job_by_id(
+                storage.connection().unwrap(),
+                &next.job_id
+            )
+            .unwrap()
+            .unwrap()
+            .state,
+            ExecutionJobState::Running
+        );
+        let outcomes: i64 = storage
+            .connection()
+            .unwrap()
+            .query_row(
+                "SELECT COUNT(*) FROM product_state WHERE stream_id LIKE 'execution-outcome:%'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(outcomes, 0);
+        drop(storage);
+        std::fs::remove_dir_all(directory).unwrap();
+    }
     #[test]
     fn token_binding_access_and_receipt_roll_back_together() {
         let directory =

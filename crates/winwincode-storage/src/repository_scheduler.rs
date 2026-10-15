@@ -197,6 +197,13 @@ enum DriveReceiptReplay {
     Stored(Box<Option<RepositorySchedulerClaimReceipt>>),
 }
 
+#[derive(Clone, Copy)]
+enum QueuedJobSelection<'job> {
+    Any,
+    Admitted(&'job ExecutionJobId),
+    None,
+}
+
 enum ActiveJobRecovery {
     Wait,
     Reoffer(ExecutionJobRecord),
@@ -272,6 +279,28 @@ impl<'storage> RepositoryScheduler<'storage> {
         request: &RepositorySchedulerClaimRequest,
         new_claim_allowed: bool,
     ) -> Result<Option<RepositorySchedulerClaimReceipt>, StorageError> {
+        self.claim_next_selected(request, new_claim_allowed, QueuedJobSelection::Any)
+    }
+
+    pub fn claim_admitted_next_with_capacity(
+        &mut self,
+        request: &RepositorySchedulerClaimRequest,
+        new_claim_allowed: bool,
+        admitted_job_id: Option<&ExecutionJobId>,
+    ) -> Result<Option<RepositorySchedulerClaimReceipt>, StorageError> {
+        self.claim_next_selected(
+            request,
+            new_claim_allowed,
+            admitted_job_id.map_or(QueuedJobSelection::None, QueuedJobSelection::Admitted),
+        )
+    }
+
+    fn claim_next_selected(
+        &mut self,
+        request: &RepositorySchedulerClaimRequest,
+        new_claim_allowed: bool,
+        queued_job: QueuedJobSelection<'_>,
+    ) -> Result<Option<RepositorySchedulerClaimReceipt>, StorageError> {
         validate_claim_request(request)?;
         let scope_key = repository_scope_key(&request.scope);
         let request_digest = digest(request)?;
@@ -304,7 +333,26 @@ impl<'storage> RepositoryScheduler<'storage> {
                 return Ok(None);
             }
             Some(active) => Some(active),
-            None => select_ready_job(&transaction, request)?.map(ActiveJobRecovery::Reoffer),
+            None => match queued_job {
+                QueuedJobSelection::Any => select_ready_job(
+                    &transaction,
+                    &request.scope,
+                    &request.worker_id,
+                    &request.worker_instance_id,
+                    None,
+                    true,
+                )?,
+                QueuedJobSelection::Admitted(job_id) => select_ready_job(
+                    &transaction,
+                    &request.scope,
+                    &request.worker_id,
+                    &request.worker_instance_id,
+                    Some(job_id),
+                    true,
+                )?,
+                QueuedJobSelection::None => None,
+            }
+            .map(ActiveJobRecovery::Reoffer),
         };
         let Some(selected) = selected else {
             insert_drive_receipt(
@@ -344,6 +392,24 @@ impl<'storage> RepositoryScheduler<'storage> {
         )?;
         transaction.commit().map_err(sql_error)?;
         Ok(Some(receipt))
+    }
+
+    pub fn ready_job_for_worker(
+        &self,
+        scope: &RepositorySchedulerScope,
+        worker_id: &WorkerId,
+        worker_instance_id: &WorkerInstanceId,
+        allow_unbound: bool,
+    ) -> Result<Option<ExecutionJobRecord>, StorageError> {
+        validate_scope(scope)?;
+        select_ready_job(
+            self.storage.connection()?,
+            scope,
+            worker_id,
+            worker_instance_id,
+            None,
+            allow_unbound,
+        )
     }
 
     pub fn retry_failed(
@@ -1521,9 +1587,12 @@ fn retry_failed_receipt(
 
 fn select_ready_job(
     connection: &Connection,
-    request: &RepositorySchedulerClaimRequest,
+    scope: &RepositorySchedulerScope,
+    worker_id: &WorkerId,
+    worker_instance_id: &WorkerInstanceId,
+    admitted_job_id: Option<&ExecutionJobId>,
+    allow_unbound: bool,
 ) -> Result<Option<ExecutionJobRecord>, StorageError> {
-    let scope = &request.scope;
     let scope_key = repository_scope_key(scope);
     let stored = connection
         .query_row(
@@ -1540,6 +1609,7 @@ fn select_ready_job(
              WHERE j.organization_id = ?2 AND j.workspace_id = ?3
                AND j.project_id = ?4 AND j.repository_id = ?5
                AND j.state = 'queued' AND j.cancellation_request_id IS NULL
+               AND (?8 IS NULL OR j.job_id = ?8)
                AND NOT EXISTS (
                    SELECT 1 FROM scheduler_execution_job_dependencies d
                    LEFT JOIN scheduler_execution_jobs dependency
@@ -1549,7 +1619,7 @@ fn select_ready_job(
                           OR dependency.cancellation_request_id IS NOT NULL)
                )
                AND (
-                   (json_extract(CASE WHEN json_valid(CAST(j.dispatch_payload AS TEXT)) THEN CAST(j.dispatch_payload AS TEXT) ELSE '{}' END, '$.workInput.deviceTarget') IS NULL AND NOT EXISTS (
+                   (?9 AND json_extract(CASE WHEN json_valid(CAST(j.dispatch_payload AS TEXT)) THEN CAST(j.dispatch_payload AS TEXT) ELSE '{}' END, '$.workInput.deviceTarget') IS NULL AND NOT EXISTS (
                        SELECT 1 FROM device_execution_current_facts device_dispatch
                        WHERE device_dispatch.job_id = j.job_id
                    ))
@@ -1568,8 +1638,10 @@ fn select_ready_job(
                 scope.workspace_id.0,
                 scope.project_id.0,
                 scope.repository_id.0,
-                request.worker_id.0,
-                request.worker_instance_id.0,
+                worker_id.0,
+                worker_instance_id.0,
+                admitted_job_id.map(|job_id| job_id.0.as_str()),
+                allow_unbound,
             ],
             stored_job_from_row,
         )

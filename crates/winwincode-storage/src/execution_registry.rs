@@ -1227,37 +1227,10 @@ impl<'storage> ExecutionRegistry<'storage> {
             .connection_mut()?
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(sql_error)?;
-        let Some(current) = load_worker_in_transaction(&transaction, worker_id)? else {
-            transaction.commit().map_err(sql_error)?;
-            return Ok(None);
-        };
-        if current.worker_instance_id != *worker_instance_id {
-            transaction.commit().map_err(sql_error)?;
-            return Ok(None);
-        }
-        if current.health != WorkerHealth::TimedOut {
-            let changed = transaction
-                .execute(
-                    "UPDATE execution_workers SET health = ?1
-                     WHERE worker_id = ?2 AND worker_instance_id = ?3",
-                    params![
-                        WorkerHealth::TimedOut.as_str(),
-                        worker_id.0,
-                        worker_instance_id.0,
-                    ],
-                )
-                .map_err(sql_error)?;
-            if changed != 1 {
-                return Err(StorageError::adapter(
-                    "Worker disconnect lost its registry authority",
-                ));
-            }
-        }
-        let worker = load_worker_in_transaction(&transaction, worker_id)?.ok_or_else(|| {
-            StorageError::adapter("disconnected Worker disappeared from the registry")
-        })?;
+        let worker =
+            mark_worker_disconnected_in_transaction(&transaction, worker_id, worker_instance_id)?;
         transaction.commit().map_err(sql_error)?;
-        Ok(Some(worker))
+        Ok(worker)
     }
 
     pub fn load_managed_worker(
@@ -1804,6 +1777,41 @@ pub(crate) fn claim_execution_job_in_transaction(
         &response,
     )?;
     Ok(response)
+}
+
+pub(crate) fn mark_worker_disconnected_in_transaction(
+    connection: &rusqlite::Connection,
+    worker_id: &WorkerId,
+    worker_instance_id: &WorkerInstanceId,
+) -> Result<Option<WorkerRecord>, StorageError> {
+    let Some(current) = load_worker_in_transaction(connection, worker_id)? else {
+        return Ok(None);
+    };
+    if current.worker_instance_id != *worker_instance_id {
+        return Ok(None);
+    }
+    if current.health != WorkerHealth::TimedOut {
+        let changed = connection
+            .execute(
+                "UPDATE execution_workers SET health = ?1
+                 WHERE worker_id = ?2 AND worker_instance_id = ?3",
+                params![
+                    WorkerHealth::TimedOut.as_str(),
+                    worker_id.0,
+                    worker_instance_id.0,
+                ],
+            )
+            .map_err(sql_error)?;
+        if changed != 1 {
+            return Err(StorageError::adapter(
+                "Worker disconnect lost its registry authority",
+            ));
+        }
+    }
+    let worker = load_worker_in_transaction(connection, worker_id)?.ok_or_else(|| {
+        StorageError::adapter("disconnected Worker disappeared from the registry")
+    })?;
+    Ok(Some(worker))
 }
 
 pub(crate) fn finish_execution_lease_in_transaction(

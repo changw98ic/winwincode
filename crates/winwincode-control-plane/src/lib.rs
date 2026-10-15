@@ -1550,7 +1550,6 @@ impl ControlPlane {
             || acknowledgement.worker_session_id != chunk.worker_session_id
             || acknowledgement.session_identity != chunk.session_identity
             || acknowledgement.ack_sequence.0 != chunk.sequence.0
-            || acknowledgement.lease != authority_lease(authority)
         {
             return Err(CandidateResolutionError::Storage(
                 StorageError::invalid_input(
@@ -1573,14 +1572,41 @@ impl ControlPlane {
                 "Control Plane Git source resolver is not configured",
             ))
         })?;
-        let storage = self
-            .storage_ref()
+        let (durable, job) = {
+            let storage = self.storage.as_deref_mut().ok_or_else(|| {
+                CandidateResolutionError::Storage(StorageError::adapter(
+                    "Control Plane storage is closed",
+                ))
+            })?;
+            let (durable, job) = delivery_transaction::load_durable_execution_job(
+                storage,
+                &acknowledgement.lease.job_id,
+            )
             .map_err(CandidateResolutionError::Storage)?;
-        let (durable, job) = delivery_transaction::load_durable_execution_job(
-            storage,
-            &acknowledgement.lease.job_id,
-        )
-        .map_err(CandidateResolutionError::Storage)?;
+            let accepted_window = execution_lease_period::accepted_lease_window_matches(
+                storage,
+                &acknowledgement.lease,
+                &job.payload_digest,
+                authority,
+            )
+            .map_err(CandidateResolutionError::Storage)?;
+            if artifact_transaction::validate_authority(
+                &acknowledgement.lease,
+                &acknowledgement.worker_session_id,
+                authority,
+                accepted_window,
+            )
+            .map_err(CandidateResolutionError::Storage)?
+            .is_some()
+            {
+                return Err(CandidateResolutionError::Storage(
+                    StorageError::invalid_input(
+                        "final Artifact acknowledgement differs from its sealed Worker authority",
+                    ),
+                ));
+            }
+            (durable, job)
+        };
         if matches!(
             job.execution_profile.as_str(),
             "reviewer" | "verifier" | "adversarial-verifier"
@@ -1595,6 +1621,9 @@ impl ControlPlane {
         };
         let provenance = candidate_source::provenance_from_session_binding(authority)?;
         let scope_key = repository_scope_key(scope)?;
+        let storage = self
+            .storage_ref()
+            .map_err(CandidateResolutionError::Storage)?;
         let artifacts = self.artifact_store.as_ref().ok_or_else(|| {
             CandidateResolutionError::Storage(StorageError::adapter(
                 "Control Plane Artifact store is not configured",
@@ -2095,22 +2124,6 @@ fn reserved_public_projection_topic(topic: &str) -> bool {
 
 fn reserved_delivery_transaction_topic(topic: &str) -> bool {
     topic.starts_with("delivery.") || topic.starts_with("runtime.")
-}
-
-fn authority_lease(
-    authority: &winwincode_delivery::application::workrun_execution::SessionBindingAuthority,
-) -> execution_port::ExecutionLeaseStamp {
-    let active = authority.active_lease();
-    execution_port::ExecutionLeaseStamp {
-        attempt: i64::try_from(active.attempt()).unwrap_or(i64::MAX),
-        expires_at: authority.expires_at().clone(),
-        fencing_token: active.fencing_token().clone(),
-        issued_at: authority.issued_at().clone(),
-        job_id: active.execution_job_id().clone(),
-        lease_id: active.lease_id().clone(),
-        worker_id: active.worker_id().clone(),
-        worker_instance_id: active.worker_instance_id().clone(),
-    }
 }
 
 fn artifact_ack_digest(

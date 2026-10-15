@@ -4,7 +4,7 @@
 import assert from 'node:assert/strict'
 import { execFileSync, spawn } from 'node:child_process'
 import { createHash, randomBytes } from 'node:crypto'
-import { appendFileSync, chmodSync, closeSync, existsSync, globSync, lstatSync, mkdirSync, openSync, readFileSync, readdirSync, realpathSync, renameSync, unlinkSync, writeFileSync } from 'node:fs'
+import { appendFileSync, chmodSync, closeSync, existsSync, globSync, lstatSync, mkdirSync, openSync, readFileSync, readdirSync, readlinkSync, realpathSync, renameSync, unlinkSync, writeFileSync } from 'node:fs'
 import { request as httpsRequest } from 'node:https'
 import { request as httpRequest } from 'node:http'
 import { hostname } from 'node:os'
@@ -13,7 +13,7 @@ import { DatabaseSync } from 'node:sqlite'
 import { setTimeout as delay } from 'node:timers/promises'
 import { pathToFileURL } from 'node:url'
 
-import { executeRequest, httpFailure, NetworkError, retryAfter } from '../packages/network-request/src/index.mjs'
+import { executeRequest, httpFailure, NetworkError, retryAfter, withResponseFailure } from '../packages/network-request/src/index.mjs'
 
 import { apiProductionSourceDigest, assertDeviceRuntimeWorker, createCertificate, prepareControlledRepository,
   driveDelivery, verifyApiProductionSourceSeal, waitForDeviceWorkerRegistered,
@@ -95,6 +95,7 @@ export function validateRemoteFaultConfiguration(configuration) {
     'Device acceptance data must be outside the checkout')
   if (device.port !== undefined) assert.ok(Number.isInteger(device.port) && device.port > 0 && device.port <= 65535)
   if (device.identityFile !== undefined) assert.equal(resolve(device.identityFile), device.identityFile)
+  if (device.controlPath !== undefined) assert.equal(resolve(device.controlPath), device.controlPath)
   if (device.toolTty !== undefined) assert.equal(typeof device.toolTty, 'boolean')
   if (server.tlsMode === 'loopback-proxy') {
     const backend = new URL(server.backendUrl)
@@ -160,6 +161,88 @@ function readonly(database, callback) {
   finally { connection.close() }
 }
 
+export function deviceExecutionResources(database, clientNodeId) {
+  return readonly(database, connection => ({
+    leases: connection.prepare(`SELECT l.job_id AS jobId,l.lease_id AS leaseId,l.worker_id AS workerId,
+      l.worker_instance_id AS workerInstanceId,l.attempt,l.fencing_token AS fencingToken,
+      j.state AS jobState,t.outcome AS leaseOutcome,t.terminal_at AS leaseTerminalAt,s.state AS slotState,
+      r.state AS admissionState,r.release_reason AS releaseReason,r.actual_tokens AS actualTokens,
+      r.actual_cost_microunits AS actualCostMicrounits,a.accounting_status AS accountingStatus,
+      a.terminal_usage_json AS terminalUsageJson FROM execution_leases l
+      JOIN scheduler_execution_jobs j USING(job_id)
+      LEFT JOIN execution_lease_terminals t ON t.lease_id=l.lease_id
+      LEFT JOIN worker_session_slots s ON s.lease_id=l.lease_id AND s.job_id=l.job_id
+        AND s.worker_id=l.worker_id AND s.worker_instance_id=l.worker_instance_id
+        AND s.attempt=l.attempt AND s.fencing_token=l.fencing_token
+      LEFT JOIN execution_admission_reservations r USING(job_id)
+      LEFT JOIN execution_admission_reconciliation a USING(job_id)
+      WHERE EXISTS(SELECT 1 FROM worker_launch_grants g WHERE g.client_node_id=?
+        AND g.worker_id=l.worker_id AND g.worker_instance_id=l.worker_instance_id)
+      ORDER BY l.lease_id`).all(clientNodeId).map(({ terminalUsageJson, ...row }) => ({ ...row,
+      terminalUsage: terminalUsageJson === null ? null : JSON.parse(terminalUsageJson) })),
+    workers: connection.prepare(`SELECT worker_id AS workerId,worker_instance_id AS workerInstanceId,health
+      FROM execution_workers w WHERE EXISTS(SELECT 1 FROM worker_launch_grants g
+        WHERE g.client_node_id=? AND g.worker_id=w.worker_id AND g.worker_instance_id=w.worker_instance_id)
+      ORDER BY worker_id,worker_instance_id`).all(clientNodeId),
+    slots: connection.prepare(`SELECT worker_session_id AS workerSessionId,job_id AS jobId,lease_id AS leaseId,
+      worker_id AS workerId,worker_instance_id AS workerInstanceId,attempt,fencing_token AS fencingToken,
+      state,terminal_at AS terminalAt FROM worker_session_slots s WHERE EXISTS(SELECT 1 FROM worker_launch_grants g
+        WHERE g.client_node_id=? AND g.worker_id=s.worker_id AND g.worker_instance_id=s.worker_instance_id)
+      ORDER BY worker_session_id`).all(clientNodeId),
+  }))
+}
+
+export function assertRevokedDeviceExecutionResources(before, after) {
+  assert.ok(before.leases.length > 0 && before.workers.length > 0, 'revocation evidence requires actual Device execution')
+  for (const original of before.leases) {
+    const current = after.leases.find(row => row.leaseId === original.leaseId)
+    assert.ok(current, 'revocation must retain each original execution lease')
+    for (const key of ['jobId', 'workerId', 'workerInstanceId', 'attempt', 'fencingToken']) {
+      assert.equal(current[key], original[key])
+    }
+    if (original.leaseOutcome !== null) {
+      for (const key of ['jobState', 'leaseOutcome', 'leaseTerminalAt', 'slotState',
+        'admissionState', 'releaseReason', 'actualTokens', 'actualCostMicrounits']) assert.equal(current[key], original[key])
+      assert.deepEqual(current.terminalUsage, original.terminalUsage)
+      assert.ok(current.accountingStatus === original.accountingStatus
+        || (original.accountingStatus === 'pending' && current.accountingStatus === 'settled'),
+      'revocation must retain original terminal accounting facts')
+    }
+  }
+  for (const row of after.leases) {
+    assert.ok(['completed', 'failed'].includes(row.jobState), 'revocation must close the execution job')
+    assert.ok(['completed', 'cancelled', 'failed'].includes(row.leaseOutcome), 'revocation must retain a lease terminal')
+    assert.ok(row.slotState === null || ['completed', 'failed', 'cancelled', 'recovery_failed'].includes(row.slotState),
+      'revocation must release the execution slot')
+    assert.ok(row.admissionState === null || ['settled', 'released'].includes(row.admissionState),
+      'revocation must release admission capacity')
+    if (row.leaseOutcome === 'cancelled' && row.admissionState === 'released'
+      && before.leases.some(original => original.leaseId === row.leaseId && original.leaseOutcome === null
+        && ['queued', 'running'].includes(original.admissionState))) {
+      assert.equal(row.releaseReason, 'cancelled')
+      assert.equal(row.actualTokens, null)
+      assert.equal(row.actualCostMicrounits, null)
+      assert.equal(row.accountingStatus, 'pending')
+      assert.equal(row.terminalUsage?.accountingStatus, 'unknown')
+      assert.equal(row.terminalUsage?.tokens, null)
+      assert.equal(row.terminalUsage?.costMicrounits, null)
+    }
+  }
+  for (const original of before.workers) assert.ok(after.workers.some(row => row.workerId === original.workerId
+    && row.workerInstanceId === original.workerInstanceId), 'revocation must retain each original Worker identity')
+  for (const worker of after.workers) assert.equal(worker.health, 'timed_out', 'revoked Workers cannot receive new tasks')
+  for (const original of before.slots) {
+    const current = after.slots.find(row => row.workerSessionId === original.workerSessionId)
+    assert.ok(current, 'revocation must retain each original execution slot')
+    for (const key of ['jobId', 'leaseId', 'workerId', 'workerInstanceId', 'attempt', 'fencingToken']) {
+      assert.equal(current[key], original[key])
+    }
+    if (!['running', 'cancelling'].includes(original.state)) assert.deepEqual(current, original)
+  }
+  for (const slot of after.slots) assert.ok(['completed', 'failed', 'cancelled', 'recovery_failed'].includes(slot.state),
+    'revocation must close execution slots from every attempt')
+}
+
 function command(command_, arguments_, { input, env = process.env, timeoutMillis = 120_000, diagnosticPath } = {}) {
   return new Promise((resolvePromise, reject) => {
     if (diagnosticPath) mkdirSync(dirname(diagnosticPath), { recursive: true, mode: 0o700 })
@@ -183,6 +266,7 @@ function command(command_, arguments_, { input, env = process.env, timeoutMillis
 export function remoteOperationCommand(device) {
   const arguments_ = ['-o', 'BatchMode=yes', '-o', 'StrictHostKeyChecking=yes']
   if (device.identityFile !== undefined) arguments_.push('-i', device.identityFile)
+  if (device.controlPath !== undefined) arguments_.push('-S', device.controlPath)
   if (device.port !== undefined) arguments_.push('-p', String(device.port))
   arguments_.push(device.sshHost, `exec ${shellQuote(device.node ?? 'node')} ${shellQuote(join(device.checkout,
     'scripts/run-remote-device-fault-acceptance.mjs'))} --device-operation`)
@@ -261,11 +345,12 @@ export async function secureAcceptanceRequest(url, options = {}) {
     }, { replay: (options.method ?? 'GET') === 'GET' ? 'replay_exact' : 'reconcile_first', deadline })
   } catch (error) {
     if (error instanceof NetworkError && error.response !== undefined) return error.response
+    error.message = `${options.method ?? 'GET'} ${endpoint.pathname}${options.body?.command || options.body?.query ? ` (${options.body.command ?? options.body.query})` : ''}: ${error.message}`
     throw error
   }
 }
 
-class RemoteApi {
+export class RemoteApi {
   constructor(server, password) {
     this.server = server; this.password = password; this.scope = { ...DEFAULT_SCOPE, ...server.scope }
     this.ca = server.caFile ? readFileSync(server.caFile) : undefined
@@ -288,17 +373,21 @@ class RemoteApi {
       schemaVersion: SCHEMA, requestId, actor: this.actor, scope: this.scope,
       command: name, expectedRevision, payload,
     } })
-    assert.equal(response.status, 200, `command ${name} rejected`)
+    if (response.status !== 200) throw withResponseFailure(Object.assign(new Error(`command ${name} rejected`), {
+      code: response.json?.error?.code ?? 'HTTP_ERROR', status: response.status, requestId,
+    }), response)
     assert.equal(response.json.requestId, requestId)
     return response.json
   }
-  async query(name, parameters) {
+  async query(name, parameters, page = { cursor: null, limit: 200 }) {
     const requestId = identifier('req')
     const response = await this.request('/api/v1/queries', { method: 'POST', body: {
       schemaVersion: SCHEMA, requestId, actor: this.actor, scope: this.scope,
-      query: name, parameters, page: { cursor: null, limit: 200 },
+      query: name, parameters, page,
     } })
-    assert.equal(response.status, 200, `query ${name} rejected`)
+    if (response.status !== 200) throw withResponseFailure(Object.assign(new Error(`query ${name} rejected`), {
+      code: response.json?.error?.code ?? 'HTTP_ERROR', status: response.status, requestId,
+    }), response)
     assert.equal(response.json.requestId, requestId)
     return response.json.result
   }
@@ -308,7 +397,7 @@ async function startRemoteTask(api, binding, repository, modelRoute, marker) {
   const productSessionId = identifier('psn')
   await api.command('session.create', 0, { productSessionId, projectId: api.scope.projectId,
     repositoryId: api.scope.repositoryId, title: 'Remote fault acceptance fixture', modelRoute })
-  const response = await api.request('/api/v1/sessions', { method: 'POST', body: {
+  const response = await api.request('/api/v1/sessions', { method: 'POST', timeoutMillis: 45_000, body: {
     schemaVersion: SCHEMA, clientId: binding.publicClientId, repositoryBindingId: repository.repositoryBindingId,
     productSession: { id: productSessionId, scope: api.scope },
   } })
@@ -350,7 +439,7 @@ async function createRemoteDeliveryCandidate({ api, binding, repository, modelRo
   const launches = new Map()
   const launch = async workRunId => {
     if (!workRunId || launches.has(workRunId)) return
-    const response = await api.request('/api/v1/sessions', { method: 'POST', body: {
+    const response = await api.request('/api/v1/sessions', { method: 'POST', timeoutMillis: 45_000, body: {
       schemaVersion: SCHEMA, clientId: binding.publicClientId,
       repositoryBindingId: repository.repositoryBindingId, workRunId,
     } })
@@ -381,12 +470,16 @@ function processTable() {
     if (!match) return []
     const pid = Number(match[1])
     let start = match[5].replace(/\s+/gu, ' ')
+    let executable = basename(match[6])
     if (process.platform === 'linux') {
-      try { const stat = readFileSync(`/proc/${pid}/stat`, 'utf8'); start = `linux-${stat.slice(stat.lastIndexOf(')') + 1).trim().split(/\s+/u)[19]}` }
-      catch { return [] }
+      try {
+        const stat = readFileSync(`/proc/${pid}/stat`, 'utf8')
+        start = `linux-${stat.slice(stat.lastIndexOf(')') + 1).trim().split(/\s+/u)[19]}`
+        executable = basename(readlinkSync(`/proc/${pid}/exe`))
+      } catch { return [] }
     }
     return [{ pid, parent: Number(match[2]), group: Number(match[3]), state: match[4], start,
-      executable: basename(match[6]) }]
+      executable }]
   })
 }
 
@@ -484,7 +577,7 @@ export function readFixtureCommandEvidence({ deviceData, workerSessionId, jobId,
       acceptedResultSha256: digest(row.accepted_result) })) }
 }
 
-function deviceSnapshot(device) {
+export function deviceSnapshot(device) {
   return readonly(join(device.directory, 'device-data/device-client.sqlite3'), database => {
     const binding = database.prepare(`SELECT request_id AS requestId,client_node_id AS clientNodeId,
       public_client_id AS publicClientId,bound_at AS boundAt,failure_reason AS failureReason,
@@ -495,9 +588,11 @@ function deviceSnapshot(device) {
     const mirror = database.prepare('SELECT occupancy_lease_id AS leaseId,fencing_token AS epoch FROM occupancy_mirror').get() ?? null
     const identity = database.prepare('SELECT current_instance_id AS instanceId FROM device_identity').get()
     const outbox = database.prepare(`SELECT message_id AS messageId,envelope_sequence AS sequence,
-      kind,payload,published FROM client_outbox`).all().map(({ payload, ...row }) => ({
-        ...row, payloadDigest: `sha256:${digest(payload)}`,
-      }))
+      kind,payload,published FROM client_outbox`).all().map(({ payload, ...row }) => {
+        const envelope = JSON.parse(Buffer.from(payload).toString('utf8'))
+        return { ...row, envelopeDigest: `sha256:${digest(payload)}`,
+          payloadDigest: `sha256:${digest(JSON.stringify({ kind: envelope.kind, payload: envelope.payload }))}` }
+      })
     const applications = database.prepare(`SELECT application_id AS applicationId,approval_id AS approvalId,
       candidate_ref AS candidateRef,base_commit AS baseCommit,original_epoch AS originalEpoch,
       finished_receipt_json AS finishedReceiptJson,recovery_outcome AS recoveryOutcome FROM candidate_applications`).all()
@@ -867,7 +962,7 @@ export async function runRemoteDeviceFaultAcceptance(configuration, output) {
         restartedDevicePid: restarted.devicePid, previousInstanceId: before.identity.instanceId,
         currentInstanceId: after.identity.instanceId, requestId: after.binding.requestId, clientNodeId: after.binding.clientNodeId }
     })
-    const occupied = await api.request('/api/v1/clients/occupancy', { method: 'POST', body: {
+    const occupied = await api.request('/api/v1/clients/occupancy', { method: 'POST', timeoutMillis: 45_000, body: {
       schemaVersion: SCHEMA, clientId: binding.publicClientId,
     } })
     assert.equal(occupied.status, 201)
@@ -986,6 +1081,7 @@ export async function runRemoteDeviceFaultAcceptance(configuration, output) {
         try { toolProcessWitnesses(value, task.launched); return value } catch { return false }
       }, 'remote task descendants before online revoke', 60_000)
       const witnesses = [...before.processes]
+      const resourcesBefore = deviceExecutionResources(configuration.server.database, binding.clientNodeId)
       const revoked = await api.request(`/api/v1/devices/${binding.clientNodeId}/revoke`, { method: 'POST', body: { schemaVersion: SCHEMA } })
       assert.equal(revoked.status, 200)
       const after = await waitFor(async () => {
@@ -995,8 +1091,10 @@ export async function runRemoteDeviceFaultAcceptance(configuration, output) {
           && value.workers.every(item => item.state !== 'running') ? value : false
       }, 'revoked Device permanently fails and closes every owned process', 60_000)
       assert.equal(after.binding.failureReason, 'Device 绑定已吊销；服务已停止。')
+      const resourcesAfter = deviceExecutionResources(configuration.server.database, binding.clientNodeId)
+      assertRevokedDeviceExecutionResources(resourcesBefore, resourcesAfter)
       return { clientNodeId: binding.clientNodeId, revoked: true, before: before.processes,
-        after: after.processes, authorizationFailure: after.binding.failureReason }
+        after: after.processes, authorizationFailure: after.binding.failureReason, resourcesBefore, resourcesAfter }
     })
     if (configuration.networkFault) await runOfflineScenarios({ configuration, api, caPem, attempt, result, report })
   } catch (error) {
@@ -1032,7 +1130,7 @@ async function runOfflineScenarios({ configuration, api, caPem, attempt, result,
     const agent = await deviceCall('start'); started = true
     await waitFor(async () => (await api.request('/api/v1/clients')).json?.clients
       ?.some(item => item.clientId === binding.publicClientId && item.presence === 'online'), 'second bound Device online', 60_000)
-    const occupied = await api.request('/api/v1/clients/occupancy', { method: 'POST', body: {
+    const occupied = await api.request('/api/v1/clients/occupancy', { method: 'POST', timeoutMillis: 45_000, body: {
       schemaVersion: SCHEMA, clientId: binding.publicClientId,
     } })
     assert.equal(occupied.status, 201)
@@ -1081,6 +1179,7 @@ async function runOfflineScenarios({ configuration, api, caPem, attempt, result,
     await attempt('offline-revoke-reconnect-failure', async () => {
       const before = await deviceCall('snapshot')
       assert.equal(before.binding.failureReason, null, 'an offline Device has not yet received revocation')
+      const resourcesBefore = deviceExecutionResources(configuration.server.database, binding.clientNodeId)
       const revoked = await api.request(`/api/v1/devices/${binding.clientNodeId}/revoke`, {
         method: 'POST', body: { schemaVersion: SCHEMA },
       })
@@ -1096,8 +1195,10 @@ async function runOfflineScenarios({ configuration, api, caPem, attempt, result,
       assert.equal(after.binding.failureReason, 'Device 绑定已吊销；服务已停止。')
       const retry = await deviceCall('bind')
       assert.notEqual(retry.exitCode, 0, 'revoked original binding cannot be recovered into an authorized identity')
+      const resourcesAfter = deviceExecutionResources(configuration.server.database, binding.clientNodeId)
+      assertRevokedDeviceExecutionResources(resourcesBefore, resourcesAfter)
       return { clientNodeId: binding.clientNodeId, failureReason: after.binding.failureReason,
-        bindRetryExitCode: retry.exitCode, before: before.processes, after: after.processes }
+        bindRetryExitCode: retry.exitCode, before: before.processes, after: after.processes, resourcesBefore, resourcesAfter }
     })
   } finally {
     if (disconnected) {
@@ -1185,7 +1286,7 @@ async function runCandidateScenarios({ configuration, api, binding, repository, 
       const response = await api.request(`/api/v1/clients/${binding.publicClientId}/occupancy`)
       return response.status === 200 && response.json.occupancy === 'available'
     }, 'a current Device occupancy can be claimed', 60_000)
-    const claimed = await api.request('/api/v1/clients/occupancy', { method: 'POST', body: {
+    const claimed = await api.request('/api/v1/clients/occupancy', { method: 'POST', timeoutMillis: 45_000, body: {
       schemaVersion: SCHEMA, clientId: binding.publicClientId,
     } })
     assert.equal(claimed.status, 201)
