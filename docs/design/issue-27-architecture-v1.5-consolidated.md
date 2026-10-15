@@ -61,7 +61,7 @@
 | Browser | 界面；用户登录；在加密档下解密内容 | 用户会话；内容主密钥（仅存于浏览器的不可导出密钥存储） |
 | Server | 身份与映射；租约裁决；控制事件审计链；同步副本存放；WebSocket 网关 | 用户、设备、仓库、会话之间的映射；任务与租约状态；审计链；按档位存放的内容副本 |
 | Device | 信任根；凭据保管；仓库绑定；本地事件日志；拉起并监管 Worker | 模型凭据；设备私钥；内容主密钥；完整内容与工件 |
-| Worker | 执行：工作区检出、内核、工具调用、沙箱、上下文管线 | 单次尝试的一次性令牌；仅在内存中的、按需下发的凭据 |
+| Worker | 执行：工作区检出、内核、工具调用、沙箱、上下文管线 | 受控继承的 stdio 管道端点；绑定的执行上下文；仅在内存中的、按需下发的凭据 |
 | Verifier（Device 内组件） | 在干净工作区运行验证项，产出签名的结构化验证结果 | 验证配置；设备私钥（用于签名） |
 | 工具宿主（Device 内组件） | 托管 MCP 服务器：懒启动、共享、生命周期管理；向调用网关提供工具目录与调用 | MCP 服务器凭据；服务器进程与连接 |
 
@@ -98,13 +98,13 @@
 | TLS | 不要求 | 对外 HTTPS / WSS 必须；受保护代理后端见 4.2 |
 | 用户认证 | `local-open` | `password`，或扩展的 `idp` |
 | Device↔Server 认证 | 回环内信任，仍使用设备身份 | 设备签名挑战 |
-| 内容存放 | 默认仅本机，可配置 | 默认加密同步，可配置 |
+| 内容存放 | 默认 `local_only`；显式配置优先，须满足 `allowed_tiers` | 默认 `encrypted_sync`；显式配置优先，须满足 `allowed_tiers` |
 
 ### 4.1 local-open 约束
 
 - Server 在 `local-open` 模式下必须绑定回环地址；绑定非回环地址时拒绝启动。
 - 校验 `Host` 与 `Origin`，仅接受回环主机名与预期来源，以防御来自网页的跨站请求与 DNS rebinding。
-- 不因启用 `local-open` 而放宽 Device 与 Worker 之间的令牌校验。
+- Device 与 Worker 按 §13 确认通信对象并绑定执行上下文。
 
 ---
 
@@ -162,9 +162,9 @@
 
 ### 6.3 默认与策略
 
-- 默认档位：`encrypted_sync`。
+- 未显式配置档位时，`local` 默认使用 `local_only`，`remote` 默认使用 `encrypted_sync`。显式配置优先于部署形态的默认值。
 - v1 档位为部署级全局配置。界面必须始终显示当前档位。
-- 部署可配置 `allowed_tiers`。Device 在绑定与上传前校验，不满足策略时拒绝绑定或停止上传。
+- 部署可配置 `allowed_tiers`。显式配置与默认值都必须满足该策略。Device 在绑定与上传前校验，不满足策略时拒绝绑定或停止上传。
 
 ### 6.4 档位切换
 
@@ -184,7 +184,7 @@
 |---|---|---|---|
 | Browser ↔ Server | Browser | HTTPS / WSS | 用户认证 |
 | Device ↔ Server | Device | WSS | 长连接；仅 Device 外连，无需入站端口 |
-| Worker ↔ Device | Device 拉起 Worker | 本机 IPC | Unix 域套接字或回环；每次拉起使用一次性令牌 |
+| Worker ↔ Device | Device 拉起 Worker | Device 创建并独占、继承权限受控的 stdio 管道 | 以管道本身确认通信对象，再绑定执行上下文；可重新连接的 Unix socket 或回环监听须明确连接认证方案（见 §13） |
 
 ### 7.2 事件信封
 
@@ -272,8 +272,8 @@ Device 产生的内容事件使用下列信封。
 | 位置 | 规则 |
 |---|---|
 | Server | 指令路径拒绝 `epoch` 低于当前租约的消息；日志路径按 8.3 校验 |
-| Device | 记录每个任务已见的最大 `epoch`；拒绝低 `epoch` 的 Server 指令；拒绝 `attempt_id` 非当前的 Worker 指令类消息 |
-| Worker | 每个尝试使用独立的工作区（独立的 git worktree）；仅接受当前令牌绑定的指令 |
+| Device | 记录每个任务已见的最大 `epoch`；拒绝低 `epoch` 的 Server 指令；核对 Worker 指令类消息与通道绑定的 `session_id`、`task_id`、`attempt_id`、`epoch`，拒绝非当前尝试或 epoch 的消息 |
+| Worker | 每个尝试使用独立的工作区（独立的 git worktree）；仅接受与已确认通道绑定的 `session_id`、`task_id`、`attempt_id`、`epoch` 一致的指令 |
 
 ### 8.3 历史日志补传
 
@@ -351,7 +351,9 @@ Server → Device    下发任务，携带 epoch 与 cause_id
 ```
 Device             校验 epoch 与指令；解密内容；追加本地事件日志（分配 seq）
 Device             分配 attempt_id；创建独立 worktree
-Device → Worker    经本机 IPC 传递任务、一次性令牌、按需凭据（仅内存）
+Device             创建并独占 stdio 管道；控制继承权限，拉起 Worker
+Device ↔ Worker    以管道的创建、独占与受控继承关系确认对端，绑定 {session_id, task_id, attempt_id, epoch}
+Device → Worker    经已绑定通道传递任务、按需凭据（仅内存）
 Worker             组装上下文（见第 12 节）→ 调用模型 → 调用工具
                    每次调用先写 request 与 pending，完成后写配对的 result
 Worker → Device    事件流；Device 写入本地日志
@@ -510,7 +512,7 @@ Device 重启后扫描日志，对存在 `pending` 而无 `result` 的调用：
 
 `outcome_unknown` 的解除顺序：
 
-1. 调用带幂等键：使用同一键重试。
+1. 调用带幂等键：使用 §11.1 规定的同一键重试，跨尝试或租约恢复时保持该键不变。
 2. 可核对实际结果：查询真实状态（提交对象是否存在、文件是否已删除、远端是否已有该写入），据此补记 `result`，或确认未发生后重试。
 3. 无法核对：任务进入 `blocked`，由用户决定，决定写入日志。
 
@@ -522,14 +524,14 @@ Device 重启后扫描日志，对存在 `pending` 而无 `result` 的调用：
 
 ### 10.4 重复发起的拦截
 
-Device 禁止把处于 `outcome_unknown` 的 R1 调用作为**新调用**重复执行，包括新尝试经重新规划后发出的相同调用；同一个逻辑调用（相同 `call_id`）按 10.3 恢复不受此限。
+Device 禁止把处于 `outcome_unknown` 的 R1 调用作为**新调用**重复执行，包括新尝试经重新规划后发出的相同调用；同一个逻辑调用（相同的 `session_id`、`task_id`、`call_id`）按 10.3 恢复不受此限。
 
-- 调用身份由 `call_id` 决定。恢复沿用原 `call_id`，并记录其所属的原 `attempt_id`；Code Mode 中复用原 `call_id` 的条件见 11.1。
-- `(工具, 规范化参数摘要)` 只用于识别疑似重复：命中且 `call_id` 不同的新调用，在原调用的 `outcome_unknown` 解除前被拦截；它不能代替调用身份，也不会拦截按 10.3 进行的恢复。
+- 调用由 `(session_id, task_id, call_id)` 唯一标识。恢复沿用原 `session_id`、`task_id`、`call_id`，并记录其所属的原 `attempt_id`；Code Mode 中复用原 `call_id` 的条件见 11.1。
+- `(工具, 规范化参数摘要)` 只用于识别疑似重复：命中且调用身份不同的新调用，在原调用的 `outcome_unknown` 解除前被拦截；它不能代替调用身份，也不会拦截按 10.3 进行的恢复。
 
 ### 10.5 恢复
 
-恢复通过新的尝试完成：`attempt_id` 加一，申请新租约（`epoch` 加一），使用新的隔离工作区，由新尝试依据日志重新规划。
+恢复通过新的尝试完成：`attempt_id` 加一，申请新租约（`epoch` 加一），使用新的隔离工作区，由新尝试依据日志重新规划。恢复同一逻辑调用时，沿用原 `session_id`、`task_id`、`call_id` 与幂等键；新的 `attempt_id`、`epoch` 用于执行上下文与围栏，不进入幂等键。
 
 ---
 
@@ -542,7 +544,7 @@ Device 禁止把处于 `outcome_unknown` 的 R1 调用作为**新调用**重复�
 职责：
 
 - **调用身份**：`call_id` 由网关在调用点分配，不由调用方（包括 Code Mode 中的代码）提供。
-- **重试分类与幂等**：按 10.2 归类；目标支持幂等键的 HTTP 请求携带确定性幂等键 `H(task_id, call_id)`，恢复时沿用原 `call_id`，因此键不变。
+- **重试分类与幂等**：按 10.2 归类；目标支持幂等键的请求携带确定性幂等键 `H(canonical([session_id, task_id, call_id]))`。数组按 `session_id`、`task_id`、`call_id` 的固定顺序构造，并使用统一的规范编码。恢复同一逻辑调用时沿用这三个标识；跨 `attempt_id`、`epoch` 恢复仍使用原键。`attempt_id`、`epoch` 用于执行上下文与围栏，不进入幂等键。
 - **日志**：执行前落盘 `request` 与 `pending`，完成后落盘 `result`。
 - **策略**：超时、重试次数与退避、并发上限、出站目标白名单、预算。
 - **凭据**：按调用类型注入所需凭据，日志中脱敏。
@@ -578,9 +580,9 @@ MCP 工具与 Skill 统一作为工具源，经调用网关暴露给 Worker 与 
   |---|---|---|
   | `stateless` | `(server_id, 凭据范围)` | 无状态、不依赖工作目录的服务器 |
   | `per_repo` | `(server_id, repo_id, 凭据范围)` | 绑定工作目录或仓库根的服务器 |
-  | `per_session` | `(server_id, session_id, 凭据范围)` | 持有会话状态的服务器 |
+  | `per_session` | `(server_id, repo_id, session_id, 凭据范围)` | 持有会话状态的服务器 |
 
-  未声明的服务器按 `per_session` 处理。工作目录等上下文随调用传入，不依赖实例的启动参数。
+  未声明的服务器按 `per_session` 处理。同一会话可以涉及不同仓库；不同 `repo_id` 不共享 `per_repo` 或 `per_session` 实例。工作目录等上下文随调用传入，不依赖实例的启动参数。
 - **可选，而非强制**：某个 MCP 服务器或 Skill 是否启用由配置决定，不是任务启动的前提。服务器不可用不终止任务，按下列情形处理：
   - 请求尚未发送到服务器（启动失败、连接失败）：确认未执行，对应调用返回失败，给模型或代码。
   - 请求已发出而结果不明（服务器在此后崩溃或断开）：按 10.3 处理，R0 记为 `failed(interrupted)`，R1 记为 `outcome_unknown`。
@@ -615,7 +617,7 @@ MCP 工具与 Skill 统一作为工具源，经调用网关暴露给 Worker 与 
 |---|---|---|
 | Browser ↔ Server | `local-open`（仅本地回环入口）/ `password` / 扩展 `idp` | 远程对外链路必须 TLS；代理后端见 4.2 |
 | Device ↔ Server | 设备私钥对挑战签名 | 远程对外链路必须 TLS；可选 mTLS；代理后端见 4.2 |
-| Worker ↔ Device | 每次拉起生成的一次性令牌，绑定 `task_id`、`attempt_id`、`epoch` | 本机 IPC，无需 TLS |
+| Worker ↔ Device | 以 Device 创建并独占、继承权限受控的 stdio 管道本身确认通信对象，再绑定 `session_id`、`task_id`、`attempt_id`、`epoch` | 本机 IPC，无需 TLS；可重新连接的 Unix socket 或回环监听须明确连接认证方案 |
 | 模型凭据 | 保存于系统钥匙串或权限为 0600 的文件 | 仅在内存中传递给 Worker，按需、按尝试 |
 | MCP 服务器凭据 | 同上，按服务器分别保管 | 仅在启动对应服务器时由工具宿主注入，不传递给 Worker |
 
@@ -624,7 +626,8 @@ MCP 工具与 Skill 统一作为工具源，经调用网关暴露给 Worker 与 
 - 仅本地回环入口可使用不要求 TLS 与用户认证的 `local-open`，仍须遵守 §4.1；反向代理的回环后端不是远程入口免认证的依据。
 - 远程对外入口必须具备有效 HTTPS / WSS 安全边界；应用进程直接终止 TLS 或按 §4.2 正确配置 TLS 终止代理均可。缺少该安全边界时拒绝以远程模式启动或暴露入口；不再一概要求 Server 应用进程加载证书。
 - Device 校验证书与主机名，拒绝连接非 TLS 的非回环 Server；仅信任明确配置且受访问控制保护的代理，不能信任任意转发头。
-- 一次性令牌经继承的文件描述符或标准输入传递，不放入环境变量或命令行参数。
+- Device 创建并独占 Worker 的 stdio 管道，控制管道端点的继承权限。Device 与 Worker 以管道本身确认通信对象，再绑定 `session_id`、`task_id`、`attempt_id`、`epoch`，并按 §8.2 校验指令。
+- 使用可重新连接的 Unix socket 或回环监听时，必须明确连接认证方案；执行上下文标识用于绑定与围栏，不能代替连接认证。
 - 设备被吊销后，Server 拒绝新连接、使已有连接及其全部租约失效，并拒绝继续接受状态变更；在线停止与离线限时停止按 §9.10 执行。
 
 ---
@@ -726,14 +729,17 @@ MCP 工具与 Skill 统一作为工具源，经调用网关暴露给 Worker 与 
 - 注入一个必然失败的验证项，交付必须被拦截。
 - 在审批后改变仓库基线，候选必须被标记为 `stale`。
 - 在应用提交后、记录结果前强制崩溃：恢复后不得产生重复提交；若租约已更换，仍能通过 `application.reconciled` 补报并正确推进状态。
-- 对 `outcome_unknown` 的 R1 调用，同一 `call_id` 的恢复可以执行，新尝试发出的同参数新调用被拦截。
+- 对 `outcome_unknown` 的 R1 调用，同一逻辑调用身份的恢复可以执行，新尝试发出的同参数新调用被拦截。
+- 对支持幂等键的目标，核对请求使用 `H(canonical([session_id, task_id, call_id]))`，字段顺序与规范编码固定；同一逻辑调用跨 `attempt_id`、`epoch` 恢复后键不变。不同会话即使 `task_id`、`call_id` 相同，也必须得到不同的幂等键。
+- 未显式配置时，`local` 使用 `local_only`，`remote` 使用 `encrypted_sync`；显式配置优先，显式配置与默认值都须满足 `allowed_tiers`。
+- Device 创建并独占、继承权限受控的 stdio 管道；Device 与 Worker 以管道本身确认通信对象并绑定执行上下文。与通道绑定的 `session_id`、`task_id`、`attempt_id` 或 `epoch` 不符的指令被拒绝；可重新连接的 Unix socket 或回环监听须验证其明确的连接认证方案。
 - 给出相互冲突的任务级配置层，任务必须在启动前被拒绝并指出冲突项，而不是在运行中终止；任务运行期间修改配置，不影响该任务。
 - 调用时给出越界的局部覆盖，只有该调用被拒绝，任务继续运行。
 - Code Mode 代码块恢复执行时，同一位置的调用若工具、目标或参数摘要与原 `request` 不一致，必须分配新的 `call_id`，不得复用原身份与幂等键。
 - Code Mode 中的代码发出的 HTTP 请求与工具调用，必须出现在同一调用日志中，并带有网关分配的 `call_id`。
 - 某个 MCP 服务器无法启动时，任务继续运行，对应调用返回错误，不终止任务。
 - MCP 服务器在 R1 调用发出后崩溃：该调用记为 `outcome_unknown`，服务器重启后不得被重放。
-- 两个不同仓库的任务，不得共享声明为 `per_repo` 或 `per_session` 的 MCP 实例。
+- 两个不同仓库的任务，不得共享声明为 `per_repo` 或 `per_session` 的 MCP 实例；同一 `session_id` 下的两个不同 `repo_id` 也不得共享这些实例。
 - 在断线期间写入旧 epoch 事件，恢复后会话不得卡住，且任务状态不被改变。
 
 ---
