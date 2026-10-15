@@ -23,12 +23,17 @@ use winwincode_client_port::domain::ApplyResult;
 use winwincode_client_port::domain::ApplyStrategy;
 use winwincode_client_port::domain::ClientArchitecture;
 use winwincode_client_port::domain::ClientCapacityReport;
+use winwincode_client_port::domain::ClientControlError;
+use winwincode_client_port::domain::ClientControlErrorCode;
+use winwincode_client_port::domain::ClientControlMessageKind;
 use winwincode_client_port::domain::ClientLockState;
 use winwincode_client_port::domain::ClientPlatformTarget;
+use winwincode_client_port::domain::CommandAckStatus;
 use winwincode_client_port::domain::LocalCandidateState;
 use winwincode_client_port::domain::PresenceState;
 use winwincode_client_port::messages::ClientCandidateApplyResultPayload;
 use winwincode_client_port::messages::ClientCandidateRetainedPayload;
+use winwincode_client_port::messages::ClientCommandAckPayload;
 use winwincode_client_port::messages::ClientEnrollPayload;
 use winwincode_client_port::messages::ClientHelloPayload;
 use winwincode_client_port::messages::ClientToServerEnvelope;
@@ -44,6 +49,7 @@ use winwincode_control_plane::ConnectCodeService;
 use winwincode_domain::Instant;
 use winwincode_server::{
     ApiError, AuthSessionBootstrap, AuthSessionConfig, AuthenticatedPrincipal,
+    ClientCandidatesApplication, ClientCandidatesConfig, ClientCandidatesErrorKind,
     ClientExchangeApplication, ClientExchangeConfig, ClientExchangePort, ControlPlaneApiPort,
     EventSubscription, RequestAuthenticator, ServerConfig, SqliteAuthSessionManager,
     UserAccountService, start_server_with_remote_worker,
@@ -802,11 +808,13 @@ enum ApplyVerdict {
     BaseStale,
 }
 
-#[allow(clippy::too_many_lines)]
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 fn spawn_candidate_responder(
     data_directory: PathBuf,
     address: std::net::SocketAddr,
     node: String,
+    instance: String,
+    expected_application: Option<(String, String)>,
     mut inbox_ack: u64,
     mut next_sequence: u64,
     verdict: ApplyVerdict,
@@ -834,7 +842,12 @@ fn spawn_candidate_responder(
                 if frame_value["kind"] != json!("client.candidate.apply") {
                     continue;
                 }
+                assert_eq!(frame_value["clientInstanceId"], instance);
                 let payload = &frame_value["payload"];
+                if let Some((application_id, approval_id)) = &expected_application {
+                    assert_eq!(payload["applicationId"], application_id.as_str());
+                    assert_eq!(payload["approvalId"], approval_id.as_str());
+                }
                 let lease_id = payload["occupancyLeaseId"]
                     .as_str()
                     .expect("occupancy lease id")
@@ -907,7 +920,7 @@ fn spawn_candidate_responder(
                     },
                 );
                 let request = exchange_request(
-                    &[frame(&node, DEVICE_INSTANCE, next_sequence, apply_result)],
+                    &[frame(&node, &instance, next_sequence, apply_result)],
                     stored.sequence,
                 );
                 next_sequence += 1;
@@ -1191,6 +1204,8 @@ async fn branch_chain_runs_http_downlink_device_ack_and_is_idempotent() {
         data_directory.clone(),
         address,
         node.clone(),
+        DEVICE_INSTANCE.into(),
+        None,
         downlink_ack_cursor(&data_directory, &node),
         next_client_sequence(&data_directory, &node),
         ApplyVerdict::BranchCreated,
@@ -1319,6 +1334,8 @@ async fn apply_chain_settles_both_outcomes_and_repeats_the_original_receipt() {
         data_directory.clone(),
         address,
         node.clone(),
+        DEVICE_INSTANCE.into(),
+        None,
         downlink_ack_cursor(&data_directory, &node),
         next_client_sequence(&data_directory, &node),
         ApplyVerdict::Applied,
@@ -1390,6 +1407,8 @@ async fn apply_chain_settles_both_outcomes_and_repeats_the_original_receipt() {
         data_directory.clone(),
         address,
         node.clone(),
+        DEVICE_INSTANCE.into(),
+        None,
         downlink_ack_cursor(&data_directory, &node),
         next_client_sequence(&data_directory, &node),
         ApplyVerdict::BaseStale,
@@ -1426,6 +1445,161 @@ async fn apply_chain_settles_both_outcomes_and_repeats_the_original_receipt() {
     );
 
     running.shutdown().await.expect("shutdown");
+    let _ = std::fs::remove_dir_all(&data_directory);
+    let _ = std::fs::remove_dir_all(&auth_directory);
+}
+
+#[tokio::test]
+#[allow(clippy::too_many_lines)]
+async fn rejected_old_instance_apply_can_be_retried_with_the_original_approval() {
+    const RECOVERED_INSTANCE: &str = "cix_C3C3C3C3C3C3C3C3C3C3C3C3C3";
+    let data_directory = test_directory("candidate-instance-retry");
+    let auth_directory = test_directory("candidate-instance-retry-auth");
+    let running = start_server(&data_directory, &auth_directory).await;
+    let address = running.local_address();
+    let (_cookie, owner) = initialize_and_login_owner(address).await;
+    let (node, public) = enroll_online_device(address, &data_directory).await;
+    consume_code_as(
+        &data_directory,
+        &node,
+        &publish_connect_code(&data_directory, &node, "34343434"),
+        &owner,
+    );
+    let binding = stage_visible_binding(&data_directory, &node, &owner);
+    let (lease, epoch) = stage_occupied_lease(&data_directory, &node, &owner);
+    let commit = "0f9e8d7c6b5a4938271605f4e3d2c1b0a9988776";
+    send_retained(
+        address,
+        &data_directory,
+        &node,
+        &lease,
+        epoch,
+        1,
+        &binding,
+        commit,
+    )
+    .await;
+    let request: Value = serde_json::from_str(&apply_body(
+        &public,
+        &candidate_ref_of(commit),
+        &binding,
+        "main",
+        FIXTURE_BASE_COMMIT,
+    ))
+    .unwrap();
+    let config = ClientCandidatesConfig {
+        apply_wait: Duration::from_millis(20),
+        poll_interval: Duration::from_millis(1),
+    };
+    let application = ClientCandidatesApplication::open(&data_directory, &config).unwrap();
+    let first = application
+        .apply_candidate(&owner, &request)
+        .await
+        .expect_err("the rejected command has no apply result");
+    assert_eq!(first.kind(), ClientCandidatesErrorKind::ApplyResultTimeout);
+
+    let (downlink, original) = {
+        let mut storage = SqliteStorage::open(&data_directory).unwrap();
+        let downlink = storage
+            .client_downlink_outbox()
+            .unwrap()
+            .deliverable(&node, 0, 1)
+            .unwrap()
+            .pop()
+            .unwrap();
+        let original = storage
+            .candidate_application_for_candidate(&node, &candidate_ref_of(commit))
+            .unwrap()
+            .unwrap();
+        (downlink, original)
+    };
+    let queued: Value = serde_json::from_str(&downlink.frame).unwrap();
+    assert_eq!(queued["payload"]["applicationId"], original.application_id);
+    assert_eq!(queued["payload"]["approvalId"], original.approval_id);
+
+    let sequence = next_client_sequence(&data_directory, &node);
+    let hello = ClientToServerMessage::Hello(ClientHelloPayload {
+        client_version: "0.1.0-alpha.1".into(),
+        capacity: capacity(0),
+        accepting_connections: true,
+        lock_state: ClientLockState::Unlocked,
+        presence_state: PresenceState::Online,
+    });
+    let rejected = ClientToServerMessage::CommandAck(ClientCommandAckPayload {
+        command_kind: ClientControlMessageKind::CandidateApply,
+        command_message_id: downlink.message_id,
+        status: CommandAckStatus::RejectedStaleFencingToken,
+        current_revision: Some(1),
+        error: Some(ClientControlError {
+            code: ClientControlErrorCode::DeviceInstanceChanged,
+            message: "the candidate command has obsolete execution authority".into(),
+            retryable: false,
+        }),
+    });
+    let (status, _) = post_exchange(
+        address,
+        &exchange_request(
+            &[
+                frame(&node, RECOVERED_INSTANCE, sequence, hello),
+                frame(&node, RECOVERED_INSTANCE, sequence + 1, rejected),
+            ],
+            downlink.sequence,
+        ),
+    )
+    .await;
+    assert!(status.starts_with("HTTP/1.1 200"), "{status}");
+    assert_eq!(
+        application.list(&owner, &public).unwrap()["candidates"][0]["application"]["status"],
+        "applying"
+    );
+
+    let responder = spawn_candidate_responder(
+        data_directory.clone(),
+        address,
+        node.clone(),
+        RECOVERED_INSTANCE.into(),
+        Some((
+            original.application_id.clone(),
+            original.approval_id.clone(),
+        )),
+        downlink_ack_cursor(&data_directory, &node),
+        next_client_sequence(&data_directory, &node),
+        ApplyVerdict::Applied,
+    );
+    let recovery =
+        ClientCandidatesApplication::open(&data_directory, &ClientCandidatesConfig::default())
+            .unwrap();
+    let result = recovery.apply_candidate(&owner, &request).await.unwrap();
+    assert_eq!(
+        result["receipt"]["localApplyReceiptId"],
+        original.application_id
+    );
+    assert_eq!(result["receipt"]["result"], "applied");
+    responder.abort();
+
+    let connection =
+        rusqlite::Connection::open(data_directory.join("control-plane.sqlite3")).unwrap();
+    let applications: i64 = connection
+        .query_row("SELECT count(*) FROM candidate_applications", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    let approvals: i64 = connection
+        .query_row(
+            "SELECT count(*) FROM candidate_application_events WHERE kind='approval.granted'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!((applications, approvals), (1, 1));
+    drop(connection);
+    let retained = SqliteStorage::open(&data_directory)
+        .unwrap()
+        .candidate_application(&original.application_id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(retained.approval_id, original.approval_id);
+    running.shutdown().await.unwrap();
     let _ = std::fs::remove_dir_all(&data_directory);
     let _ = std::fs::remove_dir_all(&auth_directory);
 }
@@ -1552,6 +1726,8 @@ async fn failed_downlink_publication_rolls_back_approval_and_retry_across_restar
             directory.clone(),
             address,
             node.clone(),
+            DEVICE_INSTANCE.into(),
+            None,
             downlink_ack_cursor(&directory, &node),
             next_client_sequence(&directory, &node),
             ApplyVerdict::Applied,

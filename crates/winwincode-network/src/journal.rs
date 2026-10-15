@@ -244,6 +244,28 @@ impl RequestJournal {
         Ok(permit)
     }
 
+    pub fn retry_delay(&self, operation: &[u8], now: u64) -> Result<Duration, NetworkFailure> {
+        let now = self.monotonic_now(now)?;
+        let encoded: String = self
+            .0
+            .lock()
+            .map_err(|_| storage())?
+            .query_row(
+                "SELECT state_json FROM network_queue_state WHERE operation_hash=?1",
+                [key(operation)],
+                |row| row.get(0),
+            )
+            .map_err(|_| storage())?;
+        let state: State = serde_json::from_str(&encoded).map_err(|_| storage())?;
+        if state.stopped {
+            return Err(state.failure);
+        }
+        if state.in_flight {
+            return Err(storage());
+        }
+        Ok(Duration::from_millis(state.ready_at.saturating_sub(now)))
+    }
+
     pub fn finish(
         &self,
         operation: &[u8],
@@ -416,7 +438,7 @@ mod tests {
         tag: &str,
         failure: NetworkFailure,
         cap: Option<Duration>,
-    ) -> Option<Duration> {
+    ) -> Duration {
         let path = std::env::temp_dir().join(format!(
             "network-delay-cap-{tag}-{}-{}.sqlite3",
             std::process::id(),
@@ -443,14 +465,7 @@ mod tests {
         journal
             .finish_with_delay_cap(b"capped", sequence, Some(failure), later, cap)
             .unwrap();
-        let delay = match journal
-            .prepare(b"capped", Replay::ReplayExact, 4, later)
-            .unwrap()
-        {
-            QueuePermit::Waiting(delay, _) => Some(delay),
-            QueuePermit::Stopped(_) => None,
-            QueuePermit::Ready(_) => Some(Duration::ZERO),
-        };
+        let delay = journal.retry_delay(b"capped", later).unwrap();
         drop(journal);
         let _ = std::fs::remove_file(path);
         delay
@@ -464,13 +479,12 @@ mod tests {
             Phase::Connect,
         );
         let cap = Duration::from_millis(200);
-        let uncapped = delay_after_one_failure("none", failure, None).unwrap();
+        let uncapped = delay_after_one_failure("none", failure, None);
         assert!(uncapped > cap, "uncapped {uncapped:?} must exceed the cap");
-        let capped = delay_after_one_failure("small", failure, Some(cap)).unwrap();
+        let capped = delay_after_one_failure("small", failure, Some(cap));
         assert!(capped <= cap, "{capped:?}");
         assert!(capped > Duration::ZERO);
-        let large =
-            delay_after_one_failure("large", failure, Some(Duration::from_hours(1))).unwrap();
+        let large = delay_after_one_failure("large", failure, Some(Duration::from_hours(1)));
         assert!(
             large.abs_diff(uncapped) <= Duration::from_millis(50),
             "large {large:?} vs uncapped {uncapped:?}"
@@ -487,8 +501,7 @@ mod tests {
         );
         deferred.retry_after_ms = Some(120_000);
         let delay =
-            delay_after_one_failure("retry-after", deferred, Some(Duration::from_millis(200)))
-                .unwrap();
+            delay_after_one_failure("retry-after", deferred, Some(Duration::from_millis(200)));
         assert!(delay >= Duration::from_secs(119), "{delay:?}");
 
         let terminal = NetworkFailure::new(
@@ -518,6 +531,7 @@ mod tests {
                 Some(Duration::from_millis(1)),
             )
             .unwrap();
+        assert_eq!(journal.retry_delay(b"stop", 10_000), Err(terminal));
         assert!(matches!(
             journal
                 .prepare(b"stop", Replay::ReplayExact, 4, 10_000)

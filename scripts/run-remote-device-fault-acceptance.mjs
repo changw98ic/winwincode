@@ -585,7 +585,8 @@ export function deviceSnapshot(device) {
     const workers = database.prepare(`SELECT worker_session_id AS workerSessionId,worker_id AS workerId,
       worker_instance_id AS workerInstanceId,pid,process_start_identity AS processStartIdentity,state,exit_code AS exitCode
       FROM worker_process_registry`).all()
-    const mirror = database.prepare('SELECT occupancy_lease_id AS leaseId,fencing_token AS epoch FROM occupancy_mirror').get() ?? null
+    const mirror = database.prepare(`SELECT occupancy_lease_id AS leaseId,fencing_token AS epoch,
+      holder_user_id AS holderUserId,mirror_revision AS revision FROM occupancy_mirror`).get() ?? null
     const identity = database.prepare('SELECT current_instance_id AS instanceId FROM device_identity').get()
     const outbox = database.prepare(`SELECT message_id AS messageId,envelope_sequence AS sequence,
       kind,payload,published FROM client_outbox`).all().map(({ payload, ...row }) => {
@@ -823,7 +824,8 @@ export async function runRemoteDeviceFaultAcceptance(configuration, output) {
   const attempt = async (id, run) => {
     try { const evidence = await run(); result(id, 'passed', evidence); return evidence }
     catch (error) { result(id, 'failed', { diagnosticPath: error.diagnosticPath ?? null,
-      remoteDiagnosticPath: error.remoteDiagnosticPath ?? null },
+      remoteDiagnosticPath: error.remoteDiagnosticPath ?? null,
+      httpStatus: error.status ?? null, httpResponse: error.response ?? null },
     `${error.code ?? error.name}: ${error.message.split('\n')[0]}`); return null }
   }
   const password = process.env[configuration.server.passwordEnvironment]
@@ -1041,7 +1043,8 @@ export async function runRemoteDeviceFaultAcceptance(configuration, output) {
           } })
       } catch (error) {
         result('apply-commit-crash-recovery', 'failed', { diagnosticPath: error.diagnosticPath ?? null,
-          remoteDiagnosticPath: error.remoteDiagnosticPath ?? null }, `${error.code ?? error.name}: ${error.message.split('\n')[0]}`)
+          remoteDiagnosticPath: error.remoteDiagnosticPath ?? null,
+          httpStatus: error.status ?? null, httpResponse: error.response ?? null }, `${error.code ?? error.name}: ${error.message.split('\n')[0]}`)
       }
     }
     if (configuration.networkFault) {
@@ -1212,7 +1215,31 @@ async function runOfflineScenarios({ configuration, api, caPem, attempt, result,
   }
 }
 
-async function runCandidateScenarios({ configuration, api, binding, repository, deviceCall, result, attempt, createCandidate, observedHooks }) {
+export async function runCandidateScenarios({ configuration, api, binding, repository, deviceCall, result, attempt, createCandidate, observedHooks }) {
+  const waitForReady = (previousInstanceId = null, requireOccupancy = true) => waitFor(async () => {
+    const snapshot = await deviceCall('snapshot')
+    if (!snapshot.agent?.deviceRunning || !snapshot.identity.instanceId
+      || snapshot.identity.instanceId === previousInstanceId) return false
+    const authority = readonly(configuration.server.database, database => database.prepare(`SELECT
+      n.current_instance_id AS instanceId,n.presence_state AS presence,l.occupancy_lease_id AS leaseId,
+      l.fencing_token AS epoch,l.holder_user_id AS holderUserId FROM client_nodes n
+      LEFT JOIN client_occupancy_leases l ON l.client_node_id=n.client_node_id AND l.state IN ('occupied','draining')
+      WHERE n.client_node_id=?`).get(binding.clientNodeId))
+    if (authority?.instanceId !== snapshot.identity.instanceId || authority.presence !== 'online') return false
+    if (!requireOccupancy) return snapshot
+    const mirror = snapshot.mirror
+    if (!mirror || !mirror.holderUserId || mirror.leaseId !== authority.leaseId
+      || mirror.epoch !== authority.epoch || mirror.holderUserId !== authority.holderUserId) return false
+    const revision = readonly(join(dirname(configuration.server.database), 'client-occupancy-mirror.sqlite3'), database =>
+      database.prepare('SELECT mirror_revision AS revision FROM client_occupancy_mirror_revisions WHERE client_node_id=?')
+        .get(binding.clientNodeId)?.revision)
+    return mirror.revision > 0 && mirror.revision === revision ? snapshot : false
+  }, 'current Device instance and application authority', 60_000)
+  const restart = async (environment = {}, requireOccupancy = true) => {
+    const before = await deviceCall('snapshot')
+    await deviceCall('restart', { environment })
+    return waitForReady(before.identity.instanceId, requireOccupancy)
+  }
   const list = async () => {
     const response = await api.request(`/api/v1/clients/${binding.publicClientId}/candidates`)
     assert.equal(response.status, 200)
@@ -1254,21 +1281,30 @@ async function runCandidateScenarios({ configuration, api, binding, repository, 
   assert.equal(stale.baseCommit, applied.baseCommit)
   assert.equal(unknown.baseCommit, applied.baseCommit)
   const branchFixture = await deviceCall('prepare-application-branches', { baseCommit: applied.baseCommit })
-  const apply = (candidate, targetBranch) => api.request('/api/v1/clients/candidates/apply', {
-    method: 'POST', timeoutMillis: 45_000, body: { schemaVersion: SCHEMA,
-      clientId: binding.publicClientId, candidateRef: candidate.candidateRef,
-      repositoryBindingId: repository.repositoryBindingId, targetBranch, expectedHead: candidate.baseCommit,
-    },
-  })
+  const apply = async (candidate, targetBranch, expectedStatus = 201, expectedCode = null) => {
+    const response = await api.request('/api/v1/clients/candidates/apply', {
+      method: 'POST', timeoutMillis: 45_000, body: { schemaVersion: SCHEMA,
+        clientId: binding.publicClientId, candidateRef: candidate.candidateRef,
+        repositoryBindingId: repository.repositoryBindingId, targetBranch, expectedHead: candidate.baseCommit,
+      },
+    })
+    if (response.status !== expectedStatus || (expectedCode !== null && response.json?.error?.code !== expectedCode)) {
+      throw withResponseFailure(Object.assign(new Error(`candidate apply returned HTTP ${response.status}`), {
+        code: response.json?.error?.code ?? 'HTTP_ERROR', status: response.status, response: response.json,
+      }), response)
+    }
+    return response
+  }
   const crash = async (candidate, point, targetBranch) => {
-    await deviceCall('restart', { environment: { WWC_TEST_APPLICATION_CRASH_POINT: point } })
-    const request = apply(candidate, targetBranch).catch(error => ({ status: null, code: error.code }))
+    await restart({ WWC_TEST_APPLICATION_CRASH_POINT: point })
+    const response = await apply(candidate, targetBranch, 504, 'APPLY_RESULT_TIMEOUT')
     const snapshot = await waitFor(async () => {
       const value = await deviceCall('snapshot')
       return value.agent?.deviceExitCode === 86 && value.applications.some(item => item.candidateRef === candidate.candidateRef
         && item.finishedReceiptJson === null) ? value : false
-    }, `actual Device process exits after ${point}`, 60_000)
-    await request
+    }, `actual Device process exits after ${point}`, 60_000).catch(error => {
+      throw Object.assign(error, { status: response.status, response: response.json })
+    })
     const application = snapshot.applications.find(item => item.candidateRef === candidate.candidateRef)
     assert.ok(application.applicationId && application.approvalId)
     const observed = await deviceCall('application-crash-evidence', { point, applicationId: application.applicationId })
@@ -1281,16 +1317,17 @@ async function runCandidateScenarios({ configuration, api, binding, repository, 
       method: 'POST', body: { schemaVersion: SCHEMA, clientId: binding.publicClientId },
     })
     assert.equal(released.status, 200)
-    await deviceCall('restart')
+    await restart({}, false)
     await waitFor(async () => {
       const response = await api.request(`/api/v1/clients/${binding.publicClientId}/occupancy`)
-      return response.status === 200 && response.json.occupancy === 'available'
+      assert.equal(response.status, 200, JSON.stringify(response.json))
+      return response.json.occupancy === 'available'
     }, 'a current Device occupancy can be claimed', 60_000)
     const claimed = await api.request('/api/v1/clients/occupancy', { method: 'POST', timeoutMillis: 45_000, body: {
       schemaVersion: SCHEMA, clientId: binding.publicClientId,
     } })
     assert.equal(claimed.status, 201)
-    return (await deviceCall('snapshot')).mirror
+    return (await waitForReady()).mirror
   }
   const recovered = await attempt('apply-commit-crash-recovery', async () => {
     const interrupted = await crash(applied, 'after_repository_commit', 'wwc-acceptance-applied')
@@ -1323,7 +1360,7 @@ async function runCandidateScenarios({ configuration, api, binding, repository, 
       currentEpoch: recovered.currentEpoch, events }
   })
   await attempt('baseline-stale', async () => {
-    await deviceCall('restart')
+    await restart()
     const before = await deviceCall('repository-state')
     assert.equal(before.branches['wwc-acceptance-stale'], branchFixture.movedHead)
     assert.notEqual(before.branches['wwc-acceptance-stale'], stale.baseCommit)
@@ -1340,11 +1377,11 @@ async function runCandidateScenarios({ configuration, api, binding, repository, 
     await deviceCall('make-unknown-outcome')
     try {
       const mirror = await renewOccupancy()
-      await apply(unknown, 'wwc-acceptance-unknown')
+      await apply(unknown, 'wwc-acceptance-unknown', 409, 'WRONG_STATE')
       const blocked = await waitFor(async () => (await list()).find(item => item.candidateRef === unknown.candidateRef
         && item.application?.status === 'blocked'), 'unknown application remains visibly blocked', 60_000)
       const before = await deviceCall('repository-state')
-      const repeated = await apply(unknown, 'wwc-acceptance-unknown')
+      const repeated = await apply(unknown, 'wwc-acceptance-unknown', 409, 'WRONG_STATE')
       assert.equal(repeated.status, 409)
       const after = await deviceCall('repository-state')
       assert.deepEqual(after.branches, before.branches)

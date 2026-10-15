@@ -190,7 +190,7 @@ async function applicationFixture(initialStatus) {
 }
 
 test('candidate applications show durable recovery states and block repeated writes', async () => {
-  for (const status of ['applying', 'applied', 'stale', 'blocked', 'failed']) {
+  for (const status of ['applied', 'stale', 'blocked', 'failed']) {
     const fixture = await applicationFixture(status)
     assert.equal(fixture.root.querySelector('button[type=submit]').disabled, true, status)
     assert.ok(fixture.root.querySelector('[role=status]').textContent.length > 0)
@@ -199,6 +199,26 @@ test('candidate applications show durable recovery states and block repeated wri
     assert.deepEqual(fixture.calls, [], `${status} cannot claim or apply`)
     fixture.close()
   }
+})
+
+test('an applying candidate can resume the original application after a lost response', async () => {
+  const fixture = await applicationFixture('applying')
+  const apply = fixture.root.querySelector('button[type=submit]')
+  assert.equal(apply.disabled, false)
+  assert.equal(apply.textContent, '恢复原应用')
+  assert.equal(fixture.root.querySelector('#wwc-apply-branch').disabled, true)
+  assert.equal(fixture.root.querySelector('#wwc-apply-branch').value, 'release/original')
+  assert.equal(fixture.root.querySelector('#wwc-apply-head').value, 'a'.repeat(40))
+  assert.deepEqual(fixture.calls, [])
+  await fixture.submit()
+  assert.deepEqual(fixture.calls, ['accept', 'claim', {
+    clientId: '123456789012', candidateRef, repositoryBindingId: 'binding-fixture',
+    targetBranch: 'release/original', expectedHead: 'a'.repeat(40),
+  }])
+  await fixture.submit()
+  assert.equal(fixture.calls.length, 3)
+  assert.match(fixture.root.textContent, /已确认应用完成/u)
+  fixture.close()
 })
 
 test('awaiting retry restores the original branch and baseline and submits it exactly once', async () => {
@@ -219,12 +239,14 @@ test('awaiting retry restores the original branch and baseline and submits it ex
 })
 
 test('a newly blocked application is re-read before accepting or applying a stale UI selection', async () => {
-  const fixture = await applicationFixture(null)
-  fixture.setStatus('blocked')
-  await fixture.submit()
-  assert.deepEqual(fixture.calls, [])
-  assert.equal(fixture.root.querySelector('button[type=submit]').disabled, true)
-  fixture.close()
+  for (const status of [null, 'applying', 'awaiting_retry']) {
+    const fixture = await applicationFixture(status)
+    fixture.setStatus('blocked')
+    await fixture.submit()
+    assert.deepEqual(fixture.calls, [])
+    assert.equal(fixture.root.querySelector('button[type=submit]').disabled, true)
+    fixture.close()
+  }
 })
 
 test('candidate API preserves application recovery fields and rejects unknown recovery states', async () => {

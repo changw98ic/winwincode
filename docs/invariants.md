@@ -137,6 +137,8 @@ Device 启动完成日志核对后，在有效的当前占用授权下主动补�
 
 恢复事实通过当前占用授权下的 `client.application.reconciled` 上报。Server 同时核对原审批与候选绑定。旧 epoch 的普通 `apply_result` 只写事实。候选已到终态时，补报保留真实应用事实。`not_started` 进入 `awaiting_retry`，用户再次申请后，Server 才能在当前租约下授予同一应用的 `reconciledRetry`。`outcome_unknown` 进入 blocked，后续应用请求返回 `409 WRONG_STATE`。
 
+应用请求超时或仍显示 `applying` 时，用户可以选择“恢复原应用”。请求保留原候选、目标分支和基线，Server 复用原 `applicationId` 与 `approvalId`，向当前 Device 实例重发。Device 已有本地应用记录时，根据 journal 和 Git 事实裁决：已完成则返回原结果，确认未开始则补报 `not_started`，结果不明则补报 `outcome_unknown`。本地尚无该应用记录时，Device 按当前授权执行原请求。单条命令的拒绝 ACK 不能证明整个应用尚未开始。
+
 源码依据：`crates/winwincode-device-client/src/candidate_registry.rs`、`application_journal.rs`、`apply_engine.rs`；`crates/winwincode-storage/src/candidate_applications.rs`；`crates/winwincode-server/src/client_candidates.rs`。相关测试位于 Device 的 `tests/apply_engine.rs` 和 Server 的 `tests/client_candidates.rs`。
 
 ## 验证必须来自真实观察

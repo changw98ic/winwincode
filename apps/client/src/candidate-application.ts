@@ -48,7 +48,7 @@ const RESULTS: Record<string, string> = {
 }
 
 const APPLICATION_STATUS = {
-  applying: '正在应用。设备恢复连接后会核对原操作，请刷新设备结果。',
+  applying: '正在等待设备确认。可恢复原应用，由设备核对并返回执行结果。',
   applied: '设备已确认应用完成。',
   stale: '目标分支已偏离候选基线，请重新生成候选版本。',
   awaiting_retry: '设备确认上次操作尚未开始。检查原分支后，可重试原应用。',
@@ -103,7 +103,7 @@ export function mountCandidateApplication(options: CandidateApplicationOptions):
   function canApply(candidate: ControlPlaneCandidateSummary): boolean {
     const application = candidate.application
     return (candidate.state === 'retained' || candidate.state === 'branch_created')
-      && (application == null || (application.status === 'awaiting_retry'
+      && (application == null || ((application.status === 'applying' || application.status === 'awaiting_retry')
         && application.baseCommit === candidate.baseCommit))
   }
   function lock(): void {
@@ -120,7 +120,8 @@ export function mountCandidateApplication(options: CandidateApplicationOptions):
     const disabled = applied || busy || !candidateCanApply(options.model.state)
       || selected === undefined || !canApply(selected)
     apply.disabled = disabled
-    apply.textContent = selected?.application?.status === 'awaiting_retry' ? '重试原应用' : '应用到项目'
+    apply.textContent = selected?.application?.status === 'applying' ? '恢复原应用'
+      : selected?.application?.status === 'awaiting_retry' ? '重试原应用' : '应用到项目'
     for (const control of [destination, branch, head, confirm]) control.disabled = disabled
     if (selected?.application != null) branch.disabled = true
     refresh.disabled = busy

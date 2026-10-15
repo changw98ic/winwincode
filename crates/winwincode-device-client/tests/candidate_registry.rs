@@ -821,6 +821,40 @@ fn startup_rejects_a_pre_v6_database_instead_of_migrating() {
 }
 
 #[test]
+fn expired_exchange_backoff_does_not_stop_the_daemon_or_reserve_unstarted_attempts() {
+    let root = temporary_directory("expired-exchange-backoff");
+    let (store, identity) = open_enrolled(&root);
+    let mut config = daemon_config("expired-exchange-backoff");
+    config.initial_backoff = Duration::from_nanos(1);
+    config.max_backoff = Duration::from_nanos(1);
+    let mut daemon =
+        DeviceDaemon::start(config, store, Arc::new(NeverTransport), &identity).unwrap();
+    for expected_attempts in 1..=2 {
+        let outcome = daemon.tick(std::time::Instant::now()).unwrap();
+        assert!(matches!(
+            outcome,
+            winwincode_device_client::TickOutcome::Retrying { after, .. } if after.is_zero()
+        ));
+        let journal = Connection::open(root.join("network-requests.sqlite3")).unwrap();
+        let (attempts, in_flight): (i64, i64) = journal
+            .query_row(
+                "SELECT COUNT(*),COALESCE(SUM(outcome='in_flight'),0) FROM network_request_attempts",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(attempts, expected_attempts);
+        assert_eq!(in_flight, 0);
+        assert_eq!(
+            daemon.status().exchanges_started,
+            u64::try_from(expected_attempts).unwrap()
+        );
+    }
+    drop(daemon);
+    cleanup(&root);
+}
+
+#[test]
 fn daemon_recovers_a_frozen_candidate_and_reports_exit_after_restart() {
     let (repository, base_commit) = init_repository("worker-freeze");
     let message = serde_json::json!({

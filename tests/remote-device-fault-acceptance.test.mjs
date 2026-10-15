@@ -14,7 +14,7 @@ import vm from 'node:vm'
 import { createCertificate, waitForDeviceWorkerRegistered } from '../scripts/run-api-production-vertical.mjs'
 import { waitFor } from '../scripts/device-production-fixture.mjs'
 import { REMOTE_FAULT_SCENARIOS, RemoteApi, assertRevokedDeviceExecutionResources, deviceSnapshot, emptyRemoteFaultReport, finalizeRemoteFaultReport,
-  fixtureCommandCell, observeProcessWitnesses, readFixtureCommandEvidence, remoteOperationCommand, secureAcceptanceRequest, taskProcessWitnesses,
+  fixtureCommandCell, observeProcessWitnesses, readFixtureCommandEvidence, remoteOperationCommand, runCandidateScenarios, secureAcceptanceRequest, taskProcessWitnesses,
   validateRemoteFaultConfiguration } from '../scripts/run-remote-device-fault-acceptance.mjs'
 
 function configuration() {
@@ -25,6 +25,129 @@ function configuration() {
   device: { sshHost: 'acceptance@device.example.invalid', checkout: '/opt/winwincode',
     binaryDirectory: '/opt/winwincode-bin', directory: '/private/wwc-acceptance-fixture' } }
 }
+
+function candidateScenarioFixture(t, applyFailure = null) {
+  const directory = mkdtempSync(join(tmpdir(), 'wwc-remote-application-'))
+  const database = new DatabaseSync(join(directory, 'control-plane.sqlite3'))
+  database.exec(`CREATE TABLE client_nodes(client_node_id,current_instance_id,presence_state);
+    CREATE TABLE client_occupancy_leases(client_node_id,occupancy_lease_id,fencing_token,holder_user_id,state);
+    CREATE TABLE candidate_application_events(application_id,kind,epoch);
+    INSERT INTO client_nodes VALUES('device','instance-0','online');
+    INSERT INTO client_occupancy_leases VALUES('device','lease-1',1,'owner','occupied');`)
+  const revisions = new DatabaseSync(join(directory, 'client-occupancy-mirror.sqlite3'))
+  revisions.exec(`CREATE TABLE client_occupancy_mirror_revisions(client_node_id,mirror_revision);
+    INSERT INTO client_occupancy_mirror_revisions VALUES('device',1);`)
+  t.after(() => { database.close(); revisions.close(); rmSync(directory, { recursive: true, force: true }) })
+  const candidates = ['applied', 'stale', 'unknown'].map(name => ({ candidateRef: name,
+    repositoryBindingId: 'repository', baseCommit: 'a'.repeat(40) }))
+  const branches = { 'wwc-acceptance-applied': 'a'.repeat(40), 'wwc-acceptance-stale': 'b'.repeat(40),
+    'wwc-acceptance-unknown': 'a'.repeat(40) }
+  const applications = []; const results = []; const sends = []; const restarts = []
+  let instanceId = 'instance-0'; let epoch = 1; let revision = 1; let running = true
+  let mirror = { leaseId: 'lease-1', epoch, holderUserId: 'owner', revision }
+  let transition = null; let crashPoint = null; let dirty = false; let prematureApply = false
+  const deviceCall = async (operation, values = {}) => {
+    if (operation === 'restart') {
+      transition = { previous: instanceId, next: `instance-${restarts.length + 1}`, checks: 0 }
+      restarts.push(transition); running = true; revision += 1
+      crashPoint = values.environment?.WWC_TEST_APPLICATION_CRASH_POINT
+      return { deviceRunning: true }
+    }
+    if (operation === 'snapshot') {
+      assert.equal(prematureApply, false, 'apply issued before readiness')
+      if (transition) {
+        transition.checks += 1
+        if (transition.checks >= 2) { instanceId = transition.next; mirror = null }
+        if (transition.checks >= 3) database.prepare('UPDATE client_nodes SET current_instance_id=?').run(instanceId)
+        if (transition.checks >= 4) mirror = { leaseId: `lease-${epoch}`, epoch, holderUserId: 'owner', revision }
+        if (transition.checks >= 5) revisions.prepare('UPDATE client_occupancy_mirror_revisions SET mirror_revision=?').run(revision)
+      }
+      return { identity: { instanceId }, mirror, applications,
+        agent: { deviceRunning: running, deviceExitCode: running ? null : 86 } }
+    }
+    if (operation === 'prepare-application-branches') return { movedHead: branches['wwc-acceptance-stale'] }
+    if (operation === 'repository-state') return { branches: { ...branches },
+      applicationCommits: applications.filter(item => item.candidateRef === 'applied')
+        .map(item => ({ commit: 'c'.repeat(40), applicationIds: [item.applicationId] })) }
+    if (operation === 'application-crash-evidence') return { markerObserved: true }
+    if (operation === 'make-unknown-outcome') { dirty = true; return {} }
+    if (operation === 'clear-unknown-fixture') { dirty = false; return {} }
+    assert.fail(`unexpected Device operation ${operation}`)
+  }
+  const api = { request: async (path, options = {}) => {
+    if (path.endsWith('/candidates')) return { status: 200, json: { candidates } }
+    if (path === '/api/v1/clients/occupancy/force-release') {
+      database.prepare("UPDATE client_occupancy_leases SET state='released'").run()
+      return { status: 200 }
+    }
+    if (path === '/api/v1/clients/device-public/occupancy') return { status: 200, json: { occupancy: 'available' } }
+    if (path === '/api/v1/clients/occupancy') {
+      assert.equal(database.prepare('SELECT current_instance_id AS instanceId FROM client_nodes').get().instanceId, instanceId)
+      assert.ok(transition.checks >= 3, 'occupancy claim must wait for the new Server instance')
+      epoch += 1
+      database.prepare('INSERT INTO client_occupancy_leases VALUES(?,?,?,?,?)').run('device', `lease-${epoch}`, epoch, 'owner', 'occupied')
+      if (dirty) candidates[2].application = { status: 'blocked', applicationId: 'application-unknown' }
+      else database.prepare('INSERT INTO candidate_application_events VALUES(?,?,?)')
+        .run('application-applied', 'application.reconciled', epoch)
+      return { status: 201 }
+    }
+    if (path === '/api/v1/clients/candidates/apply') {
+      const serverInstance = database.prepare('SELECT current_instance_id AS instanceId FROM client_nodes').get().instanceId
+      const serverRevision = revisions.prepare('SELECT mirror_revision AS revision FROM client_occupancy_mirror_revisions').get().revision
+      prematureApply = serverInstance !== instanceId || instanceId !== transition?.next
+        || !mirror || mirror.epoch !== epoch || mirror.revision !== serverRevision
+      if (prematureApply) throw new Error('apply issued before readiness')
+      sends.push({ candidateRef: options.body.candidateRef, instanceId, checks: transition.checks })
+      if (applyFailure) return applyFailure
+      const candidate = candidates.find(item => item.candidateRef === options.body.candidateRef)
+      if (crashPoint && !applications.some(item => item.candidateRef === candidate.candidateRef)) {
+        applications.push({ candidateRef: candidate.candidateRef, applicationId: `application-${candidate.candidateRef}`,
+          approvalId: 'approval', originalEpoch: epoch, finishedReceiptJson: null })
+        if (candidate.candidateRef === 'applied') branches['wwc-acceptance-applied'] = 'c'.repeat(40)
+        running = false
+        return { status: 504, json: { error: { code: 'APPLY_RESULT_TIMEOUT' } } }
+      }
+      if (candidate.candidateRef === 'unknown') return { status: 409, json: { error: { code: 'WRONG_STATE' } } }
+      if (candidate.candidateRef === 'applied') candidate.application = { status: 'applied', applicationId: 'application-applied' }
+      return { status: 201, json: { receipt: { result: 'base_stale' } } }
+    }
+    assert.fail(`unexpected API request ${path}`)
+  } }
+  return { api, restarts, sends, results, run: () => runCandidateScenarios({
+    configuration: { ...configuration(), testSupport: true, server: { database: join(directory, 'control-plane.sqlite3') } },
+    api, binding: { clientNodeId: 'device', publicClientId: 'device-public' }, repository: { repositoryBindingId: 'repository' },
+    deviceCall, observedHooks: [], result: (...args) => results.push(args),
+    attempt: async (id, run) => { const evidence = await run(); results.push({ id, evidence }); return evidence },
+    createCandidate: () => assert.fail('the fixture already has three frozen candidates'),
+  }) }
+}
+
+test('application faults wait for each new Device instance and matching occupancy before apply', async t => {
+  const fixture = candidateScenarioFixture(t)
+  await fixture.run()
+  assert.equal(fixture.restarts.length, 5)
+  assert.deepEqual(fixture.sends.map(item => item.candidateRef), ['applied', 'applied', 'stale', 'unknown', 'unknown', 'unknown'])
+  assert.ok(fixture.sends.every(item => item.checks >= 5))
+  assert.deepEqual(fixture.results.map(item => item.id), ['apply-commit-crash-recovery', 'apply-current-epoch-reconciliation',
+    'baseline-stale', 'application-outcome-unknown-blocked'])
+})
+
+test('application faults retain an unexpected API response instead of waiting for a crash', async t => {
+  const response = { status: 504, json: { error: { code: 'UNEXPECTED_TIMEOUT', message: 'fixture response diagnostic' } } }
+  const fixture = candidateScenarioFixture(t, response)
+  await assert.rejects(fixture.run(), error => error.status === response.status
+    && JSON.stringify(error.response) === JSON.stringify(response.json))
+})
+
+test('baseline application retains a 504 response as a failure', async t => {
+  const fixture = candidateScenarioFixture(t)
+  const request = fixture.api.request
+  const response = { status: 504, json: { error: { code: 'APPLY_RESULT_TIMEOUT', message: 'baseline diagnostic' } } }
+  fixture.api.request = (path, options) => path === '/api/v1/clients/candidates/apply' && options.body.candidateRef === 'stale'
+    ? response : request(path, options)
+  await assert.rejects(fixture.run(), error => error.status === response.status
+    && JSON.stringify(error.response) === JSON.stringify(response.json))
+})
 
 test('Worker registration retries only the original RESOURCE_NOT_FOUND response', async () => {
   const api = new RemoteApi(configuration().server, 'fixture-password')
@@ -54,7 +177,7 @@ test('Device outbox evidence compares the message digest and retains the exact e
   const database = new DatabaseSync(join(directory, 'device-data/device-client.sqlite3'))
   database.exec(`CREATE TABLE remote_device_binding(request_id,client_node_id,public_client_id,bound_at,failure_reason,pairing_token);
     CREATE TABLE worker_process_registry(worker_session_id,worker_id,worker_instance_id,pid,process_start_identity,state,exit_code);
-    CREATE TABLE occupancy_mirror(occupancy_lease_id,fencing_token);
+    CREATE TABLE occupancy_mirror(occupancy_lease_id,fencing_token,holder_user_id,mirror_revision);
     CREATE TABLE device_identity(current_instance_id);
     CREATE TABLE client_outbox(message_id,envelope_sequence,kind,payload,published);
     CREATE TABLE candidate_applications(application_id,approval_id,candidate_ref,base_commit,original_epoch,finished_receipt_json,recovery_outcome);`)

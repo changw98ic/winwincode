@@ -931,21 +931,12 @@ impl DeviceDaemon {
         self.consecutive_failures = self.consecutive_failures.saturating_add(1);
         self.status.consecutive_failures = self.consecutive_failures;
         self.status.last_error = Some(reason);
-        if let winwincode_network::journal::QueuePermit::Waiting(delay, _) = self
+        let delay = self
             .network_journal
-            .prepare(
-                operation.as_bytes(),
-                winwincode_network::Replay::ReplayExact,
-                winwincode_network::defaults().max_attempts,
-                network_now,
-            )
-            .map_err(DaemonError::Network)?
-        {
-            self.next_attempt_at = now + delay;
-            self.status.current_backoff = delay;
-        } else {
-            return Err(DaemonError::Network(error.network_failure()));
-        }
+            .retry_delay(operation.as_bytes(), network_now)
+            .map_err(DaemonError::Network)?;
+        self.next_attempt_at = now + delay;
+        self.status.current_backoff = delay;
         Ok(self.retry_outcome())
     }
 
