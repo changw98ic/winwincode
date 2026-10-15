@@ -24,7 +24,7 @@
 
 `apps/client/src/boot.ts` 是浏览器启动入口。它读取根节点和运行时配置，然后调用 `mountWinWinCodeClient`。根节点缺失会抛出错误。运行时配置读取失败时，启动入口会渲染带 `role="alert"` 的错误消息。
 
-运行时配置位于 `globalThis.__WINWINCODE_CLIENT_CONFIG__`。当前唯一字段是 `serverUrl`。`readWinWinCodeClientRuntimeConfig` 要求它是绝对 HTTP 或 HTTPS URL。URL 不能包含凭据、查询串或片段。部署可以修改 `runtime-config.js`，无需重新构建静态资源。
+运行时配置位于 `globalThis.__WINWINCODE_CLIENT_CONFIG__`。当前唯一字段是 `serverUrl`，默认值为 `http://127.0.0.1:8443`。`readWinWinCodeClientRuntimeConfig` 要求它是绝对 HTTP 或 HTTPS URL。URL 不能包含凭据、查询串或片段。部署可以修改 `runtime-config.js`，无需重新构建静态资源。
 
 `mountWinWinCodeClient` 是组合根。它完成以下工作：
 

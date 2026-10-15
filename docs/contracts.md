@@ -173,6 +173,16 @@ WebSocket 入口是 `/api/v1/events`。它只传输订阅控制帧和服务端�
 
 ExecutionPort 的 `fencingToken` 和 ClientControlPort 的 `occupancyFencingToken` 属于不同租约域。字段名、租约身份和校验上下文不能互换。
 
+### Device 转发 Worker 消息
+
+Device 通过 `POST /internal/v1/client/worker-exchange` 转发子 Worker 的请求。`DeviceWorkerRelayRequest` 携带 `clientNodeId`、`workerId`、`workerInstanceId` 和 `request`。
+
+`WorkerRelayRequest` 是 `kind` 标记的联合。`exchange` 携带序列化的 `body`。`accounting` 携带可空的 `body` 和 `offset`。`WorkerRelayResponse` 返回 `status` 和 `body`。类型定义见 `crates/winwincode-client-port/src/worker_relay.rs`。
+
+Worker 与父 Device 之间使用 stdin/stdout JSON-lines。Server 核对 Device 与 Worker 的归属、当前 instance、启动授权、placement 和执行租约。动作授权与用量对账沿用同一转发边界。
+
+Worker 的 managed config 由 Device supervisor 写入。它包含会话身份、occupancy fencing token、仓库、工作目录、Provider 目录、`helperExecutable` 和可选模型路由。
+
 ## 当前数据库 Schema 策略
 
 产品存储的适用边界、原子初始化与结构拒绝行为见 [当前数据库 schema](invariants.md#当前数据库-schema)。协议版本 `winwincode/v1` 与各库的 SQLite `user_version` 是不同概念。

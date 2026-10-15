@@ -1,14 +1,13 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import assert from 'node:assert/strict'
-import { execFileSync } from 'node:child_process'
-import { createHash } from 'node:crypto'
 import { globSync, mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import test from 'node:test'
 
+import { pauseManagedProcess } from './fixtures/managed-process-pause.mjs'
 import { runApiProductionVertical } from '../scripts/run-api-production-vertical.mjs'
 import { deterministicDeviceProvider, waitFor } from '../scripts/device-production-fixture.mjs'
 import { readDeviceExecutionReceipts } from '../scripts/export-device-candidate.mjs'
@@ -43,19 +42,8 @@ function snapshot(database, jobId) {
   }
 }
 
-function originalTransportState(probe, message) {
-  const operation = `${probe.workerId}:${probe.workerInstanceId}:${message.messageId}`
-  const hash = createHash('sha256').update(operation).digest('hex')
-  const store = new DatabaseSync(probe.networkJournalPath, { readOnly: true })
-  try {
-    store.exec('PRAGMA busy_timeout=5000')
-    const row = store.prepare('SELECT state_json FROM network_queue_state WHERE operation_hash=?').get(hash)
-    const attempts = store.prepare('SELECT * FROM network_request_attempts WHERE operation_hash=? ORDER BY sequence').all(hash)
-    return { hash, state: row ? JSON.parse(row.state_json) : null, attempts }
-  } finally { store.close() }
-}
 
-test('Chat replays its original ready outcome after actual HTTPS business ACK response loss and a Server crash', async t => {
+test('Chat replays its original ready outcome after actual Device relay business ACK response loss and a Server crash', async t => {
   const directory = mkdtempSync(join(tmpdir(), 'wwc-chat-ready-ack-loss-'))
   const productSessionId = 'psn_01J00000000000000000000141'
   const requestId = 'req_01J00000000000000000000141'
@@ -79,9 +67,6 @@ test('Chat replays its original ready outcome after actual HTTPS business ACK re
       const database = new DatabaseSync(join(directory, 'server-data/control-plane.sqlite3'))
       database.exec('PRAGMA busy_timeout=5000')
       try {
-        // Hold the final ACK readiness commit. The actual Worker accounting
-        // reconciler must finish its signed handoff before SIGSTOP also freezes
-        // that background task. The trigger never inserts a fact or receipt.
         database.exec(`CREATE TRIGGER pause_ready_ack_loss BEFORE INSERT ON outbox
           WHEN NEW.topic='execution-outcome.acknowledgement-ready.v1'
             AND json_extract(CAST(NEW.payload AS TEXT),'$.jobId') IN
@@ -105,12 +90,10 @@ test('Chat replays its original ready outcome after actual HTTPS business ACK re
             && state.accounting.execution_attempt_accounting_totals.length === 1
             && state.accounting.execution_attempt_terminal_usage.length === 1
             ? outcomes[0] : false
-        }, 'the actual Worker completes cleanup and signed accounting while its original terminal still awaits business ACK', 120_000)
+        }, 'the actual Worker completes cleanup and accounting while its original terminal still awaits business ACK', 120_000)
         assert.equal(original.message.outcome.status, 'succeeded')
         const authority = database.prepare('SELECT * FROM execution_dispatch_authorities WHERE job_id=?').get(job.job_id)
         const probe = readWorkerTransport(devicePath.deviceData, authority)
-        // Product CodexThread is a canonical identity. The Core uses its own
-        // session identity, obtained from the actual retained Adapter run.
         const runs = globSync('**/worker-codex.sqlite3', { cwd: devicePath.deviceData }).flatMap(path => {
           const adapter = new DatabaseSync(join(devicePath.deviceData, path), { readOnly: true })
           try {
@@ -140,21 +123,12 @@ test('Chat replays its original ready outcome after actual HTTPS business ACK re
         assert.equal(beforeLoss.accounting.execution_attempt_provider_receipts.length, physicalReceipts,
           'all actual physical receipts reach CP through the live accounting reconciler before it is frozen')
         const httpCount = devicePath.modelServer.requests.length
-        // A stopped process can still have a request in flight at the Server.
-        // Freeze only in the original durable retry's quiet backoff window.
-        await waitFor(() => {
-          const before = originalTransportState(probe, original.message)
-          if (!before.state || before.state.in_flight || before.attempts.at(-1)?.outcome !== 'failed') return false
-          process.kill(probe.pid, 'SIGSTOP')
-          paused = probe.pid
-          const stopped = execFileSync('ps', ['-p', String(probe.pid), '-o', 'stat='], { encoding: 'utf8' }).trim()
-          const after = originalTransportState(probe, original.message)
-          if (stopped.startsWith('T') && after.state && !after.state.in_flight
-            && after.attempts.at(-1)?.outcome === 'failed') return after
-          process.kill(probe.pid, 'SIGCONT')
-          paused = null
-          return false
-        }, 'the actual Worker is stopped with its original failed exchange fully finished and no in-flight outcome', 30_000, 10)
+        await pauseManagedProcess(probe.pid, () => {
+          const [outcome] = readRetainedOutcomes(devicePath.deviceData, job.job_id)
+          return outcome?.delivery && !outcome.workerAcknowledged
+        }, { timeoutMillis: 30_000 })
+        paused = probe.pid
+        await new Promise(resolve => setTimeout(resolve, 10_100))
         assert.deepEqual(snapshot(database, job.job_id), beforeLoss,
           'freezing the actual Worker leaves its accepted result and completed cleanup unchanged')
         const [stoppedOutcome] = readRetainedOutcomes(devicePath.deviceData, job.job_id)
@@ -162,13 +136,9 @@ test('Chat replays its original ready outcome after actual HTTPS business ACK re
         assert.ok(stoppedOutcome.delivery)
         assert.equal(stoppedOutcome.workerAcknowledged, false)
         database.exec('DROP TRIGGER pause_ready_ack_loss')
-        // Forward the exact original bytes using the actual private launch
-        // credential. Drop this real successful response before reading its
-        // body; do not manufacture or acknowledge any response delivery.
-        const lost = await probe.postRetainedMessage(original.bytes, {
-          ca: readFileSync(join(directory, 'fixture-cert.pem')), loseResponseAfterHeaders: true,
-        })
-        assert.equal(lost.status, 200)
+        const lost = await probe.postRetainedMessage(original.bytes, { loseResponseAfterHeaders: true })
+        assert.equal(lost.httpStatus, 200)
+        assert.equal(lost.status, null)
         assert.equal(lost.responseLostAfterHeaders, true)
         assert.equal(lost.acknowledgement, null)
         const committed = await waitFor(() => {

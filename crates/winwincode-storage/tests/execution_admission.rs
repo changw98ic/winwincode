@@ -383,25 +383,24 @@ fn late_predecessor_receipts_are_additive_idempotent_and_do_not_revive_cancelled
 #[test]
 #[allow(
     clippy::too_many_lines,
-    reason = "signed financial lower bounds survive missing statistics, immutable terminal replay, restart and attempted rollback"
+    reason = "Provider financial lower bounds survive missing statistics, immutable terminal replay, restart and attempted rollback"
 )]
-fn signed_physical_lower_bounds_survive_missing_terminal_statistics_and_reopen() {
+fn provider_lower_bounds_survive_missing_terminal_statistics_and_reopen() {
     for (legacy_known, complete) in [(false, false), (true, false), (true, true)] {
-        reconcile_signed_physical_usage(legacy_known, complete);
+        reconcile_provider_usage(legacy_known, complete);
     }
 }
 
 #[allow(
     clippy::too_many_lines,
-    reason = "signed physical totals repair legacy logical accounting while preserving original source and terminal facts across restart"
+    reason = "Provider physical totals repair legacy logical accounting while preserving original source and terminal facts across restart"
 )]
-fn reconcile_signed_physical_usage(legacy_known: bool, complete: bool) {
+fn reconcile_provider_usage(legacy_known: bool, complete: bool) {
     use winwincode_domain::{
         FencingToken, LeaseId, ModelExchangeId, Sha256Digest, WorkerId, WorkerInstanceId,
     };
     use winwincode_execution_port::{
         accounting::{AttemptAccountingStatement, ProviderAccountingReceipt},
-        action_enforcement::ActionEnforcementSigningKey,
         generated::{
             ExecutionLeaseStamp, ExecutionOutcomeUsage, ExecutionOutcomeUsageAccountingStatus,
         },
@@ -518,7 +517,7 @@ fn reconcile_signed_physical_usage(legacy_known: bool, complete: bool) {
                 .unwrap()
         );
     }
-    let key = ActionEnforcementSigningKey::from_bytes([7; 32]).unwrap();
+
     let mut statement = AttemptAccountingStatement {
         lease: lease.clone(),
         manifest: vec!["primary:physical-attempts".into()],
@@ -532,11 +531,10 @@ fn reconcile_signed_physical_usage(legacy_known: bool, complete: bool) {
             known_tokens: if complete { 16 } else { 5 },
             cost_microunits: complete.then_some(9),
         }],
-        signature: Sha256Digest(String::new()),
     };
-    statement.sign(&key).unwrap();
+
     storage
-        .reconcile_provider_attempt(&statement.verified(&key).unwrap(), &at(4))
+        .reconcile_provider_attempt(&statement, &at(4))
         .unwrap();
     let combined = storage
         .combine_execution_attempt_usage(&lease, &raw)
@@ -557,7 +555,7 @@ fn reconcile_signed_physical_usage(legacy_known: bool, complete: bool) {
                     &at(4)
                 )
                 .unwrap(),
-            "an exact earlier receipt stays replayable after signed CURRENT uncertainty"
+            "an exact earlier receipt stays replayable after Provider CURRENT uncertainty"
         );
         let connection = rusqlite::Connection::open(storage.database_path()).unwrap();
         let facts: i64 = connection
@@ -573,7 +571,7 @@ fn reconcile_signed_physical_usage(legacy_known: bool, complete: bool) {
                 .combine_execution_attempt_usage(&lease, &raw)
                 .unwrap(),
             combined,
-            "exact replay preserves the current signed financial projection"
+            "exact replay preserves the current Provider financial projection"
         );
     }
     if !complete {
@@ -596,7 +594,7 @@ fn reconcile_signed_physical_usage(legacy_known: bool, complete: bool) {
                     &at(5)
                 )
                 .is_err(),
-            "raw final success cannot fill signed CURRENT physical uncertainty"
+            "raw final success cannot fill Provider CURRENT physical uncertainty"
         );
         let falsely_priced = ExecutionOutcomeUsage {
             runtime_millis: 1000,
@@ -630,7 +628,7 @@ fn reconcile_signed_physical_usage(legacy_known: bool, complete: bool) {
     drop(storage);
     let mut storage = SqliteStorage::open(&root).unwrap();
     storage
-        .reconcile_provider_attempt(&statement.verified(&key).unwrap(), &at(5))
+        .reconcile_provider_attempt(&statement, &at(5))
         .unwrap();
     assert_eq!(
         storage
@@ -688,10 +686,10 @@ fn reconcile_signed_physical_usage(legacy_known: bool, complete: bool) {
         1
     );
     statement.receipts[0].known_tokens = 4;
-    statement.sign(&key).unwrap();
+
     assert!(
         storage
-            .reconcile_provider_attempt(&statement.verified(&key).unwrap(), &at(6))
+            .reconcile_provider_attempt(&statement, &at(6))
             .is_err()
     );
     drop(connection);
@@ -709,7 +707,6 @@ fn reconcile_late_predecessor(tokens_first: bool) {
     };
     use winwincode_execution_port::{
         accounting::{AttemptAccountingStatement, ProviderAccountingReceipt},
-        action_enforcement::ActionEnforcementSigningKey,
         generated::{
             ExecutionLeaseStamp, ExecutionOutcomeUsage, ExecutionOutcomeUsageAccountingStatus,
         },
@@ -802,7 +799,7 @@ fn reconcile_late_predecessor(tokens_first: bool) {
         .unwrap()
         .release_with_unknown_usage(&terminal, &combined)
         .unwrap();
-    let key = ActionEnforcementSigningKey::from_bytes([7; 32]).unwrap();
+
     let mut statement = AttemptAccountingStatement {
         lease: lease.clone(),
         manifest: vec!["primary:mdl_00000000000000000000000190".into()],
@@ -816,12 +813,11 @@ fn reconcile_late_predecessor(tokens_first: bool) {
             known_tokens: 0,
             cost_microunits: (!tokens_first).then_some(7),
         }],
-        signature: Sha256Digest(String::new()),
     };
-    statement.sign(&key).unwrap();
-    statement.verify(&key).unwrap();
+
+    statement.validate().unwrap();
     storage
-        .reconcile_provider_attempt(&statement.verified(&key).unwrap(), &at(4))
+        .reconcile_provider_attempt(&statement, &at(4))
         .unwrap();
     let fixture = rusqlite::Connection::open(storage.database_path()).unwrap();
     let usage:String=fixture.query_row("SELECT usage_json FROM execution_admission_reconciliation_facts ORDER BY sequence DESC LIMIT 1",[],|row|row.get(0)).unwrap();
@@ -837,18 +833,18 @@ fn reconcile_late_predecessor(tokens_first: bool) {
     drop(storage);
     let mut storage = SqliteStorage::open(&root).unwrap();
     storage
-        .reconcile_provider_attempt(&statement.verified(&key).unwrap(), &at(5))
+        .reconcile_provider_attempt(&statement, &at(5))
         .unwrap();
     let token_only = statement.clone();
     statement.receipts[0].cost_microunits = Some(7);
     statement.receipts[0].tokens = Some(11);
     statement.receipts[0].source_digest = Sha256Digest(format!("sha256:{}", "c".repeat(64)));
-    statement.sign(&key).unwrap();
+
     storage
-        .reconcile_provider_attempt(&statement.verified(&key).unwrap(), &at(6))
+        .reconcile_provider_attempt(&statement, &at(6))
         .unwrap();
     storage
-        .reconcile_provider_attempt(&token_only.verified(&key).unwrap(), &at(7))
+        .reconcile_provider_attempt(&token_only, &at(7))
         .unwrap();
     assert!(
         !storage
@@ -888,18 +884,18 @@ fn reconcile_late_predecessor(tokens_first: bool) {
     );
     let mut foreign = statement.clone();
     foreign.lease.fencing_token = FencingToken("999".into());
-    foreign.sign(&key).unwrap();
+
     assert!(
         storage
-            .reconcile_provider_attempt(&foreign.verified(&key).unwrap(), &at(8))
+            .reconcile_provider_attempt(&foreign, &at(8))
             .is_err()
     );
     let mut changed = statement.clone();
     changed.receipts[0].tokens = Some(12);
-    changed.sign(&key).unwrap();
+
     assert!(
         storage
-            .reconcile_provider_attempt(&changed.verified(&key).unwrap(), &at(8))
+            .reconcile_provider_attempt(&changed, &at(8))
             .is_err()
     );
     let mut reused = statement.clone();
@@ -908,10 +904,10 @@ fn reconcile_late_predecessor(tokens_first: bool) {
     reused.receipts[0].slot = "primary:current".into();
     reused.receipts[0].tokens = Some(20);
     reused.receipts[0].cost_microunits = Some(30);
-    reused.sign(&key).unwrap();
+
     assert_eq!(
         storage
-            .reconcile_provider_attempt(&reused.verified(&key).unwrap(), &at(8))
+            .reconcile_provider_attempt(&reused, &at(8))
             .unwrap_err()
             .kind(),
         winwincode_storage::StorageErrorKind::InvalidInput,

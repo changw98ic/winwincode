@@ -17,11 +17,9 @@ use winwincode_execution_port::transport::{
     EndpointSide, LocalWorkerAdapter, RemoteTransportAdapter, TypedFrame,
 };
 use winwincode_storage::{
-    EXECUTION_PROTOCOL_VERSION, ExecutionJobState, ExecutionJobSubmission,
-    ExecutionJobTransitionRequest, ExecutionLeaseClaim, ExecutionQueueScope, NewOutboxEvent,
-    ProductStateStorage, ReceiptActorKey, ReceiptIdentity, ReceiptScopeKey, SqliteStorage,
-    StateCommit, WorkerAuthenticationIdentity, WorkerPlatform, WorkerRegistrationRequest,
-    WorkerRegistryScope,
+    ExecutionJobState, ExecutionJobSubmission, ExecutionJobTransitionRequest, ExecutionLeaseClaim,
+    ExecutionQueueScope, NewOutboxEvent, ProductStateStorage, ReceiptActorKey, ReceiptIdentity,
+    ReceiptScopeKey, SqliteStorage, StateCommit,
 };
 
 static NEXT_TEMP_DIRECTORY: AtomicU64 = AtomicU64::new(1);
@@ -367,80 +365,6 @@ fn claim_without_a_durable_execution_intent_is_rejected_before_lease_write() {
         "a rejected intent join must not write a claim receipt"
     );
     drop(registry);
-    Box::new(storage).close().expect("storage close");
-    fs::remove_dir_all(root).expect("directory release");
-}
-
-#[test]
-fn transport_authenticated_claim_without_durable_pool_placement_fails_closed() {
-    let root = temporary_directory("claim-missing-authenticated-placement");
-    let mut storage = SqliteStorage::open(&root).expect("storage open");
-    let expected: JobDispatchMessage = fixture_message("job.dispatch");
-    commit_durable_dispatch_intent(&mut storage, &expected.job);
-    let claim = claim_from_dispatch(&expected);
-    let register: WorkerRegisterMessage = fixture_message("worker.register");
-    storage
-        .execution_registry()
-        .expect("registry")
-        .register_worker_for_scope(
-            &WorkerRegistrationRequest {
-                authentication_identity: WorkerAuthenticationIdentity::TransportPrincipal {
-                    issuer: "fixture-remote-worker".to_owned(),
-                    subject: "remote-worker".to_owned(),
-                    credential_fingerprint: winwincode_domain::Sha256Digest(format!(
-                        "sha256:{}",
-                        "a".repeat(64)
-                    )),
-                },
-                protocol_version: EXECUTION_PROTOCOL_VERSION.to_owned(),
-                platform: WorkerPlatform::Aarch64AppleDarwin,
-                capabilities: vec!["codex".to_owned()],
-                capability_digest: winwincode_domain::Sha256Digest(format!(
-                    "sha256:{}",
-                    "b".repeat(64)
-                )),
-                security_zone: "remote-default".to_owned(),
-                max_slots: 1,
-                message_id: register.message_id,
-                request_id: register.request_id,
-                sent_at: claim.issued_at.clone(),
-                started_at: winwincode_domain::Instant("2026-08-24T11:59:00.000Z".to_owned()),
-                worker_id: claim.worker_id.clone(),
-                worker_instance_id: claim.worker_instance_id.clone(),
-            },
-            &WorkerRegistryScope::Repository {
-                organization_id: winwincode_domain::OrganizationId(
-                    "org_00000000000000000000000001".to_owned(),
-                ),
-                workspace_id: winwincode_domain::WorkspaceId(
-                    "wsp_00000000000000000000000001".to_owned(),
-                ),
-                project_id: winwincode_domain::ProjectId(
-                    "prj_00000000000000000000000001".to_owned(),
-                ),
-                repository_id: expected.job.workspace.repository_id.clone(),
-            },
-        )
-        .expect("transport Worker registration");
-
-    let mut service = ExecutionPortService::new(&mut storage, claim.issued_at.clone());
-    let error = service
-        .claim_execution_job(expected.job.clone(), claim.clone())
-        .expect_err("missing authenticated placement must fail closed");
-    assert!(matches!(
-        error,
-        ExecutionPortServiceError::AuthorityRejected("authenticated Worker placement is missing")
-    ));
-    drop(service);
-    assert!(
-        storage
-            .execution_registry()
-            .expect("registry")
-            .load_lease(&claim.job_id)
-            .expect("lease read")
-            .is_none(),
-        "fail-closed authenticated claim must not write a Registry lease"
-    );
     Box::new(storage).close().expect("storage close");
     fs::remove_dir_all(root).expect("directory release");
 }
@@ -1257,9 +1181,6 @@ mod runtime_router_fixture {
         WorkerSessionId, WorkspaceId, WorkspaceRevision,
     };
     use winwincode_domain::{RepositoryScope, UserActor};
-    use winwincode_execution_port::action_enforcement::{
-        ActionEnforcementIssuer, ActionEnforcementSigningKey,
-    };
     use winwincode_execution_port::generated::{
         ActionEnforcementDecision, ActionEnforcementRequestMessage,
         ActionEnforcementRequestMessageKind, ActionPolicyKind, ExecutionEventCategory,
@@ -2484,9 +2405,7 @@ mod runtime_router_fixture {
         let mut request = action_request(&fixture, seed);
         request.sent_at = Instant(sent_at.to_owned());
         fixture.control_plane.shutdown().expect("shutdown fixture");
-        let issuer = ActionEnforcementIssuer::new(
-            ActionEnforcementSigningKey::from_bytes([11_u8; 32]).expect("signing key"),
-        );
+
         let mut storage = SqliteStorage::open(&root).expect("reopen storage");
         install_runtime_lease(&mut storage, &fixture.runtime, &fixture.job, seed);
         let lease = &request.lease;
@@ -2517,26 +2436,24 @@ mod runtime_router_fixture {
             Instant("2027-01-15T08:06:00.000Z".into()),
         );
         let receipt = service
-            .enforce_action(&issuer, &request)
+            .enforce_action(&request)
             .expect("original action identity remains authorized by current renewed lease");
         assert_eq!(receipt.lease, request.lease);
         assert!(receipt.evaluated_at.0 > request.lease.expires_at.0);
         assert_eq!(
-            service
-                .enforce_action(&issuer, &request)
-                .expect("exact replay"),
+            service.enforce_action(&request).expect("exact replay"),
             receipt
         );
         let mut changed = request.clone();
         changed.lease.fencing_token = FencingToken("2".into());
-        assert!(service.enforce_action(&issuer, &changed).is_err());
+        assert!(service.enforce_action(&changed).is_err());
         changed = request.clone();
         changed.sent_at = request.lease.expires_at.clone();
-        assert!(service.enforce_action(&issuer, &changed).is_err());
+        assert!(service.enforce_action(&changed).is_err());
         drop(service);
         assert!(
             winwincode_control_plane::ExecutionPortService::new(&mut storage, renewed_expiry)
-                .enforce_action(&issuer, &request)
+                .enforce_action(&request)
                 .is_err()
         );
         Box::new(storage).close().expect("close storage");
@@ -2553,9 +2470,7 @@ mod runtime_router_fixture {
             .control_plane
             .shutdown()
             .expect("fixture Control Plane shutdown");
-        let issuer = ActionEnforcementIssuer::new(
-            ActionEnforcementSigningKey::from_bytes([11_u8; 32]).expect("signing key"),
-        );
+
         let first = {
             let mut storage = SqliteStorage::open(&root).expect("storage reopen");
             install_runtime_lease(&mut storage, &fixture.runtime, &fixture.job, seed);
@@ -2566,7 +2481,6 @@ mod runtime_router_fixture {
             let message = service
                 .handle_with_action_enforcement(
                     ExecutionPortMessage::ActionEnforcementRequestMessage(request.clone()),
-                    &issuer,
                 )
                 .expect("action receipt");
             let ExecutionPortMessage::ActionEnforcementReceiptMessage(receipt) = message else {
@@ -2590,14 +2504,14 @@ mod runtime_router_fixture {
             Instant("2027-01-15T08:00:01.300Z".to_owned()),
         );
         let replay = service
-            .enforce_action(&issuer, &request)
+            .enforce_action(&request)
             .expect("exact action receipt replay");
         assert_eq!(replay, first);
 
         let mut changed = request.clone();
         changed.resource = "action:shell:changed".to_owned();
         assert!(
-            service.enforce_action(&issuer, &changed).is_err(),
+            service.enforce_action(&changed).is_err(),
             "changed action reuse must fail closed"
         );
         drop(service);
@@ -2612,7 +2526,7 @@ mod runtime_router_fixture {
             Instant("2027-01-15T08:00:01.400Z".to_owned()),
         );
         assert!(
-            corrupt_service.enforce_action(&issuer, &request).is_err(),
+            corrupt_service.enforce_action(&request).is_err(),
             "noncanonical durable receipt bytes must fail closed"
         );
         drop(corrupt_service);

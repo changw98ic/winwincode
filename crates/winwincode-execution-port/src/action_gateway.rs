@@ -5,8 +5,7 @@ use std::fmt;
 use winwincode_domain::{Instant, RequestId, WorkerSessionId};
 
 use crate::action_enforcement::{
-    ActionEnforcementError, ActionEnforcementVerifier, ActionReceiptClaim, ActionReceiptUseError,
-    ActionReceiptUseStore,
+    ActionEnforcementError, ActionReceiptClaim, ActionReceiptUseError, ActionReceiptUseStore,
 };
 use crate::action_normalizer::{
     ActionIntent, ActionNormalization, ActionNormalizationError, IntentMismatch, ObservedAction,
@@ -298,7 +297,6 @@ where
         now: &Instant,
         action: &WorkerActionRequest,
         receipt: &ActionEnforcementReceiptMessage,
-        verifier: &ActionEnforcementVerifier,
         receipt_store: &mut dyn ActionReceiptUseStore,
     ) -> ActionGatewayResult<Executor::Output, Recorder::Error, Executor::Error> {
         validate_authority(now, &self.authority, &action.authority)?;
@@ -310,8 +308,7 @@ where
                 local_normalization.comparison.mismatches,
             ));
         }
-        let normalization = verifier
-            .verify(action, receipt)
+        let normalization = crate::action_enforcement::validate_action_receipt(action, receipt)
             .map_err(ActionGatewayError::ActionEnforcement)?;
 
         let decision = self.gate.decide(GateInput {

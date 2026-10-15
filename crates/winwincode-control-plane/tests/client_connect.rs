@@ -69,7 +69,6 @@ fn seed_client_node(storage: &mut SqliteStorage, seed: u64) -> String {
         "aarch64-unknown-linux-gnu",
         "aarch64",
         "1.0.0",
-        None,
         Some(instance_id(seed)),
         2,
     )

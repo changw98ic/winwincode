@@ -404,7 +404,6 @@ export async function runDeviceTaskVertical({
   const inputPath = taskInputPath ?? process.env.WWC_DEVICE_TASK_INPUT
   const input = inputPath ? loadDeviceAgentTask(inputPath) : null
   const serverEnvironment = deviceOnlyServerEnvironment({
-    WWC_SERVER_WORKER_MODE: 'remote',
     WWC_DEBUG_RUNTIME: '1',
     WWC_DEBUG_RUNTIME_LOG: join(directory, 'server-runtime.log'),
     WWC_SERVER_EXECUTION_LEASE_SECONDS: '600',

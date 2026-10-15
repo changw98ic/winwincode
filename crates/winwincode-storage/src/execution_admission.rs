@@ -944,8 +944,6 @@ impl<'storage> ExecutionAdmission<'storage> {
         })
     }
 
-    /// Reads the original terminal accounting fact, before later reconciliation facts.
-    /// Rejects invalid identifiers, a foreign terminal identity, corrupt usage, or storage failure.
     pub fn load_retained_terminal_usage(
         &self,
         job_id: &ExecutionJobId,
@@ -985,11 +983,6 @@ impl<'storage> ExecutionAdmission<'storage> {
         Ok(Some(usage))
     }
 
-    /// Retains a terminal usage fact after cancellation already released its reservation.
-    /// The original release receipt and reservation remain unchanged. The new request
-    /// identifies the terminal fact for subsequent accounting reconciliation.
-    /// Rejects changed replays, foreign/stale cancellation authority, inconsistent usage,
-    /// unresolved predecessor totals, an existing terminal fact, or storage failure.
     pub fn retain_released_terminal_usage(
         &mut self,
         request: &ExecutionReservationRelease,
@@ -1088,15 +1081,14 @@ impl<'storage> ExecutionAdmission<'storage> {
         )
     }
 
-    pub(crate) fn settle_verified_provider_reconciliation(
+    pub(crate) fn settle_imported_provider_reconciliation(
         &mut self,
         terminal_request_id: &RequestId,
         settlement_request_id: &RequestId,
         usage: &winwincode_execution_port::generated::ExecutionOutcomeUsage,
         observed_at: &Instant,
-        verified: &winwincode_execution_port::accounting::VerifiedAccountingStatement,
+        statement: &winwincode_execution_port::accounting::AttemptAccountingStatement,
     ) -> Result<bool, ExecutionAdmissionError> {
-        let statement = verified.statement();
         let digest = format!(
             "sha256:{:x}",
             Sha256::digest(
@@ -1166,8 +1158,6 @@ impl<'storage> ExecutionAdmission<'storage> {
             }
             return Ok(false);
         }
-        // Serialize the physical completeness check with its new financial fact.
-        // Exact receipts remain replayable after later Provider facts arrive.
         validate_reconciliation_predecessors(&tx, job_id, usage)?;
         let row:(String,String)=tx.query_row(
             "SELECT terminal_request_id,COALESCE((SELECT usage_json FROM execution_admission_reconciliation_facts f WHERE f.job_id=r.job_id ORDER BY sequence DESC LIMIT 1),terminal_usage_json) FROM execution_admission_reconciliation r WHERE job_id=?1",

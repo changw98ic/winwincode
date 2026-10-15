@@ -43,7 +43,6 @@ const save = () => writeFileSync(
 )
 
 const serverEnvironment = deviceOnlyServerEnvironment({
-  WWC_SERVER_WORKER_MODE: 'remote',
   WWC_SERVER_AUTH_MODE: 'local-open',
   WWC_DEBUG_RUNTIME: '1',
   WWC_DEBUG_RUNTIME_LOG: resolve(directory, 'server-runtime.log'),

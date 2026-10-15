@@ -8,7 +8,6 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use serde_json::Value;
-use sha2::{Digest, Sha256};
 use winwincode_client_port::domain::{
     ApplyResult, ApplyStrategy, ClientArchitecture, ClientCapacityReport, ClientPlatformTarget,
     LocalApplyReceipt, LocalCandidateState,
@@ -55,35 +54,16 @@ fn seed() -> DeviceIdentitySeed {
 
 const ASSIGNED_NODE: &str = "cnd_B2B2B2B2B2B2B2B2B2B2B2B2B2";
 const ASSIGNED_PUBLIC_CLIENT_ID: &str = "0123456789";
-const ISSUED_SECRET: [u8; 32] = [0x5d; 32];
 const STAMP: &str = "2026-09-04T00:00:00.000Z";
 const LEASE: &str = "ocl_APPLYENGINE00000000000000000000";
 const TOKEN: u64 = 5;
 const BINDING: &str = "rbd_APPLYENGINEBINDING000000000000";
 const WORKER_SESSION: &str = "wks_APPLYENGINE00000000000000000";
 
-fn issued_credential_material() -> String {
-    const HEX: &[u8; 16] = b"0123456789abcdef";
-    let mut encoded = String::with_capacity(ISSUED_SECRET.len() * 2);
-    for byte in ISSUED_SECRET {
-        encoded.push(HEX[usize::from(byte >> 4)] as char);
-        encoded.push(HEX[usize::from(byte & 0x0f)] as char);
-    }
-    encoded
-}
-
-fn issued_credential_digest() -> String {
-    format!("sha256:{:x}", Sha256::digest(ISSUED_SECRET))
-}
-
 struct NeverTransport;
 
 impl ExchangeTransport for NeverTransport {
-    fn exchange(
-        &self,
-        _credential: Option<&str>,
-        _request_bytes: &[u8],
-    ) -> Result<Vec<u8>, ExchangeTransportError> {
+    fn exchange(&self, _request_bytes: &[u8]) -> Result<Vec<u8>, ExchangeTransportError> {
         Err(ExchangeTransportError::new(
             "the apply engine must not exchange on its own",
         ))
@@ -128,8 +108,6 @@ fn open_enrolled(root: &Path) -> (DeviceStore, IdentityRecord) {
         &IssuedEnrollment {
             client_node_id: ASSIGNED_NODE.to_owned(),
             public_client_id: ASSIGNED_PUBLIC_CLIENT_ID.to_owned(),
-            credential_material: issued_credential_material(),
-            credential_digest: issued_credential_digest(),
         },
         STAMP,
     )
@@ -1350,11 +1328,7 @@ fn daemon_applies_the_complete_reworked_candidate_from_its_downlink() {
         base: String,
     }
     impl ExchangeTransport for ApplyTransport {
-        fn exchange(
-            &self,
-            _: Option<&str>,
-            bytes: &[u8],
-        ) -> Result<Vec<u8>, ExchangeTransportError> {
+        fn exchange(&self, bytes: &[u8]) -> Result<Vec<u8>, ExchangeTransportError> {
             let request: ExchangeRequest = serde_json::from_slice(bytes).unwrap();
             let first = &request.frames[0];
             let envelope = ServerToClientEnvelope {
@@ -1387,7 +1361,6 @@ fn daemon_applies_the_complete_reworked_candidate_from_its_downlink() {
                 replay_from_sequence: None,
                 frames: vec![serde_json::to_value(envelope).unwrap()],
                 enrollment: None,
-                worker_credentials: vec![],
             })
             .unwrap())
         }

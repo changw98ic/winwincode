@@ -8,9 +8,10 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use rusqlite::{Connection, OpenFlags, OptionalExtension, params};
+use rusqlite::{Connection, OpenFlags, params};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use winwincode_storage::CONTROL_PLANE_SCHEMA_VERSION as SERVER_CONTROL_PLANE_SCHEMA_VERSION;
 
 use crate::cli::WwcCliExit;
 
@@ -24,8 +25,6 @@ const MANIFEST_FORMAT: &str = "winwincode.local-backup.v1";
 
 const CONTROL_PLANE_DATABASE: &str = "control-plane";
 const DEVICE_CLIENT_DATABASE: &str = "device-client";
-
-const SERVER_CONTROL_PLANE_SCHEMA_VERSION: i64 = 6;
 
 const VACUUM_TMP_SUFFIX: &str = ".vacuum-tmp";
 const RESTORE_TMP_SUFFIX: &str = ".restore-tmp";
@@ -54,8 +53,8 @@ pub const BACKUP_HELP_LINES: [&str; 7] = [
     "  wwc backup verify --from BACKUP-DIR [--json]",
     "  wwc backup restore --store server|device --data-dir PATH --from BACKUP-DIR [--json]",
     "  wwc backup repair --store server|device --data-dir PATH [--apply] [--json]",
-    "backup 用 SQLite VACUUM INTO 取一致性快照，绝不用文件冷拷贝热库；备份产物不含明文凭据",
-    "（Device 凭据位清零，恢复时按 digest 回绑本机活库凭据，跨设备恢复身份被拒绝）；",
+    "backup 用 SQLite VACUUM INTO 取一致性快照，可用 wwc backup verify 校验。",
+    "Device 快照保留身份和运行状态，可恢复到空数据目录。",
     "restore 校验 schema 版本 fail closed；repair 默认只读诊断，--apply 只执行白名单动作并留痕。",
 ];
 
@@ -98,7 +97,6 @@ pub struct BackupDatabaseEntry {
     pub byte_count: u64,
     pub sha256: String,
     pub integrity: String,
-    pub credential_redacted: bool,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -519,19 +517,8 @@ fn snapshot_store(
         let vacuum_tmp = output.join(format!("{name}.sqlite3{VACUUM_TMP_SUFFIX}"));
         let schema_version = create_snapshot(&source, &vacuum_tmp)
             .map_err(|failure| cleanup_failed_snapshot(failure, &vacuum_tmp))?;
-        let credential_redacted = name == DEVICE_CLIENT_DATABASE;
-        if credential_redacted {
-            redact_device_credentials(&vacuum_tmp)
-                .map_err(|failure| cleanup_failed_snapshot(failure, &vacuum_tmp))?;
-        }
-        let entry = seal_snapshot(
-            &vacuum_tmp,
-            &snapshot_path,
-            &name,
-            schema_version,
-            credential_redacted,
-        )
-        .map_err(|failure| cleanup_failed_snapshot(failure, &vacuum_tmp))?;
+        let entry = seal_snapshot(&vacuum_tmp, &snapshot_path, &name, schema_version)
+            .map_err(|failure| cleanup_failed_snapshot(failure, &vacuum_tmp))?;
         entries.push(entry);
     }
     let manifest = BackupManifest {
@@ -629,40 +616,11 @@ fn create_snapshot(source: &Path, vacuum_tmp: &Path) -> Result<i64, BackupFailur
     Ok(schema_version)
 }
 
-fn redact_device_credentials(snapshot_tmp: &Path) -> Result<(), BackupFailure> {
-    let connection = open_live_connection(snapshot_tmp)?;
-    let credential_table: Option<String> = connection
-        .query_row(
-            "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'device_credential'",
-            [],
-            |row| row.get(0),
-        )
-        .optional()
-        .map_err(|error| BackupFailure::Failed {
-            code: "backup.redaction",
-            message: format!("读取快照 schema 失败：{error}"),
-        })?;
-    if credential_table.is_some() {
-        connection
-            .execute(
-                "UPDATE device_credential SET credential_secret = zeroblob(32)",
-                [],
-            )
-            .map_err(|error| BackupFailure::Failed {
-                code: "backup.redaction",
-                message: format!("快照凭据清零失败：{error}"),
-            })?;
-    }
-    drop(connection);
-    Ok(())
-}
-
 fn seal_snapshot(
     vacuum_tmp: &Path,
     snapshot_path: &Path,
     name: &str,
     schema_version: i64,
-    credential_redacted: bool,
 ) -> Result<BackupDatabaseEntry, BackupFailure> {
     let integrity = verify_snapshot_file(vacuum_tmp, name)?;
     let bytes = fs::read(vacuum_tmp).map_err(|error| BackupFailure::Failed {
@@ -690,7 +648,6 @@ fn seal_snapshot(
         byte_count: bytes.len() as u64,
         sha256: sha256_digest(&bytes),
         integrity,
-        credential_redacted,
     })
 }
 
@@ -829,41 +786,11 @@ fn verify_backup_entry(from: &Path, entry: &BackupDatabaseEntry, findings: &mut 
                 "{label}: 快照 schema 版本 {version} 与 manifest 记录 {} 不一致。",
                 entry.schema_version
             ));
-            return;
         }
         Err(error) => {
             findings.push(format!("{label}: 读取快照 schema 版本失败（{error}）。"));
-            return;
         }
     }
-    if entry.name == DEVICE_CLIENT_DATABASE {
-        match credential_redaction_finding(&connection) {
-            Ok(()) => {}
-            Err(finding) => findings.push(finding),
-        }
-    }
-}
-
-fn credential_redaction_finding(connection: &Connection) -> Result<(), String> {
-    let rows: Vec<(String, Vec<u8>)> = {
-        let mut statement = connection
-            .prepare("SELECT device_id, credential_secret FROM device_credential")
-            .map_err(|error| format!("device-client: device_credential 读取失败：{error}"))?;
-        let mapped = statement
-            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
-            .map_err(|error| format!("device-client: device_credential 读取失败：{error}"))?;
-        mapped
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(|error| format!("device-client: device_credential 读取失败：{error}"))?
-    };
-    for (device_id, secret) in rows {
-        if secret.len() != 32 || secret.iter().any(|byte| *byte != 0) {
-            return Err(format!(
-                "device-client: 快照携带明文设备凭据（device_id {device_id}），备份无效。"
-            ));
-        }
-    }
-    Ok(())
 }
 
 fn restore_store(
@@ -901,96 +828,18 @@ fn restore_store(
         code: "restore.data-directory",
         message: format!("数据目录不可用：{error}"),
     })?;
-    let live_credentials = if store == BackupStoreKind::Device {
-        Some(read_live_credentials(data_directory)?)
-    } else {
-        None
-    };
     let mut restored = Vec::new();
     for entry in &manifest.databases {
-        place_snapshot(
-            store,
-            data_directory,
-            from,
-            entry,
-            live_credentials.as_ref(),
-        )?;
+        place_snapshot(data_directory, from, entry)?;
         restored.push(entry.name.clone());
     }
     Ok(restored)
 }
 
-struct LiveCredential {
-    device_id: String,
-    secret: Vec<u8>,
-    digest: String,
-}
-
-fn read_live_credentials(data_directory: &Path) -> Result<Vec<LiveCredential>, BackupFailure> {
-    let live_path = data_directory.join(format!("{DEVICE_CLIENT_DATABASE}.sqlite3"));
-    if !live_path.is_file() {
-        return Err(BackupFailure::Refused {
-            code: "restore.device-credential-unavailable",
-            message: format!(
-                "目标目录没有活的 Device Client 本地库（{}）；备份不含凭据，\
-                 无法在新设备上恢复身份，请先完成该设备的本地初始化或重新 enrollment。",
-                live_path.display()
-            ),
-        });
-    }
-    let connection = open_live_connection(&live_path)?;
-    let rows: Vec<(String, Vec<u8>, String)> = {
-        let mut statement = connection
-            .prepare(
-                "SELECT device_id, credential_secret, credential_digest \
-                 FROM device_credential",
-            )
-            .map_err(|error| credential_read_failure(&error.to_string()))?;
-        let mapped = statement
-            .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
-            .map_err(|error| credential_read_failure(&error.to_string()))?;
-        mapped
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(|error| credential_read_failure(&error.to_string()))?
-    };
-    if rows.is_empty() {
-        return Err(BackupFailure::Refused {
-            code: "restore.device-credential-unavailable",
-            message: "本机 Device Client 本地库没有设备凭据行；无法完成凭据回绑。".to_owned(),
-        });
-    }
-    let mut credentials = Vec::new();
-    for (device_id, secret, digest) in rows {
-        if credential_digest(&secret) != digest {
-            return Err(BackupFailure::Refused {
-                code: "restore.credential-mismatch",
-                message: format!(
-                    "本机凭据与其 digest 不一致（device_id {device_id}）：本地库异常，拒绝恢复。"
-                ),
-            });
-        }
-        credentials.push(LiveCredential {
-            device_id,
-            secret,
-            digest,
-        });
-    }
-    Ok(credentials)
-}
-
-fn credential_read_failure(detail: &str) -> BackupFailure {
-    BackupFailure::Failed {
-        code: "restore.credential-read",
-        message: format!("读取本机设备凭据失败：{detail}"),
-    }
-}
-
 fn place_snapshot(
-    store: BackupStoreKind,
     data_directory: &Path,
     from: &Path,
     entry: &BackupDatabaseEntry,
-    live_credentials: Option<&Vec<LiveCredential>>,
 ) -> Result<(), BackupFailure> {
     let snapshot_path = from.join(&entry.file);
     let target = data_directory.join(&entry.file);
@@ -1000,9 +849,6 @@ fn place_snapshot(
         message: format!("{} 恢复拷贝失败：{error}", entry.name),
     })?;
     set_owner_only_permissions(&restore_tmp)?;
-    if store == BackupStoreKind::Device && entry.name == DEVICE_CLIENT_DATABASE {
-        rebind_device_credentials(&restore_tmp, live_credentials)?;
-    }
     for suffix in ["-wal", "-shm"] {
         let sidecar = target_with_suffix(&target, suffix);
         if sidecar.exists() {
@@ -1023,82 +869,6 @@ fn target_with_suffix(target: &Path, suffix: &str) -> PathBuf {
     let mut os_string = target.as_os_str().to_owned();
     os_string.push(suffix);
     PathBuf::from(os_string)
-}
-
-fn rebind_device_credentials(
-    restore_tmp: &Path,
-    live_credentials: Option<&Vec<LiveCredential>>,
-) -> Result<(), BackupFailure> {
-    let Some(live_credentials) = live_credentials else {
-        return Err(BackupFailure::Failed {
-            code: "restore.credential-missing",
-            message: "内部错误：Device 恢复缺少本机凭据。".to_owned(),
-        });
-    };
-    let connection = open_live_connection(restore_tmp)?;
-    let snapshot_credentials: Vec<(String, String)> = {
-        let mut statement = connection
-            .prepare("SELECT device_id, credential_digest FROM device_credential")
-            .map_err(|error| rebind_failure(&error.to_string()))?;
-        let mapped = statement
-            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
-            .map_err(|error| rebind_failure(&error.to_string()))?;
-        mapped
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(|error| rebind_failure(&error.to_string()))?
-    };
-    for (device_id, snapshot_digest) in snapshot_credentials {
-        let Some(live) = live_credentials
-            .iter()
-            .find(|credential| credential.device_id == device_id)
-        else {
-            return Err(BackupFailure::Refused {
-                code: "restore.credential-mismatch",
-                message: format!(
-                    "快照中的设备 {device_id} 不在本机活库中：备份不含凭据，跨设备恢复被拒绝。"
-                ),
-            });
-        };
-        if live.digest != snapshot_digest {
-            return Err(BackupFailure::Refused {
-                code: "restore.credential-mismatch",
-                message: format!(
-                    "设备 {device_id} 的凭据在备份后已轮换（digest 不一致）：\
-                     拒绝用旧快照覆盖，请先重新备份或经重新 enrollment 换身份。"
-                ),
-            });
-        }
-        connection
-            .execute(
-                "UPDATE device_credential SET credential_secret = ?1 WHERE device_id = ?2",
-                params![live.secret, live.device_id],
-            )
-            .map_err(|error| rebind_failure(&error.to_string()))?;
-    }
-    let still_zeroed: i64 = connection
-        .query_row(
-            "SELECT count(*) FROM device_credential WHERE credential_secret = zeroblob(32)",
-            [],
-            |row| row.get(0),
-        )
-        .map_err(|error| rebind_failure(&error.to_string()))?;
-    if still_zeroed > 0 {
-        return Err(BackupFailure::Failed {
-            code: "restore.credential-bind",
-            message: "凭据回绑不完整：仍有清零凭据残留。".to_owned(),
-        });
-    }
-    connection
-        .close()
-        .map_err(|(_, error)| rebind_failure(&error.to_string()))?;
-    Ok(())
-}
-
-fn rebind_failure(detail: &str) -> BackupFailure {
-    BackupFailure::Failed {
-        code: "restore.credential-bind",
-        message: format!("凭据回绑失败：{detail}"),
-    }
 }
 
 fn repair_store(
@@ -1374,10 +1144,6 @@ fn sha256_digest(bytes: &[u8]) -> String {
     format!("sha256:{:x}", Sha256::digest(bytes))
 }
 
-fn credential_digest(secret: &[u8]) -> String {
-    format!("sha256:{:x}", Sha256::digest(secret))
-}
-
 fn scan_secret_markers(bytes: &[u8]) -> Option<&'static str> {
     let mut normalized = Vec::with_capacity(bytes.len());
     normalized.extend(bytes.iter().filter_map(|byte| match byte {
@@ -1422,20 +1188,12 @@ fn render_plain(outcome: &BackupOutcome) -> String {
             for entry in databases {
                 let _ = writeln!(
                     output,
-                    "- {}：schema 版本 {}，{} 字节，sha256 {}（凭据已清零：{}）",
-                    entry.name,
-                    entry.schema_version,
-                    entry.byte_count,
-                    entry.sha256,
-                    if entry.credential_redacted {
-                        "是"
-                    } else {
-                        "否"
-                    }
+                    "- {}：schema 版本 {}，{} 字节，sha256 {}",
+                    entry.name, entry.schema_version, entry.byte_count, entry.sha256,
                 );
             }
             output.push_str(
-                "说明：快照经 VACUUM INTO 一致性 cut，产物不含明文凭据；可随时用 wwc backup verify 校验。\n",
+                "说明：快照经 VACUUM INTO 一致性 cut，可随时用 wwc backup verify 校验。\n",
             );
         }
         BackupOutcome::VerifyOk { store, databases } => {
@@ -1672,12 +1430,11 @@ mod tests {
         }
     }
 
-    fn seed_device_store(data_directory: &Path) -> (String, Vec<u8>) {
+    fn seed_device_store(data_directory: &Path) -> String {
         let mut store = DeviceStore::open(data_directory).expect("device store");
         let record = ensure_device_identity(&mut store, &device_seed(), "2026-09-05T00:00:00Z")
             .expect("device identity");
         let device_id = record.identity().device_id().to_owned();
-        let secret = record.credential().expose_secret().to_vec();
         drop(store);
         let database = connection(&data_directory.join("device-client.sqlite3"));
         database
@@ -1693,12 +1450,7 @@ mod tests {
             )
             .expect("seed outbox and cursor");
         drop(database);
-        (device_id, secret)
-    }
-
-    fn secret_in_file(secret: &[u8], path: &Path) -> bool {
-        let bytes = fs::read(path).expect("snapshot bytes");
-        secret.len() <= bytes.len() && bytes.windows(secret.len()).any(|window| window == secret)
+        device_id
     }
 
     #[test]
@@ -1915,7 +1667,7 @@ mod tests {
         let fixture = Fixture::new("device-newer-schema");
         let data = fixture.data_arg();
         let backup = fixture.backup_arg();
-        let (device_id, secret) = seed_device_store(&fixture.data_dir());
+        let device_id = seed_device_store(&fixture.data_dir());
         let data_directory = fixture.data_dir();
         assert_success(&run(&[
             "snapshot",
@@ -1953,15 +1705,14 @@ mod tests {
             .expect("identity load")
             .expect("identity present");
         assert_eq!(record.identity().device_id(), device_id);
-        assert_eq!(record.credential().expose_secret(), secret);
     }
 
     #[test]
-    fn device_snapshot_redacts_credential_and_restore_keeps_identity_state() {
+    fn device_snapshot_and_restore_keep_identity_state() {
         let fixture = Fixture::new("device-round-trip");
         let data = fixture.data_arg();
         let backup = fixture.backup_arg();
-        let (device_id, secret) = seed_device_store(&fixture.data_dir());
+        let device_id = seed_device_store(&fixture.data_dir());
         let data_directory = fixture.data_dir();
 
         let snapshot = run(&[
@@ -1978,32 +1729,6 @@ mod tests {
         assert_eq!(value["status"], "snapshot-complete");
         let entry = &value["databases"][0];
         assert_eq!(entry["name"], "device-client");
-        assert_eq!(entry["credential_redacted"], true);
-
-        let snapshot_path = fixture.backup_dir().join("device-client.sqlite3");
-        assert!(!secret_in_file(&secret, &snapshot_path));
-        {
-            let database = connection(&snapshot_path);
-            let (length, nonzero): (i64, i64) = database
-                .query_row(
-                    "SELECT length(credential_secret), \
-                     (SELECT count(*) FROM device_credential \
-                      WHERE credential_secret != zeroblob(32)) \
-                     FROM device_credential",
-                    [],
-                    |row| Ok((row.get(0)?, row.get(1)?)),
-                )
-                .expect("redaction check");
-            assert_eq!(length, 32);
-            assert_eq!(nonzero, 0);
-        }
-        {
-            let store = DeviceStore::open(&data_directory).expect("live store");
-            let record = load_device_identity(&store)
-                .expect("identity load")
-                .expect("identity present");
-            assert_eq!(record.credential().expose_secret(), secret);
-        }
 
         {
             let database = connection(&data_directory.join("device-client.sqlite3"));
@@ -2029,7 +1754,6 @@ mod tests {
             .expect("identity load")
             .expect("identity present");
         assert_eq!(record.identity().device_id(), device_id);
-        assert_eq!(record.credential().expose_secret(), secret);
         assert_eq!(
             count(
                 &data_directory,
@@ -2053,48 +1777,7 @@ mod tests {
     }
 
     #[test]
-    fn restore_rejects_snapshot_when_live_device_credential_rotated() {
-        let fixture = Fixture::new("device-credential-mismatch");
-        let data = fixture.data_arg();
-        let backup = fixture.backup_arg();
-        seed_device_store(&fixture.data_dir());
-        let data_directory = fixture.data_dir();
-        assert_success(&run(&[
-            "snapshot",
-            "--store",
-            "device",
-            "--data-dir",
-            &data,
-            "--output",
-            &backup,
-        ]));
-        {
-            let database = connection(&data_directory.join("device-client.sqlite3"));
-            database
-                .execute("UPDATE device_credential SET credential_digest = ?", [])
-                .expect_err("missing parameter should fail");
-            database
-                .execute(
-                    "UPDATE device_credential SET credential_digest = ?1",
-                    params![format!("sha256:{}", "0".repeat(64))],
-                )
-                .expect("rotate digest");
-        }
-        let restore = run(&[
-            "restore",
-            "--store",
-            "device",
-            "--data-dir",
-            &data,
-            "--from",
-            &backup,
-        ]);
-        assert_eq!(restore.code, EXIT_SERVICE, "stderr: {}", restore.stderr);
-        assert!(restore.stderr.contains("restore.credential-mismatch"));
-    }
-
-    #[test]
-    fn restore_rejects_device_backup_without_live_store() {
+    fn device_backup_restores_into_an_empty_directory() {
         let fixture = Fixture::new("device-cross-restore");
         let backup = fixture.backup_arg();
         let device_data = fixture.root.join("origin");
@@ -2118,61 +1801,9 @@ mod tests {
             "--from",
             &backup,
         ]);
-        assert_eq!(restore.code, EXIT_SERVICE, "stderr: {}", restore.stderr);
-        assert!(
-            restore
-                .stderr
-                .contains("restore.device-credential-unavailable")
-        );
-    }
-
-    #[test]
-    fn verify_rejects_snapshot_carrying_plaintext_device_credential() {
-        let fixture = Fixture::new("verify-secret");
-        let data = fixture.data_arg();
-        let backup = fixture.backup_arg();
-        let (_, secret) = seed_device_store(&fixture.data_dir());
-        assert_success(&run(&[
-            "snapshot",
-            "--store",
-            "device",
-            "--data-dir",
-            &data,
-            "--output",
-            &backup,
-        ]));
-        {
-            let snapshot_path = fixture.backup_dir().join("device-client.sqlite3");
-            let database = connection(&snapshot_path);
-            database
-                .execute(
-                    "UPDATE device_credential SET credential_secret = ?1",
-                    params![secret],
-                )
-                .expect("re-plant secret");
-            drop(database);
-            let manifest_path = fixture.backup_dir().join("manifest.json");
-            let bytes = fs::read(&manifest_path).expect("manifest");
-            let mut manifest: BackupManifest =
-                serde_json::from_slice(&bytes).expect("manifest json");
-            let snapshot_bytes = fs::read(&snapshot_path).expect("snapshot");
-            for entry in &mut manifest.databases {
-                entry.byte_count = snapshot_bytes.len() as u64;
-                entry.sha256 = sha256_digest(&snapshot_bytes);
-            }
-            fs::write(
-                &manifest_path,
-                serde_json::to_vec_pretty(&manifest).expect("manifest encode"),
-            )
-            .expect("rewrite manifest");
-        }
-        let verify = run(&["verify", "--from", &fixture.backup_arg()]);
-        assert_eq!(
-            verify.code, EXIT_DIAGNOSTIC_FAILED,
-            "stderr: {}",
-            verify.stderr
-        );
-        assert!(verify.stderr.contains("明文设备凭据"));
+        assert_success(&restore);
+        let store = DeviceStore::open(&other).expect("restored store");
+        assert!(load_device_identity(&store).unwrap().is_some());
     }
 
     #[test]
@@ -2274,7 +1905,7 @@ mod tests {
     fn repair_without_apply_is_read_only_and_records_a_trace() {
         let fixture = Fixture::new("repair-diagnose");
         let data = fixture.data_arg();
-        let (device_id, secret) = seed_device_store(&fixture.data_dir());
+        let device_id = seed_device_store(&fixture.data_dir());
         let data_directory = fixture.data_dir();
         let before = fs::read(data_directory.join("device-client.sqlite3")).expect("before bytes");
 
@@ -2299,7 +1930,6 @@ mod tests {
             .expect("identity load")
             .expect("identity present");
         assert_eq!(record.identity().device_id(), device_id);
-        assert_eq!(record.credential().expose_secret(), secret);
     }
 
     #[test]
@@ -2340,7 +1970,7 @@ mod tests {
             count(
                 &data_directory,
                 "device-client.sqlite3",
-                "SELECT count(*) FROM device_credential"
+                "SELECT count(*) FROM device_identity"
             ),
             1
         );
@@ -2401,14 +2031,6 @@ mod tests {
                 b"sha256:aa71ae5f2b6f4d9c1a2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d5e6faa71"
             ),
             None
-        );
-    }
-
-    #[test]
-    fn credential_digest_matches_device_client_formula() {
-        assert_eq!(
-            credential_digest(b"test-secret"),
-            format!("sha256:{:x}", Sha256::digest(b"test-secret"))
         );
     }
 

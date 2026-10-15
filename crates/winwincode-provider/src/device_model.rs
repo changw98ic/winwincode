@@ -1880,7 +1880,6 @@ mod tests {
             },
             time::Duration,
         };
-        use winwincode_execution_port::action_enforcement::ActionEnforcementSigningKey;
 
         let root = std::env::temp_dir().join(format!(
             "wwc-accounting-model-concurrency-{}-{}",
@@ -1980,10 +1979,7 @@ mod tests {
             let accounting = accounting.borrow_mut().take().unwrap();
             let lease = old.lease.clone();
             *task.borrow_mut() = Some(std::thread::spawn(move || {
-                accounting.accounting_statement(
-                    &lease,
-                    &ActionEnforcementSigningKey::from_bytes([7; 32]).unwrap(),
-                )
+                accounting.accounting_statement(&lease)
             }));
             scanned.recv_timeout(Duration::from_secs(10)).unwrap();
         };
@@ -2021,12 +2017,9 @@ mod tests {
             scan_result.is_err(),
             "a stale accounting snapshot must retry rather than close a changed database"
         );
-        let key = ActionEnforcementSigningKey::from_bytes([7; 32]).unwrap();
-        let statement = store
-            .accounting_statement(&old.lease, &key)
-            .unwrap()
-            .unwrap();
-        statement.verify(&key).unwrap();
+
+        let statement = store.accounting_statement(&old.lease).unwrap().unwrap();
+        statement.validate().unwrap();
         let mut forbidden = old.clone();
         forbidden.model_exchange_id.0 = "mdl_00000000000000000000000998".into();
         assert!(

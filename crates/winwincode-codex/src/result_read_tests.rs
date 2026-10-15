@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 use super::super::ExecutionPortActionGate;
-use super::super::tests::{binding, catalog, signing_key};
+use super::super::tests::{binding, catalog};
 use winwincode_domain::Instant;
+
 use winwincode_kernel::{KernelActionGate, KernelToolResultReadRequest};
 
 fn read_request() -> KernelToolResultReadRequest {
@@ -24,7 +25,6 @@ async fn stored_result_read_is_receipt_bound_and_current_lease_fenced() {
     let gate = ExecutionPortActionGate::open(
         home.as_path(),
         catalog(),
-        signing_key(),
         crate::model_bridge::SharedAuthoritySource::default(),
     )
     .unwrap();
@@ -59,7 +59,6 @@ async fn expired_unknown_and_delegated_result_reads_are_rejected() {
     let gate = ExecutionPortActionGate::open(
         home.as_path(),
         catalog(),
-        signing_key(),
         crate::model_bridge::SharedAuthoritySource::default(),
     )
     .unwrap();
@@ -85,7 +84,6 @@ async fn result_read_authority_expires_without_owner_clock_refresh() {
     let gate = ExecutionPortActionGate::open(
         &home,
         catalog(),
-        signing_key(),
         crate::model_bridge::SharedAuthoritySource::default(),
     )
     .unwrap();

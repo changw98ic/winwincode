@@ -6,7 +6,7 @@ use serde::Serialize;
 use sha2::{Digest, Sha256};
 use winwincode_domain::{Instant, Sha256Digest, WorkerSessionId};
 
-use crate::action_enforcement::{ActionEnforcementVerifier, ActionReceiptUseStore};
+use crate::action_enforcement::ActionReceiptUseStore;
 use crate::action_gateway::{
     ActionGatewayError, CodexToolExecutor, DeterministicActionGate, ExecutedAction,
     PreActionDecisionRecorder, WorkerActionGateway, WorkerActionRequest,
@@ -384,7 +384,6 @@ where
         &mut self,
         now: &Instant,
         invocation: CapabilityInvocationRequest<'_>,
-        verifier: &ActionEnforcementVerifier,
         receipt_store: &mut dyn ActionReceiptUseStore,
     ) -> CapabilityAdapterResult<Executor::Output, Recorder::Error, Executor::Error> {
         let actual_id = match &invocation.action.request {
@@ -462,7 +461,6 @@ where
                 now,
                 invocation.action,
                 invocation.enforcement_receipt,
-                verifier,
                 receipt_store,
             )
             .map_err(|error| CapabilityAdapterError::Gateway(Box::new(error)))?;

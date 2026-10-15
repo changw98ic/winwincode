@@ -8,9 +8,8 @@ import {
   readdirSync,
   rmSync,
   statSync,
-  writeFileSync,
 } from 'node:fs'
-import { createServer } from 'node:https'
+import { createServer } from 'node:http'
 import { createServer as createNetServer } from 'node:net'
 import { tmpdir } from 'node:os'
 import { join, normalize, resolve } from 'node:path'
@@ -35,29 +34,6 @@ function command(name, args) {
   assert.equal(result.status, 0, `${name} failed:\n${result.stdout}${result.stderr}`)
 }
 
-function certificate(directory) {
-  const configuration = join(directory, 'openssl.cnf')
-  const key = join(directory, 'fixture-key.pem')
-  const cert = join(directory, 'fixture-cert.pem')
-  writeFileSync(configuration, `[req]
-distinguished_name = dn
-x509_extensions = extensions
-prompt = no
-[dn]
-CN = control.localhost
-[extensions]
-subjectAltName = @names
-[names]
-DNS.1 = control.localhost
-DNS.2 = client.localhost
-`)
-  command('openssl', [
-    'req', '-x509', '-newkey', 'rsa:2048', '-nodes', '-sha256', '-days', '1',
-    '-config', configuration, '-keyout', key, '-out', cert,
-  ])
-  return { key, cert }
-}
-
 async function listen(server, port = 0) {
   await new Promise((resolvePromise, reject) => {
     server.once('error', reject)
@@ -66,7 +42,7 @@ async function listen(server, port = 0) {
   return server.address().port
 }
 
-function staticClientServer(cert, controlConfiguration) {
+function staticClientServer(controlConfiguration) {
   const moduleRoot = resolve(root, 'apps/client/dist/module')
   const browserCoreRoot = resolve(root, 'packages/browser-core/dist')
   const browserUiRoot = resolve(root, 'packages/browser-ui/dist')
@@ -81,9 +57,8 @@ function staticClientServer(cert, controlConfiguration) {
       '<script type="module" src="/fixture/browser-local-controls-client.mjs"></script>',
     )
   return createServer(
-    { key: readFileSync(cert.key), cert: readFileSync(cert.cert) },
     (request, response) => {
-      const path = new URL(request.url, 'https://client.localhost').pathname
+      const path = new URL(request.url, 'http://127.0.0.1').pathname
       if (path === '/') {
         response.writeHead(200, {
           'Content-Type': 'text/html; charset=utf-8',
@@ -160,8 +135,8 @@ function fixtureTargetDirectory() {
     : resolve(root, configured)
 }
 
-function startFixture({ cert, clientOrigin, controlPort, directory, proof, errors }) {
-  const controlUrl = `https://control.localhost:${String(controlPort)}`
+function startFixture({ clientOrigin, controlPort, directory, proof, errors }) {
+  const controlUrl = `http://127.0.0.1:${String(controlPort)}`
   const child = spawn(
     resolve(fixtureTargetDirectory(), 'debug/examples/browser_local_controls_fixture'),
     [],
@@ -174,8 +149,6 @@ function startFixture({ cert, clientOrigin, controlPort, directory, proof, error
         WWC_SERVER_DATA_DIRECTORY: join(directory, 'server-data'),
         WWC_SERVER_ALLOWED_ORIGINS: clientOrigin,
         WWC_SERVER_BOOTSTRAP_PROOF: proof,
-        WWC_SERVER_TLS_CERTIFICATE: cert.cert,
-        WWC_SERVER_TLS_PRIVATE_KEY: cert.key,
       },
       stdio: ['ignore', 'pipe', 'pipe'],
     },
@@ -194,7 +167,7 @@ async function waitForServer(controlUrl, child, errors) {
     assert.equal(child.exitCode, null, `fixture Server exited:\n${errors.join('')}`)
     const response = spawnSync(
       'curl',
-      ['-ksS', '--noproxy', '*', `https://127.0.0.1:${port}/health`],
+      ['-sS', '--noproxy', '*', `http://127.0.0.1:${port}/health`],
       { encoding: 'utf8' },
     )
     if (response.status === 0 && JSON.parse(response.stdout).status === 'ready') return
@@ -327,11 +300,10 @@ test('real browser preserves local settings, decisions, resume cursors, and revo
     ])
   }
   const directory = mkdtempSync(join(tmpdir(), 'winwincode-browser-local-controls-'))
-  const cert = certificate(directory)
   let controlUrl = ''
-  const clientServer = staticClientServer(cert, () => ({ serverUrl: controlUrl }))
+  const clientServer = staticClientServer(() => ({ serverUrl: controlUrl }))
   const clientPort = await listen(clientServer)
-  const clientOrigin = `https://client.localhost:${String(clientPort)}`
+  const clientOrigin = `http://127.0.0.1:${String(clientPort)}`
   const controlPort = await freePort()
   const proof = `proof-${randomBytes(24).toString('base64url')}`
   const firstLocator = `vault://browser/${randomBytes(20).toString('base64url')}`
@@ -351,7 +323,6 @@ test('real browser preserves local settings, decisions, resume cursors, and revo
   })
 
   ;({ child: standalone, controlUrl } = startFixture({
-    cert,
     clientOrigin,
     controlPort,
     directory,
@@ -362,7 +333,7 @@ test('real browser preserves local settings, decisions, resume cursors, and revo
   const initializationProbe = spawnSync(
     'curl',
     [
-      '-ksS',
+      '-sS',
       '--noproxy', '*',
       '-H', `Origin: ${clientOrigin}`,
       `${controlUrl}/api/v1/server/initialization`,
@@ -379,7 +350,6 @@ test('real browser preserves local settings, decisions, resume cursors, and revo
   chrome = spawn(chromePath, [
     '--headless=new',
     '--disable-gpu',
-    '--ignore-certificate-errors',
     '--no-first-run',
     '--no-default-browser-check',
     `--remote-debugging-port=${String(debugPort)}`,
@@ -414,7 +384,6 @@ test('real browser preserves local settings, decisions, resume cursors, and revo
 
   await stopChild(standalone, 'SIGINT')
   ;({ child: standalone, controlUrl } = startFixture({
-    cert,
     clientOrigin,
     controlPort,
     directory,

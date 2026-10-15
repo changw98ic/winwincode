@@ -8,8 +8,7 @@ use std::{
 
 use serde_json::{Value, from_value};
 use winwincode_control_plane::{
-    ExecutionPortService, RemoteWorkerAuthenticationError, RemoteWorkerAuthenticator,
-    RemoteWorkerConnection, RemoteWorkerConnectionState, RemoteWorkerCredential,
+    ExecutionPortService, RemoteWorkerConnection, RemoteWorkerConnectionState,
     RemoteWorkerPoolAdapter, RemoteWorkerPrincipal,
 };
 use winwincode_domain::{
@@ -35,7 +34,6 @@ use winwincode_storage::{
     ReceiptScopeKey, SqliteStorage, StateCommit, WorkerPoolId, WorkerRegistryScope,
 };
 
-const REMOTE_PROOF: &[u8] = b"REMOTE_WORKER_FIXTURE_PROOF";
 static NEXT_DIRECTORY: AtomicU64 = AtomicU64::new(1);
 
 struct TestDirectory(PathBuf);
@@ -59,34 +57,8 @@ impl Drop for TestDirectory {
 }
 
 #[derive(Clone)]
-struct FixedAuthenticator {
-    principal: RemoteWorkerPrincipal,
-}
-
-impl RemoteWorkerAuthenticator for FixedAuthenticator {
-    fn authenticate(
-        &self,
-        credential: &RemoteWorkerCredential,
-        _now: &Instant,
-    ) -> Result<RemoteWorkerPrincipal, RemoteWorkerAuthenticationError> {
-        if credential.expose_for_verification() == REMOTE_PROOF {
-            Ok(self.principal.clone())
-        } else {
-            Err(RemoteWorkerAuthenticationError::rejected())
-        }
-    }
-
-    fn ensure_active(
-        &self,
-        principal: &RemoteWorkerPrincipal,
-        _now: &Instant,
-    ) -> Result<(), RemoteWorkerAuthenticationError> {
-        if principal == &self.principal {
-            Ok(())
-        } else {
-            Err(RemoteWorkerAuthenticationError::rejected())
-        }
-    }
+struct WorkerRoute {
+    scope: WorkerRegistryScope,
 }
 
 fn fixture_message<T: serde::de::DeserializeOwned>(kind: &str) -> T {
@@ -441,34 +413,28 @@ fn registry_scope(scope: &RepositoryScope) -> WorkerRegistryScope {
     }
 }
 
-fn remote_authenticator(scope: &RepositoryScope) -> FixedAuthenticator {
-    FixedAuthenticator {
-        principal: RemoteWorkerPrincipal::new(
-            fixture_message::<WorkerRegisterMessage>("worker.register").worker_id,
-            WorkerPoolId("wpl_00000000000000000000000905".to_owned()),
-            registry_scope(scope),
-            "remote-worker-issuer".to_owned(),
-            "remote-worker-subject".to_owned(),
-            Sha256Digest(format!("sha256:{}", "9".repeat(64))),
-            "remote-zone".to_owned(),
-        )
-        .expect("remote principal"),
+fn remote_route(scope: &RepositoryScope) -> WorkerRoute {
+    WorkerRoute {
+        scope: registry_scope(scope),
     }
-}
-
-fn credential() -> RemoteWorkerCredential {
-    RemoteWorkerCredential::new(REMOTE_PROOF.to_vec()).expect("remote credential")
 }
 
 fn connect_and_register(
     storage: &mut SqliteStorage,
-    authenticator: &FixedAuthenticator,
+    route: &WorkerRoute,
     registration: &WorkerRegisterMessage,
 ) -> (RemoteWorkerConnection, ExecutionPortMessage) {
-    let mut adapter = RemoteWorkerPoolAdapter::new(storage, authenticator);
-    let mut connection = adapter
-        .connect(&credential(), &registration.sent_at)
-        .expect("authenticated remote connection");
+    let mut adapter = RemoteWorkerPoolAdapter::new(storage);
+    let principal = RemoteWorkerPrincipal::new(
+        registration.worker_id.clone(),
+        registration.worker_instance_id.clone(),
+        WorkerPoolId("wpl_00000000000000000000000905".to_owned()),
+        route.scope.clone(),
+        "cnd_00000000000000000000000001".to_owned(),
+        "wsn_00000000000000000000000001".to_owned(),
+    )
+    .unwrap();
+    let mut connection = adapter.connect(principal);
     let response = adapter
         .accept(
             &mut connection,
@@ -505,23 +471,23 @@ fn heartbeat_for(
 
 fn remote_accept(
     storage: &mut SqliteStorage,
-    authenticator: &FixedAuthenticator,
+    _route: &WorkerRoute,
     connection: &mut RemoteWorkerConnection,
     message: &ExecutionPortMessage,
     now: &Instant,
 ) -> ExecutionPortMessage {
-    RemoteWorkerPoolAdapter::new(storage, authenticator)
+    RemoteWorkerPoolAdapter::new(storage)
         .accept(connection, message, now)
         .expect("remote Worker message")
 }
 
 fn activate_remote_worker(
     storage: &mut SqliteStorage,
-    authenticator: &FixedAuthenticator,
+    route: &WorkerRoute,
     registration: &WorkerRegisterMessage,
     lease: &ExecutionLeaseClaim,
 ) -> RemoteWorkerConnection {
-    let (mut connection, registered) = connect_and_register(storage, authenticator, registration);
+    let (mut connection, registered) = connect_and_register(storage, route, registration);
     let ExecutionPortMessage::WorkerRegistrationResultMessage(registered) = registered else {
         panic!("remote registration result")
     };
@@ -545,7 +511,7 @@ fn activate_remote_worker(
     stale.lease.fencing_token = FencingToken("41".to_owned());
     let stale = remote_accept(
         storage,
-        authenticator,
+        route,
         &mut connection,
         &ExecutionPortMessage::JobDispatchResultMessage(stale),
         &Instant("2026-08-24T12:00:01.000Z".to_owned()),
@@ -560,7 +526,7 @@ fn activate_remote_worker(
     unissued.lease.expires_at = Instant("2026-08-24T12:09:00.000Z".to_owned());
     let unissued = remote_accept(
         storage,
-        authenticator,
+        route,
         &mut connection,
         &ExecutionPortMessage::JobDispatchResultMessage(unissued),
         &Instant("2026-08-24T12:00:02.000Z".to_owned()),
@@ -582,7 +548,7 @@ fn activate_remote_worker(
     let active_heartbeat = heartbeat_for(registration, 1, 1, true);
     remote_accept(
         storage,
-        authenticator,
+        route,
         &mut connection,
         &ExecutionPortMessage::WorkerHeartbeatMessage(active_heartbeat.clone()),
         &active_heartbeat.observed_at,
@@ -592,13 +558,13 @@ fn activate_remote_worker(
 
 fn disconnect_and_replace(
     storage: &mut SqliteStorage,
-    authenticator: &FixedAuthenticator,
+    route: &WorkerRoute,
     connection: &mut RemoteWorkerConnection,
     replacement: &WorkerRegisterMessage,
     lease: &ExecutionLeaseClaim,
 ) -> RemoteWorkerConnection {
     assert!(
-        RemoteWorkerPoolAdapter::new(storage, authenticator)
+        RemoteWorkerPoolAdapter::new(storage)
             .disconnect(connection)
             .expect("remote disconnect")
     );
@@ -607,7 +573,7 @@ fn disconnect_and_replace(
         RemoteWorkerConnectionState::Disconnected
     );
     let (replacement_connection, replacement_result) =
-        connect_and_register(storage, authenticator, replacement);
+        connect_and_register(storage, route, replacement);
     let ExecutionPortMessage::WorkerRegistrationResultMessage(replacement_result) =
         replacement_result
     else {
@@ -644,7 +610,7 @@ fn disconnect_and_replace(
 
 fn finish_and_report_capacity(
     storage: &mut SqliteStorage,
-    authenticator: &FixedAuthenticator,
+    route: &WorkerRoute,
     connection: &mut RemoteWorkerConnection,
     replacement: &WorkerRegisterMessage,
     lease: &ExecutionLeaseClaim,
@@ -670,7 +636,7 @@ fn finish_and_report_capacity(
     let recovered_heartbeat = heartbeat_for(replacement, 1, 5, false);
     remote_accept(
         storage,
-        authenticator,
+        route,
         connection,
         &ExecutionPortMessage::WorkerHeartbeatMessage(recovered_heartbeat.clone()),
         &recovered_heartbeat.observed_at,
@@ -682,25 +648,19 @@ fn finish_and_report_capacity(
 fn remote_disconnect_replacement_and_terminal_recover_after_restart() {
     let root = TestDirectory::new("remote-fleet");
     let scope = repository_scope();
-    let authenticator = remote_authenticator(&scope);
+    let route = remote_route(&scope);
     let registration: WorkerRegisterMessage = fixture_message("worker.register");
     let dispatch: JobDispatchMessage = fixture_message("job.dispatch");
     let lease = claim_from_dispatch(&dispatch);
     let mut storage = SqliteStorage::open(&root.0).expect("remote Fleet storage");
     commit_durable_dispatch_intent(&mut storage, &dispatch);
-    let mut connection =
-        activate_remote_worker(&mut storage, &authenticator, &registration, &lease);
+    let mut connection = activate_remote_worker(&mut storage, &route, &registration, &lease);
     let replacement = replacement_registration();
-    let mut replacement_connection = disconnect_and_replace(
-        &mut storage,
-        &authenticator,
-        &mut connection,
-        &replacement,
-        &lease,
-    );
+    let mut replacement_connection =
+        disconnect_and_replace(&mut storage, &route, &mut connection, &replacement, &lease);
     let terminal = finish_and_report_capacity(
         &mut storage,
-        &authenticator,
+        &route,
         &mut replacement_connection,
         &replacement,
         &lease,

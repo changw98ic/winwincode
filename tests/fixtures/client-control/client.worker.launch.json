@@ -18,7 +18,6 @@
     "workerSessionId": "wks_000000000000000000000001",
     "workerId": "wrk_000000000000000000000001",
     "workerInstanceId": "wki_000000000000000000000001",
-    "credentialDigest": "sha256:7d8e9f0a7d8e9f0a7d8e9f0a7d8e9f0a7d8e9f0a7d8e9f0a7d8e9f0a7d8e9f0a",
     "modelRoute": "default",
     "expiresAt": "2026-09-01T09:41:18.000Z"
   }

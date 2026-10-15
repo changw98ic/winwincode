@@ -3130,9 +3130,6 @@
         },
         "evaluatedAt": {
           "$ref": "./domain.schema.json#/$defs/Instant"
-        },
-        "receiptSignature": {
-          "$ref": "./domain.schema.json#/$defs/Sha256Digest"
         }
       },
       "required": [
@@ -3155,8 +3152,7 @@
         "policyMode",
         "policyVersion",
         "evaluationSha256",
-        "evaluatedAt",
-        "receiptSignature"
+        "evaluatedAt"
       ],
       "title": "action.enforcement_receipt",
       "description": "Immutable Control Plane-issued action receipt bound to repository scope, actor, Policy version, invocation, action digest, and current Worker authority.",

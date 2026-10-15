@@ -69,7 +69,7 @@ function retainedRequests(deviceData, jobId, family, attempt = 1) {
   })
 }
 
-function signedActionReceipt(cp, request) {
+function actionReceipt(cp, request) {
   const suffix = sha256(request.requestId)
   const row = cp.prepare('SELECT revision,payload FROM product_state WHERE stream_id=?')
     .get(`action-enforcement-receipt:${suffix}`)
@@ -77,7 +77,7 @@ function signedActionReceipt(cp, request) {
   const bytes = Buffer.from(row.payload)
   const receipt = jsonBytes(bytes)
   for (const field of ['requestId', 'jobId', 'workerSessionId', 'sessionIdentity', 'lease']) {
-    assert.deepEqual(receipt[field], request[field], `the signed action receipt keeps original ${field}`)
+    assert.deepEqual(receipt[field], request[field], `the action receipt keeps original ${field}`)
   }
   return { revision: row.revision, bytes, receipt }
 }
@@ -483,7 +483,7 @@ test('Chat formal user rejection consumes the original approval and never runs t
     }, { gated: false })
 })
 
-test('Chat signed action receipt write failure keeps the original pending action instead of fabricating user denial', async t => {
+test('Chat action receipt write failure keeps the original pending action instead of fabricating user denial', async t => {
   const marker = 'action-receipt-write'
   const productSessionId = 'psn_01J00000000000000000000172'
   const command = "printf '%s' 'written' > CHAT-ACTION-WRITE-RECOVERED.txt"
@@ -508,8 +508,8 @@ test('Chat signed action receipt write failure keeps the original pending action
       'the original authenticated action request actually receives a failed CP write response', 30_000)
       const frozen = cp.prepare('SELECT revision,payload FROM product_state WHERE stream_id=?')
         .get(`action-enforcement-evaluation-time:${sha256(request.frame.requestId)}`)
-      assert.ok(frozen, 'the original signed evaluation time is independently retained')
-      assert.equal(signedActionReceipt(cp, request.frame), null)
+      assert.ok(frozen, 'the original recorded evaluation time is independently retained')
+      assert.equal(actionReceipt(cp, request.frame), null)
       assert.equal(responseProof(request), null)
       assert.equal(existsSync(actionClaimPath(request)), false)
       assert.equal(globSync('**/CHAT-ACTION-WRITE-RECOVERED.txt', { cwd: context.directory }).length, 0)
@@ -517,14 +517,14 @@ test('Chat signed action receipt write failure keeps the original pending action
       assert.equal((await api.query('approval.list', { states: ['rejected'] })).result.items
         .filter(item => item.binding.executionJobId === job.job_id).length, 0)
       cp.exec('DROP TRIGGER refuse_original_action_receipt')
-      const receipt = await waitFor(() => signedActionReceipt(cp, request.frame),
-        'the same original request obtains its signed receipt after storage recovers', 60_000)
+      const receipt = await waitFor(() => actionReceipt(cp, request.frame),
+        'the same original request obtains its recorded receipt after storage recovers', 60_000)
       assert.equal(receipt.receipt.decision, 'permit')
       assert.equal(receipt.receipt.evaluatedAt, jsonBytes(frozen.payload).evaluatedAt)
       await waitAcknowledgedTerminal(cp, api, devicePath.deviceData, productSessionId, job.job_id, authority)
       assertOneSuccessfulCommand(devicePath.deviceData, job.job_id, command)
       assert.ok(responseProof(request))
-      assert.deepEqual(signedActionReceipt(cp, request.frame).bytes, receipt.bytes)
+      assert.deepEqual(actionReceipt(cp, request.frame).bytes, receipt.bytes)
       await assertPublicSafe(api, productSessionId)
       return { jobId: job.job_id, requestId: request.frame.requestId, scope: 'control_plane_action_receipt',
         source: 'required_receipt_storage', failedTransportAttempt: failed.sequence,
@@ -534,7 +534,7 @@ test('Chat signed action receipt write failure keeps the original pending action
 })
 
 for (const fault of ['action-store-read', 'applied-response-write']) {
-  test(`Chat ${fault} keeps original signed authority and repairs its reliable delivery once`, async t => {
+  test(`Chat ${fault} keeps original recorded authority and repairs its reliable delivery once`, async t => {
     const marker = fault
     const productSessionId = fault === 'action-store-read'
       ? 'psn_01J00000000000000000000173' : 'psn_01J00000000000000000000174'
@@ -570,9 +570,9 @@ for (const fault of ['action-store-read', 'applied-response-write']) {
         devicePath.modelServer.releaseResponseGate(marker)
         const request = await waitFor(() => retainedRequests(devicePath.deviceData, job.job_id, 'action_request')[0],
           'the original Core action reaches its durable request', 60_000)
-        const signed = await waitFor(() => signedActionReceipt(cp, request.frame),
-          'the actual CP signs and saves the original action receipt', 30_000)
-        assert.equal(signed.receipt.decision, 'permit')
+        const recorded = await waitFor(() => actionReceipt(cp, request.frame),
+          'the actual CP records the original action receipt', 30_000)
+        assert.equal(recorded.receipt.decision, 'permit')
         await waitFor(() => workerLog(surface).slice(beforeLog.length).includes('stage=control_consume code=CodexDurableState'),
           'the original Adapter acceptance actually fails at the installed required-storage cut', 30_000)
         assert.equal(responseProof(request), null, 'a missing required response proof is never presented as applied')
@@ -590,15 +590,15 @@ for (const fault of ['action-store-read', 'applied-response-write']) {
         } else {
           originalClaim = readFileSync(actionClaimPath(request))
           const claim = jsonBytes(originalClaim)
-          assert.equal(claim.requestId, signed.receipt.requestId)
-          assert.equal(claim.receiptSignature, signed.receipt.receiptSignature)
+          assert.equal(claim.requestId, recorded.receipt.requestId)
+          assert.deepEqual(claim.receipt, recorded.receipt)
           store.exec('DROP TRIGGER refuse_original_applied_action')
         }
         const proof = await waitFor(() => responseProof(request),
-          'the exact original signed receipt repairs its required response proof', 60_000)
+          'the exact original recorded receipt repairs its required response proof', 60_000)
         await waitAcknowledgedTerminal(cp, api, devicePath.deviceData, productSessionId, job.job_id, authority)
         assertOneSuccessfulCommand(devicePath.deviceData, job.job_id, command)
-        assert.deepEqual(signedActionReceipt(cp, request.frame).bytes, signed.bytes)
+        assert.deepEqual(actionReceipt(cp, request.frame).bytes, recorded.bytes)
         if (originalClaim) assert.deepEqual(readFileSync(actionClaimPath(request)), originalClaim,
           'reliable-delivery repair never creates a second action claim')
         assert.equal(store.prepare(`SELECT COUNT(*) AS count FROM execution_response_receipt
@@ -606,7 +606,7 @@ for (const fault of ['action-store-read', 'applied-response-write']) {
         await assertPublicSafe(api, productSessionId)
         return { jobId: job.job_id, requestId: request.frame.requestId,
           scope: fault === 'action-store-read' ? 'adapter_consumed_receipt_read' : 'adapter_applied_response_save',
-          originalRequestSha256: sha256(request.bytes), originalReceiptSha256: sha256(signed.bytes),
+          originalRequestSha256: sha256(request.bytes), originalReceiptSha256: sha256(recorded.bytes),
           responseProofDigest: proof.response_digest, repaired: true, realCommandAttempts: 1, userDenied: false }
       } finally {
         store.exec('DROP TRIGGER IF EXISTS refuse_original_applied_action')
@@ -620,7 +620,7 @@ for (const fault of ['action-store-read', 'applied-response-write']) {
   })
 }
 
-test('Chat a refused real Provider connection retains not_sent proof and its signed zero-charge accounting', async t => {
+test('Chat a refused real Provider connection retains not_sent proof and its zero-charge accounting', async t => {
   const marker = 'provider-connect-not-sent'
   const productSessionId = 'psn_01J00000000000000000000180'
   await runFixture(t, 'connect-not-sent', marker, nativeCommand('true'), async context => {
@@ -656,7 +656,7 @@ test('Chat a refused real Provider connection retains not_sent proof and its sig
       return terminal?.outcome === 'cancelled' && worker?.workerAcknowledged
         && accepted?.revision === 2 && raw?.acknowledgementReady && statement
         ? { terminal, worker, raw, statement } : false
-    }, 'the original cancellation receives its actual business ACK and signed accounting statement', 30_000)
+    }, 'the original cancellation receives its actual business ACK and accounting statement', 30_000)
     assert.deepEqual(settled.raw.message, settled.worker.message)
     assert.equal(settled.worker.message.outcome.status, 'cancelled')
     const statement = jsonBytes(settled.statement.statement_json)
@@ -667,9 +667,8 @@ test('Chat a refused real Provider connection retains not_sent proof and its sig
     assert.equal(receipt.slot, slot)
     assert.equal(receipt.modelExchangeId, failed.exchange.exchange_id)
     assert.equal(receipt.tokens, 0)
-    assert.equal(receipt.knownTokens, undefined, 'the signed receipt omits its zero lower bound')
+    assert.equal(receipt.knownTokens, undefined, 'the recorded receipt omits its zero lower bound')
     assert.equal(receipt.costMicrounits, 0)
-    assert.match(statement.signature, /^sha256:[0-9a-f]{64}$/u)
     assert.match(receipt.sourceDigest, /^sha256:[0-9a-f]{64}$/u)
     const final = providerFacts(devicePath.deviceData, job.job_id)
     assert.equal(final.length, 1)
@@ -783,7 +782,6 @@ function originalProviderReconciliation(cp, deviceData, authority, usage, provid
   assert.equal(receipt.costMicrounits, null, 'the actual Provider did not supply a measured cost')
   assert.match(receipt.sourceDigest, /^sha256:[0-9a-f]{64}$/u)
   assert.equal(receipt.providerReceiptId, `device-attempt-set:${receipt.sourceDigest}`)
-  assert.match(statement.signature, /^sha256:[0-9a-f]{64}$/u)
   return { usage: { accountingStatus: 'known', tokens, knownTokens: tokens,
     costMicrounits: null, runtimeMillis: usage.runtimeMillis },
     source: { statementDigest: facts[0].statement_digest, providerReceiptId: receipt.providerReceiptId,

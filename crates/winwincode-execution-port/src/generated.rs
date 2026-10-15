@@ -54,8 +54,6 @@ pub struct ActionEnforcementReceiptMessage {
     #[serde(deserialize_with = "deserialize_required_nullable")]
     #[serde(rename = "policyVersion")]
     pub policy_version: Option<ActionPolicyVersionReference>,
-    #[serde(rename = "receiptSignature")]
-    pub receipt_signature: winwincode_domain::Sha256Digest,
     #[serde(rename = "requestId")]
     pub request_id: winwincode_domain::RequestId,
     #[serde(rename = "resource")]

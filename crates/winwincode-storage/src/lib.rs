@@ -35,7 +35,6 @@ mod worker_fleet_operations;
 mod worker_outbound_queue;
 mod worker_placement;
 mod worker_registry;
-mod worker_session_credential;
 mod worker_session_slots;
 
 pub use artifact::{
@@ -207,12 +206,6 @@ pub use worker_registry::{
     WorkerManagementSnapshot, WorkerManagementState, WorkerOperationalState, WorkerPlatform,
     WorkerRegistrationErrorCode, WorkerRegistryScope,
 };
-pub use worker_session_credential::{
-    CredentialAuditAction, CredentialAuditEntry, CredentialIssuance, CredentialRotation,
-    CredentialRotationOutcome, WorkerSessionCredentialLedger, WorkerSessionCredentialRecord,
-    WorkerSessionCredentialState, WorkerSessionCredentialStoreError,
-    WorkerSessionCredentialStoreErrorKind,
-};
 pub use worker_session_slots::{
     WorkerSessionSlots, WorkerSlotAuthority, WorkerSlotCancellation, WorkerSlotCapacity,
     WorkerSlotCloseRequest, WorkerSlotError, WorkerSlotErrorCode, WorkerSlotEventAdvance,
@@ -240,7 +233,7 @@ use winwincode_domain::{
 };
 
 const DATABASE_FILE_NAME: &str = "control-plane.sqlite3";
-const SCHEMA_VERSION: i64 = 6;
+pub const CONTROL_PLANE_SCHEMA_VERSION: i64 = 7;
 static SQLITE_OPEN_LOCKS: OnceLock<Mutex<HashMap<PathBuf, Weak<Mutex<()>>>>> = OnceLock::new();
 thread_local! {
     static SQLITE_OPEN_BUSY_DEADLINE: Cell<Option<StdInstant>> = const { Cell::new(None) };
@@ -4209,10 +4202,10 @@ fn initialize_schema(connection: &mut Connection) -> Result<(), StorageError> {
             git_candidate_retention::create_schema(&transaction)?;
             managed_app::create_schema(&transaction)?;
             transaction
-                .pragma_update(None, "user_version", SCHEMA_VERSION)
+                .pragma_update(None, "user_version", CONTROL_PLANE_SCHEMA_VERSION)
                 .map_err(sql_error)?;
         }
-        SCHEMA_VERSION => {}
+        CONTROL_PLANE_SCHEMA_VERSION => {}
         _ => {
             return Err(StorageError::adapter(format!(
                 "unsupported schema version {version}"
@@ -4781,16 +4774,12 @@ pub fn issue_worker_launch_bundle(
     storage: &mut SqliteStorage,
     issuance: &LaunchGrantIssuance,
     predecessor: Option<&str>,
-    credential: &CredentialIssuance,
     build_downlink: impl FnOnce(u64) -> Result<ClientDownlinkAppend, StorageError>,
     now: &Instant,
 ) -> Result<WorkerLaunchGrantRecord, WorkerLaunchBundleError> {
     storage
         .worker_launch_grant_ledger()
         .map_err(|_| StorageError::adapter("launch ledger unavailable"))?;
-    storage
-        .worker_session_credential_ledger()
-        .map_err(|_| StorageError::adapter("credential ledger unavailable"))?;
     storage
         .client_downlink_outbox()
         .map_err(|_| StorageError::adapter("downlink ledger unavailable"))?;
@@ -4803,14 +4792,9 @@ pub fn issue_worker_launch_bundle(
         .map_err(|_| StorageError::adapter("launch transaction unavailable"))?;
     tx.execute_batch("CREATE TABLE IF NOT EXISTS worker_launch_publications (grant_id TEXT PRIMARY KEY, client_node_id TEXT NOT NULL, message_id TEXT NOT NULL, sequence INTEGER NOT NULL, frame_digest TEXT NOT NULL, created_at TEXT NOT NULL)")
         .map_err(|_|StorageError::adapter("launch publication unavailable"))?;
-    if let Some(grant) = client_launch_grant::reusable_launch_in_transaction(
-        &tx,
-        issuance,
-        predecessor,
-        credential,
-        now,
-    )
-    .map_err(WorkerLaunchBundleError::Launch)?
+    if let Some(grant) =
+        client_launch_grant::reusable_launch_in_transaction(&tx, issuance, predecessor, now)
+            .map_err(WorkerLaunchBundleError::Launch)?
     {
         tx.commit()
             .map_err(|_| StorageError::adapter("launch reuse commit failed"))?;
@@ -4821,13 +4805,7 @@ pub fn issue_worker_launch_bundle(
     let sequence = client_downlink::next_sequence_in_transaction(&tx, &grant.client_node_id)
         .map_err(|_| StorageError::adapter("launch sequence unavailable"))?;
     let append = build_downlink(sequence)?;
-    if credential.worker_session_id != grant.worker_session_id
-        || credential.worker_id != grant.worker_id
-        || credential.worker_instance_id != grant.worker_instance_id
-        || credential.worker_launch_grant_id != grant.worker_launch_grant_id
-        || credential.credential_digest != grant.credential_digest
-        || append.client_node_id != grant.client_node_id
-    {
+    if append.client_node_id != grant.client_node_id {
         return Err(StorageError::invalid_input("launch publication authority differs").into());
     }
     let frame: serde_json::Value = serde_json::from_str(&append.frame)
@@ -4837,7 +4815,7 @@ pub fn issue_worker_launch_bundle(
         "clientInstanceId":grant.client_instance_id,"occupancyLeaseId":grant.occupancy_lease_id,"occupancyFencingToken":wire_fencing_token,
         "repositoryBindingId":grant.repository_binding_id,"productSessionId":grant.product_session_id.clone().unwrap_or_default(),
         "workRunId":grant.work_run_id.as_ref().map(|id|&id.0),"workerSessionId":grant.worker_session_id,"workerId":grant.worker_id,
-        "workerInstanceId":grant.worker_instance_id,"credentialDigest":grant.credential_digest,"expiresAt":grant.expires_at.0,"state":"issued","revision":grant.revision});
+        "workerInstanceId":grant.worker_instance_id,"expiresAt":grant.expires_at.0,"state":"issued","revision":grant.revision});
     let mut actual_grant = frame["payload"]["launchGrant"].clone();
     if let Some(object) = actual_grant.as_object_mut() {
         object.entry("workRunId").or_insert(serde_json::Value::Null);
@@ -4853,8 +4831,6 @@ pub fn issue_worker_launch_bundle(
     {
         return Err(StorageError::invalid_input("launch frame authority differs").into());
     }
-    worker_session_credential::issue_credential_in_transaction(&tx, credential, now)
-        .map_err(|_| StorageError::invalid_input("launch credential rejected"))?;
     let frame = client_downlink::append_launch_in_transaction(&tx, &append, now)
         .map_err(|_| StorageError::invalid_input("launch downlink rejected"))?;
     tx.execute(

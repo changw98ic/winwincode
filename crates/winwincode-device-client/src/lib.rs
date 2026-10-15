@@ -72,15 +72,15 @@ pub use daemon::{
     DaemonConfig, DaemonError, DaemonStatus, DeviceDaemon, EnrollmentIssuance, ExchangeRequest,
     ExchangeResponse, ExchangeTransport, ExchangeTransportError, LeaseWorkerController,
     ManagedAppRepositorySource, TickOutcome, WorkerCapacitySnapshot, WorkerCapacitySource,
-    WorkerCredentialIssuance, WorkerLaunchDirectories, WorkerLaunchMaterialSource,
+    WorkerLaunchDirectories, WorkerLaunchMaterialSource,
 };
 pub use fencing::{
     FencedCommandKind, FencingGuard, FencingRejection, FencingTicket, FencingVerdict,
 };
 pub use http::HttpExchangeTransport;
 pub use identity::{
-    DeviceCredential, DeviceIdentity, DeviceIdentitySeed, IdentityRecord, IssuedEnrollment,
-    adopt_enrollment, ensure_device_identity, load_device_identity,
+    DeviceIdentity, DeviceIdentitySeed, IdentityRecord, IssuedEnrollment, adopt_enrollment,
+    ensure_device_identity, load_device_identity,
 };
 pub use managed_app::{ManagedAppError, ManagedAppSupervisor, ManagedAppSupervisorConfig};
 pub use path_confinement::{ConfinedPath, ConfinedRoot, ConfinementVerdict, PathConfinementError};

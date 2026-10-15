@@ -2,7 +2,7 @@
 
 use std::fmt;
 
-use winwincode_domain::{Instant, Sha256Digest, WorkerId, WorkerInstanceId};
+use winwincode_domain::{Instant, WorkerId, WorkerInstanceId};
 use winwincode_execution_port::generated::{
     ExecutionPortMessage, JobDispatchResultMessage, WorkerHeartbeatAckMessage,
     WorkerHeartbeatMessage, WorkerRegisterMessage, WorkerRegistrationResultMessage,
@@ -18,160 +18,39 @@ use crate::{
     ExecutionPortServiceError,
 };
 
-const MAX_REMOTE_CREDENTIAL_BYTES: usize = 16 * 1024;
-
-pub struct RemoteWorkerCredential {
-    bytes: Vec<u8>,
-}
-
-impl RemoteWorkerCredential {
-    pub fn new(bytes: Vec<u8>) -> Result<Self, RemoteWorkerAuthenticationError> {
-        if bytes.is_empty() || bytes.len() > MAX_REMOTE_CREDENTIAL_BYTES {
-            return Err(RemoteWorkerAuthenticationError::rejected());
-        }
-        Ok(Self { bytes })
-    }
-
-    #[must_use]
-    pub fn expose_for_verification(&self) -> &[u8] {
-        &self.bytes
-    }
-}
-
-impl Drop for RemoteWorkerCredential {
-    fn drop(&mut self) {
-        self.bytes.fill(0);
-    }
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum RemoteWorkerAuthenticationErrorKind {
-    Rejected,
-    Revoked,
-    Unavailable,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct RemoteWorkerAuthenticationError {
-    kind: RemoteWorkerAuthenticationErrorKind,
-}
-
-impl RemoteWorkerAuthenticationError {
-    #[must_use]
-    pub const fn rejected() -> Self {
-        Self {
-            kind: RemoteWorkerAuthenticationErrorKind::Rejected,
-        }
-    }
-
-    #[must_use]
-    pub const fn revoked() -> Self {
-        Self {
-            kind: RemoteWorkerAuthenticationErrorKind::Revoked,
-        }
-    }
-
-    #[must_use]
-    pub const fn unavailable() -> Self {
-        Self {
-            kind: RemoteWorkerAuthenticationErrorKind::Unavailable,
-        }
-    }
-
-    #[must_use]
-    pub const fn kind(self) -> RemoteWorkerAuthenticationErrorKind {
-        self.kind
-    }
-}
-
-impl fmt::Display for RemoteWorkerAuthenticationError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("remote Worker authentication failed")
-    }
-}
-
-impl std::error::Error for RemoteWorkerAuthenticationError {}
-
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RemoteWorkerPrincipal {
     worker_id: WorkerId,
-    worker_instance_id: Option<WorkerInstanceId>,
+    worker_instance_id: WorkerInstanceId,
     worker_pool_id: WorkerPoolId,
     scope: WorkerRegistryScope,
-    issuer: String,
-    subject: String,
-    credential_fingerprint: Sha256Digest,
-    security_zone: String,
+    client_node_id: String,
+    worker_session_id: String,
 }
 
 impl RemoteWorkerPrincipal {
     pub fn new(
         worker_id: WorkerId,
-        worker_pool_id: WorkerPoolId,
-        scope: WorkerRegistryScope,
-        issuer: String,
-        subject: String,
-        credential_fingerprint: Sha256Digest,
-        security_zone: String,
-    ) -> Result<Self, RemoteWorkerAuthenticationError> {
-        Self::new_inner(
-            worker_id,
-            None,
-            worker_pool_id,
-            scope,
-            issuer,
-            subject,
-            credential_fingerprint,
-            security_zone,
-        )
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    pub fn new_bound(
-        worker_id: WorkerId,
         worker_instance_id: WorkerInstanceId,
         worker_pool_id: WorkerPoolId,
         scope: WorkerRegistryScope,
-        issuer: String,
-        subject: String,
-        credential_fingerprint: Sha256Digest,
-        security_zone: String,
-    ) -> Result<Self, RemoteWorkerAuthenticationError> {
-        Self::new_inner(
-            worker_id,
-            Some(worker_instance_id),
-            worker_pool_id,
-            scope,
-            issuer,
-            subject,
-            credential_fingerprint,
-            security_zone,
-        )
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    fn new_inner(
-        worker_id: WorkerId,
-        worker_instance_id: Option<WorkerInstanceId>,
-        worker_pool_id: WorkerPoolId,
-        scope: WorkerRegistryScope,
-        issuer: String,
-        subject: String,
-        credential_fingerprint: Sha256Digest,
-        security_zone: String,
-    ) -> Result<Self, RemoteWorkerAuthenticationError> {
-        let principal = Self {
+        client_node_id: String,
+        worker_session_id: String,
+    ) -> Result<Self, RemoteWorkerPoolError> {
+        canonical_id(&worker_id.0, "wrk_")?;
+        canonical_id(&worker_instance_id.0, "wki_")?;
+        canonical_id(&worker_pool_id.0, "wpl_")?;
+        canonical_id(&client_node_id, "cnd_")?;
+        canonical_id(&worker_session_id, "wsn_")?;
+        validate_scope(&scope)?;
+        Ok(Self {
             worker_id,
             worker_instance_id,
             worker_pool_id,
             scope,
-            issuer,
-            subject,
-            credential_fingerprint,
-            security_zone,
-        };
-        validate_principal(&principal)?;
-        Ok(principal)
+            client_node_id,
+            worker_session_id,
+        })
     }
 
     #[must_use]
@@ -180,8 +59,8 @@ impl RemoteWorkerPrincipal {
     }
 
     #[must_use]
-    pub const fn worker_instance_id(&self) -> Option<&WorkerInstanceId> {
-        self.worker_instance_id.as_ref()
+    pub const fn worker_instance_id(&self) -> &WorkerInstanceId {
+        &self.worker_instance_id
     }
 
     #[must_use]
@@ -195,36 +74,20 @@ impl RemoteWorkerPrincipal {
     }
 
     #[must_use]
-    pub const fn credential_fingerprint(&self) -> &Sha256Digest {
-        &self.credential_fingerprint
+    pub fn worker_session_id(&self) -> &str {
+        &self.worker_session_id
     }
 
     fn authentication_identity(&self) -> WorkerAuthenticationIdentity {
-        WorkerAuthenticationIdentity::TransportPrincipal {
-            issuer: self.issuer.clone(),
-            subject: self.subject.clone(),
-            credential_fingerprint: self.credential_fingerprint.clone(),
+        WorkerAuthenticationIdentity::LocalEmbedded {
+            control_plane_principal: format!("device:{}", self.client_node_id),
         }
     }
 }
 
-pub trait RemoteWorkerAuthenticator: Send + Sync {
-    fn authenticate(
-        &self,
-        credential: &RemoteWorkerCredential,
-        now: &Instant,
-    ) -> Result<RemoteWorkerPrincipal, RemoteWorkerAuthenticationError>;
-
-    fn ensure_active(
-        &self,
-        principal: &RemoteWorkerPrincipal,
-        now: &Instant,
-    ) -> Result<(), RemoteWorkerAuthenticationError>;
-}
-
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RemoteWorkerConnectionState {
-    Authenticated,
+    Connected,
     Registered,
     Disconnected,
 }
@@ -262,9 +125,6 @@ impl RemoteWorkerConnection {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RemoteWorkerPoolErrorKind {
-    AuthenticationRejected,
-    AuthenticationRevoked,
-    AuthenticationUnavailable,
     InvalidConnection,
     UnsupportedMessage,
     Registry,
@@ -294,28 +154,22 @@ impl fmt::Display for RemoteWorkerPoolError {
 
 impl std::error::Error for RemoteWorkerPoolError {}
 
-pub struct RemoteWorkerPoolAdapter<'storage, 'authenticator> {
+pub struct RemoteWorkerPoolAdapter<'storage> {
     storage: &'storage mut SqliteStorage,
-    authenticator: &'authenticator dyn RemoteWorkerAuthenticator,
     heartbeat_interval_ms: i64,
 }
 
-impl<'storage, 'authenticator> RemoteWorkerPoolAdapter<'storage, 'authenticator> {
+impl<'storage> RemoteWorkerPoolAdapter<'storage> {
     #[must_use]
-    pub const fn new(
-        storage: &'storage mut SqliteStorage,
-        authenticator: &'authenticator dyn RemoteWorkerAuthenticator,
-    ) -> Self {
+    pub const fn new(storage: &'storage mut SqliteStorage) -> Self {
         Self {
             storage,
-            authenticator,
             heartbeat_interval_ms: DEFAULT_HEARTBEAT_INTERVAL_MS,
         }
     }
 
     pub fn with_heartbeat_interval(
         storage: &'storage mut SqliteStorage,
-        authenticator: &'authenticator dyn RemoteWorkerAuthenticator,
         heartbeat_interval_ms: i64,
     ) -> Result<Self, RemoteWorkerPoolError> {
         if !(1_000..=300_000).contains(&heartbeat_interval_ms) {
@@ -325,42 +179,26 @@ impl<'storage, 'authenticator> RemoteWorkerPoolAdapter<'storage, 'authenticator>
         }
         Ok(Self {
             storage,
-            authenticator,
             heartbeat_interval_ms,
         })
     }
 
-    pub fn connect(
-        &self,
-        credential: &RemoteWorkerCredential,
-        now: &Instant,
-    ) -> Result<RemoteWorkerConnection, RemoteWorkerPoolError> {
-        let principal = self
-            .authenticator
-            .authenticate(credential, now)
-            .map_err(authentication_error)?;
-        Ok(RemoteWorkerConnection {
+    pub fn connect(&self, principal: RemoteWorkerPrincipal) -> RemoteWorkerConnection {
+        RemoteWorkerConnection {
             principal,
-            state: RemoteWorkerConnectionState::Authenticated,
+            state: RemoteWorkerConnectionState::Connected,
             binding: None,
-        })
+        }
     }
 
     pub fn resume(
         &mut self,
-        credential: &RemoteWorkerCredential,
+        principal: RemoteWorkerPrincipal,
         worker_id: &WorkerId,
         worker_instance_id: &WorkerInstanceId,
-        now: &Instant,
     ) -> Result<RemoteWorkerConnection, RemoteWorkerPoolError> {
-        let principal = self
-            .authenticator
-            .authenticate(credential, now)
-            .map_err(authentication_error)?;
         if principal.worker_id() != worker_id
-            || principal
-                .worker_instance_id()
-                .is_some_and(|bound| bound != worker_instance_id)
+            || principal.worker_instance_id() != worker_instance_id
         {
             return Err(RemoteWorkerPoolError::new(
                 RemoteWorkerPoolErrorKind::InvalidConnection,
@@ -406,9 +244,9 @@ impl<'storage, 'authenticator> RemoteWorkerPoolAdapter<'storage, 'authenticator>
         connection: &mut RemoteWorkerConnection,
         worker_id: &WorkerId,
         worker_instance_id: &WorkerInstanceId,
-        now: &Instant,
+        _now: &Instant,
     ) -> Result<(), RemoteWorkerPoolError> {
-        self.ensure_connection_active(connection, now)?;
+        Self::ensure_connection_active(connection)?;
         require_binding(connection, worker_id, worker_instance_id)
     }
 
@@ -418,7 +256,7 @@ impl<'storage, 'authenticator> RemoteWorkerPoolAdapter<'storage, 'authenticator>
         message: &ExecutionPortMessage,
         now: &Instant,
     ) -> Result<ExecutionPortMessage, RemoteWorkerPoolError> {
-        self.ensure_connection_active(connection, now)?;
+        Self::ensure_connection_active(connection)?;
         match message {
             ExecutionPortMessage::WorkerRegisterMessage(message) => self
                 .register(connection, message, now)
@@ -448,19 +286,12 @@ impl<'storage, 'authenticator> RemoteWorkerPoolAdapter<'storage, 'authenticator>
     }
 
     fn ensure_connection_active(
-        &mut self,
-        connection: &mut RemoteWorkerConnection,
-        now: &Instant,
+        connection: &RemoteWorkerConnection,
     ) -> Result<(), RemoteWorkerPoolError> {
         if connection.state == RemoteWorkerConnectionState::Disconnected {
             return Err(RemoteWorkerPoolError::new(
                 RemoteWorkerPoolErrorKind::InvalidConnection,
             ));
-        }
-        if let Err(error) = self.authenticator.ensure_active(&connection.principal, now) {
-            connection.state = RemoteWorkerConnectionState::Disconnected;
-            self.disconnect_registered_binding(connection)?;
-            return Err(authentication_error(error));
         }
         Ok(())
     }
@@ -472,10 +303,7 @@ impl<'storage, 'authenticator> RemoteWorkerPoolAdapter<'storage, 'authenticator>
         now: &Instant,
     ) -> Result<WorkerRegistrationResultMessage, RemoteWorkerPoolError> {
         if message.worker_id != *connection.principal.worker_id()
-            || connection
-                .principal
-                .worker_instance_id()
-                .is_some_and(|bound| bound != &message.worker_instance_id)
+            || connection.principal.worker_instance_id() != &message.worker_instance_id
         {
             return Err(RemoteWorkerPoolError::new(
                 RemoteWorkerPoolErrorKind::InvalidConnection,
@@ -501,7 +329,7 @@ impl<'storage, 'authenticator> RemoteWorkerPoolAdapter<'storage, 'authenticator>
                 connection.principal.authentication_identity(),
                 connection.principal.scope(),
                 connection.principal.worker_pool_id(),
-                connection.principal.security_zone.clone(),
+                "device-client".to_owned(),
             )
             .map_err(|error| execution_port_error(&error))?;
         if matches!(
@@ -590,21 +418,6 @@ fn require_binding(
     }
 }
 
-fn authentication_error(error: RemoteWorkerAuthenticationError) -> RemoteWorkerPoolError {
-    let kind = match error.kind() {
-        RemoteWorkerAuthenticationErrorKind::Rejected => {
-            RemoteWorkerPoolErrorKind::AuthenticationRejected
-        }
-        RemoteWorkerAuthenticationErrorKind::Revoked => {
-            RemoteWorkerPoolErrorKind::AuthenticationRevoked
-        }
-        RemoteWorkerAuthenticationErrorKind::Unavailable => {
-            RemoteWorkerPoolErrorKind::AuthenticationUnavailable
-        }
-    };
-    RemoteWorkerPoolError::new(kind)
-}
-
 fn execution_port_error(error: &ExecutionPortServiceError) -> RemoteWorkerPoolError {
     let kind = match error {
         ExecutionPortServiceError::UnsupportedMessage => {
@@ -635,45 +448,7 @@ fn registry_error(_error: StorageError) -> RemoteWorkerPoolError {
     RemoteWorkerPoolError::new(RemoteWorkerPoolErrorKind::Registry)
 }
 
-fn validate_principal(
-    principal: &RemoteWorkerPrincipal,
-) -> Result<(), RemoteWorkerAuthenticationError> {
-    canonical_id(&principal.worker_id.0, "wrk_")?;
-    if let Some(worker_instance_id) = &principal.worker_instance_id {
-        canonical_id(&worker_instance_id.0, "wki_")?;
-    }
-    canonical_id(&principal.worker_pool_id.0, "wpl_")?;
-    validate_scope(&principal.scope)?;
-    for value in [
-        principal.issuer.as_str(),
-        principal.subject.as_str(),
-        principal.security_zone.as_str(),
-    ] {
-        if value.is_empty()
-            || value.len() > 200
-            || value.trim() != value
-            || !value.is_ascii()
-            || value.bytes().any(|byte| byte.is_ascii_control())
-        {
-            return Err(RemoteWorkerAuthenticationError::rejected());
-        }
-    }
-    let digest = principal
-        .credential_fingerprint
-        .0
-        .strip_prefix("sha256:")
-        .ok_or_else(RemoteWorkerAuthenticationError::rejected)?;
-    if digest.len() != 64
-        || !digest
-            .bytes()
-            .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
-    {
-        return Err(RemoteWorkerAuthenticationError::rejected());
-    }
-    Ok(())
-}
-
-fn validate_scope(scope: &WorkerRegistryScope) -> Result<(), RemoteWorkerAuthenticationError> {
+fn validate_scope(scope: &WorkerRegistryScope) -> Result<(), RemoteWorkerPoolError> {
     match scope {
         WorkerRegistryScope::Organization { organization_id } => {
             canonical_id(&organization_id.0, "org_")
@@ -708,7 +483,7 @@ fn validate_scope(scope: &WorkerRegistryScope) -> Result<(), RemoteWorkerAuthent
     }
 }
 
-fn canonical_id(value: &str, prefix: &str) -> Result<(), RemoteWorkerAuthenticationError> {
+fn canonical_id(value: &str, prefix: &str) -> Result<(), RemoteWorkerPoolError> {
     let valid = value.strip_prefix(prefix).is_some_and(|suffix| {
         suffix.len() == 26
             && suffix.bytes().all(|byte| {
@@ -722,6 +497,8 @@ fn canonical_id(value: &str, prefix: &str) -> Result<(), RemoteWorkerAuthenticat
     if valid {
         Ok(())
     } else {
-        Err(RemoteWorkerAuthenticationError::rejected())
+        Err(RemoteWorkerPoolError::new(
+            RemoteWorkerPoolErrorKind::InvalidConnection,
+        ))
     }
 }

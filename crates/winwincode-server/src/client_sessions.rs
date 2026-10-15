@@ -41,15 +41,11 @@ use winwincode_storage::DeviceExecutionBindingState;
 use winwincode_storage::ExecutionJobState;
 use winwincode_storage::SqliteStorage;
 use winwincode_storage::StorageError;
-use winwincode_storage::{WorkerSessionCredentialState, WorkerSlotState};
+use winwincode_storage::WorkerSlotState;
 
-use crate::client_exchange::{
-    ClientExchangeApplication, ClientExchangeConfig, ClientExchangePort, WorkerCredentialDelivery,
-};
+use crate::client_exchange::{ClientExchangeApplication, ClientExchangeConfig, ClientExchangePort};
 use crate::client_occupancy::client_mirror_revision_view;
 use crate::client_occupancy::offset_instant;
-use crate::worker_session_credentials::WorkerSessionCredentialService;
-use crate::worker_session_credentials::issue_credential_material;
 
 const SUPPORTED_SCHEMA_VERSION: &str = "winwincode/v1";
 
@@ -91,7 +87,6 @@ pub enum ClientSessionsErrorKind {
 enum LaunchFailureStage {
     StorageOpen,
     Prepare,
-    CredentialPublication,
     MirrorRevision,
     LaunchBundle,
     GrantPoll,
@@ -103,7 +98,6 @@ impl LaunchFailureStage {
         match self {
             Self::StorageOpen => "storage_open",
             Self::Prepare => "prepare",
-            Self::CredentialPublication => "credential_publication",
             Self::MirrorRevision => "mirror_revision",
             Self::LaunchBundle => "launch_bundle",
             Self::GrantPoll => "grant_poll",
@@ -115,9 +109,6 @@ impl LaunchFailureStage {
 #[derive(Clone, Copy, Eq, PartialEq)]
 enum LaunchFailureCode {
     Unavailable,
-    ExchangeUnavailable,
-    ExchangeInvalidRequest,
-    ExchangeAuthentication,
     Storage(winwincode_storage::StorageErrorKind),
 }
 
@@ -126,9 +117,6 @@ impl LaunchFailureCode {
         use winwincode_storage::StorageErrorKind;
         match self {
             Self::Unavailable => "unavailable",
-            Self::ExchangeUnavailable => "exchange_unavailable",
-            Self::ExchangeInvalidRequest => "exchange_invalid_request",
-            Self::ExchangeAuthentication => "exchange_authentication",
             Self::Storage(kind) => match kind {
                 StorageErrorKind::InvalidInput => "storage_invalid_input",
                 StorageErrorKind::RevisionConflict => "storage_revision_conflict",
@@ -541,13 +529,6 @@ impl ClientSessionsApplication {
                     "the ProductSession is cancelled or closed; reopen a live conversation before launching a Device Worker",
                 ));
             }
-            crate::device_providers::validate_session_route(
-                &mut storage,
-                &scope,
-                &id,
-                &node.client_node_id,
-            )
-            .map_err(|_| ClientSessionsError::invalid_request())?;
             id.0
         };
         WorkerLaunchGrantService::new(&mut storage)
@@ -662,24 +643,7 @@ impl ClientSessionsApplication {
                         | WorkerSlotState::RecoveryFailed
                 )
             });
-            let credential = WorkerSessionCredentialService::new(&mut storage)
-                .status_for_session(&grant.worker_session_id)
-                .map_err(|_| ClientSessionsError::unavailable())?;
-            let credential_live = credential.as_ref().is_some_and(|record| {
-                record.state == WorkerSessionCredentialState::Active && record.expires_at.0 > now.0
-            });
-            if !credential_live
-                && binding_state == Some(DeviceExecutionBindingState::Bound)
-                && !device_reported_released
-                && !slot_exited
-            {
-                return Err(ClientSessionsError::new(
-                    ClientSessionsErrorKind::SessionNotLaunchable,
-                    "the previous Device Worker authority ended; await trusted exit or stop evidence before relaunch",
-                ));
-            }
-            let reuse_same_worker = credential_live
-                && occupancy_matches
+            let reuse_same_worker = occupancy_matches
                 && matches!(
                     grant.state,
                     LaunchGrantState::Issued | LaunchGrantState::Consumed
@@ -710,24 +674,6 @@ impl ClientSessionsApplication {
                     "the occupancy behind the pending launch grant is gone",
                 ));
             }
-            let mut credentials = WorkerSessionCredentialService::new(&mut storage);
-            if credential
-                .as_ref()
-                .is_some_and(|record| record.state == WorkerSessionCredentialState::Active)
-            {
-                credentials
-                    .revoke_for_session(
-                        &grant.worker_session_id,
-                        user_id,
-                        Some(if device_reported_released {
-                            "released Chat worker replaced"
-                        } else {
-                            "exited Device Worker replaced with restart evidence"
-                        }),
-                        &now,
-                    )
-                    .map_err(|_| ClientSessionsError::unavailable())?;
-            }
         }
         let worker_session_id = generate_prefixed_id("wsn_")?;
         let worker_id = match replacement_worker_id {
@@ -736,8 +682,6 @@ impl ClientSessionsApplication {
         };
         let worker_instance_id = generate_prefixed_id("wki_")?;
         let worker_launch_grant_id = generate_prefixed_id("wlg_")?;
-        let credential_material =
-            issue_credential_material().map_err(|_| ClientSessionsError::unavailable())?;
         let expires_at = offset_instant(&now, duration_millis(self.config.grant_ttl))
             .ok_or_else(ClientSessionsError::unavailable)?;
         let issuance = winwincode_storage::LaunchGrantIssuance::try_new(
@@ -753,43 +697,11 @@ impl ClientSessionsApplication {
             worker_session_id.clone(),
             worker_id.clone(),
             worker_instance_id.clone(),
-            credential_material.credential_digest().to_owned(),
             Some(product_session_id.clone()),
             work_run_id.clone(),
             expires_at.clone(),
         )
         .map_err(|_| ClientSessionsError::unavailable())?;
-        let credential_issuance = WorkerSessionCredentialService::new(&mut storage)
-            .prepare_launch_issuance(
-                &worker_session_id,
-                &worker_id,
-                &worker_instance_id,
-                &worker_launch_grant_id,
-                credential_material.credential_digest(),
-                &now,
-            )
-            .map_err(|_| ClientSessionsError::unavailable())?;
-
-        self.client_exchange
-            .publish_worker_credential(WorkerCredentialDelivery {
-                client_node_id: node.client_node_id.clone(),
-                worker_launch_grant_id: worker_launch_grant_id.clone(),
-                worker_session_id: worker_session_id.clone(),
-                credential_digest: credential_material.credential_digest().to_owned(),
-                worker_credential: credential_material.material().to_owned(),
-                expires_at: expires_at.clone(),
-            })
-            .map_err(|error| {
-                let code = if error.is_invalid_request() {
-                    LaunchFailureCode::ExchangeInvalidRequest
-                } else if error.is_authentication() {
-                    LaunchFailureCode::ExchangeAuthentication
-                } else {
-                    LaunchFailureCode::ExchangeUnavailable
-                };
-                ClientSessionsError::unavailable_at(LaunchFailureStage::CredentialPublication, code)
-            })?;
-
         let mirror_revision_view =
             client_mirror_revision_view(&self.data_directory, &node.client_node_id).map_err(
                 |_| {
@@ -821,7 +733,6 @@ impl ClientSessionsApplication {
                 worker_session_id: worker_session_id.clone(),
                 worker_id: worker_id.clone(),
                 worker_instance_id: worker_instance_id.clone(),
-                credential_digest: credential_material.credential_digest().to_owned(),
                 expires_at: expires_at.0.clone(),
                 state: WireGrantState::Issued,
                 revision: 1,
@@ -832,7 +743,6 @@ impl ClientSessionsApplication {
             &mut storage,
             &issuance,
             predecessor_grant_id.as_deref(),
-            &credential_issuance,
             |sequence| {
                 encode_frame(&node, message, sequence, &now)
                     .map_err(|_| StorageError::invalid_input("launch downlink encoding failed"))
@@ -1033,7 +943,6 @@ fn session_body(prepared: &PreparedLaunch) -> Value {
         "workerInstanceId": prepared.grant.worker_instance_id,
         "productSessionId": prepared.product_session_id,
         "workRunId": prepared.work_run_id,
-        "credentialDigest": prepared.grant.credential_digest,
         "expiresAt": prepared.grant.expires_at.0,
     })
 }

@@ -9,7 +9,7 @@ export interface WinWinCodeClientRuntimeConfig {
 }
 
 export function readWinWinCodeClientRuntimeConfig(
-  source: unknown = Reflect.get(globalThis, RUNTIME_CONFIG_KEY),
+  source: unknown = Reflect.get(globalThis, RUNTIME_CONFIG_KEY) ?? { serverUrl: 'http://127.0.0.1:8443' },
 ): WinWinCodeClientRuntimeConfig {
   if (source === null || typeof source !== 'object' || Array.isArray(source)) {
     throw new TypeError(`${RUNTIME_CONFIG_KEY}.serverUrl must be configured at deployment time.`)

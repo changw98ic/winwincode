@@ -24,7 +24,7 @@ use winwincode_client_port::messages::{
 };
 
 /// Schema identity of the current local device-client database.
-pub const CLIENT_STORE_SCHEMA_VERSION: i64 = 9;
+pub const CLIENT_STORE_SCHEMA_VERSION: i64 = 10;
 
 const DATABASE_FILE_NAME: &str = "device-client.sqlite3";
 const SQLITE_BUSY_TIMEOUT: Duration = Duration::from_secs(5);
@@ -2479,13 +2479,6 @@ CREATE TABLE device_identity (
     created_at TEXT NOT NULL,
     revision INTEGER NOT NULL CHECK (revision > 0)
 );
-CREATE TABLE device_credential (
-    device_id TEXT PRIMARY KEY NOT NULL REFERENCES device_identity (device_id) ON DELETE CASCADE,
-    credential_secret BLOB NOT NULL CHECK (length(credential_secret) = 32),
-    credential_digest TEXT NOT NULL CHECK (length(credential_digest) = 71),
-    credential_generation INTEGER NOT NULL CHECK (credential_generation > 0),
-    rotated_at TEXT NOT NULL
-);
 CREATE TABLE server_profile (
     server_profile_id TEXT PRIMARY KEY NOT NULL,
     base_url TEXT NOT NULL UNIQUE,
@@ -2778,17 +2771,6 @@ const STORE_SCHEMA_COLUMNS: &[(&str, &str, &[&str])] = &[
             "current_instance_id",
             "created_at",
             "revision",
-        ],
-    ),
-    (
-        "device_credential",
-        "PRAGMA table_info(device_credential)",
-        &[
-            "device_id",
-            "credential_secret",
-            "credential_digest",
-            "credential_generation",
-            "rotated_at",
         ],
     ),
     (

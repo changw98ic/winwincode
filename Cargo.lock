@@ -1108,7 +1108,6 @@ version = "0.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b1df331683d982a0b9492b38127151e6453639cd34926eb9c07d4cd8c6d22bfc"
 dependencies = [
- "arc-swap",
  "bytes",
  "either",
  "fs-err",
@@ -1116,11 +1115,7 @@ dependencies = [
  "http-body 1.0.1",
  "hyper",
  "hyper-util",
- "pin-project-lite",
- "rustls",
- "rustls-pki-types",
  "tokio",
- "tokio-rustls",
  "tower-service",
 ]
 
@@ -12976,7 +12971,6 @@ dependencies = [
  "codex-apply-patch",
  "codex-protocol",
  "codex-shell-command",
- "ed25519-dalek",
  "futures",
  "rusqlite",
  "serde",
@@ -13157,15 +13151,12 @@ dependencies = [
  "futures",
  "getrandom 0.3.4",
  "http 1.4.0",
- "rcgen",
  "rusqlite",
- "rustls",
  "serde",
  "serde_json",
  "sha2 0.10.9",
  "time",
  "tokio",
- "tokio-rustls",
  "tokio-tungstenite",
  "ureq",
  "winwincode-api",
@@ -13270,7 +13261,6 @@ version = "0.2.0"
 dependencies = [
  "codex-arg0",
  "codex-code-mode-host",
- "sha2 0.10.9",
  "tokio",
 ]
 
@@ -13403,17 +13393,13 @@ dependencies = [
  "getrandom 0.3.4",
  "http 1.4.0",
  "httpdate",
- "rcgen",
  "rusqlite",
- "rustls",
  "serde",
  "serde_json",
  "sha2 0.10.9",
  "time",
  "tokio",
- "tokio-rustls",
  "tokio-tungstenite",
- "ureq",
  "winwincode-api",
  "winwincode-client-port",
  "winwincode-codex",
@@ -13486,6 +13472,7 @@ dependencies = [
  "tokio",
  "tokio-rustls",
  "winwincode-api",
+ "winwincode-client-port",
  "winwincode-codex",
  "winwincode-control-plane",
  "winwincode-delivery",

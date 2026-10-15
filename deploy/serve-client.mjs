@@ -4,10 +4,10 @@ import { createServer } from 'node:http'
 import { readFile, stat } from 'node:fs/promises'
 import { extname, resolve, sep } from 'node:path'
 
-const root = resolve(process.env.WWC_CLIENT_DIST ?? '/app/public')
-const host = process.env.HOST ?? '0.0.0.0'
+const root = resolve(process.env.WWC_CLIENT_DIST ?? resolve(import.meta.dirname, '../apps/client/dist/public'))
+const host = process.env.HOST ?? '127.0.0.1'
 const port = Number.parseInt(process.env.PORT ?? '8080', 10)
-const serverUrl = process.env.WWC_SERVER_URL ?? ''
+const serverUrl = process.env.WWC_SERVER_URL ?? 'http://127.0.0.1:8443'
 const csp = "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data: blob:; font-src 'self'; connect-src https: wss: http://127.0.0.1:* http://localhost:* ws://127.0.0.1:* ws://localhost:*; object-src 'none'; base-uri 'none'; form-action 'none'"
 const contentTypes = new Map([
   ['.css', 'text/css; charset=utf-8'],
@@ -21,18 +21,10 @@ const contentTypes = new Map([
 if (!Number.isSafeInteger(port) || port < 1 || port > 65_535) {
   throw new Error('PORT must be an integer from 1 to 65535')
 }
-if (serverUrl !== '') {
-  const url = new URL(serverUrl)
-  const localHttp =
-    (url.protocol === 'http:' || url.protocol === 'https:') &&
-    (url.hostname === '127.0.0.1' ||
-      url.hostname === 'localhost' ||
-      url.hostname === 'control.localhost')
-  if (!localHttp || url.username || url.password || url.search || url.hash) {
-    throw new Error(
-      'WWC_SERVER_URL must be an HTTPS origin (loopback HTTP allowed for Community local) without credentials, query, or fragment',
-    )
-  }
+const url = new URL(serverUrl)
+if (!['http:', 'https:'].includes(url.protocol)
+  || url.username || url.password || url.search || url.hash || url.pathname !== '/') {
+  throw new Error('WWC_SERVER_URL must be an HTTP(S) origin without credentials, path, query, or fragment')
 }
 
 function headers(contentType, cacheControl = 'no-cache') {

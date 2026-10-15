@@ -19,7 +19,6 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 use winwincode_execution_port::{
-    action_enforcement::ActionEnforcementSigningKey,
     agent_config::{AgentProfileSettings, resolve_agent_session_config},
     generated::{
         ExecutionJob, ExecutionScope, ProductSessionExecutionScope,
@@ -291,12 +290,9 @@ fn exercise_case(case: &str) {
         chunks,
         "completed logical exchange replays without new authorization or HTTP"
     );
-    let key = ActionEnforcementSigningKey::from_bytes([7; 32]).unwrap();
-    let statement = store
-        .accounting_statement(&open.lease, &key)
-        .unwrap()
-        .unwrap();
-    statement.verify(&key).unwrap();
+
+    let statement = store.accounting_statement(&open.lease).unwrap().unwrap();
+    statement.validate().unwrap();
     let primary_slot = format!("primary:{}", open.model_exchange_id.0);
     let mut expected_manifest = receipts_before
         .iter()
@@ -371,7 +367,7 @@ fn exercise_case(case: &str) {
             .all(|receipt| receipt.cost_microunits.is_none())
     );
     assert_eq!(
-        store.accounting_statement(&open.lease, &key).unwrap(),
+        store.accounting_statement(&open.lease,).unwrap(),
         Some(statement)
     );
     drop(store);

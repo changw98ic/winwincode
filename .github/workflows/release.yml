@@ -46,7 +46,6 @@ jobs:
       RUSTC_WRAPPER: sccache
       SCCACHE_GHA_ENABLED: 'true'
       SCCACHE_IDLE_TIMEOUT: '0'
-      WINWINCODE_HELPER_RELEASE_PUBLIC_KEY_HEX: ${{ vars.WINWINCODE_HELPER_RELEASE_PUBLIC_KEY_HEX }}
       RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
       RELEASE_TARGET: ${{ matrix.target }}
       CANDIDATE_RUN: ${{ inputs.candidate_run }}
@@ -71,7 +70,6 @@ jobs:
           const version = JSON.parse(readFileSync('package.json', 'utf8')).version
           assert.match(version, /^\d+\.\d+\.\d+$/u)
           assert.equal(process.env.RELEASE_TAG, `v${version}`)
-          assert.match(process.env.WINWINCODE_HELPER_RELEASE_PUBLIC_KEY_HEX, /^[0-9a-f]{64}$/u)
           NODE
 
       - name: Install pinned Node.js
@@ -171,10 +169,10 @@ jobs:
           node --input-type=module <<'NODE'
           import { appendFileSync } from 'node:fs'
           import { resolve } from 'node:path'
-          import { createReleaseBuildEnvironment, helperReleaseBuildBaseEnvironment } from './scripts/release-artifact-contract.mjs'
+          import { createReleaseBuildEnvironment } from './scripts/release-artifact-contract.mjs'
           const root = process.cwd()
           const environment = createReleaseBuildEnvironment({
-            baseEnvironment: helperReleaseBuildBaseEnvironment(process.env),
+            baseEnvironment: process.env,
             root,
             buildRoot: resolve('.cache/release-build'),
             targetDirectory: resolve('target'),
@@ -213,22 +211,17 @@ jobs:
             fi
           done
 
-      - name: Sign helper and seal release executables
+      - name: Record release executable checksums
         if: ${{ steps.candidate.outputs.restored != 'true' }}
         shell: bash
-        env:
-          WINWINCODE_HELPER_RELEASE_PRIVATE_KEY_HEX: ${{ secrets.WINWINCODE_HELPER_RELEASE_PRIVATE_KEY_HEX }}
         run: |
           node --input-type=module <<'NODE'
-          import assert from 'node:assert/strict'
           import { resolve } from 'node:path'
-          import { writeHelperReleaseManifest, writeApiProductionSourceSeal } from './scripts/run-api-production-vertical.mjs'
-          assert.match(process.env.WINWINCODE_HELPER_RELEASE_PRIVATE_KEY_HEX, /^[0-9a-f]{64}$/u)
+          import { writeApiProductionSourceSeal } from './scripts/run-api-production-vertical.mjs'
           const root = process.cwd()
           const bin = resolve('target', process.env.RELEASE_TARGET, 'release')
           const helperExecutable = resolve(bin, 'winwincode-kernel-helper')
-          const helperReleaseManifest = writeHelperReleaseManifest(root, helperExecutable)
-          writeApiProductionSourceSeal({ root, serverBinary: resolve(bin, 'winwincode-server'), helperExecutable, helperReleaseManifest })
+          writeApiProductionSourceSeal({ root, serverBinary: resolve(bin, 'winwincode-server'), helperExecutable })
           NODE
 
       - name: Verify the release through the production API
@@ -247,7 +240,7 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p .cache/candidate/bin .cache/candidate-upload
-          for name in winwincode-server winwincode-worker winwincode-kernel-helper wwc winwincode-kernel-helper.release.json winwincode-api-production.source.json; do
+          for name in winwincode-server winwincode-worker winwincode-kernel-helper wwc winwincode-api-production.source.json; do
             cp -f "target/${RELEASE_TARGET}/release/${name}" .cache/candidate/bin/
           done
           cp -f .cache/release-api-report.json .cache/candidate/api-production.json

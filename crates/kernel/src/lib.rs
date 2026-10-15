@@ -997,50 +997,6 @@ impl Kernel {
         model_port: Arc<dyn ModelPort>,
         action_gate: Arc<dyn KernelActionGate>,
     ) -> KernelResult<Self> {
-        if !options.home.is_absolute() {
-            return Err(KernelFailure::new(
-                "INVALID_HOME",
-                format!("kernel home must be absolute: {}", options.home.display()),
-            ));
-        }
-        if !options.helper_executable.is_absolute() {
-            return Err(KernelFailure::new(
-                "INVALID_HELPER_PATH",
-                format!(
-                    "kernel helper path must be absolute: {}",
-                    options.helper_executable.display()
-                ),
-            ));
-        }
-        let helper_metadata =
-            std::fs::symlink_metadata(&options.helper_executable).map_err(|_| {
-                KernelFailure::new(
-                    "HELPER_NOT_FOUND",
-                    format!(
-                        "kernel helper executable does not exist: {}",
-                        options.helper_executable.display()
-                    ),
-                )
-            })?;
-        if helper_metadata.file_type().is_symlink() || !helper_metadata.is_file() {
-            return Err(KernelFailure::new(
-                "HELPER_NOT_FOUND",
-                format!(
-                    "kernel helper executable does not exist: {}",
-                    options.helper_executable.display()
-                ),
-            ));
-        }
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt as _;
-            if helper_metadata.permissions().mode() & 0o111 == 0 {
-                return Err(KernelFailure::new(
-                    "HELPER_NOT_EXECUTABLE",
-                    "kernel helper executable is not executable",
-                ));
-            }
-        }
         options.event_capacity = options
             .event_capacity
             .clamp(MIN_EVENT_CAPACITY, MAX_EVENT_CAPACITY);
@@ -1054,12 +1010,6 @@ impl Kernel {
             KernelFailure::new(
                 "HOME_CREATE_FAILED",
                 format!("{}: {error}", options.home.display()),
-            )
-        })?;
-        restrict_private_tree(&options.home).map_err(|_| {
-            KernelFailure::new(
-                "HOME_PERMISSION_FAILED",
-                "kernel home permissions could not be restricted",
             )
         })?;
         Ok(Self {
@@ -1092,15 +1042,6 @@ impl Kernel {
     #[must_use]
     pub fn is_closed(&self) -> bool {
         self.closed.load(Ordering::Acquire)
-    }
-
-    pub fn enforce_private_permissions(&self) -> KernelResult<()> {
-        restrict_private_tree(&self.options.home).map_err(|_| {
-            KernelFailure::new(
-                "HOME_PERMISSION_FAILED",
-                "kernel runtime permissions could not be restricted",
-            )
-        })
     }
 
     fn runtime(&self) -> BoxFuture<'_, KernelResult<Arc<Runtime>>> {
@@ -1249,12 +1190,6 @@ impl Kernel {
                     host: Arc::clone(&self.action_gate),
                 })),
             );
-            restrict_private_tree(&self.options.home).map_err(|_| {
-                KernelFailure::new(
-                    "HOME_PERMISSION_FAILED",
-                    "kernel runtime permissions could not be restricted",
-                )
-            })?;
             Ok(Arc::new(Runtime {
                 manager,
                 auth_manager,
@@ -1583,13 +1518,11 @@ impl Kernel {
             }
             let runtime = self.runtime().await?;
             let session = self.session(&runtime, session_id).await?;
-            self.enforce_private_permissions()?;
             let submission = session
                 .thread
                 .start_or_steer_turn(user_text_request(text, &options))
                 .await
                 .map_err(|error| KernelFailure::new("TURN_SUBMIT_FAILED", error.to_string()))?;
-            self.enforce_private_permissions()?;
             Ok(submission_info(submission))
         })
         .await
@@ -1611,7 +1544,6 @@ impl Kernel {
             }
             let runtime = self.runtime().await?;
             let session = self.session(&runtime, session_id).await?;
-            self.enforce_private_permissions()?;
             let durable = session
                 .thread
                 .inspect_durable_turn(&turn_id)
@@ -1622,7 +1554,7 @@ impl Kernel {
                         "durable turn history lookup failed",
                     )
                 })?;
-            let result = match durable {
+            match durable {
                 DurableTurnInspection::Completed(terminal) => {
                     Ok(ExactTurnReconciliation::Completed(terminal))
                 }
@@ -1655,9 +1587,7 @@ impl Kernel {
                     })?;
                     Ok(exact_turn_submission(submission, recovered))
                 }
-            };
-            self.enforce_private_permissions()?;
-            result
+            }
         })
         .await
     }
@@ -1678,13 +1608,11 @@ impl Kernel {
             }
             let runtime = self.runtime().await?;
             let session = self.session(&runtime, session_id).await?;
-            self.enforce_private_permissions()?;
             let submission = session
                 .thread
                 .steer_turn(user_text_request(text, &options), expected_turn_id)
                 .await
                 .map_err(|error| KernelFailure::new("TURN_STEER_FAILED", error.to_string()))?;
-            self.enforce_private_permissions()?;
             Ok(steer_info(submission))
         })
         .await
@@ -1694,16 +1622,11 @@ impl Kernel {
         Self::guard(async {
             let runtime = self.runtime().await?;
             let session = self.session(&runtime, session_id).await?;
-            self.enforce_private_permissions()?;
             session
                 .thread
                 .submit(Op::Interrupt)
                 .await
                 .map_err(|error| KernelFailure::new("INTERRUPT_FAILED", error.to_string()))
-                .and_then(|result| {
-                    self.enforce_private_permissions()?;
-                    Ok(result)
-                })
         })
         .await
     }
@@ -1714,16 +1637,11 @@ impl Kernel {
             let operation = codex_approval_operation(response)?;
             let runtime = self.runtime().await?;
             let session = self.session(&runtime, &session_id).await?;
-            self.enforce_private_permissions()?;
             session
                 .thread
                 .submit(operation)
                 .await
                 .map_err(|error| KernelFailure::new("APPROVAL_SUBMIT_FAILED", error.to_string()))
-                .and_then(|result| {
-                    self.enforce_private_permissions()?;
-                    Ok(result)
-                })
         })
         .await
     }
@@ -1747,7 +1665,6 @@ impl Kernel {
             }
             let runtime = self.runtime().await?;
             let session = self.session(&runtime, session_id).await?;
-            self.enforce_private_permissions()?;
             session
                 .thread
                 .submit(Op::UserInputAnswer {
@@ -1762,10 +1679,6 @@ impl Kernel {
                         "embedded Codex input response submission failed",
                     )
                 })
-                .and_then(|result| {
-                    self.enforce_private_permissions()?;
-                    Ok(result)
-                })
         })
         .await
     }
@@ -1776,7 +1689,6 @@ impl Kernel {
         timeout: Option<Duration>,
     ) -> KernelResult<EventPoll> {
         Self::guard(async {
-            self.enforce_private_permissions()?;
             let runtime = self.runtime().await?;
             let Some(session) = runtime.sessions.read().await.get(session_id).cloned() else {
                 return Ok(EventPoll::Closed);
@@ -1794,7 +1706,6 @@ impl Kernel {
                 }),
             };
             drop(events);
-            self.enforce_private_permissions()?;
             result
         })
         .await
@@ -1844,7 +1755,6 @@ impl Kernel {
                 let _ = runtime.manager.remove_thread(&thread_id).await;
             }
             join_event_task(&session).await;
-            self.enforce_private_permissions()?;
             Ok(())
         })
         .await
@@ -1886,7 +1796,6 @@ impl Kernel {
             if let Some(state_db) = &runtime.state_db {
                 state_db.close().await;
             }
-            self.enforce_private_permissions()?;
             Ok(ShutdownInfo {
                 completed: report
                     .completed
@@ -1919,12 +1828,6 @@ impl Kernel {
             .thread
             .rollout_path()
             .map(|path| path.to_string_lossy().into_owned());
-        restrict_private_tree(&self.options.home).map_err(|_| {
-            KernelFailure::new(
-                "HOME_PERMISSION_FAILED",
-                "kernel rollout permissions could not be restricted",
-            )
-        })?;
         let (event_tx, event_rx) = mpsc::channel(self.options.event_capacity);
         let (stop, stop_rx) = watch::channel(false);
         let thread = Arc::clone(&new_thread.thread);
@@ -2008,7 +1911,6 @@ impl Kernel {
         }
         let runtime = Arc::clone(&self.runtime);
         let timeout = self.options.shutdown_timeout;
-        let home = self.options.home.clone();
         Some(Box::pin(async move {
             let Some(runtime) = runtime.lock().await.take() else {
                 return;
@@ -2030,36 +1932,8 @@ impl Kernel {
             if let Some(state_db) = &runtime.state_db {
                 state_db.close().await;
             }
-            let _ = restrict_private_tree(&home);
         }))
     }
-}
-
-#[cfg(unix)]
-fn restrict_private_tree(root: &Path) -> std::io::Result<()> {
-    use std::os::unix::fs::PermissionsExt as _;
-
-    let metadata = std::fs::symlink_metadata(root)?;
-    if metadata.file_type().is_symlink() {
-        return Err(std::io::Error::other("private runtime path is a symlink"));
-    }
-    if metadata.is_dir() {
-        std::fs::set_permissions(root, std::fs::Permissions::from_mode(0o700))?;
-        for entry in std::fs::read_dir(root)? {
-            restrict_private_tree(&entry?.path())?;
-        }
-    } else if metadata.is_file() {
-        let mode = 0o600 | (metadata.permissions().mode() & 0o100);
-        std::fs::set_permissions(root, std::fs::Permissions::from_mode(mode))?;
-    } else {
-        return Err(std::io::Error::other("private runtime path is not a file"));
-    }
-    Ok(())
-}
-
-#[cfg(not(unix))]
-fn restrict_private_tree(_root: &Path) -> std::io::Result<()> {
-    Ok(())
 }
 
 #[must_use]
@@ -2574,7 +2448,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn kernel_home_and_preexisting_state_are_restricted() {
+    fn kernel_preserves_existing_home_and_file_permissions() {
         use std::os::unix::fs::PermissionsExt as _;
 
         let home = std::env::temp_dir().join(format!(
@@ -2608,7 +2482,7 @@ mod tests {
                 .permissions()
                 .mode()
                 & 0o777,
-            0o700
+            0o777
         );
         assert_eq!(
             std::fs::metadata(&state)
@@ -2616,7 +2490,7 @@ mod tests {
                 .permissions()
                 .mode()
                 & 0o777,
-            0o600
+            0o666
         );
         assert_eq!(
             std::fs::metadata(&script)
@@ -2624,7 +2498,7 @@ mod tests {
                 .permissions()
                 .mode()
                 & 0o777,
-            0o700
+            0o755
         );
         drop(kernel);
         std::fs::remove_dir_all(home).expect("remove kernel home");

@@ -247,8 +247,6 @@ mod tests {
     const T3: &str = "2026-01-01T00:03:00.000Z";
     const GRANT_EXPIRES: &str = "2026-01-01T01:00:00.000Z";
 
-    const DIGEST: &str = "sha256:00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff";
-
     struct Fixture {
         node: String,
         instance: String,
@@ -271,7 +269,6 @@ mod tests {
                 "aarch64-apple-darwin",
                 "aarch64",
                 "1.2.3",
-                None,
                 Some(instance.clone()),
                 4,
             )
@@ -381,7 +378,6 @@ mod tests {
             id("wsn", seed + 8),
             id("wrk", seed + 9),
             id("wki", seed + 10),
-            DIGEST,
             Some(id("ps", seed + 11)),
             Some(WorkRunId(format!("wrn_{:026}", seed + 12))),
             instant(GRANT_EXPIRES),

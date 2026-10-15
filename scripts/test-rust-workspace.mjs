@@ -4,8 +4,6 @@ import { spawnSync } from 'node:child_process'
 import { readdirSync, statSync } from 'node:fs'
 import { resolve } from 'node:path'
 
-import { prepareCompactKernelHelper } from './compact-kernel-helper.mjs'
-
 const root = resolve(import.meta.dirname, '..')
 const e2eOnly = process.env.WWC_RUST_E2E === '1'
 const standardOnly = process.env.WWC_RUST_E2E === '0'
@@ -37,11 +35,6 @@ function integrationTests(dir) {
 
 run('cargo', ['test', '--all-features', '--locked', '-p', 'winwincode-kernel-helper', '--no-run'])
 run('cargo', ['test', '--all-features', '--locked', '-p', 'winwincode-kernel-helper'])
-prepareCompactKernelHelper({
-  root,
-  targetDirectory: resolve(root, process.env.CARGO_TARGET_DIR || 'target'),
-  environment: process.env,
-})
 
 if (hasNextest()) {
   const filter = e2eOnly ? heavyExpression : standardOnly ? `not (${heavyExpression})` : null

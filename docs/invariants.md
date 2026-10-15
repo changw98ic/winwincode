@@ -46,7 +46,7 @@
 
 Device 占用和 Worker 执行使用不同的租约域。新的 Device 占用使用更高的 token。Device 的 `FencingGuard` 只接受与本地 occupancy mirror 完全相同的 lease ID 和 token。较低 token、未见过的较高 token 或其他 lease 均拒绝。mirror revision 变化会使原本地 ticket 失效。
 
-Worker 凭据绑定 WorkerSession、Worker、Worker instance 和启动授权。远程连接还绑定当前 placement。任务结果与用量结算再次核对当前执行身份和会话状态。
+Device 转发子 Worker 消息时绑定 Client Node、Worker、Worker instance 和启动授权。Server 核对当前 placement。任务结果与用量结算再次核对当前执行身份和会话状态。
 
 源码依据：
 
@@ -154,6 +154,8 @@ Worker 凭据绑定 WorkerSession、Worker、Worker instance 和启动授权。�
 
 - `crates/winwincode-storage/src/lib.rs` 的 `SqliteStorage::open` 及其调用的 `initialize_schema`。
 - `crates/winwincode-device-client/src/store.rs` 的 `DeviceStore::open` 及其调用的 `initialize_schema`。
+
+当前 Server 存储版本为 `7`，Device 存储版本为 `10`。进程归属、执行租约和回执消费记录分别由对应存储保存。
 
 这两个函数先取得 `TransactionBehavior::Immediate` 事务，再读取 SQLite `user_version`。值为 `0` 时，函数创建当前结构并写入当前版本。值为当前常量时，函数校验既有结构。其他值返回 `unsupported schema version <version>`。初始化、版本写入、结构校验和提交位于同一事务。`SqliteStorage` 调用 `validate_journal_schema` 等校验函数。`DeviceStore` 调用 `validate_store_schema` 和 `validate_worker_report_schema`。这些实现依据不能推广为所有产品数据库的保证。
 

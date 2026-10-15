@@ -4044,7 +4044,7 @@ async fn deferred_observer_start_uses_common_outbox_after_renewal() {
     let ObserverWorkerFixture { worker, pump, .. } = observer_worker_fixture().await;
     let root = tempfile::tempdir().unwrap();
     let providers = root.path().join("providers");
-    let mut worker = worker.with_device_providers(&providers).unwrap();
+    let mut worker = worker.with_device_providers(&providers);
     assert!(worker.inject_device_start_fault());
     assert_eq!(
         worker.poll_codex_boxed().await.unwrap_err().code,
@@ -5263,8 +5263,7 @@ async fn deferred_local_model_start_obeys_current_lease_and_keeps_the_original_i
         let root = tempfile::tempdir().unwrap();
         let providers = root.path().join("providers");
         let mut worker = test_worker(worker_config(1), RecordingPort::default(), codex)
-            .with_device_providers(&providers)
-            .unwrap();
+            .with_device_providers(&providers);
         register(&mut worker).await;
         worker
             .accept_control_and_drive(
@@ -5369,8 +5368,7 @@ async fn preserved_clock_anchor_allows_new_leases_without_extending_expiry() {
         let root = tempfile::tempdir().unwrap();
         let providers = root.path().join("providers");
         let mut worker = test_worker(worker_config(1), RecordingPort::default(), codex)
-            .with_device_providers(&providers)
-            .unwrap();
+            .with_device_providers(&providers);
         register(&mut worker).await;
         worker.inject_driver_clock(now(), std::time::Duration::from_millis(10_005));
         let mut dispatch = dispatch('A', delivery_scope('A'));
@@ -5459,8 +5457,7 @@ async fn stale_driver_time_cannot_reset_elapsed_first_start_authority() {
         let root = tempfile::tempdir().unwrap();
         let providers = root.path().join("providers");
         let mut worker = test_worker(worker_config(1), RecordingPort::default(), codex)
-            .with_device_providers(&providers)
-            .unwrap();
+            .with_device_providers(&providers);
         register(&mut worker).await;
         let mut dispatch = dispatch('A', delivery_scope('A'));
         dispatch.lease.expires_at = Instant("2027-01-15T08:00:03.000Z".into());
@@ -5598,9 +5595,7 @@ async fn full_provider_slots_do_not_block_another_provider_or_model_cancellation
     let mut pump = codex.clone();
     let root = tempfile::tempdir().unwrap();
     let providers = root.path().join("providers");
-    let mut worker = test_worker(worker_config(1), port, codex)
-        .with_device_providers(&providers)
-        .unwrap();
+    let mut worker = test_worker(worker_config(1), port, codex).with_device_providers(&providers);
     register(&mut worker).await;
     worker
         .accept_control_and_drive(
@@ -5742,7 +5737,6 @@ async fn owned_model_chunk_retry_does_not_starve_cancelled_core_facts() {
     let intake_log = root.path().join("intake.log");
     let mut worker = test_worker(worker_config(1), port, codex)
         .with_device_providers(&providers)
-        .unwrap()
         .with_model_intake_log(&intake_log);
     register(&mut worker).await;
     worker
@@ -5834,8 +5828,7 @@ async fn invalid_provider_slot_permissions_complete_with_failure_without_blockin
         let root = tempfile::tempdir().unwrap();
         let providers = root.path().join("providers");
         let mut worker = test_worker(worker_config(1), RecordingPort::default(), codex)
-            .with_device_providers(&providers)
-            .unwrap();
+            .with_device_providers(&providers);
         register(&mut worker).await;
         worker
             .accept_control_and_drive(
@@ -5956,9 +5949,7 @@ async fn never_started_local_model_retries_through_the_worker_outbox_and_release
             .unwrap()
             .as_nanos()
     ));
-    let mut worker = test_worker(worker_config(1), port, codex)
-        .with_device_providers(&root)
-        .unwrap();
+    let mut worker = test_worker(worker_config(1), port, codex).with_device_providers(&root);
     register(&mut worker).await;
     worker
         .accept_control_and_drive(

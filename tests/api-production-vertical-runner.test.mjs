@@ -24,7 +24,6 @@ import {
   workItemCreatePayload,
   verifyApiProductionSourceSeal,
   writeApiProductionSourceSeal,
-  writeHelperReleaseManifest,
   runApiProductionVertical,
   waitForDeviceWorkerRegistered,
 } from '../scripts/run-api-production-vertical.mjs'
@@ -482,10 +481,9 @@ test('API production vertical is a direct generated HTTP runner', async () => {
   assert.match(source, /writeApiProductionSourceSeal/u)
   assert.match(source, /verifyApiProductionSourceSeal/u)
   assert.match(source, /trackedDiffSha256/u)
-  assert.match(source, /helperReleaseManifestMode/u)
   assert.match(source, /source seal missing or invalid/u)
   assert.match(source, /IP\.1 = 127\.0\.0\.1/u)
-  assert.match(source, /WWC_WORKER_SERVER_ORIGIN: controlUrl/u)
+  assert.doesNotMatch(source, /WWC_WORKER_SERVER_ORIGIN/u)
   assert.doesNotMatch(source, /controlUrl\.replace\('127\.0\.0\.1'/u)
   assert.match(source, /export async function runApiProductionVertical/u)
   assert.doesNotMatch(source, /approveSolutionResolution/u)
@@ -528,9 +526,8 @@ test('source seal binds the Device Worker and CLI binaries', () => {
       writeFileSync(path, '#!/bin/sh\nexit 0\n')
       chmodSync(path, 0o755)
     }
-    const helperReleaseManifest = writeHelperReleaseManifest(root, helperExecutable)
-    const sealed = writeApiProductionSourceSeal({ root, serverBinary, helperExecutable,
-      helperReleaseManifest })
+      const sealed = writeApiProductionSourceSeal({ root, serverBinary, helperExecutable,
+    })
     assert.equal(sealed.seal.workerBinaryPath, 'winwincode-worker')
     assert.equal(sealed.seal.cliBinaryPath, 'wwc')
     verifyApiProductionSourceSeal({ root, serverBinary, helperExecutable })
@@ -544,7 +541,7 @@ test('source seal binds the Device Worker and CLI binaries', () => {
   } finally { rmSync(target, { recursive: true, force: true }) }
 })
 
-test('source seal rejects a changed helper build script at the same Git HEAD', t => {
+test('source seal rejects a changed product build script at the same Git HEAD', t => {
   const directory = mkdtempSync(resolve(tmpdir(), 'winwincode-api-build-source-seal-'))
   t.after(() => rmSync(directory, { recursive: true, force: true }))
   const sourceRoot = resolve(directory, 'source')
@@ -555,7 +552,7 @@ test('source seal rejects a changed helper build script at the same Git HEAD', t
   writeFileSync(resolve(sourceRoot, 'package.json'), JSON.stringify({ version: '0.1.0' }))
   writeFileSync(resolve(sourceRoot, 'Cargo.toml'), '[workspace.package]\nversion = "0.1.0"\n')
   writeFileSync(resolve(sourceRoot, 'crates/helper/src/main.rs'), 'fn main() {}\n')
-  for (const name of ['run-api-production-vertical.mjs', 'product-build-contract.mjs', 'compact-kernel-helper.mjs']) {
+  for (const name of ['run-api-production-vertical.mjs', 'product-build-contract.mjs', 'build-community.mjs']) {
     writeFileSync(resolve(sourceRoot, 'scripts', name), '// build input\n')
   }
   const git = (...args) => execFileSync('git', ['-C', sourceRoot, ...args], { encoding: 'utf8' }).trim()
@@ -572,10 +569,9 @@ test('source seal rejects a changed helper build script at the same Git HEAD', t
   const serverBinary = resolve(binaryRoot, 'winwincode-server')
   const helperExecutable = resolve(binaryRoot, 'winwincode-kernel-helper')
   const options = { root: sourceRoot, serverBinary, helperExecutable }
-  writeApiProductionSourceSeal({ ...options,
-    helperReleaseManifest: writeHelperReleaseManifest(sourceRoot, helperExecutable) })
+  writeApiProductionSourceSeal(options)
   verifyApiProductionSourceSeal(options)
-  writeFileSync(resolve(sourceRoot, 'scripts/compact-kernel-helper.mjs'), '// changed build input\n')
+  writeFileSync(resolve(sourceRoot, 'scripts/build-community.mjs'), '// changed build input\n')
   assert.equal(git('rev-parse', 'HEAD'), head)
   assert.throws(() => verifyApiProductionSourceSeal(options), /source seal is stale/u)
 })
@@ -776,7 +772,7 @@ test('source seal rejects changes in every locally patched Cargo dependency', t 
   writeFileSync(resolve(sourceRoot, 'package.json'), JSON.stringify({ version: '0.1.0' }))
   writeFileSync(resolve(sourceRoot, 'Cargo.toml'), '[workspace.package]\nversion = "0.1.0"\n[patch.crates-io]\nrusqlite = { path = "upstream/vendor/rusqlite-0.39.0" }\ni18n-embed-fl = { path = "upstream/vendor/i18n-embed-fl-0.9.4" }\n')
   writeFileSync(resolve(sourceRoot, 'crates/helper/src/main.rs'), 'fn main() {}\n')
-  for (const name of ['run-api-production-vertical.mjs', 'product-build-contract.mjs', 'compact-kernel-helper.mjs']) {
+  for (const name of ['run-api-production-vertical.mjs', 'product-build-contract.mjs', 'build-community.mjs']) {
     writeFileSync(resolve(sourceRoot, 'scripts', name), '// build input\n')
   }
   const dependencies = ['rusqlite-0.39.0', 'i18n-embed-fl-0.9.4']
@@ -800,7 +796,7 @@ test('source seal rejects changes in every locally patched Cargo dependency', t 
   const helperExecutable = resolve(binaryRoot, 'winwincode-kernel-helper')
   const options = { root: sourceRoot, serverBinary, helperExecutable }
   const sealed = writeApiProductionSourceSeal({ ...options,
-    helperReleaseManifest: writeHelperReleaseManifest(sourceRoot, helperExecutable) })
+  })
   const originalDigest = projectSourceDigest(sourceRoot)
   verifyApiProductionSourceSeal(options)
   for (const dependency of dependencies) {

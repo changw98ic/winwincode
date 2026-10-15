@@ -77,7 +77,6 @@ use winwincode_domain::{
 };
 use winwincode_domain::{RepositoryScope, RepositoryScopeKind, UserActor, UserActorKind};
 use winwincode_execution_port::{
-    action_enforcement::{ActionEnforcementIssuer, ActionEnforcementSigningKey},
     generated::{
         ActionEnforcementDecision, ActionEnforcementReceiptMessage,
         ActionEnforcementReceiptMessageKind, ApprovalActionOperation, ApprovalActionReasonCode,
@@ -1307,15 +1306,6 @@ fn helper_executable() -> PathBuf {
     target.join("debug/winwincode-kernel-helper")
 }
 
-fn helper_release_manifest() -> winwincode_codex::HelperReleaseManifest {
-    winwincode_codex::HelperReleaseManifest::from_test_helper(&helper_executable())
-        .expect("build test helper release manifest")
-}
-
-fn action_signing_key() -> ActionEnforcementSigningKey {
-    ActionEnforcementSigningKey::from_bytes([31_u8; 32]).expect("action signing key")
-}
-
 fn worker_config() -> winwincode_worker::WorkerConfig {
     winwincode_worker::WorkerConfig {
         worker_id: WorkerId(id("wrk", 1)),
@@ -1469,16 +1459,16 @@ fn adapter_config_with_modes(
     winwincode_codex::ProductionCodexConfig::try_new(winwincode_codex::ProductionCodexOptions {
         data_directory: root.worker(),
         helper_executable: helper_executable(),
-        helper_release_manifest: helper_release_manifest(),
-        provider: PROVIDER_ID.to_owned(),
-        model: MODEL_ID.to_owned(),
+
+        provider: Some(PROVIDER_ID.to_owned()),
+        model: Some(MODEL_ID.to_owned()),
         gateway_route: ModelGatewayRoute {
             capability: "reasoning".to_owned(),
             route: "embedded-canonical-loopback".to_owned(),
         },
         registered_capabilities: worker_config().capabilities,
         discovered_capabilities: Vec::new(),
-        action_signing_key: action_signing_key(),
+
         execution_mode,
         observer_mode,
     })
@@ -3293,7 +3283,7 @@ impl<'root> GatewayDriver<'root> {
                 }
                 ExecutionPortMessage::ActionEnforcementRequestMessage(request) => {
                     let decided_at = at("2030-01-01T00:00:02.000Z");
-                    let mut receipt = ActionEnforcementReceiptMessage {
+                    let receipt = ActionEnforcementReceiptMessage {
                         actor: UserActor {
                             id: UserId(id("usr", 9)),
                             kind: UserActorKind::User,
@@ -3309,7 +3299,7 @@ impl<'root> GatewayDriver<'root> {
                         policy_kind: request.policy_kind.clone(),
                         policy_mode: None,
                         policy_version: None,
-                        receipt_signature: digest('0'),
+
                         request_id: request.request_id.clone(),
                         resource: request.resource.clone(),
                         schema_version: SchemaVersion::WinwincodeV1,
@@ -3319,9 +3309,6 @@ impl<'root> GatewayDriver<'root> {
                         subject_sha256: request.subject_sha256.clone(),
                         worker_session_id: request.worker_session_id.clone(),
                     };
-                    ActionEnforcementIssuer::new(action_signing_key())
-                        .sign(&mut receipt)
-                        .expect("sign loopback action permit");
                     action_responses.push(ExecutionPortMessage::ActionEnforcementReceiptMessage(
                         receipt,
                     ));
@@ -3961,7 +3948,7 @@ async fn run_verification_work_run(root: &TestDirectory, role: &str, command: &s
         "verification action request was not delivered",
     )
     .await;
-    let mut receipt = ActionEnforcementReceiptMessage {
+    let receipt = ActionEnforcementReceiptMessage {
         actor: UserActor {
             id: UserId(id("usr", 9)),
             kind: UserActorKind::User,
@@ -3977,7 +3964,7 @@ async fn run_verification_work_run(root: &TestDirectory, role: &str, command: &s
         policy_kind: action.policy_kind,
         policy_mode: None,
         policy_version: None,
-        receipt_signature: digest('0'),
+
         request_id: action.request_id,
         resource: action.resource,
         schema_version: SchemaVersion::WinwincodeV1,
@@ -3987,9 +3974,6 @@ async fn run_verification_work_run(root: &TestDirectory, role: &str, command: &s
         subject_sha256: action.subject_sha256,
         worker_session_id: action.worker_session_id,
     };
-    ActionEnforcementIssuer::new(action_signing_key())
-        .sign(&mut receipt)
-        .expect("sign verification action permit");
     worker
         .accept_control(
             &ExecutionPortMessage::ActionEnforcementReceiptMessage(receipt),
@@ -4630,21 +4614,6 @@ fn production_worker_kernel_gateway_loopback_and_restart_replay_are_exact() {
             } else {
                 "production-restart"
             });
-            let helper = helper_executable();
-            let output = Command::new(&helper)
-                .arg("--winwincode-helper-handshake")
-                .output()
-                .expect("execute project-owned winwincode-kernel-helper");
-            assert!(output.status.success());
-            assert!(output.stderr.is_empty());
-            assert_eq!(
-                String::from_utf8(output.stdout).expect("helper handshake is UTF-8"),
-                format!(
-                    "{{\"protocol\":\"winwincode-kernel-helper\",\"version\":1,\"packageVersion\":\"{}\"}}\n",
-                    env!("CARGO_PKG_VERSION")
-                )
-            );
-
             let dispatch = dispatch(&root);
             let first_port = RecordedPort::default();
             let adapter = winwincode_codex::ProductionCodexAdapter::open(adapter_config(&root))
@@ -6863,7 +6832,7 @@ fn shell_approval_and_action_receipt_body(renew: bool) {
             "typed action request was not delivered after approval",
         )
         .await;
-        let mut receipt = ActionEnforcementReceiptMessage {
+        let receipt = ActionEnforcementReceiptMessage {
             actor: UserActor {
                 id: UserId(id("usr", 9)),
                 kind: UserActorKind::User,
@@ -6879,7 +6848,7 @@ fn shell_approval_and_action_receipt_body(renew: bool) {
             policy_kind: action.policy_kind,
             policy_mode: None,
             policy_version: None,
-            receipt_signature: digest('0'),
+
             request_id: action.request_id,
             resource: action.resource,
             schema_version: SchemaVersion::WinwincodeV1,
@@ -6895,9 +6864,6 @@ fn shell_approval_and_action_receipt_body(renew: bool) {
             subject_sha256: action.subject_sha256,
             worker_session_id: action.worker_session_id,
         };
-        ActionEnforcementIssuer::new(action_signing_key())
-            .sign(&mut receipt)
-            .expect("sign exact action permit");
         worker
             .accept_control(
                 &ExecutionPortMessage::ActionEnforcementReceiptMessage(receipt),

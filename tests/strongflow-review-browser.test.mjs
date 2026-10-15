@@ -5,7 +5,7 @@ import { join, resolve } from 'node:path'
 import test from 'node:test'
 
 import {
-  certificate, chromeBinary, closeServer, command, DevTools, evaluate,
+  chromeBinary, closeServer, command, DevTools, evaluate,
   freePort, listen, staticClientServer, stopChild, waitForGlobal,
 } from './fixtures/real-browser-harness.mjs'
 
@@ -18,11 +18,10 @@ test('a real browser reviews bounded artifacts without executing HTML or SVG', a
   const directory = mkdtempSync(join(tmpdir(), 'winwincode-review-'))
   const server = staticClientServer({
     root,
-    certificateFiles: certificate(root, directory),
     fixturePath: 'tests/fixtures/browser-strongflow-review.mjs',
     configuration: () => ({}),
   })
-  const origin = `https://client.localhost:${String(await listen(server))}`
+  const origin = `http://127.0.0.1:${String(await listen(server))}`
   let chrome = null
   let devtools = null
   t.after(async () => {
@@ -37,7 +36,6 @@ test('a real browser reviews bounded artifacts without executing HTML or SVG', a
   const { sessionId } = await devtools.send('Target.attachToTarget', { targetId, flatten: true })
   await devtools.send('Runtime.enable', {}, sessionId)
   await devtools.send('Page.enable', {}, sessionId)
-  await devtools.send('Security.setIgnoreCertificateErrors', { ignore: true }, sessionId)
   await devtools.send('Page.navigate', { url: origin }, sessionId)
   await waitForGlobal(devtools, sessionId, 'reviewReady')
   const result = await evaluate(devtools, sessionId, 'globalThis.exerciseReview()')

@@ -93,9 +93,6 @@
               }
             ]
           },
-          "receiptSignature": {
-            "$ref": "#/components/schemas/Sha256Digest"
-          },
           "requestId": {
             "$ref": "#/components/schemas/RequestId"
           },
@@ -143,8 +140,7 @@
           "policyMode",
           "policyVersion",
           "evaluationSha256",
-          "evaluatedAt",
-          "receiptSignature"
+          "evaluatedAt"
         ],
         "title": "action.enforcement_receipt",
         "type": "object",
@@ -4017,7 +4013,7 @@
       },
       "ClientEnrollMessage": {
         "additionalProperties": false,
-        "description": "First contact of one Device Client identity; creates the ClientNode in pending_enrollment. Device credential provisioning stays outside this contract.",
+        "description": "First contact of one Device Client identity; creates the ClientNode in pending_enrollment.",
         "properties": {
           "architecture": {
             "$ref": "#/components/schemas/ClientArchitecture"
@@ -4509,9 +4505,6 @@
           "currentInstanceId": {
             "$ref": "#/components/schemas/ClientInstanceId"
           },
-          "deviceCredentialDigest": {
-            "$ref": "#/components/schemas/Sha256Digest"
-          },
           "displayName": {
             "$ref": "#/components/schemas/ClientDisplayName"
           },
@@ -4551,7 +4544,6 @@
           "platform",
           "architecture",
           "clientVersion",
-          "deviceCredentialDigest",
           "currentInstanceId",
           "presenceState",
           "acceptingConnections",
@@ -27689,10 +27681,6 @@
           "clientNodeId": {
             "$ref": "#/components/schemas/ClientNodeId"
           },
-          "credentialDigest": {
-            "$ref": "#/components/schemas/Sha256Digest",
-            "description": "Digest of the short-lived worker session credential. Credential material itself never crosses this contract."
-          },
           "expiresAt": {
             "$ref": "#/components/schemas/Instant"
           },
@@ -27749,7 +27737,6 @@
           "workerSessionId",
           "workerId",
           "workerInstanceId",
-          "credentialDigest",
           "expiresAt",
           "state",
           "revision"
@@ -29402,7 +29389,7 @@
     "https://schemas.winwincode.dev/winwincode/v1/domain.schema.json",
     "https://schemas.winwincode.dev/winwincode/v1/execution-port.schema.json"
   ],
-  "x-source-digest": "sha256:1e06b28cb674b7876feb747b3645d3ea2dc28b9b16f4df046610d508317db636",
+  "x-source-digest": "sha256:0216325cdb8b54f74ec123d3c4514cb5b81754afda0573768bf793bddbfddbab",
   "x-winwincode-client-metadata": {
     "http": {
       "authentication": {

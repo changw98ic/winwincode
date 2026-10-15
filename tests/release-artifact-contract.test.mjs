@@ -1,10 +1,5 @@
 import assert from 'node:assert/strict'
-import {
-  createHash,
-  createPrivateKey,
-  createPublicKey,
-  sign,
-} from 'node:crypto'
+import { createHash } from 'node:crypto'
 import {
   chmodSync,
   copyFileSync,
@@ -23,7 +18,6 @@ import {
   RELEASE_ARTIFACT_MANIFEST,
   RELEASE_ARTIFACT_CHECKS,
   RELEASE_CHECKSUMS,
-  HELPER_RELEASE_MANIFEST_NAME,
   RELEASE_REPORT_KIND,
   RELEASE_TARGETS,
   RUST_RELEASE_ARTIFACTS,
@@ -33,9 +27,6 @@ import {
   createReleaseArtifactManifest,
   createReleaseReport,
   descriptorForFile,
-  helperReleaseBuildBaseEnvironment,
-  helperReleaseManifestArtifactPath,
-  helperReleaseVerificationBaseEnvironment,
   machoUuidForFile,
   releaseChecksums,
   stageCommunityCoreWorkerRuntime,
@@ -52,16 +43,6 @@ const root = resolve(import.meta.dirname, '..')
 const workspaceVersion = JSON.parse(readFileSync(join(root, 'package.json'), 'utf8')).version
 const sourceCommit = '1234567890abcdef1234567890abcdef12345678'
 const sourceDateEpoch = 1_700_000_000
-const helperReleasePrivateKey = createPrivateKey({
-  key: Buffer.from(`302e020100300506032b657004220420${'2a'.repeat(32)}`, 'hex'),
-  format: 'der',
-  type: 'pkcs8',
-})
-const helperReleasePublicKeyHex = createPublicKey(helperReleasePrivateKey)
-  .export({ format: 'der', type: 'spki' })
-  .subarray(-32)
-  .toString('hex')
-
 function sha256(bytes) {
   return createHash('sha256').update(bytes).digest('hex')
 }
@@ -104,7 +85,7 @@ function thinMachoFixture(target, binaryName) {
   header.writeUInt32LE(0x1b, 32)
   header.writeUInt32LE(24, 36)
   createHash('sha256').update(`${target}\0${binaryName}`).digest().copy(header, 40, 0, 16)
-  return Buffer.concat([header, Buffer.from(`fixture ${binaryName} ${helperReleasePublicKeyHex}\n`)])
+  return Buffer.concat([header, Buffer.from(`fixture ${binaryName}\n`)])
 }
 
 function replayClientDescriptors(artifactRoot) {
@@ -141,53 +122,6 @@ function writeClientAssetManifest(artifactRoot) {
   }, null, 2)}\n`)
 }
 
-function helperReleaseSigningBytes(fields) {
-  return Buffer.from([
-    'winwincode-kernel-helper.release.v1',
-    String(fields.schemaVersion),
-    fields.protocol,
-    String(fields.version),
-    fields.packageVersion,
-    fields.sourceSha256,
-    fields.binarySha256,
-    fields.binaryPath,
-    String(fields.binaryMode),
-  ].join('\0'))
-}
-
-function writeHelperReleaseManifest(artifactRoot) {
-  const helperPath = join(artifactRoot, 'bin/winwincode-kernel-helper')
-  const fields = {
-    schemaVersion: 1,
-    protocol: 'winwincode-kernel-helper-release',
-    version: 1,
-    packageVersion: workspaceVersion,
-    sourceSha256: `sha256:${sha256(readFileSync(join(root, 'crates/helper/src/main.rs')))}`,
-    binarySha256: `sha256:${sha256(readFileSync(helperPath))}`,
-    binaryPath: 'winwincode-kernel-helper',
-    binaryMode: 0o755,
-  }
-  const manifest = {
-    ...fields,
-    signature: sign(null, helperReleaseSigningBytes(fields), helperReleasePrivateKey)
-      .toString('base64url'),
-  }
-  const path = writeFixtureFile(
-    artifactRoot,
-    `bin/${HELPER_RELEASE_MANIFEST_NAME}`,
-    `${JSON.stringify(manifest, null, 2)}\n`,
-  )
-  chmodSync(path, 0o644)
-}
-
-function replayHelperReleaseManifest(artifactRoot) {
-  const { bytes, sha256: digest } = descriptorForFile(
-    join(artifactRoot, 'bin'),
-    join(artifactRoot, 'bin', HELPER_RELEASE_MANIFEST_NAME),
-  )
-  return { bytes, sha256: digest, publicKeyHex: helperReleasePublicKeyHex }
-}
-
 function createArtifactFixture(evidenceRoot, target) {
   const artifactRoot = join(evidenceRoot, target)
   const targetIdentity = targetConfiguration(target)
@@ -197,11 +131,10 @@ function createArtifactFixture(evidenceRoot, target) {
       `bin/${artifact.binaryName}`,
       targetIdentity.os === 'macos'
         ? thinMachoFixture(target, artifact.binaryName)
-        : `fixture ${artifact.binaryName} ${target} ${helperReleasePublicKeyHex}\n`,
+        : `fixture ${artifact.binaryName} ${target}\n`,
     )
     chmodSync(path, 0o755)
   }
-  writeHelperReleaseManifest(artifactRoot)
   writeFixtureFile(artifactRoot, 'client/index.html', '<!doctype html>\n')
   writeFixtureFile(artifactRoot, 'client/runtime-config.js', 'globalThis.WINWINCODE_CONFIG = {}\n')
   writeFixtureFile(artifactRoot, 'client/version.json', `${JSON.stringify({
@@ -225,8 +158,6 @@ function createArtifactFixture(evidenceRoot, target) {
     sourceDateEpoch,
     replayRust: replayRustDescriptors(artifactRoot, target),
     replayClient: replayClientDescriptors(artifactRoot),
-    helperReleasePublicKeyHex,
-    replayHelperReleaseManifest: replayHelperReleaseManifest(artifactRoot),
   })
   writeFileSync(join(artifactRoot, RELEASE_ARTIFACT_MANIFEST), canonicalJson(manifest))
   writeFileSync(join(artifactRoot, RELEASE_CHECKSUMS), releaseChecksums(manifest))
@@ -258,37 +189,6 @@ test('release source identity excludes generated output and remains deterministi
   assert.equal(paths.some(path => path.startsWith('third_party/codex/')), false)
   assert.match(releaseSourceSha256(root), /^[0-9a-f]{64}$/u)
   assert.equal(releaseSourceSha256(root), releaseSourceSha256(root))
-})
-
-test('release verification isolates both helper keys while release builds receive only the public key', () => {
-  const baseEnvironment = {
-    HOME: '/fixture-home',
-    WINWINCODE_HELPER_RELEASE_PRIVATE_KEY_HEX: 'fixture-private-key',
-    WINWINCODE_HELPER_RELEASE_PUBLIC_KEY_HEX: 'fixture-public-key',
-  }
-  assert.deepEqual(helperReleaseVerificationBaseEnvironment(baseEnvironment), {
-    HOME: '/fixture-home',
-  })
-  assert.deepEqual(helperReleaseBuildBaseEnvironment(baseEnvironment), {
-    HOME: '/fixture-home',
-    WINWINCODE_HELPER_RELEASE_PUBLIC_KEY_HEX: 'fixture-public-key',
-  })
-  assert.equal(baseEnvironment.WINWINCODE_HELPER_RELEASE_PRIVATE_KEY_HEX, 'fixture-private-key')
-  assert.equal(baseEnvironment.WINWINCODE_HELPER_RELEASE_PUBLIC_KEY_HEX, 'fixture-public-key')
-
-  const runner = readFileSync(join(root, 'scripts/run-release-artifact-gate.mjs'), 'utf8')
-  assert.match(
-    runner,
-    /run\(process\.execPath,[\s\S]*env: verificationChildEnvironment\(\)/u,
-  )
-  assert.match(
-    runner,
-    /baseEnvironment: helperReleaseBuildBaseEnvironment\(process\.env\)/u,
-  )
-  assert.match(
-    runner,
-    /const privateKeyHex = process\.env\.WINWINCODE_HELPER_RELEASE_PRIVATE_KEY_HEX/u,
-  )
 })
 
 test('release runner rejects source mutation around both isolated builds', () => {
@@ -362,11 +262,10 @@ test('release runner cold-builds twice at one physical Cargo target outside its 
   assert.equal(snapshot > 0 && snapshot < coldReplay && coldReplay < replay, true)
   assert.match(runner, /const rustSnapshot = resolve\(buildRoot, 'rust-primary'\)/u)
   assert.match(runner, /chmodSync\(sourcePath, 0o555\)/u)
-  assert.match(runner, /chmodSync\(helperReleaseManifestPath, 0o444\)/u)
   assert.match(runner, /stageArtifacts\(artifactRoot, primaryRustSnapshot, clientSnapshot\)/u)
 })
 
-test('macOS release builds ad-hoc sign every Rust artifact before hashing and the helper sidecar', () => {
+test('macOS release builds ad-hoc sign every Rust artifact before hashing', () => {
   const runner = readFileSync(join(root, 'scripts/run-release-artifact-gate.mjs'), 'utf8')
   assert.match(
     runner,
@@ -376,8 +275,7 @@ test('macOS release builds ad-hoc sign every Rust artifact before hashing and th
   const rustBuild = runner.indexOf('function rustBuild(')
   const sign = runner.indexOf('signMacReleaseArtifacts(targetIdentity, artifactPaths)', rustBuild)
   const descriptor = runner.indexOf('descriptorForFile(dirname(path), path)', rustBuild)
-  const helperSidecar = runner.indexOf('writeHelperReleaseManifest(root, helper.sourcePath)', rustBuild)
-  assert.equal(rustBuild > 0 && sign > rustBuild && sign < descriptor && descriptor < helperSidecar, true)
+  assert.equal(rustBuild > 0 && sign > rustBuild && sign < descriptor, true)
   assert.match(
     runner,
     /const artifactPaths = RUST_RELEASE_ARTIFACTS\.map[\s\S]*for \(const path of artifactPaths\) chmodSync\(path, 0o755\)[\s\S]*signMacReleaseArtifacts/u,
@@ -467,13 +365,6 @@ test('per-target evidence binds source, protocols, legal files and reproducible 
     evidenceRoot,
     'aarch64-apple-darwin',
   )
-  const helperManifestPath = helperReleaseManifestArtifactPath(artifactRoot)
-  assert.equal(helperManifestPath, join(artifactRoot, 'bin', HELPER_RELEASE_MANIFEST_NAME))
-  assert.equal(existsSync(helperManifestPath), true)
-  assert.equal(
-    existsSync(join(artifactRoot, 'bin', 'bin', HELPER_RELEASE_MANIFEST_NAME)),
-    false,
-  )
   assert.equal(manifest.source.version, workspaceVersion)
   assert.equal(manifest.source.license, 'Apache-2.0')
   assert.equal(manifest.protocols.controlPlane.schemaVersion, 'winwincode/v1')
@@ -495,6 +386,7 @@ test('per-target evidence binds source, protocols, legal files and reproducible 
   assert.deepEqual(
     manifest.artifacts.rust.map(entry => [entry.role, entry.distribution]),
     [
+      ['device-client-cli', 'product'],
       ['server', 'product'],
       ['worker', 'product'],
       ['worker-helper', 'worker-internal'],
@@ -583,7 +475,6 @@ test('Community Core worker runtime excludes Server and Client product files', t
   assert.deepEqual(result.files.map(entry => entry.path), [
     'bin/winwincode-worker',
     'bin/winwincode-kernel-helper',
-    `bin/${HELPER_RELEASE_MANIFEST_NAME}`,
     'LICENSE',
     'NOTICE',
     'THIRD_PARTY_NOTICES.md',
@@ -644,30 +535,8 @@ test('reproducibility comparison rejects a changed isolated binary or LC_UUID', 
       sourceDateEpoch,
       replayRust: replay,
       replayClient: replayClientDescriptors(artifactRoot),
-      helperReleasePublicKeyHex,
-      replayHelperReleaseManifest: replayHelperReleaseManifest(artifactRoot),
-    }),
+        }),
     error => error instanceof ReleaseArtifactError && error.code === 'REPRODUCIBILITY_FAILED',
   )
 
-  const helperManifestPath = join(artifactRoot, 'bin', HELPER_RELEASE_MANIFEST_NAME)
-  const helperManifest = JSON.parse(readFileSync(helperManifestPath, 'utf8'))
-  helperManifest.signature = `${helperManifest.signature.slice(0, -1)}${
-    helperManifest.signature.endsWith('A') ? 'B' : 'A'
-  }`
-  writeFileSync(helperManifestPath, `${JSON.stringify(helperManifest, null, 2)}\n`)
-  assert.throws(
-    () => createReleaseArtifactManifest({
-      root,
-      artifactRoot,
-      target: 'aarch64-apple-darwin',
-      sourceCommit,
-      sourceDateEpoch,
-      replayRust: replayRustDescriptors(artifactRoot, 'aarch64-apple-darwin'),
-      replayClient: replayClientDescriptors(artifactRoot),
-      helperReleasePublicKeyHex,
-      replayHelperReleaseManifest: replayHelperReleaseManifest(artifactRoot),
-    }),
-    error => error instanceof ReleaseArtifactError && error.code === 'HELPER_RELEASE_INVALID',
-  )
 })

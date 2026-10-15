@@ -1438,7 +1438,7 @@ fn startup_rejects_a_database_from_a_newer_schema_version() {
     let database_path = root.join("control-plane.sqlite3");
     let connection = Connection::open(&database_path).expect("test database should open");
     connection
-        .pragma_update(None, "user_version", 7)
+        .pragma_update(None, "user_version", 8)
         .expect("test schema version should be written");
     connection.close().expect("test database should close");
 
@@ -1446,13 +1446,13 @@ fn startup_rejects_a_database_from_a_newer_schema_version() {
         panic!("a newer schema must not be silently downgraded");
     };
 
-    assert!(error.to_string().contains("unsupported schema version 7"));
+    assert!(error.to_string().contains("unsupported schema version 8"));
     fs::remove_dir_all(root).expect("rejected database should have no open connection");
 }
 
 #[test]
 fn unpublished_schema_versions_are_refused_without_rewriting_state_or_receipts() {
-    for version in 1..6 {
+    for version in 1..7 {
         let root = temporary_directory("unsupported-schema");
         let mut storage = SqliteStorage::open(&root).expect("current storage");
         storage

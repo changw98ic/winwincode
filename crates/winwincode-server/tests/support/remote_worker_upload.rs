@@ -6,12 +6,10 @@ use sha2::{Digest as _, Sha256};
 use std::{
     collections::{HashMap, HashSet, VecDeque},
     fs,
-    os::unix::fs::PermissionsExt,
     path::Path,
     sync::{Arc, Mutex},
     time::Duration,
 };
-use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 use winwincode_codex::candidate_artifact_outbox::CandidateArtifactUpload;
 use winwincode_codex::{
     CodexCoreAdapter as _, ProductionCodexAdapter, ProductionCodexConfig, ProductionCodexOptions,
@@ -26,8 +24,7 @@ use winwincode_execution_port::{
     },
 };
 use winwincode_server::{
-    FileRemoteWorkerAuthenticator, ProductionRemoteWorkerExchange, RemoteWorkerExchangePort,
-    RepositoryRuntimeScheduler,
+    ProductionRemoteWorkerExchange, RemoteWorkerExchangePort, RepositoryRuntimeScheduler,
 };
 use winwincode_storage::{
     ArtifactAccess, ArtifactChunk, ArtifactMeteringAttribution, ArtifactOpen, ArtifactProvenance,
@@ -202,14 +199,25 @@ fn adapter(root: &Path, config: &WorkerConfig) -> ProductionCodexAdapter {
         workspace.join(target)
     };
     let helper = target.join("debug/winwincode-kernel-helper");
-    ProductionCodexAdapter::open(ProductionCodexConfig::try_new(ProductionCodexOptions {
-        data_directory: root.join("worker"), helper_release_manifest: winwincode_codex::HelperReleaseManifest::from_test_helper(&helper).unwrap(),
-        helper_executable: helper, provider: "deterministic-fixture".into(), model: "unused-model".into(),
-        gateway_route: ModelGatewayRoute { capability: "reasoning".into(), route: "unused-fixture".into() },
-        registered_capabilities: config.capabilities.clone(), discovered_capabilities: vec![],
-        action_signing_key: winwincode_execution_port::action_enforcement::ActionEnforcementSigningKey::from_bytes([31;32]).unwrap(),
-        execution_mode: ExecutionMode::React, observer_mode: winwincode_codex::ObserverMode::Off,
-    }).unwrap()).unwrap()
+    ProductionCodexAdapter::open(
+        ProductionCodexConfig::try_new(ProductionCodexOptions {
+            data_directory: root.join("worker"),
+            helper_executable: helper,
+            provider: Some("deterministic-fixture".into()),
+            model: Some("unused-model".into()),
+            gateway_route: ModelGatewayRoute {
+                capability: "reasoning".into(),
+                route: "unused-fixture".into(),
+            },
+            registered_capabilities: config.capabilities.clone(),
+            discovered_capabilities: vec![],
+
+            execution_mode: ExecutionMode::React,
+            observer_mode: winwincode_codex::ObserverMode::Off,
+        })
+        .unwrap(),
+    )
+    .unwrap()
 }
 
 async fn scenario(chunks: usize) {
@@ -267,21 +275,8 @@ async fn scenario(chunks: usize) {
     let mut codex = adapter(&root, &config);
     let retained = codex.retain_candidate_artifact(&upload).unwrap();
     assert_eq!(retained.deliveries.len(), chunks + 1);
-    let token = root.join("worker.token");
-    fs::write(&token, b"fixture-proof").unwrap();
-    fs::set_permissions(&token, fs::Permissions::from_mode(0o600)).unwrap();
-    let auth = FileRemoteWorkerAuthenticator::open(
-        &token,
-        config.worker_id.clone(),
-        winwincode_storage::WorkerPoolId(super::id("wpl", 1)),
-        super::worker_scope(1),
-        "fixture-issuer".into(),
-        "fixture-worker".into(),
-        "local-build".into(),
-        Instant("2027-01-15T09:00:00.000Z".into()),
-        &now,
-    )
-    .unwrap();
+    let client_node_id =
+        super::device_worker_route::stage(&root, &config.worker_id, &config.worker_instance_id);
     let scheduler = RepositoryRuntimeScheduler::from_application(
         &application,
         serde_json::from_value(super::repository_scope_json(1)).unwrap(),
@@ -301,7 +296,7 @@ async fn scenario(chunks: usize) {
     let metrics = Arc::new(Mutex::new(Metrics::default()));
     let exchange = Arc::new(ProductionRemoteWorkerExchange::new(
         &root,
-        Arc::new(auth),
+        serde_json::from_value(super::repository_scope_json(1)).unwrap(),
         scheduler,
         ArtifactIngress {
             store: store.clone(),
@@ -309,132 +304,87 @@ async fn scenario(chunks: usize) {
             receipts: HashMap::new(),
         },
     ));
-    let rcgen::CertifiedKey { cert, signing_key } =
-        rcgen::generate_simple_self_signed(vec!["127.0.0.1".into()]).unwrap();
-    let tls = rustls::ServerConfig::builder_with_provider(Arc::new(
-        rustls::crypto::aws_lc_rs::default_provider(),
-    ))
-    .with_safe_default_protocol_versions()
-    .unwrap()
-    .with_no_client_auth()
-    .with_single_cert(
-        vec![cert.der().clone()],
-        rustls::pki_types::PrivatePkcs8KeyDer::from(signing_key.serialize_der()).into(),
-    )
-    .unwrap();
-    let acceptor = tokio_rustls::TlsAcceptor::from(Arc::new(tls));
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let address = listener.local_addr().unwrap();
-    let listener_task = {
+    let (worker_wire, server_wire) = std::os::unix::net::UnixStream::pair().unwrap();
+    let worker_input = worker_wire.try_clone().unwrap();
+    let worker_id = config.worker_id.clone();
+    let worker_instance_id = config.worker_instance_id.clone();
+    let _relay = {
+        use std::io::{BufRead as _, Write as _};
         let exchange = exchange.clone();
         let metrics = metrics.clone();
         let now = now.clone();
-        tokio::spawn(async move {
-            loop {
-                let (socket, _) = listener.accept().await.unwrap();
-                let acceptor = acceptor.clone();
-                let exchange = exchange.clone();
-                let metrics = metrics.clone();
-                let now = now.clone();
-                tokio::spawn(async move {
-                    let Ok(mut tls) = acceptor.accept(socket).await else {
-                        return;
-                    };
-                    let mut raw = vec![];
-                    let mut scratch = [0u8; 8192];
-                    let (header_end, body_len, credential) = loop {
-                        let n = tls.read(&mut scratch).await.unwrap();
-                        if n == 0 {
-                            return;
-                        }
-                        raw.extend_from_slice(&scratch[..n]);
-                        if let Some(i) = raw.windows(4).position(|w| w == b"\r\n\r\n") {
-                            let header = std::str::from_utf8(&raw[..i]).unwrap();
-                            let value = |name: &str| {
-                                header
-                                    .lines()
-                                    .filter_map(|line| line.split_once(':'))
-                                    .find(|(key, _)| key.eq_ignore_ascii_case(name))
-                                    .map(|(_, value)| value.trim())
-                            };
-                            break (
-                                i + 4,
-                                value("content-length").unwrap().parse::<usize>().unwrap(),
-                                value("authorization")
-                                    .unwrap()
-                                    .strip_prefix("Bearer ")
-                                    .unwrap()
-                                    .as_bytes()
-                                    .to_vec(),
-                            );
-                        }
-                        assert!(raw.len() < 16384);
-                    };
-                    while raw.len() < header_end + body_len {
-                        let n = tls.read(&mut scratch).await.unwrap();
-                        if n == 0 {
-                            return;
-                        }
-                        raw.extend_from_slice(&scratch[..n]);
+        std::thread::spawn(move || {
+            let mut output = server_wire.try_clone().unwrap();
+            for line in std::io::BufReader::new(server_wire).lines() {
+                let Ok(line) = line else { break };
+                let request: winwincode_client_port::worker_relay::WorkerRelayRequest =
+                    serde_json::from_str(&line).unwrap();
+                let winwincode_client_port::worker_relay::WorkerRelayRequest::Exchange { body } =
+                    request
+                else {
+                    panic!("exchange request")
+                };
+                let body = body.as_bytes();
+                let request = RemoteExchangeRequest::decode(body).unwrap();
+                let frame =
+                    RemoteTransportAdapter::<ArtifactIngress>::decode(request.frame()).unwrap();
+                let response = exchange
+                    .exchange(
+                        &client_node_id,
+                        &worker_id.0,
+                        &worker_instance_id.0,
+                        body,
+                        now.clone(),
+                    )
+                    .unwrap();
+                let decoded = RemoteExchangeResponse::decode(&response).unwrap();
+                {
+                    let mut metrics = metrics.lock().unwrap();
+                    for ack in request.acknowledgements() {
+                        metrics.outstanding.remove(ack);
                     }
-                    let body = &raw[header_end..header_end + body_len];
-                    let request = RemoteExchangeRequest::decode(body).unwrap();
-                    let frame =
-                        RemoteTransportAdapter::<ArtifactIngress>::decode(request.frame()).unwrap();
-                    let response = exchange.exchange(credential, body, now).unwrap();
-                    let decoded = RemoteExchangeResponse::decode(&response).unwrap();
-                    {
-                        let mut metrics = metrics.lock().unwrap();
-                        for ack in request.acknowledgements() {
-                            metrics.outstanding.remove(ack);
+                    for delivery in decoded.deliveries() {
+                        let frame =
+                            RemoteTransportAdapter::<ArtifactIngress>::decode(&delivery.frame)
+                                .unwrap();
+                        if let ExecutionPortMessage::WorkerHeartbeatAckMessage(ack) =
+                            frame.message()
+                        {
+                            metrics.outstanding.remove(&ExecutionMessageId(super::id(
+                                "xmsg",
+                                20000 + u64::try_from(ack.heartbeat_sequence.0).unwrap(),
+                            )));
                         }
-                        for delivery in decoded.deliveries() {
-                            let frame =
-                                RemoteTransportAdapter::<ArtifactIngress>::decode(&delivery.frame)
-                                    .unwrap();
-                            if let ExecutionPortMessage::WorkerHeartbeatAckMessage(ack) =
-                                frame.message()
-                            {
-                                metrics.outstanding.remove(&ExecutionMessageId(super::id(
-                                    "xmsg",
-                                    20000 + u64::try_from(ack.heartbeat_sequence.0).unwrap(),
-                                )));
-                            }
-                            metrics.outstanding.insert(delivery.delivery_id.clone());
-                        }
-                        if !decoded.frame_accepted() {
-                            metrics.refused.push(
-                                winwincode_execution_port::transport::execution_message_id(
-                                    frame.message(),
-                                )
-                                .unwrap(),
-                            );
-                        }
-                        let backlog = metrics.outstanding.len();
-                        metrics.backlog.push(backlog);
+                        metrics.outstanding.insert(delivery.delivery_id.clone());
                     }
-                    let headers = format!(
-                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-                        response.len()
-                    );
-                    if tls.write_all(headers.as_bytes()).await.is_err() {
-                        return;
+                    if !decoded.frame_accepted() {
+                        metrics.refused.push(
+                            winwincode_execution_port::transport::execution_message_id(
+                                frame.message(),
+                            )
+                            .unwrap(),
+                        );
                     }
-                    let _ = tls.write_all(&response).await;
-                    let _ = tls.flush().await;
-                });
+                    let backlog = metrics.outstanding.len();
+                    metrics.backlog.push(backlog);
+                }
+
+                let response = winwincode_client_port::worker_relay::WorkerRelayResponse {
+                    status: 200,
+                    body: String::from_utf8(response).unwrap(),
+                };
+                serde_json::to_writer(&mut output, &response).unwrap();
+                output.write_all(b"\n").unwrap();
+                output.flush().unwrap();
             }
         })
     };
-    let (port, handle) = RemoteWorkerPort::open(
-        &format!("https://{address}"),
-        cert.der(),
-        &token,
+    let (port, handle) = RemoteWorkerPort::with_io(
         config.worker_id.clone(),
         config.worker_instance_id.clone(),
-        Duration::from_secs(5),
-    )
-    .unwrap();
+        std::io::BufReader::new(worker_input),
+        worker_wire,
+    );
     fs::create_dir_all(root.join("sources")).unwrap();
     let mut worker = WorkerMain::new(
         config.clone(),
@@ -601,7 +551,6 @@ async fn scenario(chunks: usize) {
         Some(retained.artifact)
     );
     drop(reopened);
-    listener_task.abort();
     drop(exchange);
     drop(application);
     drop(store);

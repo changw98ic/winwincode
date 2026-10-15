@@ -9,16 +9,10 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
 use futures::{SinkExt, StreamExt};
-use rcgen::CertifiedKey;
-use rcgen::generate_simple_self_signed;
-use rustls::ClientConfig;
-use rustls::RootCertStore;
-use rustls::pki_types::ServerName;
 use serde_json::{Value, json};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio::sync::mpsc;
-use tokio_rustls::TlsConnector;
 use tokio_tungstenite::client_async;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use winwincode_api::generated::{
@@ -28,7 +22,7 @@ use winwincode_api::generated::{
 use winwincode_domain::{Instant, OrganizationId, UserActor, UserActorKind, UserId};
 use winwincode_server::{
     ApiError, AuthSessionBootstrap, AuthSessionConfig, AuthenticatedPrincipal, ControlPlaneApiPort,
-    EventSubscription, RequestAuthenticator, RunningServer, ServerConfig, ServerError, ServerTls,
+    EventSubscription, RequestAuthenticator, RunningServer, ServerConfig, ServerError,
     SqliteAuthSessionManager, UserAccountService, start_server as start_server_with_authenticator,
 };
 
@@ -93,18 +87,12 @@ fn open_auth(
 #[derive(Default)]
 struct BlockingCall {
     entered: tokio::sync::Notify,
-    started: Mutex<Option<std::time::Instant>>,
 }
 
 impl BlockingCall {
     fn pause(&self) {
-        *self.started.lock().unwrap() = Some(std::time::Instant::now());
         self.entered.notify_one();
         std::thread::sleep(Duration::from_secs(2));
-    }
-
-    fn elapsed(&self) -> Duration {
-        self.started.lock().unwrap().unwrap().elapsed()
     }
 }
 
@@ -252,7 +240,6 @@ fn config(bind_address: SocketAddr) -> ServerConfig {
     ServerConfig::new(
         bind_address,
         "http://control.example",
-        ServerTls::Disabled,
         BTreeSet::from(["https://client.example".to_owned()]),
         test_directory("winwincode-server-test"),
         Duration::from_secs(2),
@@ -261,26 +248,7 @@ fn config(bind_address: SocketAddr) -> ServerConfig {
 }
 
 fn cleanup_recovery_config() -> ServerConfig {
-    let directory = test_directory("accepted-cleanup-recovery");
-    fs::create_dir_all(&directory).unwrap();
-    let CertifiedKey { cert, signing_key } =
-        generate_simple_self_signed(vec!["localhost".into()]).unwrap();
-    let certificate_path = directory.join("certificate.pem");
-    let private_key_path = directory.join("private-key.pem");
-    fs::write(&certificate_path, cert.pem()).unwrap();
-    fs::write(&private_key_path, signing_key.serialize_pem()).unwrap();
-    ServerConfig::new(
-        "127.0.0.1:0".parse().unwrap(),
-        "https://control.example",
-        ServerTls::Pem {
-            certificate_path,
-            private_key_path,
-        },
-        BTreeSet::from(["https://client.example".to_owned()]),
-        directory.join("data"),
-        Duration::from_secs(2),
-    )
-    .unwrap()
+    config("127.0.0.1:0".parse().unwrap())
 }
 
 fn auth() -> Arc<SqliteAuthSessionManager> {
@@ -331,7 +299,9 @@ async fn accepted_cleanup_retries_without_worker_requests_and_drains_before_appl
         }
         fn exchange(
             &self,
-            _: Vec<u8>,
+            _: &str,
+            _: &str,
+            _: &str,
             _: &[u8],
             _: Instant,
         ) -> Result<Vec<u8>, RemoteWorkerTransportError> {
@@ -375,6 +345,84 @@ async fn accepted_cleanup_retries_without_worker_requests_and_drains_before_appl
         2,
         "shutdown starts no further cleanup page"
     );
+}
+
+#[tokio::test]
+async fn device_worker_relay_preserves_bodies_and_wraps_worker_status() {
+    use winwincode_server::{
+        RemoteWorkerExchangePort, RemoteWorkerTransportError, start_server_with_remote_worker,
+    };
+    struct Boundary;
+    impl RemoteWorkerExchangePort for Boundary {
+        fn recover_accepted_outcomes(&self) -> Result<usize, RemoteWorkerTransportError> {
+            Ok(0)
+        }
+        fn exchange(
+            &self,
+            node: &str,
+            worker: &str,
+            instance: &str,
+            body: &[u8],
+            _: Instant,
+        ) -> Result<Vec<u8>, RemoteWorkerTransportError> {
+            assert_eq!(node, "cnd_00000000000000000000000001");
+            assert_eq!(worker, "wrk_00000000000000000000000001");
+            assert_eq!(instance, "wki_00000000000000000000000001");
+            Ok(body.to_vec())
+        }
+        fn accounting(
+            &self,
+            _: &str,
+            _: &str,
+            _: &str,
+            body: Option<&[u8]>,
+            offset: u64,
+            _: Instant,
+        ) -> Result<Vec<u8>, RemoteWorkerTransportError> {
+            assert_eq!(offset, 17);
+            body.map(<[u8]>::to_vec)
+                .ok_or_else(RemoteWorkerTransportError::unavailable)
+        }
+    }
+    let sessions = auth();
+    let running = start_server_with_remote_worker(
+        config("127.0.0.1:0".parse().unwrap()),
+        sessions.clone(),
+        sessions,
+        Arc::new(FakeApi::default()),
+        Some(Arc::new(Boundary)),
+        None,
+    )
+    .await
+    .unwrap();
+    for (request, expected) in [
+        (
+            json!({"kind":"exchange","body":"{ \"wire\": [1, 2] }\n"}),
+            json!({"status":200,"body":"{ \"wire\": [1, 2] }\n"}),
+        ),
+        (
+            json!({"kind":"accounting","body":"{ \"receipt\": 1 }","offset":17}),
+            json!({"status":200,"body":"{ \"receipt\": 1 }"}),
+        ),
+        (
+            json!({"kind":"accounting","body":null,"offset":17}),
+            json!({"status":503,"body":"remote Worker transport is unavailable"}),
+        ),
+    ] {
+        let body = json!({"clientNodeId":"cnd_00000000000000000000000001","workerId":"wrk_00000000000000000000000001","workerInstanceId":"wki_00000000000000000000000001","request":request}).to_string();
+        let response = http_request(
+            running.local_address(),
+            &plain_post(
+                "/internal/v1/client/worker-exchange",
+                &body,
+                "https://client.example",
+            ),
+        )
+        .await;
+        assert!(response.starts_with("HTTP/1.1 200"), "{response}");
+        assert_eq!(response_json(&response), expected);
+    }
+    running.shutdown().await.unwrap();
 }
 
 async fn http_request(address: SocketAddr, request: &str) -> String {
@@ -1417,505 +1465,94 @@ async fn graceful_shutdown_releases_the_listener_for_restart() {
     assert_eq!(second_api.shutdowns.load(Ordering::Relaxed), 1);
 }
 
-async fn assert_https_query(
-    connector: &TlsConnector,
-    server_name: &ServerName<'static>,
-    address: SocketAddr,
-    session_cookie: &str,
-) {
-    let tcp = TcpStream::connect(address).await.expect("connect HTTPS");
-    let mut tls = connector
-        .connect(server_name.clone(), tcp)
-        .await
-        .expect("HTTPS handshake");
-    let request = cookie_post(
-        "/api/v1/queries",
-        r#"{"query":"settings.get","schemaVersion":"winwincode/v1"}"#,
-        "https://client.example",
-        session_cookie,
-    );
-    tls.write_all(request.as_bytes())
-        .await
-        .expect("write HTTPS request");
-    let mut response = Vec::new();
-    tls.read_to_end(&mut response)
-        .await
-        .expect("read HTTPS response");
-    let response = String::from_utf8(response).expect("HTTPS response");
-    assert!(response.starts_with("HTTP/1.1 200 OK"), "{response}");
-    assert!(response.contains("access-control-allow-credentials: true"));
-}
-
-async fn assert_wss_subscription(
-    connector: &TlsConnector,
-    server_name: ServerName<'static>,
-    address: SocketAddr,
-    session_cookie: &str,
-) {
-    let tcp = TcpStream::connect(address).await.expect("connect WSS");
-    let tls = connector
-        .connect(server_name, tcp)
-        .await
-        .expect("WSS TLS handshake");
-    let mut request = format!("wss://localhost:{}/api/v1/events", address.port())
-        .into_client_request()
-        .expect("WSS request");
-    request.headers_mut().insert(
-        "Cookie",
-        format!("wwc_session={session_cookie}")
-            .parse()
-            .expect("cookie header"),
-    );
-    request.headers_mut().insert(
-        "Origin",
-        "https://client.example".parse().expect("origin header"),
-    );
-    let (mut socket, response) = client_async(request, tls).await.expect("upgrade WSS");
-    assert_eq!(response.status(), 101);
-    assert_eq!(
-        response
-            .headers()
-            .get("access-control-allow-origin")
-            .expect("allowed WSS origin"),
-        "https://client.example"
-    );
-    socket
-        .send(tokio_tungstenite::tungstenite::Message::Text(
-            r#"{"type":"transport.subscribe.v1"}"#.into(),
-        ))
-        .await
-        .expect("subscribe over WSS");
-    let accepted = socket
-        .next()
-        .await
-        .expect("accepted WSS frame")
-        .expect("accepted WSS message");
-    assert!(
-        accepted
-            .to_text()
-            .expect("text")
-            .contains("subscription-accepted")
-    );
-    socket.close(None).await.expect("close WSS");
-}
-
-async fn bootstrap_cookie_https(
-    connector: &TlsConnector,
-    server_name: &ServerName<'static>,
-    address: SocketAddr,
-) -> String {
-    let tcp = TcpStream::connect(address).await.expect("connect HTTPS");
-    let mut tls = connector
-        .connect(server_name.clone(), tcp)
-        .await
-        .expect("HTTPS handshake");
-    let request = post(
-        "/api/v1/auth/session",
-        &login_body(OWNER_USERNAME, OWNER_PASSWORD),
-        "https://client.example",
-        BOOTSTRAP_PROOF,
-    );
-    tls.write_all(request.as_bytes())
-        .await
-        .expect("write auth request");
-    let mut response = Vec::new();
-    tls.read_to_end(&mut response)
-        .await
-        .expect("read auth response");
-    cookie_from_bootstrap_response(&String::from_utf8(response).expect("HTTPS response"), true)
-}
-
-#[tokio::test]
-#[allow(
-    clippy::too_many_lines,
-    reason = "one TLS fixture covers authentication headers and both accounting methods"
-)]
-async fn accounting_https_route_is_separate_and_preserves_query_and_receipt_bytes() {
-    use winwincode_server::{
-        RemoteWorkerExchangePort, RemoteWorkerTransportError, start_server_with_remote_worker,
-    };
-    type FinancialCall = (String, Option<Vec<u8>>, u64);
-    #[derive(Default)]
-    struct FinancialBoundary {
-        calls: Mutex<Vec<FinancialCall>>,
-        execution_calls: AtomicU64,
-    }
-    impl RemoteWorkerExchangePort for FinancialBoundary {
-        fn recover_accepted_outcomes(&self) -> Result<usize, RemoteWorkerTransportError> {
-            Ok(0)
-        }
-        fn accounting(
-            &self,
-            token: &str,
-            body: Option<&[u8]>,
-            offset: u64,
-            _: Instant,
-        ) -> Result<Vec<u8>, RemoteWorkerTransportError> {
-            self.calls
-                .lock()
-                .unwrap()
-                .push((token.into(), body.map(<[u8]>::to_vec), offset));
-            Ok(b"{}".to_vec())
-        }
-        fn exchange(
-            &self,
-            credential: Vec<u8>,
-            body: &[u8],
-            _: Instant,
-        ) -> Result<Vec<u8>, RemoteWorkerTransportError> {
-            assert_eq!(credential, b"execution-token");
-            let request =
-                winwincode_execution_port::transport::RemoteExchangeRequest::decode(body).unwrap();
-            assert!(request.supports_acceptance_receipt());
-            self.execution_calls.fetch_add(1, Ordering::Relaxed);
-            Ok(
-                winwincode_execution_port::transport::RemoteExchangeResponse::with_acceptance(
-                    Vec::new(),
-                    true,
-                )
-                .unwrap()
-                .encode()
-                .unwrap(),
-            )
-        }
-    }
-    let directory = test_directory("accounting-https-route");
-    fs::create_dir_all(&directory).unwrap();
-    let CertifiedKey { cert, signing_key } =
-        generate_simple_self_signed(vec!["localhost".into()]).unwrap();
-    let certificate_path = directory.join("certificate.pem");
-    let private_key_path = directory.join("private-key.pem");
-    fs::write(&certificate_path, cert.pem()).unwrap();
-    fs::write(&private_key_path, signing_key.serialize_pem()).unwrap();
-    let config = ServerConfig::new(
-        "127.0.0.1:0".parse().unwrap(),
-        "https://control.example",
-        ServerTls::Pem {
-            certificate_path,
-            private_key_path,
-        },
-        BTreeSet::from(["https://client.example".into()]),
-        directory.join("data"),
-        Duration::from_secs(2),
-    )
-    .unwrap();
-    let sessions = auth();
-    let authenticator: Arc<dyn RequestAuthenticator> = sessions.clone();
-    let boundary = Arc::new(FinancialBoundary::default());
-    let running = start_server_with_remote_worker(
-        config,
-        sessions,
-        authenticator,
-        Arc::new(FakeApi::default()),
-        Some(boundary.clone()),
-        None,
-    )
-    .await
-    .unwrap();
-    let mut roots = RootCertStore::empty();
-    roots.add(cert.der().clone()).unwrap();
-    let tls_config = ClientConfig::builder_with_provider(Arc::new(
-        rustls::crypto::aws_lc_rs::default_provider(),
-    ))
-    .with_safe_default_protocol_versions()
-    .unwrap()
-    .with_root_certificates(roots)
-    .with_no_client_auth();
-    let connector = TlsConnector::from(Arc::new(tls_config));
-    for (method, headers, body, status) in [
-        ("GET", "", "", 401),
-        (
-            "GET",
-            "Authorization: Bearer financial-token\r\nAuthorization: Bearer duplicate\r\n",
-            "",
-            401,
-        ),
-        (
-            "GET",
-            "Authorization: Bearer financial-token\r\nX-Accounting-Offset: invalid\r\n",
-            "",
-            400,
-        ),
-        (
-            "GET",
-            "Authorization: Bearer financial-token\r\nX-Accounting-Offset: 100\r\n",
-            "",
-            200,
-        ),
-        (
-            "POST",
-            "Authorization: Bearer financial-token\r\n",
-            "{\"receipt\":\"exact-bytes\"}",
-            200,
-        ),
-    ] {
-        let tcp = TcpStream::connect(running.local_address()).await.unwrap();
-        let mut tls = connector
-            .connect(ServerName::try_from("localhost").unwrap().to_owned(), tcp)
-            .await
-            .unwrap();
-        let request = format!(
-            "{method} /internal/v1/execution-port/accounting HTTP/1.1\r\nHost: control.example\r\n{headers}Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
-            body.len()
-        );
-        tls.write_all(request.as_bytes()).await.unwrap();
-        let mut response = Vec::new();
-        tls.read_to_end(&mut response).await.unwrap();
-        let response = String::from_utf8(response).unwrap();
-        assert!(
-            response.starts_with(&format!("HTTP/1.1 {status}")),
-            "{response}"
-        );
-    }
-    assert_eq!(
-        *boundary.calls.lock().unwrap(),
-        vec![
-            ("financial-token".into(), None, 100),
-            (
-                "financial-token".into(),
-                Some(b"{\"receipt\":\"exact-bytes\"}".to_vec()),
-                0
-            )
-        ]
-    );
-    assert_eq!(boundary.execution_calls.load(Ordering::Relaxed), 0);
-    #[cfg(all(feature = "local-worker", unix))]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        use winwincode_codex::WorkerExecutionPort;
-        use winwincode_execution_port::generated::ExecutionPortMessage;
-        use winwincode_worker::remote_transport::RemoteWorkerPort;
-        let credential = directory.join("execution-credential");
-        fs::write(&credential, b"execution-token").unwrap();
-        fs::set_permissions(&credential, fs::Permissions::from_mode(0o600)).unwrap();
-        let fixture: Value = serde_json::from_str(include_str!(
-            "../../../tests/fixtures/contracts/execution-port.valid.json"
-        ))
-        .unwrap();
-        let message: ExecutionPortMessage = serde_json::from_value(
-            fixture["messages"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .find(|m| m["kind"] == "worker.heartbeat")
-                .unwrap()
-                .clone(),
-        )
-        .unwrap();
-        let ExecutionPortMessage::WorkerHeartbeatMessage(heartbeat) = &message else {
-            panic!("heartbeat")
-        };
-        let (mut port, handle) = RemoteWorkerPort::open(
-            &format!("https://localhost:{}", running.local_address().port()),
-            cert.der().as_ref(),
-            credential,
-            heartbeat.worker_id.clone(),
-            heartbeat.worker_instance_id.clone(),
-            Duration::from_secs(2),
-        )
-        .unwrap();
-        port.send(message).await.unwrap();
-        assert!(handle.terminal_error().is_none());
-        assert_eq!(boundary.execution_calls.load(Ordering::Relaxed), 1);
-    }
-    running.shutdown().await.unwrap();
-    fs::remove_dir_all(directory).unwrap();
-}
-
-#[cfg(all(feature = "local-worker", unix))]
-#[allow(
-    clippy::too_many_lines,
-    reason = "one native TLS fixture observes control and Worker progress on a single async thread"
-)]
+#[allow(clippy::too_many_lines)]
 async fn assert_blocking_handler_preserves_other_route(blocked_route: &str) {
-    use std::os::unix::fs::PermissionsExt;
-    use winwincode_codex::WorkerExecutionPort;
-    use winwincode_execution_port::generated::ExecutionPortMessage;
     use winwincode_server::{
         RemoteWorkerExchangePort, RemoteWorkerTransportError, start_server_with_remote_worker,
     };
-    use winwincode_worker::remote_transport::RemoteWorkerPort;
-
-    struct Boundary {
-        blocking: Arc<BlockingCall>,
-        slow: bool,
-    }
+    struct Boundary(Arc<BlockingCall>);
     impl RemoteWorkerExchangePort for Boundary {
         fn recover_accepted_outcomes(&self) -> Result<usize, RemoteWorkerTransportError> {
             Ok(0)
         }
         fn exchange(
             &self,
-            credential: Vec<u8>,
+            _: &str,
+            _: &str,
+            _: &str,
             body: &[u8],
             _: Instant,
         ) -> Result<Vec<u8>, RemoteWorkerTransportError> {
-            assert_eq!(credential, b"execution-token");
-            let request =
-                winwincode_execution_port::transport::RemoteExchangeRequest::decode(body).unwrap();
-            assert!(request.supports_acceptance_receipt());
-            if self.slow {
-                self.blocking.pause();
+            if body == b"slow" {
+                self.0.pause();
             }
-            Ok(
-                winwincode_execution_port::transport::RemoteExchangeResponse::with_acceptance(
-                    Vec::new(),
-                    true,
-                )
-                .unwrap()
-                .encode()
-                .unwrap(),
-            )
+            Ok(b"{}".to_vec())
         }
     }
-    async fn tls_request(connector: TlsConnector, address: SocketAddr, request: String) -> String {
-        let tcp = TcpStream::connect(address).await.unwrap();
-        let mut tls = connector
-            .connect(ServerName::try_from("localhost").unwrap().to_owned(), tcp)
-            .await
-            .unwrap();
-        tls.write_all(request.as_bytes()).await.unwrap();
-        let mut response = Vec::new();
-        tls.read_to_end(&mut response).await.unwrap();
-        String::from_utf8(response).unwrap()
-    }
-    let directory = test_directory("blocking-handler-progress");
-    fs::create_dir_all(&directory).unwrap();
-    let CertifiedKey { cert, signing_key } =
-        generate_simple_self_signed(vec!["localhost".into()]).unwrap();
-    let certificate_path = directory.join("certificate.pem");
-    let private_key_path = directory.join("private-key.pem");
-    fs::write(&certificate_path, cert.pem()).unwrap();
-    fs::write(&private_key_path, signing_key.serialize_pem()).unwrap();
-    let configuration = ServerConfig::new(
-        "127.0.0.1:0".parse().unwrap(),
-        "https://control.example",
-        ServerTls::Pem {
-            certificate_path,
-            private_key_path,
-        },
-        BTreeSet::from(["https://client.example".into()]),
-        directory.join("data"),
-        Duration::from_secs(2),
-    )
-    .unwrap();
-    let sessions = auth();
-    let authenticator: Arc<dyn RequestAuthenticator> = sessions.clone();
     let api = Arc::new(FakeApi::default());
-    let worker_gate = Arc::new(BlockingCall::default());
-    let boundary = Arc::new(Boundary {
-        blocking: worker_gate.clone(),
-        slow: blocked_route == "exchange",
-    });
+    let sessions = auth();
+    let worker_blocking = Arc::new(BlockingCall::default());
     let running = start_server_with_remote_worker(
-        configuration,
+        config("127.0.0.1:0".parse().unwrap()),
+        sessions.clone(),
         sessions,
-        authenticator,
         api.clone(),
-        Some(boundary),
+        Some(Arc::new(Boundary(worker_blocking.clone()))),
         None,
     )
     .await
     .unwrap();
     let address = running.local_address();
-    let mut roots = RootCertStore::empty();
-    roots.add(cert.der().clone()).unwrap();
-    let tls_config = ClientConfig::builder_with_provider(Arc::new(
-        rustls::crypto::aws_lc_rs::default_provider(),
-    ))
-    .with_safe_default_protocol_versions()
-    .unwrap()
-    .with_root_certificates(roots)
-    .with_no_client_auth();
-    let connector = TlsConnector::from(Arc::new(tls_config));
-    let server_name = ServerName::try_from("localhost").unwrap().to_owned();
-    let cookie = bootstrap_cookie_https(&connector, &server_name, address).await;
-    let credential = directory.join("execution-credential");
-    fs::write(&credential, b"execution-token").unwrap();
-    fs::set_permissions(&credential, fs::Permissions::from_mode(0o600)).unwrap();
-    let fixture: Value = serde_json::from_str(include_str!(
-        "../../../tests/fixtures/contracts/execution-port.valid.json"
-    ))
-    .unwrap();
-    let message: ExecutionPortMessage = serde_json::from_value(
-        fixture["messages"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .find(|message| message["kind"] == "worker.heartbeat")
-            .unwrap()
-            .clone(),
-    )
-    .unwrap();
-    let ExecutionPortMessage::WorkerHeartbeatMessage(heartbeat) = &message else {
-        panic!("heartbeat")
+    let cookie = bootstrap_cookie(address).await;
+    let relay = |body: &str| {
+        let body = json!({"clientNodeId":"cnd_00000000000000000000000001","workerId":"wrk_00000000000000000000000001","workerInstanceId":"wki_00000000000000000000000001","request":{"kind":"exchange","body":body}}).to_string();
+        format!(
+            "POST /internal/v1/client/worker-exchange HTTP/1.1\r\nHost: control.example\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        )
     };
-    let (mut port, handle) = RemoteWorkerPort::open(
-        &format!("https://localhost:{}", address.port()),
-        cert.der().as_ref(),
-        credential,
-        heartbeat.worker_id.clone(),
-        heartbeat.worker_instance_id.clone(),
-        Duration::from_secs(5),
-    )
-    .unwrap();
-    let elapsed = if blocked_route == "exchange" {
-        let worker = tokio::spawn(async move {
-            port.send(message).await.unwrap();
-        });
-        worker_gate.entered.notified().await;
-        let response = tls_request(connector, address, cookie_post("/api/v1/queries",
-            r#"{"schemaVersion":"winwincode/v1","requestId":"req_00000000000000000000000001","query":"fixture.fast"}"#,
-            "https://client.example", &cookie)).await;
-        assert!(response.starts_with("HTTP/1.1 200"), "{response}");
-        let elapsed = worker_gate.elapsed();
-        worker.await.unwrap();
-        elapsed
+    let worker_is_slow = blocked_route == "/internal/v1/client/worker-exchange";
+    let slow_request = if worker_is_slow {
+        relay("slow")
     } else {
-        let (path, body) = if blocked_route == "command" {
-            (
-                "/api/v1/commands",
-                r#"{"schemaVersion":"winwincode/v1","requestId":"req_00000000000000000000000001","command":"fixture.slow"}"#,
-            )
+        let field = if blocked_route.ends_with("queries") {
+            "query"
         } else {
-            (
-                "/api/v1/queries",
-                r#"{"schemaVersion":"winwincode/v1","requestId":"req_00000000000000000000000001","query":"fixture.slow"}"#,
-            )
+            "command"
         };
-        let request = cookie_post(path, body, "https://client.example", &cookie);
-        let control = tokio::spawn(tls_request(connector, address, request));
-        api.blocking.entered.notified().await;
-        port.send(message).await.unwrap();
-        let elapsed = api.blocking.elapsed();
-        assert!(control.await.unwrap().starts_with("HTTP/1.1 200"));
-        elapsed
+        cookie_post(blocked_route, &json!({"requestId":"req_00000000000000000000000001","schemaVersion":"winwincode/v1",field:"fixture.slow"}).to_string(), "https://client.example", &cookie)
     };
-    assert!(handle.terminal_error().is_none());
+    let request = tokio::spawn(async move { http_request(address, &slow_request).await });
+    if worker_is_slow {
+        worker_blocking.entered.notified().await;
+    } else {
+        api.blocking.entered.notified().await;
+    }
+    let started = std::time::Instant::now();
+    let response = if worker_is_slow {
+        http_request(address, &cookie_post("/api/v1/queries", &json!({"requestId":"req_00000000000000000000000002","schemaVersion":"winwincode/v1","query":"fixture.fast"}).to_string(), "https://client.example", &cookie)).await
+    } else {
+        http_request(address, &relay("fast")).await
+    };
+    assert!(response.starts_with("HTTP/1.1 200"), "{response}");
+    assert!(started.elapsed() < Duration::from_millis(1500));
+    assert!(request.await.unwrap().starts_with("HTTP/1.1 200"));
     running.shutdown().await.unwrap();
-    fs::remove_dir_all(directory).unwrap();
-    assert!(
-        elapsed < Duration::from_secs(1),
-        "{blocked_route} blocked the other native route for {elapsed:?}"
-    );
 }
 
-#[cfg(all(feature = "local-worker", unix))]
 #[tokio::test]
 async fn slow_control_query_keeps_worker_exchange_responsive() {
-    assert_blocking_handler_preserves_other_route("query").await;
+    assert_blocking_handler_preserves_other_route("/api/v1/queries").await;
 }
 
-#[cfg(all(feature = "local-worker", unix))]
 #[tokio::test]
 async fn slow_control_command_keeps_worker_exchange_responsive() {
-    assert_blocking_handler_preserves_other_route("command").await;
+    assert_blocking_handler_preserves_other_route("/api/v1/commands").await;
 }
 
-#[cfg(all(feature = "local-worker", unix))]
 #[tokio::test]
 async fn slow_worker_exchange_keeps_control_query_responsive() {
-    assert_blocking_handler_preserves_other_route("exchange").await;
+    assert_blocking_handler_preserves_other_route("/internal/v1/client/worker-exchange").await;
 }
 
 #[tokio::test]
@@ -1958,97 +1595,28 @@ async fn blocking_api_panic_keeps_request_identity_and_returns_safe_unavailable(
     running.shutdown().await.unwrap();
 }
 
-#[tokio::test]
-async fn separate_origin_uses_https_and_wss_with_the_same_session() {
-    let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
-    let directory = test_directory("winwincode-server-tls-test");
-    fs::create_dir_all(&directory).expect("create TLS test directory");
-    let certificate_path = directory.join("certificate.pem");
-    let private_key_path = directory.join("private-key.pem");
-    let CertifiedKey { cert, signing_key } =
-        generate_simple_self_signed(vec!["localhost".to_owned()]).expect("generate certificate");
-    fs::write(&certificate_path, cert.pem()).expect("write certificate");
-    fs::write(&private_key_path, signing_key.serialize_pem()).expect("write private key");
-
-    let server_config = ServerConfig::new(
-        "127.0.0.1:0".parse().expect("address"),
-        "https://control.example",
-        ServerTls::Pem {
-            certificate_path,
-            private_key_path,
-        },
-        BTreeSet::from(["https://client.example".to_owned()]),
-        directory.join("data"),
-        Duration::from_secs(2),
-    )
-    .expect("TLS server configuration");
-    let api = Arc::new(FakeApi::default());
-    let running = start_server(server_config, auth(), api.clone())
-        .await
-        .expect("start TLS server");
-    let address = running.local_address();
-
-    let mut roots = RootCertStore::empty();
-    roots
-        .add(cert.der().clone())
-        .expect("trust test certificate");
-    let provider = rustls::crypto::aws_lc_rs::default_provider();
-    let client_config = ClientConfig::builder_with_provider(Arc::new(provider))
-        .with_safe_default_protocol_versions()
-        .expect("safe TLS protocol versions")
-        .with_root_certificates(roots)
-        .with_no_client_auth();
-    let connector = TlsConnector::from(Arc::new(client_config));
-    let server_name = ServerName::try_from("localhost")
-        .expect("server name")
-        .to_owned();
-
-    let session_cookie = bootstrap_cookie_https(&connector, &server_name, address).await;
-    assert_https_query(&connector, &server_name, address, &session_cookie).await;
-    assert_wss_subscription(&connector, server_name, address, &session_cookie).await;
-
-    assert_eq!(api.queries.lock().expect("queries").len(), 1);
-    assert_eq!(api.subscriptions.lock().expect("subscriptions").len(), 1);
-    running.shutdown().await.expect("shutdown TLS server");
-    fs::remove_dir_all(directory).expect("remove TLS test directory");
-}
-
 #[test]
-fn public_url_tls_and_storage_are_explicit_and_validated() {
-    let error = ServerConfig::new(
-        "127.0.0.1:8443".parse().expect("address"),
-        "http://control.example",
-        ServerTls::Pem {
-            certificate_path: PathBuf::from("cert.pem"),
-            private_key_path: PathBuf::from("key.pem"),
-        },
-        BTreeSet::from(["https://client.example".to_owned()]),
-        PathBuf::from("data"),
-        Duration::from_secs(30),
-    )
-    .expect_err("HTTP public URL must not accompany TLS");
-    assert!(error.to_string().contains("scheme"));
-
-    for public_url in [
-        "https://user:secret@control.example",
-        "https://control.example/path",
-        "https://control.example?token=secret",
-    ] {
-        assert!(
-            ServerConfig::new(
-                "127.0.0.1:8443".parse().expect("address"),
-                public_url,
-                ServerTls::Pem {
-                    certificate_path: PathBuf::from("cert.pem"),
-                    private_key_path: PathBuf::from("key.pem"),
-                },
-                BTreeSet::from(["https://client.example".to_owned()]),
-                PathBuf::from("data"),
-                Duration::from_secs(30),
-            )
-            .is_err()
-        );
-    }
+fn server_config_validates_origins_and_storage() {
+    assert!(
+        ServerConfig::new(
+            "127.0.0.1:0".parse().unwrap(),
+            "invalid",
+            ["http://localhost:8080".to_owned()],
+            PathBuf::from("data"),
+            Duration::from_secs(1)
+        )
+        .is_err()
+    );
+    assert!(
+        ServerConfig::new(
+            "127.0.0.1:0".parse().unwrap(),
+            "http://127.0.0.1:8443",
+            ["http://localhost:8080".to_owned()],
+            PathBuf::new(),
+            Duration::from_secs(1)
+        )
+        .is_err()
+    );
 }
 
 fn origin_get(path: &str, origin: &str) -> String {

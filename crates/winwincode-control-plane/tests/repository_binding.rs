@@ -95,7 +95,6 @@ fn seed_client(storage: &mut SqliteStorage, seed: u64) -> String {
         "aarch64",
         "1.0.0",
         None,
-        None,
         2,
     )
     .expect("registration");

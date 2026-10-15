@@ -7,3 +7,4 @@ pub mod managed_app;
 pub mod messages;
 pub mod preview;
 pub mod wire;
+pub mod worker_relay;

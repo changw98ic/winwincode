@@ -207,7 +207,7 @@ export async function withDeviceTaskRuntime({ directory, profiles, providers, ag
     deviceProviderSecrets: providers.flatMap(deviceProviderSecretValues).filter(Boolean),
     deviceRoute: { providerId: primary.providerId, modelId: primary.modelId },
     deviceAgentEnvironment: benchmarkDeviceEnvironment(first, { ...agentSettings, automaticTaskActions }, providerEnvironment),
-    serverEnvironment: { WWC_SERVER_WORKER_MODE: 'remote', WWC_SERVER_MAX_RUNTIME_SECONDS: 'unlimited',
+    serverEnvironment: { WWC_SERVER_MAX_RUNTIME_SECONDS: 'unlimited',
       WWC_SERVER_EXECUTION_LEASE_SECONDS: '900' },
     scenario: { async run(base) {
       const contexts = new Map()
@@ -220,7 +220,6 @@ export async function withDeviceTaskRuntime({ directory, profiles, providers, ag
             deviceData: join(directory, 'devices', deviceBenchmarkProfileKey(profile)),
             logName: `device-${deviceBenchmarkProfileKey(profile)}.log`,
             schemaVersion: base.devicePath.schemaVersion,
-            helperReleaseManifest: base.devicePath.deviceEnvironment.WWC_WORKER_HELPER_RELEASE_MANIFEST,
             helperExecutable: base.devicePath.deviceEnvironment.WWC_WORKER_HELPER_EXECUTABLE,
             modelRouteSource: primary, deviceProvider: primary, deviceSecret: primary.apiKey,
             repositoryScope: { organizationId: 'org_01J00000000000000000000000',

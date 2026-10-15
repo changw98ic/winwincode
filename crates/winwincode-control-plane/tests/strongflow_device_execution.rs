@@ -29,7 +29,6 @@ use winwincode_storage::{
 
 static NEXT_ROOT: AtomicU64 = AtomicU64::new(1);
 
-const DIGEST: &str = "sha256:00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff";
 const T0: &str = "2026-09-04T12:00:00.000Z";
 const HOLDER: &str = "usr_00000000000000000000000001";
 const MEMBER: &str = "usr_00000000000000000000000002";
@@ -96,7 +95,6 @@ fn work_run_device_fixture(
             "aarch64-apple-darwin",
             "aarch64",
             "1.2.3",
-            None,
             Some(instance.clone()),
             4,
         )
@@ -211,7 +209,6 @@ fn work_run_anchor(
         ulid_id("wsn", seed + 1),
         ulid_id("wrk", seed + 2),
         ulid_id("wki", seed + 3),
-        DIGEST,
         Some(product_session_id.to_owned()),
         Some(winwincode_domain::WorkRunId(work_run_id.to_owned())),
         instant("2100-01-01T00:00:00.000Z"),
@@ -594,10 +591,8 @@ fn registered_device_worker_claims_its_reserved_strongflow_job() {
     let worker_id = WorkerId(dispatch.facts.worker_id.clone());
     let worker_instance_id = WorkerInstanceId(dispatch.facts.worker_instance_id.clone());
     let request = WorkerRegistrationRequest {
-        authentication_identity: WorkerAuthenticationIdentity::TransportPrincipal {
-            issuer: "winwincode-server".to_owned(),
-            subject: format!("worker-session:{}", dispatch.facts.worker_session_id),
-            credential_fingerprint: Sha256Digest(DIGEST.to_owned()),
+        authentication_identity: WorkerAuthenticationIdentity::LocalEmbedded {
+            control_plane_principal: format!("worker-session:{}", dispatch.facts.worker_session_id),
         },
         protocol_version: EXECUTION_PROTOCOL_VERSION.to_owned(),
         platform: WorkerPlatform::Aarch64AppleDarwin,

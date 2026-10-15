@@ -6,7 +6,6 @@ import { join, resolve } from 'node:path'
 import test from 'node:test'
 
 import {
-  certificate,
   chromeBinary,
   closeServer,
   command,
@@ -45,15 +44,13 @@ test('every key page matches its committed visual baseline on desktop and at a n
   assert.notEqual(chromePath, null, 'Chrome or Chromium is required for the UI-608 visual lane')
   command(root, 'corepack', ['pnpm', '--filter', '@winwincode/client', 'build'])
   const directory = mkdtempSync(join(tmpdir(), 'winwincode-ui608-pages-'))
-  const certificateFiles = certificate(root, directory)
   const clientServer = staticClientServer({
     root,
-    certificateFiles,
     fixturePath: 'tests/fixtures/browser-visual-pages.mjs',
     configuration: () => ({}),
   })
   const clientPort = await listen(clientServer)
-  const clientOrigin = `https://client.localhost:${String(clientPort)}`
+  const clientOrigin = `http://127.0.0.1:${String(clientPort)}`
   let chrome = null
   let devtools = null
   let targetId = null

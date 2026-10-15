@@ -5,7 +5,6 @@ import { join, relative } from 'node:path'
 const SOURCE_ROOT_FILES = Object.freeze([
   '.cargo/config.toml',
   'scripts/code-mode-ninja.mjs',
-  'scripts/compact-kernel-helper.mjs',
   'scripts/install-code-mode-linux-build-deps.sh',
   'Cargo.lock',
   'Cargo.toml',
@@ -55,6 +54,7 @@ export function sha256(path) {
 }
 
 export const PRODUCT_TARGETS = Object.freeze([
+  Object.freeze({ packageName: 'winwincode-cli', binaryName: 'wwc' }),
   Object.freeze({ packageName: 'winwincode-server', binaryName: 'winwincode-server' }),
   Object.freeze({ packageName: 'winwincode-worker', binaryName: 'winwincode-worker' }),
   Object.freeze({ packageName: 'winwincode-kernel-helper', binaryName: 'winwincode-kernel-helper' }),

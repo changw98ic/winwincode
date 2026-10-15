@@ -22,8 +22,5 @@ fn resume_requires_the_original_runtime_catalog_and_policy() {
     changed = persisted.clone();
     changed.runtime_digest = Sha256Digest(format!("sha256:{}", "d".repeat(64)));
     assert!(original.validate_resume(Some(&changed)).is_err());
-    changed = persisted;
-    changed.host_binary_digest = Sha256Digest(format!("sha256:{}", "e".repeat(64)));
-    assert!(original.validate_resume(Some(&changed)).is_err());
     std::fs::remove_dir_all(root).unwrap();
 }

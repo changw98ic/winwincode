@@ -135,18 +135,6 @@
       "owner": "tunnel supervisor or one forwarded logical HTTP request"
     },
     {
-      "file": "crates/winwincode-worker/src/remote_transport.rs",
-      "operations": [
-        "exchange_inner",
-        "queued_http_attempt",
-        "spawn_accounting_reconciler"
-      ],
-      "policyMarkers": [
-        "network_journal.prepare"
-      ],
-      "owner": "Worker durable queue; accounting uses the same journal"
-    },
-    {
       "file": "crates/winwincode-connector-github/src/lib.rs",
       "operations": [
         "fn request("

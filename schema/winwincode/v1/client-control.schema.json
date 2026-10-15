@@ -637,9 +637,6 @@
         "clientVersion": {
           "$ref": "#/$defs/ClientVersion"
         },
-        "deviceCredentialDigest": {
-          "$ref": "./domain.schema.json#/$defs/Sha256Digest"
-        },
         "currentInstanceId": {
           "$ref": "#/$defs/ClientInstanceId"
         },
@@ -679,7 +676,6 @@
         "platform",
         "architecture",
         "clientVersion",
-        "deviceCredentialDigest",
         "currentInstanceId",
         "presenceState",
         "acceptingConnections",
@@ -1096,10 +1092,6 @@
         "workerInstanceId": {
           "$ref": "./domain.schema.json#/$defs/WorkerInstanceId"
         },
-        "credentialDigest": {
-          "$ref": "./domain.schema.json#/$defs/Sha256Digest",
-          "description": "Digest of the short-lived worker session credential. Credential material itself never crosses this contract."
-        },
         "expiresAt": {
           "$ref": "./domain.schema.json#/$defs/Instant"
         },
@@ -1121,7 +1113,6 @@
         "workerSessionId",
         "workerId",
         "workerInstanceId",
-        "credentialDigest",
         "expiresAt",
         "state",
         "revision"
@@ -1308,7 +1299,7 @@
         "idempotencyKey"
       ],
       "title": "client.enroll",
-      "description": "First contact of one Device Client identity; creates the ClientNode in pending_enrollment. Device credential provisioning stays outside this contract.",
+      "description": "First contact of one Device Client identity; creates the ClientNode in pending_enrollment.",
       "x-direction": "client-to-control-plane",
       "x-authority": "device-enrollment",
       "x-message-class": "command"

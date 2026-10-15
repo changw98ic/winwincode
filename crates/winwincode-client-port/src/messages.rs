@@ -626,7 +626,6 @@ mod tests {
             worker_session_id: "wsn_01j2".to_owned(),
             worker_id: "worker_1".to_owned(),
             worker_instance_id: "winst_01j2".to_owned(),
-            credential_digest: "sha256:dd44".to_owned(),
             expires_at: "2026-01-02T12:10:00.000Z".to_owned(),
             state: WorkerLaunchGrantState::Issued,
             revision: 1,
@@ -760,7 +759,6 @@ mod tests {
                     "workerSessionId": "wsn_01j2",
                     "workerId": "worker_1",
                     "workerInstanceId": "winst_01j2",
-                    "credentialDigest": "sha256:dd44",
                     "expiresAt": "2026-01-02T12:10:00.000Z",
                     "state": "issued",
                     "revision": 1

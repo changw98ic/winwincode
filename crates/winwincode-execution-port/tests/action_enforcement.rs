@@ -10,9 +10,10 @@ use winwincode_domain::{
     UserActorKind, UserId, WorkRunId, WorkerId, WorkerInstanceId, WorkerSessionId, WorkspaceId,
 };
 use winwincode_execution_port::action_enforcement::{
-    ActionEnforcementError, ActionEnforcementIssuer, ActionEnforcementSigningKey,
-    ActionReceiptClaim, ActionReceiptUseError, ActionReceiptUseStore, FileActionReceiptUseStore,
-    action_enforcement_facts, prepare_action_enforcement_request,
+    ActionEnforcementError, ActionReceiptClaim, ActionReceiptUseError, ActionReceiptUseStore,
+    FileActionReceiptUseStore, action_enforcement_facts, prepare_action_enforcement_request,
+    validate_action_receipt, validate_action_receipt_outcome,
+    validate_action_receipt_outcome_with_current_lease,
 };
 use winwincode_execution_port::action_gateway::{WorkerActionAuthority, WorkerActionRequest};
 use winwincode_execution_port::action_normalizer::{
@@ -75,16 +76,10 @@ fn action() -> WorkerActionRequest {
     }
 }
 
-fn issuer() -> ActionEnforcementIssuer {
-    ActionEnforcementIssuer::new(
-        ActionEnforcementSigningKey::from_bytes([13_u8; 32]).expect("signing key"),
-    )
-}
-
 fn receipt(action: &WorkerActionRequest) -> ActionEnforcementReceiptMessage {
     let normalization = normalize_action(&action.intent, &action.request).expect("normalization");
     let facts = action_enforcement_facts(&normalization).expect("facts");
-    let mut receipt = ActionEnforcementReceiptMessage {
+    ActionEnforcementReceiptMessage {
         actor: UserActor {
             id: UserId(id("usr", 'A')),
             kind: UserActorKind::User,
@@ -100,7 +95,6 @@ fn receipt(action: &WorkerActionRequest) -> ActionEnforcementReceiptMessage {
         policy_kind: facts.policy_kind,
         policy_mode: None,
         policy_version: None,
-        receipt_signature: Sha256Digest(format!("sha256:{}", "0".repeat(64))),
         request_id: action.invocation_request_id.clone(),
         resource: facts.resource,
         schema_version: SchemaVersion::WinwincodeV1,
@@ -115,31 +109,19 @@ fn receipt(action: &WorkerActionRequest) -> ActionEnforcementReceiptMessage {
         session_identity: action.authority.session_identity.clone(),
         subject_sha256: facts.subject_sha256,
         worker_session_id: action.authority.worker_session_id.clone(),
-    };
-    issuer().sign(&mut receipt).expect("signed receipt");
-    receipt
+    }
 }
 
 #[test]
-fn current_lease_verifies_late_evaluation_without_changing_original_receipt() {
+fn current_lease_accepts_late_evaluation_for_the_original_receipt() {
     let action = action();
-    let mut signed = receipt(&action);
-    signed.evaluated_at = Instant("2027-01-15T08:06:00.000Z".into());
-    signed.sent_at = signed.evaluated_at.clone();
-    issuer()
-        .sign(&mut signed)
-        .expect("sign actual evaluation time");
+    let mut receipt = receipt(&action);
+    receipt.evaluated_at = Instant("2027-01-15T08:06:00.000Z".into());
+    receipt.sent_at = receipt.evaluated_at.clone();
     let mut current = action.authority.lease.clone();
     current.expires_at = Instant("2027-01-15T08:10:00.000Z".into());
-    assert!(
-        issuer()
-            .verifier()
-            .verify_outcome(&action, &signed)
-            .is_err()
-    );
-    let verifier = issuer().verifier();
-    verifier
-        .verify_outcome_with_current_lease(&action, &signed, &current)
+    assert!(validate_action_receipt_outcome(&action, &receipt).is_err());
+    validate_action_receipt_outcome_with_current_lease(&action, &receipt, &current)
         .expect("independently verified renewal allows original request");
     for field in 0..9 {
         let mut changed = current.clone();
@@ -152,20 +134,17 @@ fn current_lease_verifies_late_evaluation_without_changing_original_receipt() {
             5 => changed.fencing_token = FencingToken("8".into()),
             6 => changed.issued_at = Instant("2027-01-15T08:00:01.000Z".into()),
             7 => changed.expires_at = Instant("2027-01-15T08:04:00.000Z".into()),
-            _ => changed.expires_at = signed.evaluated_at.clone(),
+            _ => changed.expires_at = receipt.evaluated_at.clone(),
         }
         assert!(
-            verifier
-                .verify_outcome_with_current_lease(&action, &signed, &changed)
+            validate_action_receipt_outcome_with_current_lease(&action, &receipt, &changed)
                 .is_err()
         );
     }
-    let mut forged = signed.clone();
+    let mut forged = receipt.clone();
     forged.resource.push_str("changed");
     assert!(
-        verifier
-            .verify_outcome_with_current_lease(&action, &forged, &current)
-            .is_err()
+        validate_action_receipt_outcome_with_current_lease(&action, &forged, &current).is_err()
     );
     let suffix = NEXT_DIRECTORY.fetch_add(1, Ordering::Relaxed);
     let root = std::env::temp_dir().join(format!(
@@ -174,11 +153,11 @@ fn current_lease_verifies_late_evaluation_without_changing_original_receipt() {
     ));
     let mut store = FileActionReceiptUseStore::open(&root).expect("receipt store");
     assert_eq!(
-        store.claim(&signed).expect("first claim"),
+        store.claim(&receipt).expect("first claim"),
         ActionReceiptClaim::Fresh
     );
     assert_eq!(
-        store.claim(&signed).expect("replay claim"),
+        store.claim(&receipt).expect("replay claim"),
         ActionReceiptClaim::AlreadyConsumed
     );
     fs::remove_dir_all(root).expect("remove store");
@@ -216,10 +195,7 @@ fn request_and_receipt_bind_exact_action_invocation_and_authority() {
         request.matched_condition_sha256,
         receipt.matched_condition_sha256
     );
-    issuer()
-        .verifier()
-        .verify(&action, &receipt)
-        .expect("receipt verification");
+    validate_action_receipt(&action, &receipt).expect("receipt verification");
 
     let mut changed = action.clone();
     changed.request = ToolRequest::Shell(ShellRequest {
@@ -232,15 +208,8 @@ fn request_and_receipt_bind_exact_action_invocation_and_authority() {
         "argv:[\"cargo\",\"test\",\"--release\"]".to_owned(),
     ];
     assert_eq!(
-        issuer().verifier().verify(&changed, &receipt),
+        validate_action_receipt(&changed, &receipt),
         Err(ActionEnforcementError::ReceiptMismatch)
-    );
-
-    let mut cross_tenant = receipt.clone();
-    cross_tenant.scope.organization_id = OrganizationId(id("org", 'B'));
-    assert_eq!(
-        issuer().verifier().verify(&action, &cross_tenant),
-        Err(ActionEnforcementError::InvalidSignature)
     );
 }
 
@@ -266,7 +235,7 @@ fn durable_claim_survives_restart_and_changed_reuse_conflicts() {
         ActionReceiptClaim::AlreadyConsumed
     );
     let mut changed = receipt;
-    changed.receipt_signature = Sha256Digest(format!("sha256:{}", "f".repeat(64)));
+    changed.resource.push_str("changed");
     assert_eq!(
         restarted.claim(&changed),
         Err(ActionReceiptUseError::Conflict)
@@ -275,7 +244,7 @@ fn durable_claim_survives_restart_and_changed_reuse_conflicts() {
 }
 
 #[test]
-fn consumed_receipt_proof_is_read_only_and_requires_the_complete_original_signature() {
+fn consumed_receipt_proof_is_read_only_and_matches_the_original_receipt() {
     let suffix = NEXT_DIRECTORY.fetch_add(1, Ordering::Relaxed);
     let root = std::env::temp_dir().join(format!(
         "winwincode-action-use-proof-{}-{suffix}",
@@ -301,7 +270,6 @@ fn consumed_receipt_proof_is_read_only_and_requires_the_complete_original_signat
         .path();
     let before = fs::read(&path).unwrap();
     assert!(store.has_consumed(&original).unwrap());
-    issuer().verifier().verify_signature(&original).unwrap();
     for change in 0..6 {
         let mut changed = original.clone();
         match change {
@@ -312,20 +280,11 @@ fn consumed_receipt_proof_is_read_only_and_requires_the_complete_original_signat
             4 => changed.sent_at.0 = "2027-01-15T08:00:03.000Z".into(),
             _ => changed.resource.push_str("changed"),
         }
-        assert!(store.has_consumed(&changed).unwrap());
         assert_eq!(
-            issuer().verifier().verify_signature(&changed),
-            Err(ActionEnforcementError::InvalidSignature)
+            store.has_consumed(&changed),
+            Err(ActionReceiptUseError::Conflict)
         );
     }
-    let mut resigned = original.clone();
-    resigned.resource.push_str("resigned");
-    issuer().sign(&mut resigned).unwrap();
-    issuer().verifier().verify_signature(&resigned).unwrap();
-    assert_eq!(
-        store.has_consumed(&resigned),
-        Err(ActionReceiptUseError::Conflict)
-    );
     let mut unknown = original.clone();
     unknown.request_id.0 = id("req", 'B');
     assert!(!store.has_consumed(&unknown).unwrap());

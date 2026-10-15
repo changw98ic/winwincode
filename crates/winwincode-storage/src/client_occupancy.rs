@@ -1420,7 +1420,6 @@ mod tests {
             "aarch64-apple-darwin",
             "aarch64",
             "1.2.3",
-            None,
             Some(format!("cix_{seed:026}")),
             2,
         )

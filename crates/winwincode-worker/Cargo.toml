@@ -23,7 +23,8 @@ name = "production_vertical"
 required-features = ["test-support"]
 
 [dependencies]
-winwincode-network = { workspace = true, features = ["reqwest", "journal"] }
+winwincode-network = { workspace = true, features = ["journal"] }
+winwincode-client-port.workspace = true
 winwincode-provider.workspace = true
 base64.workspace = true
 codex-apply-patch = { path = "../../third_party/codex/codex-rs/apply-patch" }
@@ -35,21 +36,21 @@ codex-utils-pty = { path = "../../third_party/codex/codex-rs/utils/pty" }
 codex-utils-path-uri = { path = "../../third_party/codex/codex-rs/utils/path-uri" }
 futures.workspace = true
 rusqlite.workspace = true
-reqwest = { version = "=0.12.28", default-features = false, features = ["rustls-tls"] }
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
 time = { workspace = true, features = ["parsing"] }
 tokio = { workspace = true, features = ["io-util", "macros", "net", "rt-multi-thread", "signal", "time"] }
-tokio-rustls.workspace = true
 winwincode-codex = { path = "../winwincode-codex" }
 winwincode-domain = { path = "../winwincode-domain" }
 winwincode-execution-port = { path = "../winwincode-execution-port" }
 
 [dev-dependencies]
 rcgen.workspace = true
+reqwest = { version = "=0.12.28", default-features = false, features = ["rustls-tls"] }
 rusqlite.workspace = true
 tempfile = "=3.27.0"
+tokio-rustls.workspace = true
 winwincode-api.workspace = true
 winwincode-control-plane = { path = "../winwincode-control-plane", features = ["test-support"] }
 winwincode-delivery = { path = "../winwincode-delivery", features = ["test-support"] }

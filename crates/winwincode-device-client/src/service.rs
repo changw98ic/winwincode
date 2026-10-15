@@ -10,6 +10,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::str::FromStr;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -36,7 +37,6 @@ const LOG_LIMIT_BYTES: u64 = 1024 * 1024;
 const CONTROL_POLL_INTERVAL: Duration = Duration::from_millis(200);
 const EXCHANGE_PATH: &str = "/internal/v1/client/exchange";
 const PREVIEW_TUNNEL_PATH: &str = "/internal/v1/preview/tunnel";
-const TLS_ROOT_DER_ENVIRONMENT: &str = "WWC_DEVICE_TLS_ROOT_DER_FILE";
 const MANAGED_APP_EXECUTABLE_ALLOWLIST_ENVIRONMENT: &str =
     "WWC_DEVICE_MANAGED_APP_EXECUTABLE_ALLOWLIST";
 
@@ -130,10 +130,6 @@ struct ServiceWorkerLaunchMaterial {
 }
 
 impl WorkerLaunchMaterialSource for ServiceWorkerLaunchMaterial {
-    fn worker_credential(&self, _credential_digest: &str) -> Option<String> {
-        None
-    }
-
     fn launch_directories(
         &self,
         worker_session_id: &str,
@@ -170,7 +166,40 @@ impl ManagedAppRepositorySource for ServiceWorkerLaunchMaterial {
 }
 
 pub fn run_device_service(config: &DeviceServiceConfig) -> Result<(), DeviceServiceError> {
-    run_device_service_until(config, || false)
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?;
+    let stop = Arc::new(AtomicBool::new(false));
+    let service_stop = Arc::clone(&stop);
+    let config = config.clone();
+    runtime.block_on(async move {
+        #[cfg(unix)]
+        let mut terminate =
+            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
+        let shutdown = async {
+            #[cfg(unix)]
+            {
+                tokio::select! {
+                    result = tokio::signal::ctrl_c() => result,
+                    _ = terminate.recv() => Ok(()),
+                }
+            }
+            #[cfg(not(unix))]
+            tokio::signal::ctrl_c().await
+        };
+        let mut service = tokio::task::spawn_blocking(move || {
+            run_device_service_until(&config, || service_stop.load(Ordering::Acquire))
+        });
+        tokio::select! {
+            result = &mut service => result.map_err(std::io::Error::other)?,
+            result = shutdown => {
+                stop.store(true, Ordering::Release);
+                let stopped = service.await.map_err(std::io::Error::other)?;
+                result?;
+                stopped
+            }
+        }
+    })
 }
 
 #[allow(clippy::too_many_lines)]
@@ -187,10 +216,6 @@ fn run_device_service_until(
         fs::remove_file(&restart_path)?;
     }
     append_log(&config.data_directory, "service started")?;
-    let preview_tls_root_der = match std::env::var_os(TLS_ROOT_DER_ENVIRONMENT) {
-        Some(path) => Some(fs::read(path)?),
-        None => None,
-    };
     let preview_registry = AuthorizedPreviewSourceRegistry::default();
 
     loop {
@@ -200,12 +225,7 @@ fn run_device_service_until(
             &device_identity_seed(&config.device_display_name),
             &stamp(),
         )?;
-        let transport = match std::env::var_os(TLS_ROOT_DER_ENVIRONMENT) {
-            Some(path) => {
-                HttpExchangeTransport::new(endpoint.clone()).with_tls_root_der(fs::read(path)?)
-            }
-            None => HttpExchangeTransport::new(endpoint.clone()),
-        };
+        let transport = HttpExchangeTransport::new(endpoint.clone());
         let mut daemon = DeviceDaemon::start(
             DaemonConfig {
                 server_profile_id: "default".to_owned(),
@@ -242,13 +262,13 @@ fn run_device_service_until(
                 &origin,
                 &identity,
                 preview_registry.clone(),
-                preview_tls_root_der.as_deref(),
             )?);
         }
         let mut last_retry = None;
         loop {
             if should_stop() {
                 drop(preview_tunnel.take());
+                daemon.shutdown_workers()?;
                 append_log(&config.data_directory, "service stopped")?;
                 return Ok(());
             }
@@ -256,6 +276,7 @@ fn run_device_service_until(
                 fs::remove_file(&restart_path)?;
                 append_log(&config.data_directory, "daemon session restarted")?;
                 drop(preview_tunnel.take());
+                daemon.shutdown_workers()?;
                 break;
             }
             let ready_in = match daemon.tick(Instant::now())? {
@@ -298,7 +319,6 @@ fn run_device_service_until(
                     &origin,
                     &enrolled,
                     preview_registry.clone(),
-                    preview_tls_root_der.as_deref(),
                 )?);
                 append_log(&config.data_directory, "local worker lane ready")?;
             }
@@ -311,14 +331,11 @@ fn start_preview_tunnel(
     origin: &str,
     identity: &IdentityRecord,
     registry: AuthorizedPreviewSourceRegistry,
-    tls_root_der: Option<&[u8]>,
 ) -> Result<PreviewTunnelSupervisor, DeviceServiceError> {
-    PreviewTunnelSupervisor::start_with_tls_root_der(
+    PreviewTunnelSupervisor::start(
         preview_tunnel_endpoint(origin)?,
         identity.identity().client_node_id().to_owned(),
-        identity.credential().material_hex(),
         registry,
-        tls_root_der.map(<[u8]>::to_vec),
     )
     .map_err(DeviceServiceError::from)
 }
@@ -327,13 +344,13 @@ fn preview_tunnel_endpoint(server_url: &str) -> Result<String, DeviceServiceErro
     let uri = http::Uri::from_str(server_url).map_err(|_| {
         DeviceServiceError::InvalidConfig("server URL is not a valid URI".to_owned())
     })?;
-    if uri.scheme_str() != Some("https") || uri.authority().is_none() {
+    if uri.scheme_str() != Some("http") || uri.authority().is_none() {
         return Err(DeviceServiceError::InvalidConfig(
-            "preview tunnel requires an https server origin".to_owned(),
+            "preview tunnel requires an http server origin".to_owned(),
         ));
     }
     Ok(format!(
-        "wss://{}{PREVIEW_TUNNEL_PATH}",
+        "ws://{}{PREVIEW_TUNNEL_PATH}",
         uri.authority().expect("authority checked")
     ))
 }
@@ -550,14 +567,14 @@ fn exchange_endpoint(server_url: &str) -> Result<String, DeviceServiceError> {
     let uri = http::Uri::from_str(server_url).map_err(|_| {
         DeviceServiceError::InvalidConfig("server URL is not a valid URI".to_owned())
     })?;
-    if uri.scheme_str() != Some("https") || uri.authority().is_none() {
+    if uri.scheme_str() != Some("http") || uri.authority().is_none() {
         return Err(DeviceServiceError::InvalidConfig(
-            "server URL must be an absolute https:// URL".to_owned(),
+            "server URL must be an absolute http:// URL".to_owned(),
         ));
     }
     match uri.path() {
         "" | "/" => Ok(format!(
-            "https://{}{EXCHANGE_PATH}",
+            "http://{}{EXCHANGE_PATH}",
             uri.authority().expect("authority checked")
         )),
         EXCHANGE_PATH if uri.query().is_none() => Ok(server_url.to_owned()),
@@ -571,13 +588,13 @@ fn server_origin(server_url: &str) -> Result<String, DeviceServiceError> {
     let uri = http::Uri::from_str(server_url).map_err(|_| {
         DeviceServiceError::InvalidConfig("server URL is not a valid URI".to_owned())
     })?;
-    if uri.scheme_str() != Some("https") || uri.authority().is_none() {
+    if uri.scheme_str() != Some("http") || uri.authority().is_none() {
         return Err(DeviceServiceError::InvalidConfig(
-            "server URL must be an absolute https:// URL".to_owned(),
+            "server URL must be an absolute http:// URL".to_owned(),
         ));
     }
     Ok(format!(
-        "https://{}",
+        "http://{}",
         uri.authority().expect("authority checked")
     ))
 }
@@ -725,7 +742,7 @@ mod tests {
         let _ = fs::remove_dir_all(&root);
         let config = DeviceServiceConfig {
             data_directory: root.clone(),
-            server_url: "https://server.example:8443".to_owned(),
+            server_url: "http://server.example:8443".to_owned(),
             server_display_name: "Server".to_owned(),
             device_display_name: "Device".to_owned(),
         };
@@ -761,7 +778,7 @@ mod tests {
             })
             .expect("authorized occupancy");
         let mut config = service_worker_supervisor_config(
-            "https://server.example:8443",
+            "http://server.example:8443",
             "cnd_SERVICE_DEVICE",
             "cix_SERVICE_INSTANCE",
         );
@@ -788,7 +805,6 @@ mod tests {
                     worker_instance_id: &instance_id,
                     occupancy_lease_id: lease_id,
                     occupancy_fencing_token: 7,
-                    worker_credential_token: "fixture-only-worker-credential",
                     repository_binding_id: "rbd_SERVICE_SOURCE",
                     launch_grant_id: "wlg_SERVICE_LAUNCH",
                     product_session_id: None,
@@ -852,13 +868,13 @@ mod tests {
     }
 
     #[test]
-    fn service_requires_https_and_canonical_exchange_path() {
-        assert!(exchange_endpoint("http://server.example:8080").is_err());
+    fn service_requires_http_and_canonical_exchange_path() {
+        assert!(exchange_endpoint("https://server.example:8080").is_err());
         assert_eq!(
-            exchange_endpoint("https://server.example:8443").expect("origin"),
-            "https://server.example:8443/internal/v1/client/exchange"
+            exchange_endpoint("http://server.example:8443").expect("origin"),
+            "http://server.example:8443/internal/v1/client/exchange"
         );
-        assert!(exchange_endpoint("https://server.example:8443/other").is_err());
+        assert!(exchange_endpoint("http://server.example:8443/other").is_err());
     }
 
     #[test]

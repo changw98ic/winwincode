@@ -376,10 +376,8 @@ pub use quick_device_execution::{
     dispatch_turn_to_device_worker,
 };
 pub use remote_worker_pool::{
-    RemoteWorkerAuthenticationError, RemoteWorkerAuthenticationErrorKind,
-    RemoteWorkerAuthenticator, RemoteWorkerConnection, RemoteWorkerConnectionState,
-    RemoteWorkerCredential, RemoteWorkerPoolAdapter, RemoteWorkerPoolError,
-    RemoteWorkerPoolErrorKind, RemoteWorkerPrincipal,
+    RemoteWorkerConnection, RemoteWorkerConnectionState, RemoteWorkerPoolAdapter,
+    RemoteWorkerPoolError, RemoteWorkerPoolErrorKind, RemoteWorkerPrincipal,
 };
 pub use repository_binding::{
     RepositoryAccessGrantService, RepositoryAvailability, RepositoryBindingService,
@@ -2557,9 +2555,6 @@ fn cleanup_suffix(failures: &[String]) -> String {
         format!("; cleanup also failed: {}", failures.join("; "))
     }
 }
-
-mod private_launch_material;
-pub use private_launch_material::PrivateLaunchMaterialStore;
 
 #[cfg(test)]
 extern crate self as winwincode_control_plane;

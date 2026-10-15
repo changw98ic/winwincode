@@ -56,11 +56,11 @@ pub fn render_help() -> String {
         "WinWinCode 本地命令：",
         "  wwc init [PATH] [--confirm-git-init] [--baseline head|snapshot|cancel] [--confirm-snapshot] [--json]",
         "  wwc repo attach [PATH] [--baseline head|snapshot|cancel] [--confirm-snapshot] [--json]",
-        "  wwc repo add <PATH> [--init] [--data-dir PATH] [--json]",
+        "  wwc repo add [PATH] [--init] [--data-dir PATH] [--json]",
         "  wwc repo list [--data-dir PATH] [--json]",
         "  wwc repo remove <BINDING-ID> [--data-dir PATH] [--json]",
         "  wwc doctor [PATH] [--json]",
-        "  wwc device serve --data-dir PATH --server-url HTTPS-URL [--server-name NAME] [--device-name NAME]",
+        "  wwc device serve [--data-dir PATH] [--server-url HTTP-URL] [--server-name NAME] [--device-name NAME]",
         "  wwc device status|refresh-code|lock|unlock|restart [--data-dir PATH] [--json]",
         "  wwc device logs [--data-dir PATH]",
     ];
@@ -170,14 +170,7 @@ fn run_repo_registry(action: &str, arguments: &[String]) -> Result<WwcCliExit, U
     let json = parsed.switches.contains("json");
     let result = match action {
         "add" => {
-            if parsed.positionals.len() != 1 {
-                return Err(UsageError("repo add 需要且只需要一个仓库路径。".into()));
-            }
-            let requested_path = parsed
-                .positionals
-                .first()
-                .map(PathBuf::from)
-                .unwrap_or_default();
+            let requested_path = repository_path(&parsed)?;
             repo_add(
                 &data_directory,
                 &requested_path,
@@ -395,7 +388,7 @@ fn run_device_service_action(arguments: &[String]) -> Result<WwcCliExit, UsageEr
         &[],
     )?;
     let server_url = device_flag_or_environment(&parsed, "server-url", "WWC_DEVICE_SERVER_URL")?
-        .ok_or_else(|| UsageError("缺少 --server-url 或 WWC_DEVICE_SERVER_URL。".into()))?;
+        .unwrap_or_else(|| "http://127.0.0.1:8443".to_owned());
     let result = run_device_service(&DeviceServiceConfig {
         data_directory: device_data_directory(&parsed)?,
         server_url,
@@ -423,16 +416,16 @@ fn device_data_directory(parsed: &ParsedArguments) -> Result<PathBuf, UsageError
     if values.len() > 1 {
         return Err(UsageError("--data-dir 不能重复。".into()));
     }
-    values
+    if let Some(path) = values
         .first()
         .map(PathBuf::from)
         .or_else(|| std::env::var_os("WWC_DEVICE_DATA_DIRECTORY").map(PathBuf::from))
-        .ok_or_else(|| {
-            UsageError(
-                "缺少 --data-dir 或 WWC_DEVICE_DATA_DIRECTORY：device 命令需要 Device Client 的本地数据目录。"
-                    .into(),
-            )
-        })
+    {
+        return Ok(path);
+    }
+    crate::default_state_root()
+        .map(|root| root.join("device-client"))
+        .map_err(|error| UsageError(error.to_string()))
 }
 
 fn device_flag(parsed: &ParsedArguments, name: &str) -> Result<Option<String>, UsageError> {

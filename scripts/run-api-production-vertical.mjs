@@ -6,18 +6,15 @@ import { spawn, spawnSync } from 'node:child_process'
 import {
   createHash,
   createPrivateKey,
-  createPublicKey,
   randomBytes,
-  sign,
-  verify,
   X509Certificate,
 } from 'node:crypto'
 import { createServer as createNetServer } from 'node:net'
 import { request as httpsRequest } from 'node:https'
+import { request as httpRequest } from 'node:http'
 import {
   appendFileSync,
   chmodSync,
-  copyFileSync,
   closeSync,
   existsSync,
   lstatSync,
@@ -34,8 +31,6 @@ import {
 import { basename, dirname, join, resolve } from 'node:path'
 import { tmpdir } from 'node:os'
 import { pathToFileURL } from 'node:url'
-
-import { prepareCompactKernelHelper } from './compact-kernel-helper.mjs'
 
 import { projectSourceDigest } from './product-build-contract.mjs'
 import {
@@ -78,13 +73,11 @@ export {
   startDeterministicDeviceModelServer,
   encryptDeviceProviderEnvelope,
 }
-const HELPER_RELEASE_MANIFEST_NAME = 'winwincode-kernel-helper.release.json'
 const HELPER_RELEASE_BINARY_NAME = 'winwincode-kernel-helper'
 const HELPER_RELEASE_BINARY_MODE = 0o755
-const TEST_HELPER_RELEASE_PRIVATE_KEY_HEX = '2a'.repeat(32)
 const API_SOURCE_SEAL_NAME = 'winwincode-api-production.source.json'
 const API_SOURCE_SEAL_PROTOCOL = 'winwincode-api-production-source-seal'
-const API_SOURCE_SEAL_VERSION = 2
+const API_SOURCE_SEAL_VERSION = 3
 const API_SOURCE_SEAL_MAX_BYTES = 32 * 1024
 const API_RUNNER_SOURCE_PATH = 'scripts/run-api-production-vertical.mjs'
 const API_SOURCE_TRACKED_PATHS = [
@@ -98,7 +91,7 @@ const API_SOURCE_TRACKED_PATHS = [
   'upstream/vendor',
   API_RUNNER_SOURCE_PATH,
   'scripts/product-build-contract.mjs',
-  'scripts/compact-kernel-helper.mjs',
+  'scripts/build-community.mjs',
 ]
 const API_SOURCE_SEAL_KEYS = [
   'cliBinaryMode',
@@ -108,10 +101,6 @@ const API_SOURCE_SEAL_KEYS = [
   'helperBinaryMode',
   'helperBinaryPath',
   'helperBinarySha256',
-  'helperReleaseManifestMode',
-  'helperReleaseManifestPath',
-  'helperReleaseManifestSha256',
-  'helperReleasePublicKeyHex',
   'protocol',
   'schemaVersion',
   'serverBinaryMode',
@@ -123,17 +112,6 @@ const API_SOURCE_SEAL_KEYS = [
   'workerBinaryMode',
   'workerBinaryPath',
   'workerBinarySha256',
-].toSorted()
-const HELPER_RELEASE_MANIFEST_KEYS = [
-  'binaryMode',
-  'binaryPath',
-  'binarySha256',
-  'packageVersion',
-  'protocol',
-  'schemaVersion',
-  'signature',
-  'sourceSha256',
-  'version',
 ].toSorted()
 
 const IDS = Object.freeze({
@@ -148,9 +126,6 @@ const IDS = Object.freeze({
   delivery: 'dlv_01J00000000000000000000001',
   workItem: 'wit_01J00000000000000000000001',
   credential: 'crd_01J00000000000000000000001',
-  remoteWorker: 'wrk_00000000000000000000000001',
-  remoteWorkerInstance: 'wki_00000000000000000000000001',
-  remoteWorkerPool: 'wpl_00000000000000000000000001',
   reconnectSession: 'psn_01J00000000000000000000004',
 })
 
@@ -201,50 +176,6 @@ function page(limit = 200) {
   return { cursor: null, limit }
 }
 
-function helperReleaseSigningBytes(fields) {
-  return Buffer.from([
-    'winwincode-kernel-helper.release.v1',
-    String(fields.schemaVersion),
-    fields.protocol,
-    String(fields.version),
-    fields.packageVersion,
-    fields.sourceSha256,
-    fields.binarySha256,
-    fields.binaryPath,
-    String(fields.binaryMode),
-  ].join('\0'))
-}
-
-function helperReleasePrivateKey(hex) {
-  assert.match(hex, /^[0-9a-f]{64}$/u, 'helper release private key must be 32 lowercase bytes')
-  return createPrivateKey({
-    key: Buffer.from(`302e020100300506032b657004220420${hex}`, 'hex'),
-    format: 'der',
-    type: 'pkcs8',
-  })
-}
-
-function helperReleasePublicKeyHex(privateKey) {
-  return createPublicKey(privateKey).export({ format: 'der', type: 'spki' })
-    .subarray(-32)
-    .toString('hex')
-}
-
-function configuredHelperReleaseKey() {
-  const privateKeyHex = process.env.WINWINCODE_HELPER_RELEASE_PRIVATE_KEY_HEX
-    ?? TEST_HELPER_RELEASE_PRIVATE_KEY_HEX
-  const privateKey = helperReleasePrivateKey(privateKeyHex)
-  const derivedPublicKeyHex = helperReleasePublicKeyHex(privateKey)
-  const configuredPublicKeyHex = process.env.WINWINCODE_HELPER_RELEASE_PUBLIC_KEY_HEX
-    ?? derivedPublicKeyHex
-  assert.equal(
-    configuredPublicKeyHex,
-    derivedPublicKeyHex,
-    'helper release public key must match the configured private key',
-  )
-  return { privateKey, publicKeyHex: derivedPublicKeyHex }
-}
-
 function sha256File(path) {
   const hash = createHash('sha256')
   const descriptor = openSync(path, 'r')
@@ -261,19 +192,6 @@ function sha256File(path) {
     closeSync(descriptor)
   }
   return hash.digest('hex')
-}
-
-function canonicalProductVersion(root) {
-  const packageVersion = JSON.parse(readFileSync(join(root, 'package.json'), 'utf8')).version
-  const cargoManifest = readFileSync(join(root, 'Cargo.toml'), 'utf8')
-  const cargoVersion = cargoManifest
-    .match(/\[workspace\.package\][\s\S]*?\nversion\s*=\s*"([^"]+)"/u)?.[1]
-  assert.equal(
-    cargoVersion,
-    packageVersion,
-    'Cargo workspace version must match the product package version',
-  )
-  return packageVersion
 }
 
 function fileIdentity(path, label) {
@@ -345,6 +263,10 @@ export function apiProductionSourceDigest(root = ROOT) {
     .update('scripts/product-build-contract.mjs')
     .update('\0')
     .update(sha256File(join(root, 'scripts/product-build-contract.mjs')))
+    .update('\0')
+    .update('scripts/build-community.mjs')
+    .update('\0')
+    .update(sha256File(join(root, 'scripts/build-community.mjs')))
     .digest('hex')
 }
 
@@ -358,84 +280,13 @@ function writeJsonAtomically(path, value) {
   }
 }
 
-function publicKeyFromHex(publicKeyHex) {
-  assert.match(publicKeyHex, /^[0-9a-f]{64}$/u, 'source seal helper public key is invalid')
-  return createPublicKey({
-    key: Buffer.concat([
-      Buffer.from('302a300506032b6570032100', 'hex'),
-      Buffer.from(publicKeyHex, 'hex'),
-    ]),
-    format: 'der',
-    type: 'spki',
-  })
-}
-
-function readAndValidateHelperReleaseManifest({
-  root,
-  helperExecutable,
-  manifestPath,
-  publicKeyHex,
-}) {
-  const manifestIdentity = fileIdentity(manifestPath, 'helper release manifest')
-  let manifest
-  try {
-    manifest = JSON.parse(readFileSync(manifestPath, 'utf8'))
-  } catch (error) {
-    fail(`helper release manifest is not valid JSON: ${error.message}`)
-  }
-  assert.deepEqual(
-    Object.keys(manifest).toSorted(),
-    HELPER_RELEASE_MANIFEST_KEYS,
-    'helper release manifest fields are not canonical',
-  )
-  assert.equal(manifest.schemaVersion, 1)
-  assert.equal(manifest.protocol, 'winwincode-kernel-helper-release')
-  assert.equal(manifest.version, 1)
-  assert.equal(manifest.packageVersion, canonicalProductVersion(root))
-  assert.equal(manifest.binaryPath, HELPER_RELEASE_BINARY_NAME)
-  assert.equal(manifest.binaryMode, HELPER_RELEASE_BINARY_MODE)
-  assert.match(manifest.sourceSha256, /^sha256:[0-9a-f]{64}$/u)
-  assert.match(manifest.binarySha256, /^sha256:[0-9a-f]{64}$/u)
-  assert.match(manifest.signature, /^[A-Za-z0-9_-]{86}$/u)
-  const expectedSourceSha256 = `sha256:${sha256File(
-    join(root, 'crates', 'helper', 'src', 'main.rs'),
-  )}`
-  assert.equal(
-    manifest.sourceSha256,
-    expectedSourceSha256,
-    'helper release manifest source identity is stale',
-  )
-  const helperIdentity = fileIdentity(helperExecutable, 'kernel helper binary')
-  assert.equal(
-    manifest.binarySha256,
-    helperIdentity.sha256,
-    'helper release manifest binary identity is stale',
-  )
-  assert.equal(
-    verify(
-      null,
-      helperReleaseSigningBytes(manifest),
-      publicKeyFromHex(publicKeyHex),
-      Buffer.from(manifest.signature, 'base64url'),
-    ),
-    true,
-    'helper release manifest signature is invalid',
-  )
-  return {
-    digest: manifestIdentity.sha256,
-    manifest,
-    manifestMode: manifestIdentity.mode,
-    helperIdentity,
-  }
-}
-
 function validateSourceSealShape(seal) {
   assert.deepEqual(
     Object.keys(seal).toSorted(),
     API_SOURCE_SEAL_KEYS,
     'API production source seal fields are not canonical',
   )
-  assert.equal(seal.schemaVersion, 2)
+  assert.equal(seal.schemaVersion, 3)
   assert.equal(seal.protocol, API_SOURCE_SEAL_PROTOCOL)
   assert.equal(seal.version, API_SOURCE_SEAL_VERSION)
   for (const field of [
@@ -445,16 +296,10 @@ function validateSourceSealShape(seal) {
     'cliBinarySha256',
     'workerBinarySha256',
     'helperBinarySha256',
-    'helperReleaseManifestSha256',
   ]) {
     assert.match(seal[field], /^sha256:[0-9a-f]{64}$/u, `${field} is invalid`)
   }
   assert.match(seal.gitHead, /^[0-9a-f]{40,64}$/u, 'source seal Git HEAD is invalid')
-  assert.match(
-    seal.helperReleasePublicKeyHex,
-    /^[0-9a-f]{64}$/u,
-    'source seal helper public key is invalid',
-  )
   assert.equal(seal.serverBinaryPath, 'winwincode-server')
   assert.equal(seal.serverBinaryMode, 0o755)
   assert.equal(seal.cliBinaryPath, 'wwc')
@@ -463,8 +308,6 @@ function validateSourceSealShape(seal) {
   assert.equal(seal.workerBinaryMode, 0o755)
   assert.equal(seal.helperBinaryPath, HELPER_RELEASE_BINARY_NAME)
   assert.equal(seal.helperBinaryMode, HELPER_RELEASE_BINARY_MODE)
-  assert.equal(seal.helperReleaseManifestMode, 0o644)
-  assert.equal(seal.helperReleaseManifestPath, HELPER_RELEASE_MANIFEST_NAME)
 }
 
 function readSourceSeal(path) {
@@ -506,28 +349,6 @@ function validateSourceSealFiles({ root, serverBinary, helperExecutable, sealPat
   assert.equal(helperIdentity.sha256, seal.helperBinarySha256, 'kernel helper digest changed')
   assert.equal(cliIdentity.sha256, seal.cliBinarySha256, 'Device CLI binary digest changed')
   assert.equal(workerIdentity.sha256, seal.workerBinarySha256, 'Device Worker binary digest changed')
-  const manifestPath = join(dirname(serverBinary), seal.helperReleaseManifestPath)
-  assert.equal(
-    resolve(manifestPath),
-    resolve(sealPath.replace(API_SOURCE_SEAL_NAME, HELPER_RELEASE_MANIFEST_NAME)),
-    'source seal manifest path is not colocated with the Server',
-  )
-  const manifest = readAndValidateHelperReleaseManifest({
-    root,
-    helperExecutable,
-    manifestPath,
-    publicKeyHex: seal.helperReleasePublicKeyHex,
-  })
-  assert.equal(
-    manifest.digest,
-    seal.helperReleaseManifestSha256,
-    'helper release manifest digest changed',
-  )
-  assert.equal(
-    manifest.manifestMode,
-    seal.helperReleaseManifestMode,
-    'helper release manifest mode changed',
-  )
   const currentSource = sourceTreeIdentity(root)
   assert.equal(
     currentSource.sourceSha256,
@@ -547,7 +368,6 @@ function validateSourceSealFiles({ root, serverBinary, helperExecutable, sealPat
     helperIdentity,
     cliIdentity,
     workerIdentity,
-    manifest,
   }
 }
 
@@ -555,12 +375,10 @@ export function writeApiProductionSourceSeal({
   root = ROOT,
   serverBinary,
   helperExecutable,
-  helperReleaseManifest,
   expectedSourceIdentity = null,
 } = {}) {
   assert.equal(typeof serverBinary, 'string', 'Server binary is required for source sealing')
   assert.equal(typeof helperExecutable, 'string', 'kernel helper is required for source sealing')
-  assert.equal(typeof helperReleaseManifest, 'string', 'helper release manifest is required for source sealing')
   const serverIdentity = fileIdentity(serverBinary, 'Server binary')
   const helperIdentity = fileIdentity(helperExecutable, 'kernel helper binary')
   const cliIdentity = fileIdentity(join(dirname(serverBinary), 'wwc'), 'Device CLI binary')
@@ -569,25 +387,6 @@ export function writeApiProductionSourceSeal({
   assert.equal(helperIdentity.mode, HELPER_RELEASE_BINARY_MODE, 'kernel helper must have mode 0755')
   assert.equal(cliIdentity.mode, 0o755, 'Device CLI binary must have mode 0755')
   assert.equal(workerIdentity.mode, 0o755, 'Device Worker binary must have mode 0755')
-  assert.equal(
-    dirname(resolve(serverBinary)),
-    dirname(resolve(helperExecutable)),
-    'Server and kernel helper must be colocated',
-  )
-  assert.equal(
-    resolve(helperReleaseManifest),
-    join(dirname(resolve(serverBinary)), HELPER_RELEASE_MANIFEST_NAME),
-    'helper release manifest must be colocated with the Server',
-  )
-  const manifestIdentity = fileIdentity(helperReleaseManifest, 'helper release manifest')
-  assert.equal(manifestIdentity.mode, 0o644, 'helper release manifest must have mode 0644')
-  const { publicKeyHex } = configuredHelperReleaseKey()
-  const manifest = readAndValidateHelperReleaseManifest({
-    root,
-    helperExecutable,
-    manifestPath: helperReleaseManifest,
-    publicKeyHex,
-  })
   const source = sourceTreeIdentity(root)
   if (expectedSourceIdentity !== null) {
     assert.deepEqual(
@@ -597,7 +396,7 @@ export function writeApiProductionSourceSeal({
     )
   }
   const seal = {
-    schemaVersion: 2,
+    schemaVersion: 3,
     protocol: API_SOURCE_SEAL_PROTOCOL,
     version: API_SOURCE_SEAL_VERSION,
     sourceSha256: source.sourceSha256,
@@ -615,10 +414,6 @@ export function writeApiProductionSourceSeal({
     helperBinaryPath: HELPER_RELEASE_BINARY_NAME,
     helperBinaryMode: helperIdentity.mode,
     helperBinarySha256: helperIdentity.sha256,
-    helperReleaseManifestMode: manifestIdentity.mode,
-    helperReleaseManifestPath: HELPER_RELEASE_MANIFEST_NAME,
-    helperReleaseManifestSha256: manifest.digest,
-    helperReleasePublicKeyHex: publicKeyHex,
   }
   validateSourceSealShape(seal)
   const sealPath = join(dirname(resolve(serverBinary)), API_SOURCE_SEAL_NAME)
@@ -654,39 +449,6 @@ export function verifyApiProductionSourceSeal({
     sealPath,
     seal: sourceSeal.seal,
   })
-}
-
-export function writeHelperReleaseManifest(root, helperExecutable) {
-  const { privateKey } = configuredHelperReleaseKey()
-  const sourceSha256 = `sha256:${createHash('sha256')
-    .update(readFileSync(join(root, 'crates', 'helper', 'src', 'main.rs')))
-    .digest('hex')}`
-  const fields = {
-    schemaVersion: 1,
-    protocol: 'winwincode-kernel-helper-release',
-    version: 1,
-    packageVersion: canonicalProductVersion(root),
-    sourceSha256,
-    binarySha256: `sha256:${createHash('sha256').update(readFileSync(helperExecutable)).digest('hex')}`,
-    binaryPath: HELPER_RELEASE_BINARY_NAME,
-    binaryMode: HELPER_RELEASE_BINARY_MODE,
-  }
-  const signature = sign(null, helperReleaseSigningBytes(fields), privateKey)
-    .toString('base64url')
-  const manifest = {
-    ...fields,
-    signature,
-  }
-  const expectedPublicKey = process.env.WINWINCODE_HELPER_RELEASE_PUBLIC_KEY_HEX
-    ?? helperReleasePublicKeyHex(privateKey)
-  assert.equal(
-    helperReleasePublicKeyHex(privateKey),
-    expectedPublicKey,
-    'helper release manifest signer must match the compiled release public key',
-  )
-  const manifestPath = join(dirname(helperExecutable), HELPER_RELEASE_MANIFEST_NAME)
-  writeJsonAtomically(manifestPath, manifest)
-  return manifestPath
 }
 
 function commandRequest(requestId, command, expectedRevision, payload, actor = ACTOR) {
@@ -746,7 +508,7 @@ function requestJsonOnce(url, {
   }
   return new Promise((resolvePromise, reject) => {
     let connected = false
-    const request = httpsRequest(target, {
+    const request = (target.protocol === 'http:' ? httpRequest : httpsRequest)(target, {
       signal,
       method,
       headers,
@@ -792,7 +554,7 @@ function requestJsonOnce(url, {
     })
     request.on('timeout', () => request.destroy(Object.assign(
       new Error('HTTP request timed out'), { code: 'ETIMEDOUT' })))
-    request.on('socket', socket => { socket.once('secureConnect', () => { connected = true }) })
+    request.on('socket', socket => { socket.once(target.protocol === 'http:' ? 'connect' : 'secureConnect', () => { connected = true }) })
     request.on('error', error => reject(Object.assign(error, { networkFailure: classifyError(error, { notSent: !connected }) })))
     if (serialized !== null) request.write(serialized)
     request.end()
@@ -983,32 +745,6 @@ async function waitFor(predicate, label, timeoutMillis) {
     if (Date.now() >= deadline) fail(`timed out waiting for ${label}`)
     await new Promise(resolvePromise => setTimeout(resolvePromise, POLL_INTERVAL_MILLIS))
   }
-}
-
-async function waitForRemoteWorker(
-  client,
-  started,
-  timeoutMillis,
-  previousHeartbeatAt = null,
-) {
-  return waitFor(async () => {
-    if (started.child.exitCode !== null || started.child.signalCode !== null) {
-      const diagnostic = started.errors.join('').trim().slice(-8_000)
-      fail(`remote Worker exited before becoming ready${
-        diagnostic.length === 0 ? '' : `:\n${diagnostic}`
-      }`)
-    }
-    const response = await client.query('worker.list', { states: [] })
-    const worker = response.result?.items?.find(item => item.id === IDS.remoteWorker)
-    if (
-      worker?.state !== 'enabled'
-      || typeof worker.lastHeartbeatAt !== 'string'
-      || worker.lastHeartbeatAt === previousHeartbeatAt
-    ) {
-      return false
-    }
-    return worker
-  }, `remote Worker ${IDS.remoteWorker} ready heartbeat`, timeoutMillis)
 }
 
 export async function waitForDeviceWorkerRegistered(
@@ -1205,13 +941,12 @@ function spawnStandaloneServer({
   root,
   checkoutRevision,
   helperExecutable,
-  helperReleaseManifest,
   repositoryRoot,
   sourceRoot,
   serverEnvironment = {},
   serverBinary,
 }) {
-  const controlUrl = `https://127.0.0.1:${String(port)}`
+  const controlUrl = `http://127.0.0.1:${String(port)}`
   const errors = []
   const binary = serverBinary ?? resolve(serverTargetDirectory(root), 'debug/winwincode-server')
   const child = spawn(binary, [], {
@@ -1222,16 +957,12 @@ function spawnStandaloneServer({
       WWC_SERVER_AUTH_MODE: serverEnvironment.WWC_SERVER_AUTH_MODE ?? 'local-open',
       ...serverEnvironment,
       WWC_SERVER_BIND: `127.0.0.1:${String(port)}`,
-      WWC_SERVER_PUBLIC_URL: `https://control.localhost:${String(port)}`,
+      WWC_SERVER_PUBLIC_URL: `http://127.0.0.1:${String(port)}`,
       WWC_SERVER_DATA_DIRECTORY: resolve(directory, 'server-data'),
       WWC_SERVER_ALLOWED_ORIGINS: origin,
       WWC_SERVER_BOOTSTRAP_PROOF: proof,
       WWC_SERVER_REPOSITORY_ROOT: repositoryRoot,
-      WWC_SERVER_SOURCE_ROOT: sourceRoot,
       WWC_SERVER_CHECKOUT_REVISION: checkoutRevision,
-      WWC_SERVER_HELPER_EXECUTABLE: helperExecutable,
-      WWC_SERVER_HELPER_RELEASE_MANIFEST: helperReleaseManifest,
-      WWC_SERVER_ACTION_SIGNING_KEY_HEX: '1f'.repeat(32),
       WWC_SERVER_ORGANIZATION_ID: IDS.organization,
       WWC_SERVER_WORKSPACE_ID: IDS.workspace,
       WWC_SERVER_PROJECT_ID: IDS.project,
@@ -1243,8 +974,6 @@ function spawnStandaloneServer({
       PUBLICATION_REQUESTERS: IDS.actor,
       PUBLICATION_APPROVERS: IDS.actor,
       PUBLICATION_APPROVAL_MAX_AGE_MILLIS: '86400000',
-      WWC_SERVER_TLS_CERTIFICATE: certificate.cert,
-      WWC_SERVER_TLS_PRIVATE_KEY: certificate.key,
       GIT_CONFIG_NOSYSTEM: '1',
     },
     stdio: ['ignore', 'pipe', 'pipe'],
@@ -1262,90 +991,6 @@ function spawnStandaloneServer({
     if (debugLog !== undefined) appendFileSync(debugLog, chunk)
   })
   return { child, controlUrl, errors }
-}
-
-function prepareRemoteWorkerFixture({ certificate, directory }) {
-  const credential = randomBytes(32).toString('base64url')
-  const credentialFile = resolve(directory, 'remote-worker.credential')
-  const tlsRootDerFile = resolve(directory, 'remote-worker-root.der')
-  writeFileSync(credentialFile, credential, { mode: 0o600 })
-  chmodSync(credentialFile, 0o600)
-  const certificateDer = new X509Certificate(readFileSync(certificate.cert)).raw
-  writeFileSync(tlsRootDerFile, certificateDer, { mode: 0o644 })
-  return {
-    credential,
-    credentialFile,
-    startedAt: new Date().toISOString(),
-    tlsRootDerFile,
-  }
-}
-
-function spawnStandaloneWorker({
-  controlUrl,
-  directory,
-  fixture,
-  helperExecutable,
-  helperReleaseManifest,
-  modelRoute,
-  root,
-  sourceRoot,
-  workerBinary,
-}) {
-  const errors = []
-  const child = spawn(workerBinary, ['--remote'], {
-    cwd: root,
-    detached: process.platform !== 'win32',
-    env: {
-      ...runtimeChildEnvironment(),
-      WWC_WORKER_MODEL_REASONING_EFFORT: process.env.WWC_WORKER_MODEL_REASONING_EFFORT,
-      WWC_WORKER_FUSION: process.env.WWC_WORKER_FUSION,
-      WWC_WORKER_JEV_JUDGE: process.env.WWC_WORKER_JEV_JUDGE,
-      WWC_WORKER_JEV_CONTEXT: process.env.WWC_WORKER_JEV_CONTEXT,
-      WWC_DEVICE_JEV_SETTINGS_FILE: process.env.WWC_DEVICE_JEV_SETTINGS_FILE,
-      WWC_BENCHMARK_SEALED_TOOLS: process.env.WWC_BENCHMARK_SEALED_TOOLS,
-      WWC_WORKER_ID: IDS.remoteWorker,
-      WWC_WORKER_INSTANCE_ID: IDS.remoteWorkerInstance,
-      WWC_WORKER_STARTED_AT: fixture.startedAt,
-      WWC_WORKER_DATA_DIRECTORY: resolve(directory, 'worker-data'),
-      WWC_WORKER_SOURCE_ROOT: sourceRoot,
-      WWC_WORKER_SERVER_ORIGIN: controlUrl,
-      WWC_WORKER_TLS_ROOT_DER_FILE: fixture.tlsRootDerFile,
-      WWC_WORKER_CREDENTIAL_FILE: fixture.credentialFile,
-      WWC_WORKER_HELPER_RELEASE_MANIFEST: helperReleaseManifest,
-      WWC_WORKER_HELPER_EXECUTABLE: helperExecutable,
-      WWC_WORKER_MODEL_PROVIDER_ID: modelRoute.providerId,
-      WWC_WORKER_MODEL_ID: modelRoute.modelId,
-      WWC_WORKER_ACTION_SIGNING_KEY_HEX: '1f'.repeat(32),
-      WWC_DEBUG_REMOTE_WORKER: '1',
-      GIT_CONFIG_NOSYSTEM: '1',
-    },
-    stdio: ['ignore', 'pipe', 'pipe'],
-  })
-  child.stdout.setEncoding('utf8')
-  child.stderr.setEncoding('utf8')
-  child.stdout.on('data', chunk => errors.push(chunk))
-  child.stderr.on('data', chunk => errors.push(chunk))
-  return { child, errors }
-}
-
-async function stopWorker(child) {
-  if (child.exitCode !== null || child.signalCode !== null) return
-  const exited = new Promise(resolvePromise => child.once('exit', resolvePromise))
-  child.kill('SIGINT')
-  const graceful = await Promise.race([
-    exited.then(() => true),
-    new Promise(resolvePromise => setTimeout(resolvePromise, 10_000, false)),
-  ])
-  if (!graceful) child.kill('SIGKILL')
-  await Promise.race([
-    exited,
-    new Promise(resolvePromise => setTimeout(resolvePromise, 5_000)),
-  ])
-  assert.equal(
-    child.exitCode !== null || child.signalCode !== null,
-    true,
-    'standalone Worker process must stop',
-  )
 }
 
 async function waitForServer(baseUrl, origin, child, errors, proof, timeoutMillis) {
@@ -1412,7 +1057,6 @@ async function startServer({
   serverBinary,
   checkoutRevision,
   helperExecutable,
-  helperReleaseManifest,
   repositoryRoot,
   sourceRoot,
   serverEnvironment,
@@ -1430,7 +1074,7 @@ async function startServer({
     assert.ok(['127.0.0.1', 'localhost', 'client.localhost'].includes(selected.hostname),
       'live acceptance Client must remain on a fixture-owned loopback origin')
   }
-  const origin = allowedClientOrigin ?? `https://api.localhost:${String(selectedPort)}`
+  const origin = allowedClientOrigin ?? `http://127.0.0.1:${String(selectedPort)}`
   const started = spawnStandaloneServer({
     certificate,
     directory,
@@ -1440,7 +1084,6 @@ async function startServer({
     root,
     checkoutRevision,
     helperExecutable,
-    helperReleaseManifest,
     repositoryRoot,
     sourceRoot,
     serverEnvironment,
@@ -1470,11 +1113,11 @@ export async function inspectRegisteredDeviceTask(launch) {
   assert.equal(resolve(launch.directory), launch.directory, 'registered directory must be absolute')
   const endpoint = JSON.parse(readFileSync(join(launch.directory, 'server-endpoint.json'), 'utf8'))
   const target = new URL(endpoint.controlUrl)
-  assert.equal(target.protocol, 'https:')
+  assert.equal(target.protocol, 'http:')
   assert.equal(target.hostname, '127.0.0.1')
   assert.equal(target.username + target.password + target.search + target.hash, '')
   assert.equal(target.pathname, '/')
-  assert.equal(endpoint.origin, `https://api.localhost:${target.port}`)
+  assert.equal(endpoint.origin, `http://127.0.0.1:${target.port}`)
   const api = new ApiClient(endpoint.controlUrl, endpoint.origin, 1,
     readFileSync(join(launch.directory, 'fixture-cert.pem')))
   await api.bootstrap(null, { localOpen: true })
@@ -2137,18 +1780,10 @@ export async function runApiProductionVertical({
     ? [...DEVICE_ONLY_PREREQUISITES]
     : null
   const binary = serverBinary ?? resolve(serverTargetDirectory(root), 'debug/winwincode-server')
-  const remoteWorkerBinary = workerBinary === null
-    ? null
-    : workerBinary
   const buildSourceIdentity = build ? sourceTreeIdentity(root) : null
-  let helperReleaseManifest
   let sourceSeal
   if (build) {
-    const helperReleaseKey = configuredHelperReleaseKey()
-    const buildEnvironment = {
-      ...process.env,
-      WINWINCODE_HELPER_RELEASE_PUBLIC_KEY_HEX: helperReleaseKey.publicKeyHex,
-    }
+    const buildEnvironment = process.env
     const result = spawnSync('cargo', [
       'build', '-p', 'winwincode-server', '--bin', 'winwincode-server',
       '-p', 'winwincode-kernel-helper', '--bin', 'winwincode-kernel-helper',
@@ -2157,28 +1792,17 @@ export async function runApiProductionVertical({
       '--locked', '--offline',
     ], { cwd: root, encoding: 'utf8', env: buildEnvironment, stdio: 'inherit' })
     assert.equal(result.status, 0, 'winwincode-server production binary build failed')
-    const builtHelper = prepareCompactKernelHelper({
-      root, targetDirectory: serverTargetDirectory(root), environment: buildEnvironment, offline: true,
-    })
-    const colocatedHelper = resolve(dirname(binary), 'winwincode-kernel-helper')
-    if (builtHelper !== colocatedHelper) copyFileSync(builtHelper, colocatedHelper)
-    chmodSync(colocatedHelper, 0o755)
+
   }
   assert.equal(existsSync(binary), true, `server binary is missing: ${binary}`)
-  let workerIdentity = null
-  if (remoteWorkerBinary !== null) {
-    workerIdentity = fileIdentity(remoteWorkerBinary, 'Worker binary')
-    assert.notEqual(workerIdentity.mode & 0o111, 0, 'Worker binary must be executable')
-  }
+  const workerIdentity = fileIdentity(workerBinary ?? resolve(dirname(binary), 'winwincode-worker'), 'Worker binary')
   const helperExecutable = resolve(dirname(binary), 'winwincode-kernel-helper')
   assert.equal(existsSync(helperExecutable), true, `kernel helper binary is missing: ${helperExecutable}`)
   if (build) {
-    helperReleaseManifest = writeHelperReleaseManifest(root, helperExecutable)
     sourceSeal = writeApiProductionSourceSeal({
       root,
       serverBinary: binary,
       helperExecutable,
-      helperReleaseManifest,
       expectedSourceIdentity: buildSourceIdentity,
     })
   } else {
@@ -2187,7 +1811,6 @@ export async function runApiProductionVertical({
       serverBinary: binary,
       helperExecutable,
     })
-    helperReleaseManifest = join(dirname(binary), HELPER_RELEASE_MANIFEST_NAME)
   }
   if (workerIdentity !== null) {
     assert.equal(workerIdentity.sha256, sourceSeal.seal.workerBinarySha256,
@@ -2202,20 +1825,6 @@ export async function runApiProductionVertical({
   mkdirSync(fixtureDirectory, { recursive: true })
   writeJsonAtomically(join(fixtureDirectory, 'product-source-seal.json'), sourceSeal.seal)
   const certificate = createCertificate(fixtureDirectory)
-  const remoteFixture = remoteWorkerBinary === null
-    ? null
-    : prepareRemoteWorkerFixture({ certificate, directory: fixtureDirectory })
-  const effectiveServerEnvironment = remoteFixture === null
-    ? serverEnvironment
-    : {
-        ...serverEnvironment,
-        WWC_SERVER_WORKER_MODE: 'remote',
-        WWC_SERVER_WORKER_ID: IDS.remoteWorker,
-        WWC_SERVER_WORKER_INSTANCE_ID: IDS.remoteWorkerInstance,
-        WWC_SERVER_WORKER_POOL_ID: IDS.remoteWorkerPool,
-        WWC_SERVER_REMOTE_WORKER_CREDENTIAL_FILE: remoteFixture.credentialFile,
-        WWC_SERVER_REMOTE_WORKER_EXPIRES_AT: '2099-01-01T00:00:00Z',
-      }
   const proof = randomBytes(32).toString('base64url')
   const proofs = [proof].filter(Boolean)
   const controlledRepository = prepareControlledRepository({
@@ -2225,12 +1834,9 @@ export async function runApiProductionVertical({
   })
   const baseline = controlledRepository.revision
   let started = null
-  let workerStarted = null
   let api = null
   let devicePath = null
   let serverOutput = ''
-  let workerOutput = ''
-  let remoteWorkerHeartbeatAt = null
   let failure = null
   const report = {
     schemaVersion: 'winwincode.api-production-vertical.v1',
@@ -2247,7 +1853,6 @@ export async function runApiProductionVertical({
       sourceSeal: {
         gitHead: sourceSeal.seal.gitHead,
         helperBinarySha256: sourceSeal.seal.helperBinarySha256,
-        helperReleaseManifestSha256: sourceSeal.seal.helperReleaseManifestSha256,
         serverBinarySha256: sourceSeal.seal.serverBinarySha256,
         sourceSha256: sourceSeal.seal.sourceSha256,
         trackedDiffSha256: sourceSeal.seal.trackedDiffSha256,
@@ -2258,7 +1863,6 @@ export async function runApiProductionVertical({
     health: { initial: null, afterRestart: null },
     restart: null,
     deterministic: null,
-    remoteWorker: null,
     devicePath: null,
     errorCodeTruthfulness: null,
   }
@@ -2268,15 +1872,15 @@ export async function runApiProductionVertical({
     ? JSON.parse(readFileSync(endpointPath, 'utf8')) : null
   if (retainedEndpoint !== null) {
     const endpoint = new URL(retainedEndpoint.controlUrl)
-    assert.equal(endpoint.protocol, 'https:')
+    assert.equal(endpoint.protocol, 'http:')
     assert.equal(endpoint.hostname, '127.0.0.1')
     assert.equal(endpoint.username + endpoint.password + endpoint.search + endpoint.hash, '')
     assert.equal(endpoint.pathname, '/')
-    assert.equal(retainedEndpoint.origin, `https://api.localhost:${endpoint.port}`)
+    assert.equal(retainedEndpoint.origin, `http://127.0.0.1:${endpoint.port}`)
     assert.ok(Number(endpoint.port) > 0)
   }
   const stableServerPort = retainedEndpoint !== null ? Number(new URL(retainedEndpoint.controlUrl).port)
-    : remoteWorkerBinary === null ? null : await freePort()
+    : await freePort()
 
   try {
     started = await startServer({
@@ -2286,10 +1890,9 @@ export async function runApiProductionVertical({
       proof,
       checkoutRevision: baseline,
       helperExecutable,
-      helperReleaseManifest,
       repositoryRoot: controlledRepository.repository,
       sourceRoot: controlledRepository.sourceRoot,
-      serverEnvironment: effectiveServerEnvironment,
+      serverEnvironment,
       allowedClientOrigin,
       serverBinary: binary,
       timeoutMillis,
@@ -2301,29 +1904,6 @@ export async function runApiProductionVertical({
 
     if (devicePrerequisites && retainedEndpoint === null) {
       report.errorCodeTruthfulness = await probeDeviceErrorTruthfulness(api)
-    }
-
-    if (remoteWorkerBinary !== null) {
-      workerStarted = spawnStandaloneWorker({
-        controlUrl: started.controlUrl,
-        directory: fixtureDirectory,
-        fixture: remoteFixture,
-        helperExecutable,
-        helperReleaseManifest,
-        modelRoute,
-        root,
-        sourceRoot: controlledRepository.sourceRoot,
-        workerBinary: remoteWorkerBinary,
-      })
-      report.remoteWorker = {
-        initialPid: workerStarted.child.pid,
-        restartedPid: null,
-        survivedServerRestartPid: null,
-        terminalAfterWorkerRestart: false,
-        terminalAfterServerRestart: false,
-      }
-      const readyWorker = await waitForRemoteWorker(api, workerStarted, timeoutMillis)
-      remoteWorkerHeartbeatAt = readyWorker.lastHeartbeatAt
     }
 
     if (devicePrerequisites) {
@@ -2344,7 +1924,6 @@ export async function runApiProductionVertical({
         schemaVersion: SCHEMA_VERSION,
         certificatePath: certificate.cert,
         privateKeyPath: certificate.key,
-        helperReleaseManifest,
         helperExecutable,
         modelRouteSource: modelRoute,
         timeoutMillis,
@@ -2393,10 +1972,9 @@ export async function runApiProductionVertical({
           proof: restartProof,
           checkoutRevision: baseline,
           helperExecutable,
-          helperReleaseManifest,
           repositoryRoot: controlledRepository.repository,
           sourceRoot: controlledRepository.sourceRoot,
-          serverEnvironment: effectiveServerEnvironment,
+          serverEnvironment,
           allowedClientOrigin,
           serverBinary: binary,
           timeoutMillis,
@@ -2460,29 +2038,6 @@ export async function runApiProductionVertical({
     }
 
     if (repeat) {
-      if (workerStarted !== null) {
-        await stopWorker(workerStarted.child)
-        workerOutput += workerStarted.errors.join('')
-        workerStarted = spawnStandaloneWorker({
-          controlUrl: started.controlUrl,
-          directory: fixtureDirectory,
-          fixture: remoteFixture,
-          helperExecutable,
-          helperReleaseManifest,
-          modelRoute,
-          root,
-          sourceRoot: controlledRepository.sourceRoot,
-          workerBinary: remoteWorkerBinary,
-        })
-        const readyWorker = await waitForRemoteWorker(
-          api,
-          workerStarted,
-          timeoutMillis,
-          remoteWorkerHeartbeatAt,
-        )
-        remoteWorkerHeartbeatAt = readyWorker.lastHeartbeatAt
-        report.remoteWorker.restartedPid = workerStarted.child.pid
-      }
       const repeated = await runChat(api, timeoutMillis, {
         modelRoute,
         productSessionId: IDS.repeatSession,
@@ -2501,9 +2056,6 @@ export async function runApiProductionVertical({
         contentEqual: true,
         firstSessionId: IDS.session,
         repeatSessionId: IDS.repeatSession,
-      }
-      if (report.remoteWorker !== null) {
-        report.remoteWorker.terminalAfterWorkerRestart = true
       }
     }
 
@@ -2708,10 +2260,9 @@ export async function runApiProductionVertical({
         proof: restartProof,
         checkoutRevision: baseline,
         helperExecutable,
-        helperReleaseManifest,
         repositoryRoot: controlledRepository.repository,
         sourceRoot: controlledRepository.sourceRoot,
-        serverEnvironment: effectiveServerEnvironment,
+        serverEnvironment,
         allowedClientOrigin,
         serverBinary: binary,
         timeoutMillis,
@@ -2720,27 +2271,6 @@ export async function runApiProductionVertical({
       report.health.afterRestart = started.health.status
       const restartedApi = new ApiClient(started.controlUrl, started.origin, 1_000_001)
       await restartedApi.bootstrap(restartProof, { login: true, localOpen: true })
-      if (workerStarted !== null) {
-        report.remoteWorker.survivedServerRestartPid = workerStarted.child.pid
-        const readyWorker = await waitForRemoteWorker(
-          restartedApi,
-          workerStarted,
-          timeoutMillis,
-          remoteWorkerHeartbeatAt,
-        )
-        remoteWorkerHeartbeatAt = readyWorker.lastHeartbeatAt
-        const reconnected = await runChat(restartedApi, timeoutMillis, {
-          modelRoute,
-          productSessionId: IDS.reconnectSession,
-          beforeSubmit: devicePath === null
-            ? null
-            : async ({ productSessionId }) => {
-              await devicePath.launchAnchor({ productSessionId })
-            },
-        })
-        assert.equal(reconnected.assistant.state, 'completed')
-        report.remoteWorker.terminalAfterServerRestart = true
-      }
       const reloadedMessages = (await restartedApi.query(
         'session.messages.list',
         { productSessionId: IDS.session },
@@ -2783,10 +2313,6 @@ export async function runApiProductionVertical({
       try { await stopDevicePath(report, devicePath) } catch (error) { failure ??= error }
       serverOutput += ''
     }
-    if (workerStarted !== null) {
-      await stopWorker(workerStarted.child).catch(() => {})
-      workerOutput += workerStarted.errors.join('')
-    }
     if (started !== null) {
       serverOutput += started.errors.join('')
       await stopServer(started.child).catch(() => {})
@@ -2795,32 +2321,18 @@ export async function runApiProductionVertical({
       (output, secret) => redactedOutput(output, secret),
       serverOutput,
     )
-    const combinedWorkerOutput = remoteFixture === null
-      ? workerOutput
-      : redactedOutput(workerOutput, remoteFixture.credential)
     assert.equal(
       proofs.some(secret => serverOutput.includes(secret)),
       false,
       'Server output must not contain bootstrap proof',
     )
-    assert.equal(
-      remoteFixture !== null && workerOutput.includes(remoteFixture.credential),
-      false,
-      'Worker output must not contain its credential',
-    )
-    assert.equal(
-      remoteFixture !== null && serverOutput.includes(remoteFixture.credential),
-      false,
-      'Server output must not contain the Worker credential',
-    )
     if (
       failure !== null
-      && (combinedOutput.trim().length > 0 || combinedWorkerOutput.trim().length > 0)
+      && combinedOutput.trim().length > 0
     ) {
       const diagnostic = combinedOutput.trim().slice(-8_000)
       if (failure instanceof Error) {
-        const workerDiagnostic = combinedWorkerOutput.trim().slice(-8_000)
-        failure.message = `${failure.message}\nServer output:\n${diagnostic}\nWorker output:\n${workerDiagnostic}`
+        failure.message = `${failure.message}\nServer output:\n${diagnostic}`
       } else {
         failure = new Error(`${String(failure)}\nServer output:\n${diagnostic}`)
       }

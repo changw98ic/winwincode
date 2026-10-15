@@ -9,7 +9,6 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use serde_json::Value;
-use sha2::{Digest, Sha256};
 use winwincode_client_port::domain::{
     ClientArchitecture, ClientCapacityReport, ClientLockState, ClientPlatformTarget, PresenceState,
 };
@@ -95,21 +94,6 @@ fn heartbeat_message(capacity: &ClientCapacityReport) -> ClientToServerMessage {
 
 const ASSIGNED_NODE: &str = "cnd_A1A1A1A1A1A1A1A1A1A1A1A1A1";
 const ASSIGNED_PUBLIC_CLIENT_ID: &str = "0123456789";
-const ISSUED_SECRET: [u8; 32] = [0xab; 32];
-
-fn issued_credential_hex() -> String {
-    const HEX: &[u8; 16] = b"0123456789abcdef";
-    let mut encoded = String::with_capacity(ISSUED_SECRET.len() * 2);
-    for byte in ISSUED_SECRET {
-        encoded.push(HEX[usize::from(byte >> 4)] as char);
-        encoded.push(HEX[usize::from(byte & 0x0f)] as char);
-    }
-    encoded
-}
-
-fn issued_credential_digest() -> String {
-    format!("sha256:{:x}", Sha256::digest(ISSUED_SECRET))
-}
 
 fn issued_enrollment() -> EnrollmentIssuance {
     issued_enrollment_with_heartbeat(10)
@@ -119,8 +103,6 @@ fn issued_enrollment_with_heartbeat(heartbeat_interval_ms: u32) -> EnrollmentIss
     EnrollmentIssuance {
         client_node_id: ASSIGNED_NODE.to_owned(),
         public_client_id: ASSIGNED_PUBLIC_CLIENT_ID.to_owned(),
-        device_credential: issued_credential_hex(),
-        device_credential_digest: issued_credential_digest(),
         heartbeat_interval_ms,
         server_time: "2026-09-04T00:00:00.000Z".to_owned(),
     }
@@ -277,7 +259,6 @@ impl ServerSim {
             replay_from_sequence: gap_response.then_some(1),
             frames: Vec::new(),
             enrollment: issuance,
-            worker_credentials: Vec::new(),
         };
         serde_json::to_vec(&response)
             .map_err(|error| ExchangeTransportError::new(format!("fake response encode: {error}")))
@@ -285,11 +266,7 @@ impl ServerSim {
 }
 
 impl ExchangeTransport for ServerSim {
-    fn exchange(
-        &self,
-        _credential: Option<&str>,
-        request_bytes: &[u8],
-    ) -> Result<Vec<u8>, ExchangeTransportError> {
+    fn exchange(&self, request_bytes: &[u8]) -> Result<Vec<u8>, ExchangeTransportError> {
         let request: ExchangeRequest = serde_json::from_slice(request_bytes).map_err(|error| {
             ExchangeTransportError::new(format!("fake request decode: {error}"))
         })?;
@@ -303,18 +280,14 @@ struct LostFirstResponseTransport {
 }
 
 impl ExchangeTransport for LostFirstResponseTransport {
-    fn exchange(
-        &self,
-        credential: Option<&str>,
-        request_bytes: &[u8],
-    ) -> Result<Vec<u8>, ExchangeTransportError> {
+    fn exchange(&self, request_bytes: &[u8]) -> Result<Vec<u8>, ExchangeTransportError> {
         if !self.first_exchange_done.swap(true, Ordering::SeqCst) {
-            let _ = self.inner.exchange(credential, request_bytes);
+            let _ = self.inner.exchange(request_bytes);
             return Err(ExchangeTransportError::new(
                 "connection reset before the response arrived",
             ));
         }
-        self.inner.exchange(credential, request_bytes)
+        self.inner.exchange(request_bytes)
     }
 }
 
@@ -324,16 +297,12 @@ struct FlakyTransport {
 }
 
 impl ExchangeTransport for FlakyTransport {
-    fn exchange(
-        &self,
-        credential: Option<&str>,
-        request_bytes: &[u8],
-    ) -> Result<Vec<u8>, ExchangeTransportError> {
+    fn exchange(&self, request_bytes: &[u8]) -> Result<Vec<u8>, ExchangeTransportError> {
         if self.failures_remaining.load(Ordering::SeqCst) > 0 {
             self.failures_remaining.fetch_sub(1, Ordering::SeqCst);
             return Err(ExchangeTransportError::new("connection refused"));
         }
-        self.inner.exchange(credential, request_bytes)
+        self.inner.exchange(request_bytes)
     }
 }
 
@@ -346,11 +315,7 @@ struct ArmedBlockingTransport {
 }
 
 impl ExchangeTransport for ArmedBlockingTransport {
-    fn exchange(
-        &self,
-        credential: Option<&str>,
-        request_bytes: &[u8],
-    ) -> Result<Vec<u8>, ExchangeTransportError> {
+    fn exchange(&self, request_bytes: &[u8]) -> Result<Vec<u8>, ExchangeTransportError> {
         let blocked =
             self.armed.load(Ordering::SeqCst) && !self.blocked_once.swap(true, Ordering::SeqCst);
         if blocked {
@@ -366,7 +331,7 @@ impl ExchangeTransport for ArmedBlockingTransport {
                 flag = condvar.wait(flag).expect("release wait");
             }
         }
-        self.inner.exchange(credential, request_bytes)
+        self.inner.exchange(request_bytes)
     }
 }
 
@@ -765,11 +730,6 @@ fn restart_recovers_unacked_frames_from_the_persistent_outbox() {
         ASSIGNED_PUBLIC_CLIENT_ID,
         "the adopted publicClientId must be stable across restarts"
     );
-    assert_eq!(
-        second_identity.credential().digest(),
-        issued_credential_digest(),
-        "the issued credential must survive restarts"
-    );
     assert_ne!(
         second_identity.current_instance_id(),
         first_identity.current_instance_id(),
@@ -932,14 +892,10 @@ struct LockCommandTransport {
     enrollment_delay: Duration,
 }
 impl ExchangeTransport for LockCommandTransport {
-    fn exchange(
-        &self,
-        credential: Option<&str>,
-        bytes: &[u8],
-    ) -> Result<Vec<u8>, ExchangeTransportError> {
+    fn exchange(&self, bytes: &[u8]) -> Result<Vec<u8>, ExchangeTransportError> {
         let request: ExchangeRequest = serde_json::from_slice(bytes).expect("request");
         let mut response: ExchangeResponse =
-            serde_json::from_slice(&self.server.exchange(credential, bytes)?).expect("response");
+            serde_json::from_slice(&self.server.exchange(bytes)?).expect("response");
         if response.enrollment.is_some() {
             thread::sleep(self.enrollment_delay);
         }

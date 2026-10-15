@@ -7,11 +7,9 @@ use sha2::{Digest, Sha256};
 use winwincode_domain::Sha256Digest;
 use winwincode_execution_port::{
     accounting::{AttemptAccountingStatement, ProviderAccountingReceipt},
-    action_enforcement::ActionEnforcementSigningKey,
     generated::{ExecutionLeaseStamp, ModelChunkMessage, ModelOpenMessage},
 };
 
-/// Measured lower bounds across every physical invocation of one model exchange.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DevicePrimaryModelUsage {
     pub input_tokens: u64,
@@ -22,8 +20,6 @@ pub struct DevicePrimaryModelUsage {
 }
 
 impl DeviceProviderStore {
-    /// Reads all physical charge facts without changing their immutable frames.
-    /// Rejects another original request, corrupt receipts, or unavailable storage.
     pub fn model_primary_usage(
         &self,
         open: &ModelOpenMessage,
@@ -120,7 +116,6 @@ impl DeviceProviderStore {
     pub fn accounting_statement(
         &self,
         lease: &ExecutionLeaseStamp,
-        key: &ActionEnforcementSigningKey,
     ) -> Result<Option<AttemptAccountingStatement>, DeviceProviderError> {
         let cancelled = self.connection.prepare("SELECT exchange_id FROM exchanges WHERE accounting_chunks IS NULL AND request_open IS NOT NULL AND (cancelled=1 OR (chunks IS NULL AND EXISTS(SELECT 1 FROM model_invocation_attempts WHERE model_invocation_attempts.exchange_id=exchanges.exchange_id))) AND json_extract(request_open,'$.lease.jobId')=?1 AND json_extract(request_open,'$.lease.attempt')=?2")?.query_map(params![lease.job_id.0,lease.attempt],|row|row.get::<_,String>(0))?.collect::<Result<Vec<_>,_>>()?;
         for exchange_id in cancelled {
@@ -145,7 +140,6 @@ impl DeviceProviderStore {
                 lease: lease.clone(),
                 manifest: Vec::new(),
                 receipts: Vec::new(),
-                signature: Sha256Digest(String::new()),
             };
             for (digest, request, chunks) in rows {
                 if digest != format!("{:x}", Sha256::digest(request.as_bytes())) {
@@ -252,7 +246,7 @@ impl DeviceProviderStore {
             statement.manifest.sort();
             statement.receipts.sort_by(|a, b| a.slot.cmp(&b.slot));
             statement
-                .sign(key)
+                .validate()
                 .map_err(|_| DeviceProviderError::StateInvalid)?;
             self.connection.execute(
                 "INSERT OR IGNORE INTO accounting_closed_attempts VALUES(?1,?2,?3)",
@@ -451,7 +445,7 @@ mod tests {
             data_base64: STANDARD.encode(&request),
             payload_digest: Sha256Digest(format!("sha256:{:x}", Sha256::digest(&request))),
         };
-        let key = ActionEnforcementSigningKey::from_bytes([7; 32]).unwrap();
+
         let store = DeviceProviderStore::open(&root).unwrap();
         let saved = serde_json::to_string(&open).unwrap();
         store
@@ -466,10 +460,7 @@ mod tests {
             )
             .unwrap();
         assert!(
-            store
-                .accounting_statement(&open.lease, &key)
-                .unwrap()
-                .is_none(),
+            store.accounting_statement(&open.lease,).unwrap().is_none(),
             "running source cannot close an attempt"
         );
         let payload=serde_json::to_vec(&serde_json::json!({"type":"completed","responseId":"provider-receipt-1","tokenUsage":{"inputTokens":85,"outputTokens":20},"actualCostMicros":47})).unwrap();
@@ -499,10 +490,7 @@ mod tests {
                 ],
             )
             .unwrap();
-        let price_statement = store
-            .accounting_statement(&open.lease, &key)
-            .unwrap()
-            .unwrap();
+        let price_statement = store.accounting_statement(&open.lease).unwrap().unwrap();
         assert_eq!(
             (
                 price_statement.receipts[0].tokens,
@@ -520,11 +508,8 @@ mod tests {
                 ],
             )
             .unwrap();
-        let statement = store
-            .accounting_statement(&open.lease, &key)
-            .unwrap()
-            .unwrap();
-        statement.verify(&key).unwrap();
+        let statement = store.accounting_statement(&open.lease).unwrap().unwrap();
+        statement.validate().unwrap();
         assert_eq!(statement.manifest, price_statement.manifest);
         assert_eq!(
             (
@@ -542,12 +527,12 @@ mod tests {
         drop(store);
         let store = DeviceProviderStore::open(&root).unwrap();
         assert_eq!(
-            store.accounting_statement(&open.lease, &key).unwrap(),
+            store.accounting_statement(&open.lease,).unwrap(),
             Some(statement)
         );
         let mut foreign = open.clone();
         foreign.lease.fencing_token.0 = "999".into();
-        assert!(store.accounting_statement(&foreign.lease, &key).is_err());
+        assert!(store.accounting_statement(&foreign.lease,).is_err());
         let mut extra = open.clone();
         extra.model_exchange_id.0 = "mdl_00000000000000000000000099".into();
         assert!(

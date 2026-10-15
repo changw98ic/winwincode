@@ -359,15 +359,14 @@ fn stage_action_gate_tool_candidate_and_runtime_facts_remain_typed_and_ordered()
         &GateDecision::Allow,
     )
     .expect("gate draft");
-    let gate_json = serde_json::to_value(&gate_draft.fact).expect("gate fact json");
-    assert!(gate_json.get("envelope_version").is_none());
-    assert!(gate_json.get("envelope_digest").is_none());
-    let mut legacy_gate_json = gate_json;
-    legacy_gate_json["envelope_version"] = serde_json::json!(1);
-    legacy_gate_json["envelope_digest"] = serde_json::json!(format!("sha256:{}", "a".repeat(64)));
     assert_eq!(
-        serde_json::from_value::<RuntimeTraceFact>(legacy_gate_json).expect("legacy gate fact"),
-        gate_draft.fact
+        serde_json::to_value(&gate_draft.fact).expect("gate fact"),
+        serde_json::json!({
+            "kind": "gate",
+            "source": "file",
+            "operation": "modify",
+            "decision": "allow"
+        })
     );
 
     let facts = vec![

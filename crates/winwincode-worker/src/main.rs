@@ -11,15 +11,15 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use winwincode_codex::{
-    ExecutionMode, HelperReleaseManifest, ObserverMode, ProductionCodexAdapter,
-    ProductionCodexConfig, ProductionCodexOptions,
+    ExecutionMode, ObserverMode, ProductionCodexAdapter, ProductionCodexConfig,
+    ProductionCodexOptions,
 };
 use winwincode_domain::{Instant, Sha256Digest, WorkerId, WorkerInstanceId};
-use winwincode_execution_port::action_enforcement::ActionEnforcementSigningKey;
+
 use winwincode_execution_port::generated::{
     ModelGatewayRoute, WorkerCapabilityFeature, WorkerCapabilitySet, WorkerCapabilitySetPlatform,
 };
-use winwincode_worker::managed_session::{ManagedSessionConfig, WorkerSessionCredential};
+use winwincode_worker::managed_session::ManagedSessionConfig;
 use winwincode_worker::remote_transport::{RemoteWorkerPort, RemoteWorkerTransportHandle};
 use winwincode_worker::validation_artifact::DurableValidationArtifactStore;
 use winwincode_worker::workspace_runtime::{JobWorkspaceRuntime, ObservationModelConfiguration};
@@ -27,17 +27,13 @@ use winwincode_worker::{WorkerConfig, WorkerLifecycleState, WorkerMain};
 
 const WORKER_TOKIO_STACK_BYTES: usize = 16 * 1024 * 1024;
 
-const USAGE: &str =
-    "usage: winwincode-worker [--check|--remote|--managed-session <config-file>|--version]";
+const USAGE: &str = "usage: winwincode-worker [--check|--managed-session <config-file>|--version]";
 
 fn main() {
     let mut args = env::args().skip(1);
     match args.next().as_deref() {
         Some("--version") => println!("winwincode-worker {}", env!("CARGO_PKG_VERSION")),
         Some("--check") | None => print_identity(),
-        Some("--remote") if args.next().is_none() => {
-            run_worker_process(run_remote());
-        }
         Some("--managed-session") => match args.next() {
             Some(config_path) if args.next().is_none() => {
                 run_worker_process(run_managed(&config_path));
@@ -89,8 +85,7 @@ struct WorkerBootstrap {
     execution_workspace_directory: Option<PathBuf>,
     provider_directory: PathBuf,
     source_directory: PathBuf,
-    server_origin: String,
-    credential_path: PathBuf,
+    helper_executable: PathBuf,
     model_route: ModelGatewayRoute,
 }
 
@@ -107,67 +102,23 @@ fn run_worker_process(future: impl Future<Output = Result<(), Box<dyn std::error
     }
 }
 
-async fn run_remote() -> Result<(), Box<dyn std::error::Error>> {
-    let bootstrap = WorkerBootstrap {
-        exit_after_work: false,
-        worker_id: WorkerId(required("WWC_WORKER_ID")?),
-        worker_instance_id: WorkerInstanceId(required("WWC_WORKER_INSTANCE_ID")?),
-        started_at: env::var("WWC_WORKER_STARTED_AT").map_or(now_instant()?, Instant),
-        data_directory: PathBuf::from(required("WWC_WORKER_DATA_DIRECTORY")?),
-        execution_workspace_directory: None,
-        provider_directory: PathBuf::from(required("WWC_DEVICE_PROVIDER_DIRECTORY")?),
-        source_directory: PathBuf::from(required("WWC_WORKER_SOURCE_ROOT")?),
-        server_origin: required("WWC_WORKER_SERVER_ORIGIN")?,
-        credential_path: PathBuf::from(required("WWC_WORKER_CREDENTIAL_FILE")?),
-        model_route: default_model_route(),
-    };
-    Box::pin(run_worker(bootstrap)).await
-}
-
-fn await_managed_start_gate(
-    mut input: impl std::io::Read,
-) -> Result<(), Box<dyn std::error::Error>> {
-    let mut release = [0u8; 1];
-    input.read_exact(&mut release)?;
-    if release != [1] {
-        return Err("managed start gate rejected".into());
-    }
-    Ok(())
-}
-
 async fn run_managed(config_path: &str) -> Result<(), Box<dyn std::error::Error>> {
-    if env::var("WWC_MANAGED_START_GATE").as_deref() == Ok("1") {
-        await_managed_start_gate(std::io::stdin())?;
-    }
     let config = ManagedSessionConfig::read(std::path::Path::new(config_path))?;
-    let credential = WorkerSessionCredential::load(&config.worker_credential_path)?;
     eprintln!(
-        "winwincode-worker: managed session {} for worker {} instance {} under lease {} with fencing token {} on {} (client {} instance {}); worker session credential digest {}",
-        config.worker_session_id.0,
-        config.worker_id.0,
-        config.worker_instance_id.0,
-        config.occupancy_lease_id.0,
-        config.occupancy_fencing_token,
-        config.repository_binding_id.0,
-        config.client_node_id.0,
-        config.client_instance_id.0,
-        credential.digest().0,
+        "winwincode-worker: managed worker {} instance {}",
+        config.worker_id.0, config.worker_instance_id.0
     );
     Box::pin(run_worker(WorkerBootstrap {
         exit_after_work: true,
-        worker_id: config.worker_id.clone(),
-        worker_instance_id: config.worker_instance_id.clone(),
+        worker_id: config.worker_id,
+        worker_instance_id: config.worker_instance_id,
         started_at: now_instant()?,
-        data_directory: config.data_directory.clone(),
-        execution_workspace_directory: config.execution_workspace_directory.clone(),
-        provider_directory: config.provider_directory.clone(),
-        source_directory: config.source_directory.clone(),
-        server_origin: config.server_origin.clone(),
-        credential_path: credential.path().to_path_buf(),
-        model_route: config
-            .model_route
-            .clone()
-            .unwrap_or_else(default_model_route),
+        data_directory: config.data_directory,
+        execution_workspace_directory: config.execution_workspace_directory,
+        provider_directory: config.provider_directory,
+        source_directory: config.source_directory,
+        helper_executable: config.helper_executable,
+        model_route: config.model_route.unwrap_or_else(default_model_route),
     }))
     .await
 }
@@ -224,8 +175,7 @@ async fn run_worker(bootstrap: WorkerBootstrap) -> Result<(), Box<dyn std::error
         execution_workspace_directory,
         provider_directory,
         source_directory,
-        server_origin,
-        credential_path,
+        helper_executable,
         model_route,
     } = bootstrap;
     #[cfg(feature = "test-support")]
@@ -234,20 +184,7 @@ async fn run_worker(bootstrap: WorkerBootstrap) -> Result<(), Box<dyn std::error
     let execution_mode = configured_execution_mode("WWC_WORKER_EXECUTION_MODE")?;
     let observer_mode = configured_observer_mode("WWC_WORKER_OBSERVER_MODE")?;
     let observation_model = configured_observation_model(observer_mode, required)?;
-    let (port, handle) = RemoteWorkerPort::open(
-        &server_origin,
-        &fs::read(required("WWC_WORKER_TLS_ROOT_DER_FILE")?)?,
-        credential_path,
-        worker_id.clone(),
-        worker_instance_id.clone(),
-        Duration::from_secs(15),
-    )?;
-    let _accounting_reconciler = port.spawn_accounting_reconciler(
-        provider_directory.clone(),
-        ActionEnforcementSigningKey::from_bytes(parse_hex_key(&required(
-            "WWC_WORKER_ACTION_SIGNING_KEY_HEX",
-        )?)?)?,
-    );
+    let (port, handle) = RemoteWorkerPort::open(worker_id.clone(), worker_instance_id.clone());
     let codex = production_codex(
         &data_directory,
         &provider_directory,
@@ -255,6 +192,7 @@ async fn run_worker(bootstrap: WorkerBootstrap) -> Result<(), Box<dyn std::error
         capabilities.clone(),
         execution_mode,
         observer_mode,
+        helper_executable,
     )?;
     let validation_artifacts =
         DurableValidationArtifactStore::open(data_directory.join("worker-validation-artifacts"))?;
@@ -275,7 +213,7 @@ async fn run_worker(bootstrap: WorkerBootstrap) -> Result<(), Box<dyn std::error
         .join("codex-runtime")
         .join("model-intake.log");
     let mut worker = WorkerMain::new(config, port, codex, workspaces)
-        .with_device_providers(&provider_directory)?
+        .with_device_providers(&provider_directory)
         .with_observer_mode(observer_mode)
         .with_registration_request_namespace(&worker_instance_id, &started_at)
         .with_model_intake_log(&intake_log);
@@ -294,17 +232,22 @@ async fn run_worker(bootstrap: WorkerBootstrap) -> Result<(), Box<dyn std::error
             return Err(error);
         }
         None => {
+            handle.close();
             let _ = Box::pin(worker.shutdown(now_instant()?)).await;
             return Ok(());
         }
     }
 
+    let _accounting_reconciler = worker
+        .execution_port()
+        .spawn_accounting_reconciler(provider_directory);
     let mut drive = tokio::time::interval(Duration::from_millis(25));
     drive.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut observed_drive_failures = Vec::new();
+    let mut interrupted = false;
     loop {
         tokio::select! {
-            () = interrupt.wait() => break,
+            () = interrupt.wait() => { interrupted = true; break; },
             _ = drive.tick() => {
                 let step = async {
                 if worker.transport_failure().is_some() { return Ok(true); }
@@ -328,7 +271,7 @@ async fn run_worker(bootstrap: WorkerBootstrap) -> Result<(), Box<dyn std::error
                 winwincode_worker::mechanism_timing::record("drive_exit", &serde_json::json!({}));
                 Ok::<_, Box<dyn std::error::Error>>(exit_after_work && worker.work_drained())
                 };
-                let Some(result) = interrupt.until_interrupt(step).await else { break; };
+                let Some(result) = interrupt.until_interrupt(step).await else { interrupted = true; break; };
                 if result? { break; }
             }
         }
@@ -339,7 +282,13 @@ async fn run_worker(bootstrap: WorkerBootstrap) -> Result<(), Box<dyn std::error
             break;
         }
     }
+    if interrupted {
+        handle.close();
+    }
     let _ = Box::pin(worker.shutdown(now_instant()?)).await;
+    if interrupted {
+        return Ok(());
+    }
     if let Some(error) = handle.terminal_error() {
         return Err(error.into());
     }
@@ -370,59 +319,18 @@ fn production_codex(
     capabilities: WorkerCapabilitySet,
     execution_mode: ExecutionMode,
     observer_mode: ObserverMode,
+    helper_executable: PathBuf,
 ) -> Result<ProductionCodexAdapter, Box<dyn std::error::Error>> {
-    let helper_release_manifest = HelperReleaseManifest::from_file(&PathBuf::from(required(
-        "WWC_WORKER_HELPER_RELEASE_MANIFEST",
-    )?))?;
-    let store = winwincode_provider::DeviceProviderStore::open(provider_directory)?;
-    let snapshot = store.snapshot("local")?;
-    let extensions = store.restore_extensions(&data_directory.join("codex-runtime/kernel-home"))?;
-    let mut discovered_capabilities = Vec::new();
-    for server in extensions {
-        for operation in winwincode_execution_port::mcp_resource::McpResourceOperation::ALL {
-            discovered_capabilities.push(
-                winwincode_execution_port::capability_adapter::CapabilityDescriptor::mcp_resource(
-                    &server.server,
-                    operation,
-                    server.digest.trim_start_matches("sha256:"),
-                    winwincode_execution_port::capability_adapter::CapabilityHealth::Healthy,
-                    winwincode_execution_port::capability_adapter::CapabilityOrigin::CodexCoreMcp,
-                )?,
-            );
-        }
-        for tool in server.tools {
-            discovered_capabilities.push(
-                winwincode_execution_port::capability_adapter::CapabilityDescriptor::mcp(
-                    &server.server,
-                    &tool,
-                    server.digest.trim_start_matches("sha256:"),
-                    winwincode_execution_port::capability_adapter::CapabilityHealth::Healthy,
-                    winwincode_execution_port::capability_adapter::CapabilityOrigin::CodexCoreMcp,
-                )?,
-            );
-        }
-    }
-    let default_provider = snapshot
-        .providers
-        .iter()
-        .find(|provider| provider.config.enabled && provider.credential_configured)
-        .ok_or("configure a Provider on this Device before starting a Worker")?;
-    let provider_id = env::var("WWC_WORKER_MODEL_PROVIDER_ID")
-        .unwrap_or_else(|_| default_provider.config.provider_id.clone());
-    let model_id = env::var("WWC_WORKER_MODEL_ID")
-        .unwrap_or_else(|_| default_provider.config.model_ids[0].clone());
+    let provider_id = env::var("WWC_WORKER_MODEL_PROVIDER_ID").ok();
+    let model_id = env::var("WWC_WORKER_MODEL_ID").ok();
     let options = ProductionCodexOptions {
         data_directory: data_directory.join("codex-runtime"),
-        helper_executable: PathBuf::from(required("WWC_WORKER_HELPER_EXECUTABLE")?),
-        helper_release_manifest,
+        helper_executable,
         provider: provider_id,
         model: model_id,
         gateway_route: model_route,
         registered_capabilities: capabilities,
-        discovered_capabilities,
-        action_signing_key: ActionEnforcementSigningKey::from_bytes(parse_hex_key(&required(
-            "WWC_WORKER_ACTION_SIGNING_KEY_HEX",
-        )?)?)?,
+        discovered_capabilities: Vec::new(),
         execution_mode,
         observer_mode,
     };
@@ -448,19 +356,22 @@ fn production_codex(
     let judge = env::var_os("WWC_WORKER_JEV_JUDGE");
     let context = env::var_os("WWC_WORKER_JEV_CONTEXT");
     let file = env::var_os("WWC_DEVICE_JEV_SETTINGS_FILE");
-    if let Some(provider) = configured_jev_judge(&store, judge.as_deref(), file.as_deref())? {
-        config = config.with_jev_judge(provider)?;
-    }
-    if let Some(settings) = configured_jev_context(
-        &store,
-        context.as_deref(),
-        if judge.is_some() && context.is_none() {
-            None
-        } else {
-            file.as_deref()
-        },
-    )? {
-        config = config.with_jev_context(settings)?;
+    if judge.is_some() || context.is_some() || file.is_some() {
+        let store = winwincode_provider::DeviceProviderStore::open(provider_directory)?;
+        if let Some(provider) = configured_jev_judge(&store, judge.as_deref(), file.as_deref())? {
+            config = config.with_jev_judge(provider)?;
+        }
+        if let Some(settings) = configured_jev_context(
+            &store,
+            context.as_deref(),
+            if judge.is_some() && context.is_none() {
+                None
+            } else {
+                file.as_deref()
+            },
+        )? {
+            config = config.with_jev_context(settings)?;
+        }
     }
     Ok(ProductionCodexAdapter::open(config)?
         .with_device_extensions(provider_directory.to_path_buf())?)
@@ -628,18 +539,6 @@ fn required(name: &str) -> Result<String, Box<dyn std::error::Error>> {
     env::var(name).map_err(|_| format!("required environment variable {name} is missing").into())
 }
 
-fn parse_hex_key(value: &str) -> Result<[u8; 32], Box<dyn std::error::Error>> {
-    if value.len() != 64 {
-        return Err("Worker action signing key must contain 32 bytes".into());
-    }
-    let mut result = [0_u8; 32];
-    for (index, slot) in result.iter_mut().enumerate() {
-        *slot = u8::from_str_radix(&value[index * 2..index * 2 + 2], 16)
-            .map_err(|_| "Worker action signing key is not hexadecimal")?;
-    }
-    Ok(result)
-}
-
 fn now_instant() -> Result<Instant, Box<dyn std::error::Error>> {
     let duration = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?;
     let seconds = i64::try_from(duration.as_secs())?;
@@ -739,13 +638,11 @@ mod tests {
             let config = ProductionCodexConfig::try_new(ProductionCodexOptions {
                 data_directory: root.path().join("codex"),
                 helper_executable: helper.clone(),
-                helper_release_manifest: HelperReleaseManifest::from_test_helper(&helper).unwrap(),
-                provider: "local-fixture".into(),
-                model: "local-fixture".into(),
+                provider: Some("local-fixture".into()),
+                model: Some("local-fixture".into()),
                 gateway_route: default_model_route(),
                 registered_capabilities: register.capabilities.clone(),
                 discovered_capabilities: Vec::new(),
-                action_signing_key: ActionEnforcementSigningKey::from_bytes([31; 32]).unwrap(),
                 execution_mode: ExecutionMode::React,
                 observer_mode: ObserverMode::Off,
             })
@@ -802,13 +699,6 @@ mod tests {
             }
             assert_eq!(worker.lifecycle(), WorkerLifecycleState::Registering);
         }
-    }
-
-    #[test]
-    fn managed_start_gate_requires_the_registered_parent_release() {
-        assert!(super::await_managed_start_gate(std::io::Cursor::new(Vec::<u8>::new())).is_err());
-        assert!(super::await_managed_start_gate(std::io::Cursor::new(vec![0])).is_err());
-        assert!(super::await_managed_start_gate(std::io::Cursor::new(vec![1])).is_ok());
     }
 
     #[test]

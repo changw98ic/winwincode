@@ -76,7 +76,6 @@ fn seed_client_with_holder(
         "aarch64-apple-darwin",
         "aarch64",
         "1.2.3",
-        None,
         Some(instance_id(seed)),
         max_slots,
     )

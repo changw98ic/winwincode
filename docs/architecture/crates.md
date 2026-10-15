@@ -153,7 +153,7 @@
 
 职责：提供 Code Mode、沙箱和文件系统操作使用的内部辅助进程。
 
-- 主要入口：`crates/helper/src/main.rs`；构建逻辑位于 `crates/helper/build.rs`。
+- 主要入口：`crates/helper/src/main.rs`。
 - normal 依赖：无第一方 crate。它直接依赖内嵌 Codex 的 `codex-arg0` 和 `codex-code-mode-host`。
 - 反向依赖：无工作区 normal 依赖。
 - 测试：`crates/helper/tests`，1 个 Cargo test target。
@@ -196,7 +196,7 @@
 
 ## `winwincode-server`
 
-职责：提供独立 HTTP/WebSocket Server。当前生产入口装配 Control Plane、远程 Worker 与 Device Client 通道。库中保留受 `local-worker` feature 控制的同进程组合支持。
+职责：提供独立 HTTP/WebSocket Server。当前生产入口装配 Control Plane、Device Client 通道和 Device 转发的 Worker 消息。库中保留受 `local-worker` feature 控制的同进程组合支持。
 
 - 主要入口：`crates/winwincode-server/src/main.rs`、`src/server.rs::start_server_with_remote_worker` 和 `src/server.rs::router`。
 - normal 依赖：`api`、`client-port`、`codex`、`control-plane`、`delivery`、`domain`、`execution-port`、`local`、`storage`、`worker`。其中 `codex`、`local` 和 `worker` 由 `local-worker` feature 控制。
@@ -205,7 +205,7 @@
 
 ## `winwincode-device-client`
 
-职责：实现设备身份、本地仓库映射、`ClientControlPort` 交换、占用状态和 Worker 进程监管。
+职责：实现设备身份、本地仓库映射、`ClientControlPort` 交换、占用状态、Worker 进程监管和 Worker 消息转发。
 
 - 主要入口：`crates/winwincode-device-client/src/lib.rs`；守护循环位于 `src/daemon.rs`，SQLite 存储位于 `src/store.rs::DeviceStore`。
 - normal 依赖：`winwincode-api`、`winwincode-client-port`、`winwincode-network`、`winwincode-provider`。

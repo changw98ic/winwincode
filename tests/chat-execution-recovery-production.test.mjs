@@ -61,8 +61,6 @@ function coreExecution(run, deviceData) {
     turns: events.filter(event => ['task_started', 'turn_started'].includes(event.type)).map(event => event.turn_id),
     users: events.filter(event => event.type === 'user_message'
       || (event.type === 'item_completed' && event.item?.type === 'UserMessage')).length,
-    // ExecCommandBegin is transient. The Core-owned receipt records the one
-    // handler attempt even when rollout history uses paginated TurnItems.
     commands: readRetainedCoreCommandResults(deviceData, run.kernelSessionId).map(row => {
       const request = JSON.parse(row.request_json)
       return {
@@ -512,7 +510,7 @@ test('Chat replaces a crashed real Worker and embedded Core through trusted Devi
           WHERE job_id=? AND attempt=1`).get(originalJob.job_id), predecessorPending)
         assert.equal(database.prepare(`SELECT COUNT(*) AS n FROM execution_attempt_accounting_facts
           WHERE job_id=? AND attempt=1`).get(originalJob.job_id).n, 0,
-          'observing zero HTTP does not manufacture a signed predecessor accounting statement')
+          'observing zero HTTP does not manufacture a predecessor accounting statement')
         assert.equal(database.prepare(`SELECT COUNT(*) AS n FROM execution_attempt_accounting_totals
           WHERE job_id=? AND attempt=1`).get(originalJob.job_id).n, 0)
         assert.equal(settled.reservation.release_reason, 'failed')
@@ -529,7 +527,7 @@ test('Chat replaces a crashed real Worker and embedded Core through trusted Devi
           assert.equal(usage.tokens ?? null, null)
           assert.equal(usage.costMicrounits ?? null, null)
           assert.equal(usage.knownTokens, knownTokens,
-            'only measured successor usage forms a lower bound while its predecessor lacks a signed statement')
+            'only measured successor usage forms a lower bound while its predecessor lacks a statement')
         }
         assert.equal(settled.messages.filter(message => message.role === 'user').length, 1)
         assert.equal(settled.messages.filter(message => message.role === 'assistant' && message.state === 'completed').length, 1)
@@ -575,8 +573,6 @@ function installCutPoint(database, point, productSessionId) {
     database.exec(`CREATE TRIGGER pause_chat_recovery BEFORE UPDATE ON worker_session_slots
       WHEN NEW.state='completed' AND NEW.job_id IN (${selectedJob})
       BEGIN SELECT RAISE(ABORT,'injected after CP terminal commit before business ACK'); END`)
-    // Settlement precedes slot cleanup. Hold both real writes so the selected
-    // crash boundary remains stable while the Core evidence is inspected.
     database.exec(`CREATE TRIGGER pause_chat_recovery_settlement BEFORE INSERT ON execution_admission_settlement_sources
       WHEN NEW.job_id IN (${selectedJob})
       BEGIN SELECT RAISE(ABORT,'injected before Chat settlement commit'); END`)
@@ -605,8 +601,6 @@ test('Chat recovers its committed original Job before dispatch after a real Serv
       const database = new DatabaseSync(join(directory, 'server-data/control-plane.sqlite3'))
       database.exec('PRAGMA busy_timeout=5000')
       try {
-        // Fail the real claim write before the first lease can exist. The Job,
-        // command and input are committed by the public API, never inserted here.
         database.exec(`CREATE TRIGGER pause_chat_claim BEFORE INSERT ON execution_leases
           WHEN NEW.job_id IN (SELECT job_id FROM scheduler_execution_jobs WHERE product_session_id='${productSessionId}')
           BEGIN SELECT RAISE(ABORT,'injected after Chat Job commit before dispatch'); END`)
@@ -705,10 +699,6 @@ for (const [point, suffix] of [['terminal-retained', '61'], ['cp-commit-before-a
         const database = new DatabaseSync(join(directory, 'server-data', 'control-plane.sqlite3'))
         database.exec('PRAGMA busy_timeout=5000')
         try {
-          // Triggers reject the real boundary write. They never create execution
-          // state, replace Worker frames, manufacture ACKs, or change usage.
-          // The launched Worker may still be opening its admission storage.
-          // Observe its real schema before arming the selected Job's cut.
           await waitFor(() => database.prepare(
             "SELECT 1 FROM sqlite_master WHERE type='table' AND name='execution_admission_settlement_sources'").get(),
           'the real Worker lifecycle prepares the settlement schema before fault injection', 30_000)
@@ -777,10 +767,10 @@ for (const [point, suffix] of [['terminal-retained', '61'], ['cp-commit-before-a
             assert.equal(pending.revision, 1)
             assert.equal(pending.payload.acknowledgementReady, false)
             assert.equal(database.prepare('SELECT state FROM worker_session_slots WHERE job_id=?').get(job.job_id).state, 'running')
-            const denied = await probe.postRetainedMessage(cut.worker.bytes, { ca: readFileSync(join(directory, 'fixture-cert.pem')) })
-            assert.equal(denied.status, 401)
+            const denied = await probe.postRetainedMessage(cut.worker.bytes)
+            assert.equal(denied.status, 400)
             assert.equal(denied.acknowledgement, null)
-            assert.deepEqual(acceptedOutcome(database, job.job_id), pending, 'old credentials cannot consume the retained CP result')
+            assert.deepEqual(acceptedOutcome(database, job.job_id), pending, 'an exited Device route cannot consume the retained CP result')
           }
           database.exec('DROP TRIGGER pause_chat_recovery')
           database.exec('DROP TRIGGER IF EXISTS pause_chat_recovery_settlement')
@@ -1556,7 +1546,7 @@ test('Chat reopens the same durable Provider retry in a fresh Store and thread w
           if (index === 0) assert.ok(first.providerAttempts[1].usage?.totalTokens > 0)
           assert.ok(calls.filter(call => call.exchangeId !== original.open.modelExchangeId).every(call => call.providerAttempts.length === 1 && call.providerAttempts[0].state === 'completed'))
           const accounting = await waitFor(() => assertOriginalUnknownAccounting(database, terminal, calls),
-            'signed original physical manifest retains every attempt and exact unknown-accounting lower bound', 30_000)
+            'original physical manifest retains every attempt and exact unknown-accounting lower bound', 30_000)
           cases.push({ jobId: original.open.lease.jobId, modelExchangeId: original.open.modelExchangeId,
             status: terminal.terminal.outcome, originalWorkerPid: original.process.pid, originalCoreThread: finalCore.codexThreadId,
             reopenedProviderEntries: 2, firstExchangePhysicalAttempts: first.providerAttempts.length, ...accounting })

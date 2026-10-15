@@ -57,6 +57,41 @@ fn fixture() -> PathBuf {
 }
 
 #[test]
+fn extensions_use_an_existing_kernel_home_without_changing_its_permissions() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let suffix = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let root = std::env::temp_dir().join(format!(
+        "wwc-extension-existing-home-{}-{suffix}",
+        std::process::id()
+    ));
+    let home = root.join("kernel-home");
+    fs::create_dir_all(&home).unwrap();
+    fs::set_permissions(&home, fs::Permissions::from_mode(0o755)).unwrap();
+    let store = DeviceProviderStore::open(&root.join("providers")).unwrap();
+
+    assert!(store.refresh_extensions(&home).unwrap().is_empty());
+    assert!(store.restore_extensions(&home).unwrap().is_empty());
+    assert_eq!(
+        fs::metadata(&home).unwrap().permissions().mode() & 0o777,
+        0o755
+    );
+    assert_eq!(
+        fs::metadata(home.join("config.toml"))
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777,
+        0o600
+    );
+    drop(store);
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 #[allow(clippy::too_many_lines)]
 fn extension_crypto_discovery_refresh_and_failure() {
     let root = std::env::temp_dir().join(format!("wwc-extensions-{}", std::process::id()));

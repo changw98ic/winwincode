@@ -340,17 +340,20 @@ where
     Port: WorkerExecutionPort,
     Codex: CodexCoreAdapter + Send + 'static,
 {
-    pub fn with_device_providers(
-        mut self,
-        directory: &std::path::Path,
-    ) -> Result<Self, winwincode_provider::DeviceProviderError> {
-        let mut models = device_model::DeviceModels::open(directory)?;
+    #[must_use]
+    pub const fn execution_port(&self) -> &Port {
+        &self.port
+    }
+
+    #[must_use]
+    pub fn with_device_providers(mut self, directory: &std::path::Path) -> Self {
+        let mut models = device_model::DeviceModels::new(directory);
         models.note_worker_instance_id(&self.config.worker_instance_id.0);
         if let Some(path) = std::env::var_os("WWC_MODEL_INTAKE_LOG") {
             models.set_intake_log(Some(std::path::PathBuf::from(path)));
         }
         self.device_models = Some(models);
-        Ok(self)
+        self
     }
 
     #[must_use]

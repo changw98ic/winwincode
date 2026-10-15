@@ -569,40 +569,11 @@ export function createReleaseArtifactSecurityReport({
         interpreter: identity.interpreter,
       })
     })
-    const helperDescriptor = manifest.artifacts.helperReleaseManifest
-    const helperPath = resolve(artifactRoot, helperDescriptor.path)
-    const helperBytes = readFileSync(helperPath)
-    if ((statSync(helperPath).mode & 0o777) !== 0o644) {
-      findings.push({
-        target: target.target,
-        path: helperDescriptor.path,
-        rule: 'helper-release.executable-mode',
-      })
-    }
-    findings.push(...scanReleaseArtifactContent({
-      bytes: helperBytes,
-      target: target.target,
-      path: helperDescriptor.path,
-      sensitiveInputs: inputs,
-    }))
-    const helperRelease = readCanonicalJson(helperPath)
     return Object.freeze({
       target: target.target,
       client: Object.freeze(client),
       rust: Object.freeze(rust),
       localComposition: manifest.artifacts.localComposition,
-      helperReleaseManifest: Object.freeze({
-        path: helperDescriptor.path,
-        bytes: helperDescriptor.bytes,
-        sha256: helperDescriptor.sha256,
-        publicKeyHex: helperDescriptor.publicKeyHex,
-        protocol: helperRelease.protocol,
-        packageVersion: helperRelease.packageVersion,
-        binaryPath: helperRelease.binaryPath,
-        binaryMode: helperRelease.binaryMode,
-        signatureVerified: true,
-        compiledKeyBound: true,
-      }),
     })
   })
   const uniqueFindings = sortedFindings(findings)

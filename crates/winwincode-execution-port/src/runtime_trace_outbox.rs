@@ -226,15 +226,6 @@ impl TraceGateOutcome {
     }
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct IgnoredLegacyField;
-
-impl<'de> Deserialize<'de> for IgnoredLegacyField {
-    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        serde::de::IgnoredAny::deserialize(deserializer).map(|_| Self)
-    }
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum RuntimeTraceFact {
@@ -252,10 +243,6 @@ pub enum RuntimeTraceFact {
         source: ActionSource,
         operation: ActionOperation,
         decision: TraceGateOutcome,
-        #[serde(default, skip_serializing, rename = "envelope_version")]
-        legacy_envelope_version: IgnoredLegacyField,
-        #[serde(default, skip_serializing, rename = "envelope_digest")]
-        legacy_envelope_digest: IgnoredLegacyField,
     },
     Tool {
         source: ActionSource,
@@ -351,8 +338,6 @@ impl RuntimeTraceDraft {
                 source: input.observed.source,
                 operation: input.observed.operation,
                 decision: outcome,
-                legacy_envelope_version: IgnoredLegacyField,
-                legacy_envelope_digest: IgnoredLegacyField,
             },
             artifacts: Vec::new(),
         })

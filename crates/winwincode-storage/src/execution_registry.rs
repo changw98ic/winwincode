@@ -2017,14 +2017,6 @@ fn validate_authenticated_placement(
     )?;
     validate_worker_scope(&placement.management_scope)?;
     validate_authentication_identity(&placement.authentication_identity)?;
-    if !matches!(
-        placement.authentication_identity,
-        WorkerAuthenticationIdentity::TransportPrincipal { .. }
-    ) {
-        return Err(StorageError::invalid_input(
-            "authenticated Worker placement requires a transport principal",
-        ));
-    }
     validate_instant(&placement.placed_at, "placedAt")
 }
 
@@ -2349,15 +2341,6 @@ fn validate_authentication_identity(
             control_plane_principal,
             "authentication.controlPlanePrincipal",
         ),
-        WorkerAuthenticationIdentity::TransportPrincipal {
-            issuer,
-            subject,
-            credential_fingerprint,
-        } => {
-            validate_bounded_ascii(issuer, "authentication.issuer")?;
-            validate_bounded_ascii(subject, "authentication.subject")?;
-            validate_digest(credential_fingerprint)
-        }
     }
 }
 

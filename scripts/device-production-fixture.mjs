@@ -1244,7 +1244,6 @@ export async function establishDeviceOnlyExecutionPath({
   deviceData = join(directory, 'device-data'),
   certificatePath = join(directory, 'fixture-cert.pem'),
   privateKeyPath = join(directory, 'fixture-key.pem'),
-  helperReleaseManifest,
   helperExecutable,
   modelRouteSource,
   timeoutMillis = 60_000,
@@ -1259,33 +1258,23 @@ export async function establishDeviceOnlyExecutionPath({
   assert.equal(typeof api?.request, 'function')
   const steps = []
   const report = { steps, complete: false }
-  const tlsRoot = writeDeviceTrustRoot({
-    certificatePath,
-    destination: join(directory, 'device-provider-trust-root.der'),
-  })
+  const tlsRoot = seedDeviceProvider && deviceProvider !== null && !deviceProvider.endpoint
+    ? writeDeviceTrustRoot({
+      certificatePath,
+      destination: join(directory, 'device-provider-trust-root.der'),
+    }) : undefined
   const deviceEnvironment = {
     ...runtimeChildEnvironment(),
     ...deviceAgentEnvironment(agentEnvironment),
-    WWC_DEVICE_TLS_ROOT_DER_FILE: tlsRoot,
     WWC_DEVICE_PROVIDER_TLS_ROOT_DER_FILE: deviceProvider?.endpoint
       ? process.env.WWC_DEVICE_PROVIDER_TLS_ROOT_DER_FILE
       : tlsRoot,
-    WWC_WORKER_TLS_ROOT_DER_FILE: tlsRoot,
-    ...(helperReleaseManifest === undefined ? {} : {
-      WWC_WORKER_HELPER_RELEASE_MANIFEST: helperReleaseManifest,
-    }),
     ...(helperExecutable === undefined ? {} : {
       WWC_WORKER_HELPER_EXECUTABLE: helperExecutable,
     }),
-    WWC_WORKER_ACTION_SIGNING_KEY_HEX: '1f'.repeat(32),
     WWC_DEBUG_REMOTE_WORKER: '1',
     GIT_CONFIG_NOSYSTEM: '1',
-    ...(process.env.WINWINCODE_HELPER_RELEASE_PUBLIC_KEY_HEX === undefined
-      ? {}
-      : {
-        WINWINCODE_HELPER_RELEASE_PUBLIC_KEY_HEX:
-          process.env.WINWINCODE_HELPER_RELEASE_PUBLIC_KEY_HEX,
-      }),
+
   }
   if (modelRouteSource !== undefined && modelRouteSource !== null) {
     deviceEnvironment.WWC_WORKER_MODEL_PROVIDER_ID = modelRouteSource.providerId

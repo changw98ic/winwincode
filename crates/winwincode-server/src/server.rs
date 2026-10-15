@@ -22,7 +22,6 @@ use axum::http::{HeaderMap, HeaderValue, Request, StatusCode, Uri};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{any, get, post};
 use axum_server::Handle;
-use axum_server::tls_rustls::RustlsConfig;
 use futures::StreamExt;
 use serde_json::{Value, json};
 use winwincode_api::generated::{
@@ -58,7 +57,7 @@ use crate::client_sessions::ClientSessionsApplication;
 use crate::client_sessions::ClientSessionsConfig;
 use crate::client_sessions::ClientSessionsError;
 use crate::client_sessions::ClientSessionsErrorKind;
-use crate::config::{ServerConfig, ServerTls};
+use crate::config::ServerConfig;
 use crate::preview::{PreviewApplication, PreviewError, PreviewErrorKind};
 use crate::remote_worker_transport::RemoteWorkerExchangePort;
 use crate::transport::{
@@ -217,24 +216,6 @@ pub async fn start_server_with_remote_worker(
     remote_worker: Option<Arc<dyn RemoteWorkerExchangePort>>,
     client_exchange: Option<Arc<dyn ClientExchangePort>>,
 ) -> Result<RunningServer, ServerError> {
-    if remote_worker.is_some() && matches!(config.tls(), ServerTls::Disabled) {
-        return Err(ServerError::new(
-            "remote Worker exchange requires the Server TLS listener",
-        ));
-    }
-    if config.preview_public_url().is_some() && client_exchange.is_none() {
-        return Err(ServerError::new(
-            "preview origin requires the authenticated Device Client exchange",
-        ));
-    }
-    if config.preview_public_url().is_some()
-        && matches!(config.tls(), ServerTls::Disabled)
-        && !config.bind_address().ip().is_loopback()
-    {
-        return Err(ServerError::new(
-            "remote preview requires TLS unless the listener is loopback-only",
-        ));
-    }
     let config = Arc::new(config);
     let client_connections = match &client_exchange {
         Some(_) => {
@@ -328,7 +309,7 @@ pub async fn start_server_with_remote_worker(
     };
     let router = router(state);
     let handle = Handle::new();
-    let task = spawn_listener(&config, router, handle.clone()).await?;
+    let task = spawn_listener(&config, router, handle.clone());
     let local_address =
         match tokio::time::timeout(Duration::from_secs(10), handle.listening()).await {
             Ok(Some(address)) => address,
@@ -384,39 +365,20 @@ fn start_outcome_recovery(
     (stop, task)
 }
 
-async fn spawn_listener(
+fn spawn_listener(
     config: &ServerConfig,
     router: Router,
     handle: Handle<SocketAddr>,
-) -> Result<tokio::task::JoinHandle<Result<(), ServerError>>, ServerError> {
+) -> tokio::task::JoinHandle<Result<(), ServerError>> {
     let address = config.bind_address();
     let make_service = router.into_make_service_with_connect_info::<SocketAddr>();
-    let task = match config.tls() {
-        ServerTls::Disabled => tokio::spawn(async move {
-            axum_server::bind(address)
-                .handle(handle)
-                .serve(make_service)
-                .await
-                .map_err(|_| ServerError::new("public HTTP listener failed"))
-        }),
-        ServerTls::Pem {
-            certificate_path,
-            private_key_path,
-        } => {
-            let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
-            let tls = RustlsConfig::from_pem_file(certificate_path, private_key_path)
-                .await
-                .map_err(|_| ServerError::new("TLS certificate or private key could not load"))?;
-            tokio::spawn(async move {
-                axum_server::bind_rustls(address, tls)
-                    .handle(handle)
-                    .serve(make_service)
-                    .await
-                    .map_err(|_| ServerError::new("public HTTPS listener failed"))
-            })
-        }
-    };
-    Ok(task)
+    tokio::spawn(async move {
+        axum_server::bind(address)
+            .handle(handle)
+            .serve(make_service)
+            .await
+            .map_err(|_| ServerError::new("HTTP listener failed"))
+    })
 }
 
 #[allow(clippy::too_many_lines)]
@@ -442,12 +404,8 @@ fn router(state: ServerState) -> Router {
             post(change_owner_password).options(preflight),
         )
         .route(
-            "/internal/v1/execution-port/exchange",
-            post(remote_worker_exchange),
-        )
-        .route(
-            "/internal/v1/execution-port/accounting",
-            get(remote_worker_accounting).post(remote_worker_accounting),
+            "/internal/v1/client/worker-exchange",
+            post(client_worker_exchange),
         )
         .route(
             "/internal/v1/client/exchange",
@@ -558,29 +516,12 @@ async fn preview_tunnel(
     uri: Uri,
     upgrade: WebSocketUpgrade,
 ) -> Response {
-    let (Some(preview), Some(exchange)) = (&state.preview, &state.client_exchange) else {
+    let (Some(preview), Some(_)) = (&state.preview, &state.client_exchange) else {
         return StatusCode::NOT_FOUND.into_response();
     };
     if preview.matches_origin(&headers) || uri.query().is_some() {
         return StatusCode::NOT_FOUND.into_response();
     }
-    if headers.get_all(AUTHORIZATION).iter().count() != 1
-        || headers
-            .get_all("x-winwincode-client-node-id")
-            .iter()
-            .count()
-            != 1
-    {
-        return StatusCode::UNAUTHORIZED.into_response();
-    }
-    let Some(credential) = headers
-        .get(AUTHORIZATION)
-        .and_then(|value| value.to_str().ok())
-        .and_then(|value| value.strip_prefix("Bearer "))
-        .filter(|value| !value.is_empty())
-    else {
-        return StatusCode::UNAUTHORIZED.into_response();
-    };
     let Some(client_node_id) = headers
         .get("x-winwincode-client-node-id")
         .and_then(|value| value.to_str().ok())
@@ -589,12 +530,6 @@ async fn preview_tunnel(
     else {
         return StatusCode::UNAUTHORIZED.into_response();
     };
-    if exchange
-        .authenticate_device(credential.as_bytes(), &client_node_id)
-        .is_err()
-    {
-        return StatusCode::UNAUTHORIZED.into_response();
-    }
     let preview = Arc::clone(preview);
     upgrade
         .on_upgrade(move |socket| async move {
@@ -759,108 +694,61 @@ fn preview_error_response(error: &PreviewError, origin: Option<&HeaderValue>) ->
     connect_error_response(status, code, error.message(), origin)
 }
 
-async fn remote_worker_exchange(
-    State(state): State<ServerState>,
-    headers: HeaderMap,
-    body: Bytes,
-) -> Response {
+async fn client_worker_exchange(State(state): State<ServerState>, body: Bytes) -> Response {
+    use winwincode_client_port::worker_relay::{
+        DeviceWorkerRelayRequest, WorkerRelayRequest, WorkerRelayResponse,
+    };
     let Some(exchange) = &state.remote_worker else {
         return StatusCode::NOT_FOUND.into_response();
     };
-    let Some(credential) = headers
-        .get(AUTHORIZATION)
-        .and_then(|value| value.to_str().ok())
-        .and_then(|value| value.strip_prefix("Bearer "))
-        .filter(|value| !value.is_empty())
-    else {
-        return StatusCode::UNAUTHORIZED.into_response();
+    let Ok(request) = serde_json::from_slice::<DeviceWorkerRelayRequest>(&body) else {
+        return StatusCode::BAD_REQUEST.into_response();
     };
-    let now = SystemStandaloneApplicationClock.now_instant();
     let exchange = Arc::clone(exchange);
-    let credential = credential.as_bytes().to_vec();
-    let result =
-        tokio::task::spawn_blocking(move || exchange.exchange(credential, &body, now)).await;
-    match result {
-        Ok(Ok(response)) => (
-            StatusCode::OK,
-            [(CONTENT_TYPE, "application/json")],
-            response,
-        )
-            .into_response(),
-        Ok(Err(error)) => {
-            if std::env::var_os("WWC_DEBUG_RUNTIME").is_some() {
-                eprintln!("remote Worker exchange error: {error}");
-            }
-            StatusCode::from_u16(error.status_code())
-                .unwrap_or(StatusCode::SERVICE_UNAVAILABLE)
-                .into_response()
+    let result = tokio::task::spawn_blocking(move || {
+        let now = SystemStandaloneApplicationClock.now_instant();
+        match request.request {
+            WorkerRelayRequest::Exchange { body } => exchange.exchange(
+                &request.client_node_id,
+                &request.worker_id,
+                &request.worker_instance_id,
+                body.as_bytes(),
+                now,
+            ),
+            WorkerRelayRequest::Accounting { body, offset } => exchange.accounting(
+                &request.client_node_id,
+                &request.worker_id,
+                &request.worker_instance_id,
+                body.as_deref().map(str::as_bytes),
+                offset,
+                now,
+            ),
         }
-        Err(_) => StatusCode::SERVICE_UNAVAILABLE.into_response(),
-    }
+    })
+    .await;
+    let response = match result {
+        Ok(Ok(body)) => match String::from_utf8(body) {
+            Ok(body) => WorkerRelayResponse { status: 200, body },
+            Err(_) => return StatusCode::SERVICE_UNAVAILABLE.into_response(),
+        },
+        Ok(Err(error)) => WorkerRelayResponse {
+            status: error.status_code(),
+            body: error.to_string(),
+        },
+        Err(_) => WorkerRelayResponse {
+            status: 503,
+            body: "Worker relay is unavailable".to_owned(),
+        },
+    };
+    Json(response).into_response()
 }
 
-async fn remote_worker_accounting(
-    State(state): State<ServerState>,
-    method: http::Method,
-    headers: HeaderMap,
-    body: Bytes,
-) -> Response {
-    let Some(exchange) = &state.remote_worker else {
-        return StatusCode::NOT_FOUND.into_response();
-    };
-    if headers.get_all(AUTHORIZATION).iter().count() != 1 {
-        return StatusCode::UNAUTHORIZED.into_response();
-    }
-    let Some(token) = headers
-        .get(AUTHORIZATION)
-        .and_then(|value| value.to_str().ok())
-        .and_then(|value| value.strip_prefix("Bearer "))
-    else {
-        return StatusCode::UNAUTHORIZED.into_response();
-    };
-    let statement = (method == http::Method::POST).then_some(body.as_ref());
-    let offset = match headers.get("X-Accounting-Offset").map(|value| {
-        value
-            .to_str()
-            .ok()
-            .and_then(|value| value.parse::<u64>().ok())
-    }) {
-        Some(Some(offset)) => offset,
-        None => 0,
-        _ => return StatusCode::BAD_REQUEST.into_response(),
-    };
-    match exchange.accounting(
-        token,
-        statement,
-        offset,
-        SystemStandaloneApplicationClock.now_instant(),
-    ) {
-        Ok(bytes) => (StatusCode::OK, [(CONTENT_TYPE, "application/json")], bytes).into_response(),
-        Err(error) => StatusCode::from_u16(error.status_code())
-            .unwrap_or(StatusCode::SERVICE_UNAVAILABLE)
-            .into_response(),
-    }
-}
-
-async fn client_control_exchange(
-    State(state): State<ServerState>,
-    headers: HeaderMap,
-    body: Bytes,
-) -> Response {
+async fn client_control_exchange(State(state): State<ServerState>, body: Bytes) -> Response {
     let Some(exchange) = &state.client_exchange else {
         return StatusCode::NOT_FOUND.into_response();
     };
-    if headers.get_all(AUTHORIZATION).iter().count() > 1 {
-        return StatusCode::UNAUTHORIZED.into_response();
-    }
-    let credential = headers
-        .get(AUTHORIZATION)
-        .and_then(|value| value.to_str().ok())
-        .and_then(|value| value.strip_prefix("Bearer "))
-        .filter(|value| !value.is_empty())
-        .map(str::as_bytes);
     let now = SystemStandaloneApplicationClock.now_instant();
-    match exchange.exchange(credential.map(<[u8]>::to_vec), &body, now) {
+    match exchange.exchange(&body, now) {
         Ok(response) => (
             StatusCode::OK,
             [(CONTENT_TYPE, "application/json")],
@@ -2025,7 +1913,7 @@ async fn create_auth_session(
         Ok(issued) => issued,
         Err(error) => return auth_session_error(error, Some(origin)).into_response(),
     };
-    let cookie_secure = matches!(state.config.tls(), ServerTls::Pem { .. });
+    let cookie_secure = state.config.public_url().starts_with("https://");
     let Ok(cookie_text) = issued.set_cookie_header(cookie_secure) else {
         return auth_session_error(AuthSessionError::response_encoding(), Some(origin))
             .into_response();
@@ -2075,7 +1963,7 @@ async fn close_auth_session(State(state): State<ServerState>, request: Request<B
     if let Err(error) = state.auth_sessions.revoke(&credentials) {
         return auth_session_error(error, Some(origin)).into_response();
     }
-    let cookie_secure = matches!(state.config.tls(), ServerTls::Pem { .. });
+    let cookie_secure = state.config.public_url().starts_with("https://");
     let mut response = StatusCode::NO_CONTENT.into_response();
     apply_cors(response.headers_mut(), &origin);
     response.headers_mut().insert(

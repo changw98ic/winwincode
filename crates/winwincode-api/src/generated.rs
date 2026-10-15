@@ -1925,8 +1925,6 @@ pub struct ClientNode {
     pub created_at: winwincode_domain::Instant,
     #[serde(rename = "currentInstanceId")]
     pub current_instance_id: winwincode_domain::ClientInstanceId,
-    #[serde(rename = "deviceCredentialDigest")]
-    pub device_credential_digest: winwincode_domain::Sha256Digest,
     #[serde(rename = "displayName")]
     pub display_name: winwincode_domain::ClientDisplayName,
     #[serde(rename = "lastHeartbeatAt")]
@@ -10049,8 +10047,6 @@ pub struct WorkerLaunchGrant {
     pub client_instance_id: winwincode_domain::ClientInstanceId,
     #[serde(rename = "clientNodeId")]
     pub client_node_id: winwincode_domain::ClientNodeId,
-    #[serde(rename = "credentialDigest")]
-    pub credential_digest: winwincode_domain::Sha256Digest,
     #[serde(rename = "expiresAt")]
     pub expires_at: winwincode_domain::Instant,
     #[serde(rename = "occupancyFencingToken")]

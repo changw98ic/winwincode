@@ -677,7 +677,6 @@ export interface ClientNode {
   readonly platform: ClientPlatformTarget
   readonly architecture: ClientArchitecture
   readonly clientVersion: ClientVersion
-  readonly deviceCredentialDigest: Sha256Digest
   readonly currentInstanceId: ClientInstanceId
   readonly presenceState: ClientNodePresenceState
   readonly acceptingConnections: boolean
@@ -785,7 +784,6 @@ export interface WorkerLaunchGrant {
   readonly workerSessionId: WorkerSessionId
   readonly workerId: WorkerId
   readonly workerInstanceId: WorkerInstanceId
-  readonly credentialDigest: Sha256Digest
   readonly expiresAt: Instant
   readonly state: WorkerLaunchGrantState
   readonly revision: Revision
@@ -938,7 +936,6 @@ export function parseClientNode(value: unknown, path = 'clientNode'): ClientNode
     'platform',
     'architecture',
     'clientVersion',
-    'deviceCredentialDigest',
     'currentInstanceId',
     'presenceState',
     'acceptingConnections',
@@ -956,10 +953,6 @@ export function parseClientNode(value: unknown, path = 'clientNode'): ClientNode
     platform: enumValue(input.platform, CLIENT_PLATFORM_TARGETS, `${path}.platform`),
     architecture: enumValue(input.architecture, CLIENT_ARCHITECTURES, `${path}.architecture`),
     clientVersion: clientVersion(input.clientVersion, `${path}.clientVersion`),
-    deviceCredentialDigest: SHA256_DIGEST(
-      input.deviceCredentialDigest,
-      `${path}.deviceCredentialDigest`,
-    ),
     currentInstanceId: CLIENT_INSTANCE_ID(
       input.currentInstanceId,
       `${path}.currentInstanceId`,
@@ -1226,7 +1219,6 @@ export function parseWorkerLaunchGrant(value: unknown, path = 'workerLaunchGrant
     'workerSessionId',
     'workerId',
     'workerInstanceId',
-    'credentialDigest',
     'expiresAt',
     'state',
     'revision',
@@ -1258,7 +1250,6 @@ export function parseWorkerLaunchGrant(value: unknown, path = 'workerLaunchGrant
     workerSessionId: WORKER_SESSION_ID(input.workerSessionId, `${path}.workerSessionId`),
     workerId: WORKER_ID(input.workerId, `${path}.workerId`),
     workerInstanceId: WORKER_INSTANCE_ID(input.workerInstanceId, `${path}.workerInstanceId`),
-    credentialDigest: SHA256_DIGEST(input.credentialDigest, `${path}.credentialDigest`),
     expiresAt: instant(input.expiresAt, `${path}.expiresAt`),
     state: enumValue(input.state, WORKER_LAUNCH_GRANT_STATES, `${path}.state`),
     revision: revision(input.revision, `${path}.revision`),

@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import childProcess, { spawn } from 'node:child_process'
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { syncBuiltinESMExports } from 'node:module'
@@ -9,7 +9,10 @@ import test from 'node:test'
 import {
   BoundedEventBuffer,
   DevTools,
+  closeServer,
   freePort,
+  listen,
+  staticClientServer,
 } from './fixtures/real-browser-harness.mjs'
 import { boundedRemoteObjectText } from './fixtures/bounded-browser-diagnostics.mjs'
 
@@ -30,6 +33,28 @@ class FakeSocket extends EventTarget {
     this.dispatchEvent(new Event('close'))
   }
 }
+
+test('static Client serves its fixture and configuration over loopback HTTP', async t => {
+  const directory = mkdtempSync(join(tmpdir(), 'winwincode-browser-http-'))
+  t.after(() => rmSync(directory, { recursive: true, force: true }))
+  const publicRoot = join(directory, 'apps/client/dist/public')
+  mkdirSync(publicRoot, { recursive: true })
+  writeFileSync(join(publicRoot, 'index.html'), '<script src="./runtime-config.js"></script><script type="module" src="./assets/client.js"></script>')
+  const configuration = { serverUrl: 'http://127.0.0.1:8443' }
+  const server = staticClientServer({
+    root: directory,
+    fixturePath: 'tests/fixtures/browser-http.mjs',
+    configuration: () => configuration,
+  })
+  t.after(() => closeServer(server))
+  const origin = `http://127.0.0.1:${await listen(server)}`
+  const entry = await fetch(origin)
+  assert.equal(entry.status, 200)
+  assert.match(await entry.text(), /src="\/fixture\/browser-http\.mjs"/u)
+  const response = await fetch(`${origin}/fixture/server-url.json`)
+  assert.equal(response.status, 200)
+  assert.deepEqual(await response.json(), configuration)
+})
 
 test('failed browser startup releases the owned child before returning', async t => {
   const directory = mkdtempSync(join(tmpdir(), 'winwincode-browser-startup-failure-'))

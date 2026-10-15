@@ -125,7 +125,6 @@ export type ActionEnforcementReceiptMessage = {
   readonly "policyKind": ActionPolicyKind
   readonly "policyMode": ActionPolicyMode | null
   readonly "policyVersion": ActionPolicyVersionReference | null
-  readonly "receiptSignature": Sha256Digest
   readonly "requestId": RequestId
   readonly "resource": string
   readonly "schemaVersion": SchemaVersion
@@ -1331,7 +1330,6 @@ export type ClientNode = {
   readonly "clientVersion": ClientVersion
   readonly "createdAt": Instant
   readonly "currentInstanceId": ClientInstanceId
-  readonly "deviceCredentialDigest": Sha256Digest
   readonly "displayName": ClientDisplayName
   readonly "lastHeartbeatAt": Instant
   readonly "lockState": ClientLockState
@@ -7387,7 +7385,6 @@ export enum WorkerLaunchAckStatus {
 export type WorkerLaunchGrant = {
   readonly "clientInstanceId": ClientInstanceId
   readonly "clientNodeId": ClientNodeId
-  readonly "credentialDigest": Sha256Digest
   readonly "expiresAt": Instant
   readonly "occupancyFencingToken": OccupancyFencingToken
   readonly "occupancyLeaseId": ClientOccupancyLeaseId

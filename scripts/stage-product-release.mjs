@@ -4,7 +4,7 @@
 import assert from 'node:assert/strict'
 import { execFileSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
-import { chmodSync, copyFileSync, cpSync, existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs'
+import { copyFileSync, cpSync, existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs'
 import { resolve } from 'node:path'
 
 import { deviceClientSbom } from './build-device-client-release.mjs'
@@ -36,9 +36,6 @@ for (const binary of binaries) {
   assert.equal(statSync(source).mode & 0o777, 0o755, `${binary} must have mode 0755`)
   copyFileSync(source, resolve(artifactRoot, 'bin', binary))
 }
-const helperManifest = 'winwincode-kernel-helper.release.json'
-copyFileSync(resolve(binaryRoot, helperManifest), resolve(artifactRoot, 'bin', helperManifest))
-chmodSync(resolve(artifactRoot, 'bin', helperManifest), 0o644)
 const seal = verifyApiProductionSourceSeal({
   root,
   serverBinary: resolve(binaryRoot, 'winwincode-server'),
@@ -57,7 +54,7 @@ assert.equal(apiReport.deterministic?.contentEqual, true)
 assert.equal(apiReport.restart?.messageBytesStable, true)
 assert.equal(apiReport.restart?.deliveryBytesStable, true)
 assert.deepEqual(apiReport.artifacts?.sourceSeal, Object.fromEntries([
-  'gitHead', 'helperBinarySha256', 'helperReleaseManifestSha256',
+  'gitHead', 'helperBinarySha256', 'cliBinarySha256', 'workerBinarySha256',
   'serverBinarySha256', 'sourceSha256', 'trackedDiffSha256',
 ].map(key => [key, seal.seal[key]])), 'API report source seal must match the verified release source and executables')
 cpSync(resolve(root, 'apps/client/dist/public'), resolve(artifactRoot, 'client'), { recursive: true })
@@ -117,7 +114,6 @@ const manifest = {
   apiVerificationRunId: process.env.GITHUB_RUN_ID ?? null,
   source,
   target: identity,
-  helperReleasePublicKeyHex: seal.seal.helperReleasePublicKeyHex,
   reviewedCredentialFindings,
   checks: ['cargo-locked-release-build', 'api-production-vertical', 'native-executable-identity', 'credential-content-scan', 'sha256-file-inventory'],
   files,

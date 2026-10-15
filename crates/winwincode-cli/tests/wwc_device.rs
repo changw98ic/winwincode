@@ -17,7 +17,6 @@ static SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 const ASSIGNED_NODE: &str = "cnd_B1B1B1B1B1B1B1B1B1B1B1B1B1";
 const ASSIGNED_PUBLIC_CLIENT_ID: &str = "9876543210";
-const ISSUED_SECRET: [u8; 32] = [0xbe; 32];
 const STAMP: &str = "2026-09-04T00:00:00.000Z";
 
 struct Fixture {
@@ -61,19 +60,12 @@ impl Fixture {
             .identity()
             .device_id()
             .to_owned();
-        let mut secret_hex = String::with_capacity(ISSUED_SECRET.len() * 2);
-        for byte in ISSUED_SECRET {
-            use std::fmt::Write as _;
-            let _ = write!(secret_hex, "{byte:02x}");
-        }
         adopt_enrollment(
             &mut store,
             &device_id,
             &IssuedEnrollment {
                 client_node_id: ASSIGNED_NODE.to_owned(),
                 public_client_id: ASSIGNED_PUBLIC_CLIENT_ID.to_owned(),
-                credential_material: secret_hex,
-                credential_digest: format!("sha256:{:x}", Sha256::digest(ISSUED_SECRET)),
             },
             STAMP,
         )
@@ -283,12 +275,6 @@ fn unknown_device_actions_are_usage_errors() {
     let exit = fixture.cli(&["bogus"]);
     assert_eq!(exit.code, 2);
     assert!(exit.stderr.contains("未知 device 命令"), "{}", exit.stderr);
-
-    let mut full = vec!["device".to_owned(), "status".to_owned()];
-    let exit = run_cli(&full, &SystemLocalLauncher::new(std::env::temp_dir()));
-    full.clear();
-    assert_eq!(exit.code, 2);
-    assert!(exit.stderr.contains("--data-dir"), "{}", exit.stderr);
 }
 
 #[test]

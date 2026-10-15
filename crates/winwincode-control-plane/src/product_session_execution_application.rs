@@ -11,7 +11,6 @@ use winwincode_domain::{
     ControlPlaneEventId, ExecutionJobId, ExecutionMessageId, Instant, ModelExchangeId,
     ProductSessionId, RequestId, Sha256Digest, SystemActorId,
 };
-use winwincode_execution_port::action_enforcement::ActionEnforcementIssuer;
 use winwincode_execution_port::generated::{
     ApprovalRequestMessage, ExecutionJob, ExecutionOutcomeStatus, ExecutionPortMessage,
     ExecutionScope, InputRequestMessage, JobOutcomeMessage, LeaseWriteStatus, ModelAckMessage,
@@ -77,27 +76,12 @@ impl std::error::Error for ProductSessionExecutionApplicationError {}
 
 pub struct ProductSessionExecutionApplication<Downstream> {
     downstream: Downstream,
-    action_issuer: Option<ActionEnforcementIssuer>,
 }
 
 impl<Downstream> ProductSessionExecutionApplication<Downstream> {
     #[must_use]
     pub const fn new(downstream: Downstream) -> Self {
-        Self {
-            downstream,
-            action_issuer: None,
-        }
-    }
-
-    #[must_use]
-    pub const fn new_with_action_issuer(
-        downstream: Downstream,
-        action_issuer: ActionEnforcementIssuer,
-    ) -> Self {
-        Self {
-            downstream,
-            action_issuer: Some(action_issuer),
-        }
+        Self { downstream }
     }
 
     #[must_use]
@@ -661,21 +645,15 @@ where
                 message,
             } => accept_terminal(&mut context, job, dispatch, message),
             DurableExecutionPortSupplement::JobScopedWorkerMessage { dispatch, message } => {
-                if let ExecutionPortMessage::ActionEnforcementRequestMessage(request) = message
-                    && let Some(issuer) = self.action_issuer.as_ref()
-                {
+                if let ExecutionPortMessage::ActionEnforcementRequestMessage(request) = message {
                     let server_time = context.server_time().clone();
-                    let receipt = issue_action_enforcement_receipt(
-                        context.storage(),
-                        issuer,
-                        &server_time,
-                        request,
-                    )
-                    .map_err(|error| {
-                        DurableExecutionPortError::Service(ExecutionPortServiceError::ActionPolicy(
-                            error,
-                        ))
-                    })?;
+                    let receipt =
+                        issue_action_enforcement_receipt(context.storage(), &server_time, request)
+                            .map_err(|error| {
+                                DurableExecutionPortError::Service(
+                                    ExecutionPortServiceError::ActionPolicy(error),
+                                )
+                            })?;
                     return Ok(vec![ExecutionPortMessage::ActionEnforcementReceiptMessage(
                         receipt,
                     )]);

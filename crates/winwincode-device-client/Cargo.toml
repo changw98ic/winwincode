@@ -18,21 +18,18 @@ futures.workspace = true
 getrandom.workspace = true
 http.workspace = true
 rusqlite.workspace = true
-rustls.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
 time = { workspace = true, features = ["parsing"] }
 winwincode-client-port = { path = "../winwincode-client-port" }
-tokio = { workspace = true, features = ["io-util", "macros", "net"] }
-tokio-tungstenite = { git = "https://github.com/openai-oss-forks/tokio-tungstenite", rev = "0e5b2d73aa18dd9f0a50ee9ff199d5aef7594186", features = ["rustls-tls-native-roots"] }
-ureq = { version = "=3.1.4", default-features = false, features = ["rustls"] }
+tokio = { workspace = true, features = ["io-util", "macros", "net", "signal"] }
+tokio-tungstenite = { git = "https://github.com/openai-oss-forks/tokio-tungstenite", rev = "0e5b2d73aa18dd9f0a50ee9ff199d5aef7594186" }
+ureq = { version = "=3.1.4", default-features = false }
 
 [lints]
 workspace = true
 
 [dev-dependencies]
 rusqlite = { workspace = true, features = ["trace"] }
-rcgen.workspace = true
-tokio-rustls.workspace = true
 winwincode-worker = { path = "../winwincode-worker" }

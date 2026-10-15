@@ -44,39 +44,17 @@ static NEXT_ROOT: AtomicU64 = AtomicU64::new(1);
     clippy::too_many_lines,
     reason = "one fixture crosses production authentication, durable import, and replay"
 )]
-fn production_accounting_consumes_signed_receipts_after_execution_authority_expires() {
-    use winwincode_control_plane::{
-        RemoteWorkerAuthenticationError, RemoteWorkerAuthenticator, RemoteWorkerCredential,
-        RemoteWorkerPrincipal,
-    };
+fn production_accounting_routes_device_receipts_and_rejects_conflicting_replay() {
     use winwincode_execution_port::{
         accounting::{
             AttemptAccountingStatement, PendingAccountingPage, ProviderAccountingReceipt,
         },
-        action_enforcement::ActionEnforcementSigningKey,
         generated::{ExecutionLeaseStamp, ExecutionPortMessage},
         transport::ExecutionPortCore,
     };
     use winwincode_server::{
         ProductionRemoteWorkerExchange, RemoteWorkerExchangePort, RepositoryRuntimeScheduler,
     };
-    struct Expired;
-    impl RemoteWorkerAuthenticator for Expired {
-        fn authenticate(
-            &self,
-            _: &RemoteWorkerCredential,
-            _: &Instant,
-        ) -> Result<RemoteWorkerPrincipal, RemoteWorkerAuthenticationError> {
-            Err(RemoteWorkerAuthenticationError::revoked())
-        }
-        fn ensure_active(
-            &self,
-            _: &RemoteWorkerPrincipal,
-            _: &Instant,
-        ) -> Result<(), RemoteWorkerAuthenticationError> {
-            Err(RemoteWorkerAuthenticationError::revoked())
-        }
-    }
     struct NoExecution;
     impl ExecutionPortCore for NoExecution {
         type Output = Vec<ExecutionPortMessage>;
@@ -97,18 +75,36 @@ fn production_accounting_consumes_signed_receipts_after_execution_authority_expi
         std::time::Duration::from_secs(30),
     )
     .unwrap();
-    let key = ActionEnforcementSigningKey::from_bytes([9; 32]).unwrap();
-    let exchange =
-        ProductionRemoteWorkerExchange::new(&root, Arc::new(Expired), scheduler, NoExecution)
-            .with_accounting_key(key.clone());
     let mut storage = SqliteStorage::open(&root).unwrap();
+    let user = id("usr", 1);
+    let node = stage_node(&mut storage, 5_000);
+    stage_client_grant(&mut storage, 5_001, &node, &user);
+    let binding = stage_visible_binding(&mut storage, 5_002, &node, &user);
+    let (occupancy, fencing) = stage_occupied_lease(&mut storage, 5_003, &node, &user);
+    let anchor = stage_anchor(
+        &mut storage,
+        5_004,
+        &node,
+        &user,
+        &occupancy,
+        fencing,
+        &binding,
+        &id("psn", 1),
+    );
+    let other = id("cnd", 5_100);
+    let exchange = ProductionRemoteWorkerExchange::new(
+        &root,
+        serde_json::from_value(repository_scope_json(1)).unwrap(),
+        scheduler,
+        NoExecution,
+    );
     assert!(storage.pending_accounting_leases(0).unwrap().is_empty());
     storage.execution_registry().unwrap();
     let fixture: serde_json::Value = serde_json::from_str(include_str!(
         "../../../tests/fixtures/contracts/execution-port.valid.json"
     ))
     .unwrap();
-    let lease: ExecutionLeaseStamp = serde_json::from_value(
+    let mut lease: ExecutionLeaseStamp = serde_json::from_value(
         fixture["messages"]
             .as_array()
             .unwrap()
@@ -118,6 +114,8 @@ fn production_accounting_consumes_signed_receipts_after_execution_authority_expi
             .clone(),
     )
     .unwrap();
+    lease.worker_id = WorkerId(anchor.worker_id.clone());
+    lease.worker_instance_id = WorkerInstanceId(anchor.worker_instance_id.clone());
     let record = winwincode_storage::ExecutionLeaseRecord {
         job_id: lease.job_id.clone(),
         lease_id: lease.lease_id.clone(),
@@ -142,18 +140,34 @@ fn production_accounting_consumes_signed_receipts_after_execution_authority_expi
         )
         .unwrap();
     drop(fixture_db);
-    let token = key.accounting_query_token();
     let now = instant("2027-01-15T08:00:00.000Z");
     assert_eq!(
         exchange
-            .accounting("wrong", None, 0, now.clone())
+            .accounting(
+                &other,
+                &anchor.worker_id,
+                &anchor.worker_instance_id,
+                None,
+                0,
+                now.clone()
+            )
             .unwrap_err()
             .status_code(),
-        401
+        400
     );
-    let page: PendingAccountingPage =
-        serde_json::from_slice(&exchange.accounting(&token.0, None, 0, now.clone()).unwrap())
-            .unwrap();
+    let page: PendingAccountingPage = serde_json::from_slice(
+        &exchange
+            .accounting(
+                &node,
+                &anchor.worker_id,
+                &anchor.worker_instance_id,
+                None,
+                0,
+                now.clone(),
+            )
+            .unwrap(),
+    )
+    .unwrap();
     assert_eq!(page.leases, vec![lease.clone()]);
     let mut statement = AttemptAccountingStatement {
         lease,
@@ -168,34 +182,79 @@ fn production_accounting_consumes_signed_receipts_after_execution_authority_expi
             tokens: Some(9),
             cost_microunits: Some(4),
         }],
-        signature: Sha256Digest(String::new()),
     };
-    statement.sign(&key).unwrap();
     let body = statement.encode().unwrap();
+    assert_eq!(
+        exchange
+            .accounting(
+                &other,
+                &anchor.worker_id,
+                &anchor.worker_instance_id,
+                None,
+                0,
+                now.clone()
+            )
+            .unwrap_err()
+            .status_code(),
+        400
+    );
+    let mut foreign = statement.clone();
+    foreign.lease.worker_instance_id = WorkerInstanceId(id("wki", 9_999));
+    assert_eq!(
+        exchange
+            .accounting(
+                &node,
+                &anchor.worker_id,
+                &anchor.worker_instance_id,
+                Some(&foreign.encode().unwrap()),
+                0,
+                now.clone()
+            )
+            .unwrap_err()
+            .status_code(),
+        400
+    );
+
     for _ in 0..2 {
         assert_eq!(
             exchange
-                .accounting(&token.0, Some(&body), 0, now.clone())
+                .accounting(
+                    &node,
+                    &anchor.worker_id,
+                    &anchor.worker_instance_id,
+                    Some(&body),
+                    0,
+                    now.clone()
+                )
                 .unwrap(),
             b"{}"
         );
     }
-    let page: PendingAccountingPage =
-        serde_json::from_slice(&exchange.accounting(&token.0, None, 0, now.clone()).unwrap())
-            .unwrap();
+    let page: PendingAccountingPage = serde_json::from_slice(
+        &exchange
+            .accounting(
+                &node,
+                &anchor.worker_id,
+                &anchor.worker_instance_id,
+                None,
+                0,
+                now.clone(),
+            )
+            .unwrap(),
+    )
+    .unwrap();
     assert!(page.leases.is_empty());
     statement.receipts[0].tokens = Some(10);
     assert_eq!(
         exchange
-            .accounting(&token.0, Some(&statement.encode().unwrap()), 0, now.clone())
-            .unwrap_err()
-            .status_code(),
-        401
-    );
-    statement.sign(&key).unwrap();
-    assert_eq!(
-        exchange
-            .accounting(&token.0, Some(&statement.encode().unwrap()), 0, now)
+            .accounting(
+                &node,
+                &anchor.worker_id,
+                &anchor.worker_instance_id,
+                Some(&statement.encode().unwrap()),
+                0,
+                now
+            )
             .unwrap_err()
             .status_code(),
         400
@@ -343,7 +402,6 @@ fn stage_node(storage: &mut SqliteStorage, seed: u64) -> String {
         "aarch64-apple-darwin",
         "aarch64",
         "1.2.3",
-        None,
         Some(format!("cix_{}", suffix(seed + 40))),
         4,
     )
@@ -486,7 +544,6 @@ fn stage_anchor(
         worker_session_id.clone(),
         worker_id.clone(),
         worker_instance_id.clone(),
-        "sha256:00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff",
         Some(product_session_id.to_owned()),
         None,
         instant("2100-01-01T00:00:00.000Z"),

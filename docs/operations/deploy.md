@@ -1,6 +1,6 @@
 # 部署 WinWinCode
 
-本文说明 WinWinCode 0.2.0 的实际部署边界。目标读者是自托管运维人员。
+本文说明当前源码的本机部署方式。已发布包的行为以对应版本的发布说明为准。
 
 WinWinCode 由浏览器 Client、Server、Device Client、Worker 和内核辅助进程组成。Server 保存产品状态。Device Client 连接用户机器。Device Client 在本机启动 Worker。Provider 凭据也保存在 Device Client 所在机器。
 
@@ -66,269 +66,205 @@ shasum -a 256 -c SHA256SUMS
 | `bin/wwc` | 本地管理、Device Client、仓库接入和备份 |
 | `bin/winwincode-worker` | Device Client 启动的 Worker |
 | `bin/winwincode-kernel-helper` | Worker 使用的内核辅助进程 |
-| `bin/winwincode-kernel-helper.release.json` | 内核辅助进程的签名清单 |
 | `client/` | 浏览器静态资源 |
 | `service/` | macOS `launchd` 或 Linux `systemd` 模板 |
 | `verification/` | API 发布验证报告和来源封印副本 |
 | `product-release-manifest.json`、`sbom.json` | 制品清单和依赖清单 |
 | `legal/` | Apache-2.0 许可证、NOTICE 和第三方声明 |
 
-`wwc`、Worker、内核辅助进程和签名清单必须保留在同一个 `bin` 目录。Device Client 按 `wwc` 的位置查找同目录的 `winwincode-worker`。Worker 会校验内核辅助进程及其签名清单。
+`wwc`、Worker 和内核辅助进程保留在同一个 `bin` 目录。Device Client 按 `wwc` 的位置查找 Worker 和内核辅助进程。Worker 直接执行配置中的内核辅助进程路径。
 
 macOS 二进制使用 ad-hoc 签名。当前发布包没有 Apple 公证。首次运行可能受到 Gatekeeper 或组织策略限制。
 
 ## 准备 Server
 
-Server 需要一个固定数据目录和一个本地 Git 仓库。Server 配置中的 checkout revision 必须是精确的 Git tree 标识。可以这样生成：
+本机部署使用三个前台进程：Server、浏览器静态服务器和 Device Client。Server 默认监听 `127.0.0.1:8443`，使用 HTTP。浏览器界面默认连接 `http://127.0.0.1:8443`。首次运行会自动建立本地 Owner。
+
+在源码仓库完成[构建](#从源码构建)后，打开第一个终端：
 
 ```sh
-git -C /srv/winwincode/repository rev-parse 'HEAD^{tree}'
+./target/debug/winwincode-server
 ```
 
-在输出前添加 `git-tree:`。例如 `git-tree:0123...`。
+Server 默认使用当前目录作为本地交付仓库，checkout revision 为 `HEAD`。需要交付候选改动时，该目录必须是有效 Git 仓库。可以用 `WWC_SERVER_REPOSITORY_ROOT` 指定其他仓库。
 
-当前生产 Server 入口总会装配远程 Worker 交换。该交换要求 Server 自己启用 TLS 监听器。生产入口缺少证书或私钥时会在监听前失败。`WWC_SERVER_PUBLIC_URL` 因此必须使用 `https://`。反向代理可以位于 Server 前方，但代理到 Server 的连接仍须使用 Server 的 HTTPS 监听器。当前生产入口不支持由反向代理终止 TLS 后再连接纯 HTTP Server。
+Server 数据默认保存在 `$HOME/.winwincode/server`。设置 `WINWINCODE_HOME` 后使用 `<WINWINCODE_HOME>/server`。`WWC_SERVER_DATA_DIRECTORY` 可以覆盖这个位置。
 
-下面的示例适用于一台机器上的首次本地部署。它把 Server 绑定到回环地址，并使用 `local-open` 认证。它仍然需要一组发布配置，因为当前 Server 启动时总会装配 GitHub 发布适配器。
-
-运行前先准备有效 Git 仓库，以及包含 `localhost` 名称的 TLS 证书和私钥。将所有路径和 `<...>` 占位值替换为实际配置。操作者需要对示例数据目录有创建权限。
-
-```sh
-install -d -m 700 /srv/winwincode/server-data
-install -d -m 700 /srv/winwincode/publication-secrets
-
-export WWC_SERVER_BIND=127.0.0.1:8443
-export WWC_SERVER_PUBLIC_URL=https://localhost:8443
-export WWC_SERVER_ALLOWED_ORIGINS=http://localhost:8080
-export WWC_SERVER_DATA_DIRECTORY=/srv/winwincode/server-data
-export WWC_SERVER_REPOSITORY_ROOT=/srv/winwincode/repository
-export WWC_SERVER_CHECKOUT_REVISION='git-tree:<exact-tree-object-id>'
-export WWC_SERVER_BOOTSTRAP_PROOF='<random-one-time-proof>'
-export WWC_SERVER_AUTH_MODE=local-open
-export WWC_SERVER_ORGANIZATION_ID=org_00000000000000000000000000
-export WWC_SERVER_WORKSPACE_ID=wsp_00000000000000000000000000
-export WWC_SERVER_PROJECT_ID=prj_00000000000000000000000000
-export WWC_SERVER_REPOSITORY_ID=rep_00000000000000000000000000
-export WWC_SERVER_ACTION_SIGNING_KEY_HEX='<64-lowercase-hex-characters>'
-export WWC_SERVER_TLS_CERTIFICATE=/etc/winwincode/server.crt
-export WWC_SERVER_TLS_PRIVATE_KEY=/etc/winwincode/server.key
-
-export GITHUB_REPOSITORY=owner/repository
-export GITHUB_CREDENTIAL_REFERENCE_ID=crd_00000000000000000000000000
-export GITHUB_API_BASE_URL=https://api.github.com
-export SECRET_DIRECTORY=/srv/winwincode/publication-secrets
-export PUBLICATION_REQUESTERS=usr_00000000000000000000000000
-export PUBLICATION_APPROVERS=usr_00000000000000000000000000
-export PUBLICATION_APPROVAL_MAX_AGE_MILLIS=3600000
-
-./bin/winwincode-server
-```
-
-可以分别用 `openssl rand -hex 32` 生成 action signing key 和 bootstrap proof。不要跨用途复用相同随机值。不要把这些值写入仓库或进程日志。
-
-完成这些前置配置后，使用示例启动 Server，并按下文检查 `/health`。GitHub 发布操作还需要在产品的 credential reference 流程中写入匹配的凭据。仅创建 `SECRET_DIRECTORY` 或设置 `GITHUB_CREDENTIAL_REFERENCE_ID` 不会创建凭据。
+发布包使用 `./bin/winwincode-server`。以下命令中的 `./target/debug/wwc` 也相应改为 `./bin/wwc`。
 
 ### Server 环境变量
 
-下表列出 `crates/winwincode-server/src/main.rs` 当前读取的运行配置。
-
-| 变量 | 要求和默认值 |
+| 变量 | 默认值或用途 |
 | --- | --- |
-| `WWC_SERVER_BIND` | 必填。Socket 地址，例如 `127.0.0.1:8443`。 |
-| `WWC_SERVER_PUBLIC_URL` | 必填。只允许 `https://` origin。不能包含路径、查询、凭据或 fragment。 |
-| `WWC_SERVER_ALLOWED_ORIGINS` | 必填。逗号分隔的浏览器 origin。至少一个。 |
-| `WWC_SERVER_PREVIEW_PUBLIC_URL` | 可选。必须是独立的 `https://` origin。 |
-| `WWC_SERVER_DATA_DIRECTORY` | 必填。Server 数据根目录。 |
-| `WWC_SERVER_REPOSITORY_ROOT` | 必填。Server 的本地交付仓库。 |
-| `WWC_SERVER_CHECKOUT_REVISION` | 必填。执行配置使用的精确 checkout revision。 |
-| `WWC_SERVER_ORGANIZATION_ID` | 必填。规范 `org_` 标识。 |
-| `WWC_SERVER_WORKSPACE_ID` | 必填。规范 `wsp_` 标识。 |
-| `WWC_SERVER_PROJECT_ID` | 必填。规范 `prj_` 标识。 |
-| `WWC_SERVER_REPOSITORY_ID` | 必填。规范 `rep_` 标识。 |
-| `WWC_SERVER_BOOTSTRAP_PROOF` | 必填。即使使用 `local-open`，当前入口也要求该值。 |
-| `WWC_SERVER_ACTION_SIGNING_KEY_HEX` | 必填。32 字节密钥的小写十六进制表示。 |
-| `WWC_SERVER_AUTH_MODE` | 可选。值为 `local-open` 或 `password`。未设置时，回环监听默认 `local-open`，其他监听地址默认 `password`。 |
-| `WWC_SERVER_BOOTSTRAP_WINDOW_SECONDS` | 默认 `600`。 |
-| `WWC_SERVER_SESSION_TTL_SECONDS` | 默认 `28800`。 |
-| `WWC_SERVER_EXECUTION_PROFILE` | 默认 `codex-chat`。 |
-| `WWC_SERVER_MAX_RUNTIME_SECONDS` | 默认 `3600`。允许 `1..604800` 或 `unlimited`。 |
-| `WWC_SERVER_MAX_ARTIFACT_BYTES` | 默认 `1073741824`。 |
-| `WWC_SERVER_EXECUTION_LEASE_SECONDS` | 默认 `900`。必须是有效的正整数秒数。 |
-| `WWC_SERVER_WORKER_ID` | 默认 `wrk_00000000000000000000000001`。 |
-| `WWC_SERVER_WORKER_POOL_ID` | 默认 `wpl_00000000000000000000000001`。 |
-| `WWC_SERVER_WORKER_INSTANCE_ID` | 可选。未设置时每次启动生成 `wki_` 标识。 |
-| `WWC_SERVER_SCHEDULER_GENERATION` | 可选。未设置时每次启动生成 `gen_` 标识。 |
-| `WWC_SERVER_TLS_CERTIFICATE` | 当前生产入口必填。PEM 证书路径。必须与私钥同时设置。 |
-| `WWC_SERVER_TLS_PRIVATE_KEY` | 当前生产入口必填。PEM 私钥路径。必须与证书同时设置。 |
-| `WWC_SERVER_CREDENTIAL_HASH_CONCURRENCY` | 可选。正整数。无效或缺失时使用可用 CPU 并行数。 |
-| `GITHUB_REPOSITORY` | 必填。格式为 `owner/repository`。 |
-| `GITHUB_CREDENTIAL_REFERENCE_ID` | 必填。规范 `crd_` 标识。 |
-| `GITHUB_API_BASE_URL` | 必填。GitHub API 地址。 |
-| `SECRET_DIRECTORY` | 必填。发布凭据的本地安全存储根目录。 |
-| `PUBLICATION_REQUESTERS` | 必填。逗号分隔。至少一个身份。 |
-| `PUBLICATION_APPROVERS` | 必填。逗号分隔。至少一个用户标识。 |
-| `PUBLICATION_APPROVAL_MAX_AGE_MILLIS` | 必填。审批最大时效，单位为毫秒。 |
+| `WWC_SERVER_BIND` | `127.0.0.1:8443`。 |
+| `WWC_SERVER_PUBLIC_URL` | `http://127.0.0.1:8443`。HTTP origin。 |
+| `WWC_SERVER_ALLOWED_ORIGINS` | `http://127.0.0.1:8080,http://localhost:8080`。逗号分隔的浏览器 origin。 |
+| `WWC_SERVER_PREVIEW_PUBLIC_URL` | 可选。预览使用的独立 origin。 |
+| `WWC_SERVER_DATA_DIRECTORY` | 覆盖 Server 数据目录。 |
+| `WINWINCODE_HOME` | 覆盖产品数据根目录。 |
+| `WWC_SERVER_REPOSITORY_ROOT` | 当前工作目录。 |
+| `WWC_SERVER_CHECKOUT_REVISION` | `HEAD`。可以指定精确 revision。 |
+| `WWC_SERVER_ORGANIZATION_ID` | `org_00000000000000000000000000`。 |
+| `WWC_SERVER_WORKSPACE_ID` | `wsp_00000000000000000000000000`。 |
+| `WWC_SERVER_PROJECT_ID` | `prj_00000000000000000000000000`。 |
+| `WWC_SERVER_REPOSITORY_ID` | `rep_00000000000000000000000000`。 |
+| `WWC_SERVER_AUTH_MODE` | 回环监听默认 `local-open`。其他监听默认 `password`。可显式指定。 |
+| `WWC_SERVER_BOOTSTRAP_PROOF` | `password` 模式的 Owner 初始化证明。 |
+| `WWC_SERVER_BOOTSTRAP_WINDOW_SECONDS` | `600`。 |
+| `WWC_SERVER_SESSION_TTL_SECONDS` | `28800`。 |
+| `WWC_SERVER_EXECUTION_PROFILE` | `codex-chat`。 |
+| `WWC_SERVER_MAX_RUNTIME_SECONDS` | `3600`。允许 `1..604800` 或 `unlimited`。 |
+| `WWC_SERVER_MAX_ARTIFACT_BYTES` | `1073741824`。 |
+| `WWC_SERVER_EXECUTION_LEASE_SECONDS` | `900`。 |
+| `WWC_SERVER_WORKER_ID` | `wrk_00000000000000000000000001`。 |
+| `WWC_SERVER_WORKER_POOL_ID` | `wpl_00000000000000000000000001`。 |
+| `WWC_SERVER_WORKER_INSTANCE_ID` | 每次启动生成 `wki_` 标识。 |
+| `WWC_SERVER_SCHEDULER_GENERATION` | 每次启动生成 `gen_` 标识。 |
 
-当前 Server 不读取 `WWC_SERVER_WORKER_MODE`、`WWC_SERVER_REMOTE_WORKER_CREDENTIAL_FILE`、`WWC_SERVER_REMOTE_WORKER_EXPIRES_AT` 或 `WWC_SERVER_SOURCE_ROOT`。设置这些变量不会改变 Server 的装配方式。Server 当前总是提供远程执行交换和 Device Client 交换端点。
+GitHub 发布是可选功能。`GITHUB_REPOSITORY`、`GITHUB_CREDENTIAL_REFERENCE_ID`、`GITHUB_API_BASE_URL`、`SECRET_DIRECTORY`、`PUBLICATION_REQUESTERS`、`PUBLICATION_APPROVERS` 和 `PUBLICATION_APPROVAL_MAX_AGE_MILLIS` 全部非空时，Server 才装配发布适配器。配置不全时，Server 正常启动，发布功能不启用。发布凭据通过产品的 Credential Reference 流程保存。
 
 ### 认证与首次初始化
 
-首次使用空数据目录时，只有 `local-open` 能完成启动。`SqliteAuthSessionManager::ensure_local_owner` 会自动创建本地 Owner。`password` 模式不会自动创建 Owner，而 `open_production_application` 要求 Owner 在开始监听前已经存在。因此，新数据目录不能通过启动 password Server 后再访问网页完成初始化。
+本机默认使用 `local-open`。Server 在空数据目录中自动建立 Owner，浏览器可以直接使用。
 
-当前也没有从这条 `local-open` 初始化路径切换到 password 模式的完整运维步骤。自动创建的 Owner 密码是随机值，程序不会显示它。`change_owner_password` 又要求提交当前密码。当前 `wwc help` 没有用户或 Owner 管理命令。因此，不要把“先用 `local-open` 创建 Owner，再切换到 `password`”写入自动化。新库的 password 初始化仍是当前产品缺口。
+`password` 模式需要 `WWC_SERVER_BOOTSTRAP_PROOF`。当前生产组合要求 Owner 在开始监听前已经存在。全新数据目录的 password 初始化，以及 local-open Owner 转为 password 登录的运维流程，仍需后续实现。
 
-不要把“空数据目录、非回环监听、默认认证模式”当成可用的首次部署。需要公网或共享网络部署时，必须先补齐受支持的 Owner 初始化流程，或使用已经正确初始化且与当前 schema 匹配的数据备份。
-
-`local-open` 不要求浏览器登录。它只适合受保护的本地或单用户环境。不要把 `local-open` Server 直接暴露到不受信任网络。认证和网络边界见[安全模型](../security-model.md)。
+`local-open` 将能访问 Server 的本机进程视为同一信任域。默认监听和 Compose 发布端口均限定在宿主回环地址。网络边界见[安全模型](../security-model.md)。
 
 ### 健康检查
 
-Server 提供 `GET /health`。就绪时返回 HTTP 200，JSON 中的 `status` 为 `ready`。内部应用不可用时返回 HTTP 503。
-
 ```sh
-curl --fail --show-error --cacert /etc/winwincode/server.crt \
-  https://localhost:8443/health
+curl --fail --show-error http://127.0.0.1:8443/health
 ```
 
-该端点报告 Server 版本、协议 schema 和主要 API 路径。它不证明 Device Client 已连接，也不证明 Provider 已配置。
+就绪时返回 HTTP 200，JSON 中的 `status` 为 `ready`。内部应用不可用时返回 HTTP 503。该端点报告 Server 版本、协议 schema 和主要 API 路径。Device 和 Provider 的状态在浏览器设备页检查。
 
 ## 部署浏览器 Client
 
-`client/` 是静态站点。部署时必须提供 `runtime-config.js`，并把 `serverUrl` 设置为 Server origin。
+在源码仓库打开第二个终端：
+
+```sh
+node deploy/serve-client.mjs
+```
+
+访问 `http://127.0.0.1:8080`。脚本默认读取 `apps/client/dist/public`，并生成连接本机 Server 的 `/runtime-config.js`。它读取 `WWC_CLIENT_DIST`、`HOST`、`PORT` 和 `WWC_SERVER_URL`。使用其他浏览器地址时，把该精确 origin 加入 `WWC_SERVER_ALLOWED_ORIGINS`。
+
+发布包中的 `client/` 可以交给普通静态服务器。例如：
+
+```sh
+python3 -m http.server 8080 --bind 127.0.0.1 --directory client
+```
+
+`client/runtime-config.js` 默认连接本机 Server。部署时可以覆盖该文件：
 
 ```js
 // SPDX-License-Identifier: Apache-2.0
 globalThis.__WINWINCODE_CLIENT_CONFIG__ = Object.freeze({
-  serverUrl: 'https://localhost:8443',
+  serverUrl: 'http://127.0.0.1:8443',
 })
 ```
 
-可以在校验并解压后复制一份 `client/` 作为部署目录，再修改部署副本。保留原始压缩包和校验文件作为未修改证据。
-
-静态服务器必须正确提供 `index.html`、`runtime-config.js` 和 `assets/`。Server 的 `WWC_SERVER_ALLOWED_ORIGINS` 必须包含浏览器站点的精确 origin。
-
-源码树中的 `deploy/serve-client.mjs` 会动态生成 `/runtime-config.js`。它需要 Node.js 24，并读取 `WWC_CLIENT_DIST`、`HOST`、`PORT` 和 `WWC_SERVER_URL`。正式发布包不包含这个脚本。发布包部署需要自备静态服务器或反向代理。
+先校验发布包，再修改部署副本。保留原始压缩包和校验文件。
 
 ## 接入 Device Client
 
-以下步骤只完成 Device Client 服务接入、设备连接、仓库注册和 Provider 配置。它们不能单独证明任务可执行。managed Worker 还需要下表中的运行配置。不要使用测试 fixture 的固定密钥补齐生产配置。
+在宿主机器打开第三个终端：
 
-Device supervisor 启动 Worker 时会继承 Device Client 进程的环境。它只额外设置 `WWC_MANAGED_START_GATE=1`，并写入包含会话身份、仓库、目录、Server origin 和 Worker 凭据路径的 managed config。该 config 不包含下表中的 Worker 运行配置。
+```sh
+./target/debug/wwc device serve
+```
 
-| 变量 | 当前要求和来源 |
+Device 默认连接 `http://127.0.0.1:8443`。数据目录默认是 `$HOME/.winwincode/device-client`。设置 `WINWINCODE_HOME` 后使用 `<WINWINCODE_HOME>/device-client`。`WWC_DEVICE_DATA_DIRECTORY` 或 `--data-dir` 可以覆盖数据目录。`WWC_DEVICE_SERVER_URL` 或 `--server-url` 可以覆盖 Server 地址。
+
+Device Client 以前台进程运行。它启动并监管 Worker。Worker 通过 stdin/stdout JSON-lines 与父 Device 通信，Device 将交换请求转发给 Server。Worker 的启动参数由 Device 写入 `managed-session.json`。
+
+| 内部参数 | 来源与用途 |
 | --- | --- |
-| `WWC_WORKER_TLS_ROOT_DER_FILE` | `run_worker` 必填。它应指向 Worker 连接 Server 时信任的 DER 根证书。未设置时，Device supervisor 使用 `WWC_DEVICE_TLS_ROOT_DER_FILE`。需要不同根证书时显式设置该变量。 |
-| `WWC_WORKER_ACTION_SIGNING_KEY_HEX` | `run_worker` 和 `production_codex` 必填。它从 Device Client 的环境继承，由部署者通过受保护的服务配置或部署环境提供。它必须与 Server 的 `WWC_SERVER_ACTION_SIGNING_KEY_HEX` 使用同一 32 字节动作签名密钥。不要把密钥写入仓库或日志。 |
-| `WWC_WORKER_HELPER_RELEASE_MANIFEST` | `production_codex` 必填。未设置时，Device supervisor 使用 Worker 同目录的 `winwincode-kernel-helper.release.json`。Worker 会验证清单签名及绑定信息。 |
-| `WWC_WORKER_HELPER_EXECUTABLE` | `production_codex` 必填。未设置时，Device supervisor 使用 Worker 同目录的 `winwincode-kernel-helper`。显式设置时使用绝对路径。 |
+| `workerId`、`workerInstanceId`、`workerSessionId` | 启动会话时生成。用于关联执行消息、进程和任务，由程序管理。 |
+| `sourceDirectory` | Device 已登记仓库的本机路径。任务从这里读取源码。 |
+| `dataDirectory` | `<device-data>/worker-sessions/<workerSessionId>/data`。保存该 Worker 的执行状态。 |
+| `executionWorkspaceDirectory` | Device 为会话准备的工作区。任务改动在这里执行。 |
+| `providerDirectory` | `<device-data>/providers`。实际模型调用时读取。 |
+| `helperExecutable` | Device 解析出的辅助进程绝对路径。执行任务时直接启动。 |
 
-同目录发现提供 `winwincode-worker`、helper 和 helper 清单路径。动作签名密钥仍需部署者提供；当前协议没有让 Server 向 Device 下发该密钥。
+| 配置 | 默认值和覆盖方式 |
+| --- | --- |
+| Worker 程序 | `wwc` 同目录的 `winwincode-worker`。 |
+| 内核辅助进程 | `wwc` 同目录的 `winwincode-kernel-helper`。可以用 `WWC_WORKER_HELPER_EXECUTABLE` 覆盖。 |
 
-Device Client 必须与目标 Server 建立 HTTPS 连接。自签名证书需要转换为 DER，再通过环境变量提供：
+显式程序路径相对于 Device 启动目录解析。Device 在切换 Worker 工作目录前将路径转换为绝对路径。
 
-```sh
-openssl x509 -in /etc/winwincode/server.crt -outform der \
-  -out /etc/winwincode/server-root.der
-export WWC_DEVICE_TLS_ROOT_DER_FILE=/etc/winwincode/server-root.der
-```
-
-选择仅当前用户可读的数据目录。启动 Device Client：
-
-```sh
-export WWC_DEVICE_DATA_DIRECTORY="$HOME/.local/share/winwincode/device"
-export WWC_DEVICE_SERVER_URL=https://localhost:8443
-./bin/wwc device serve \
-  --data-dir "$WWC_DEVICE_DATA_DIRECTORY" \
-  --server-url "$WWC_DEVICE_SERVER_URL"
-```
-
-`wwc device serve` 是前台进程。它会把自身环境传给后续 Worker。发布包中的 `service/` 模板可以交给 `launchd` 或用户级 `systemd`。模板中的占位符必须替换为绝对路径。Linux 模板还要求 `$HOME/.config/winwincode/device-client.env` 提供 `WWC_DEVICE_DATA_DIRECTORY` 和 `WWC_DEVICE_SERVER_URL`。该环境文件也可以作为受支持 Worker 变量的注入点。当前 macOS 模板未预置 Worker 环境变量。
-
-另一个终端可以检查状态：
+在另一个终端检查状态并生成连接码：
 
 ```sh
-./bin/wwc device status --data-dir "$WWC_DEVICE_DATA_DIRECTORY"
-./bin/wwc device logs --data-dir "$WWC_DEVICE_DATA_DIRECTORY"
+./target/debug/wwc device status
+./target/debug/wwc device refresh-code
 ```
 
-首次交换完成后生成一次性连接码：
+在浏览器设备页提交连接码。随后在项目目录注册当前仓库：
 
 ```sh
-./bin/wwc device refresh-code --data-dir "$WWC_DEVICE_DATA_DIRECTORY"
+./target/debug/wwc repo add
+./target/debug/wwc repo list
 ```
 
-明文连接码只显示一次。立即在 Web 端完成连接。锁定 Device Client 会拒绝新的连接验证：
+`repo add` 默认使用当前目录。也可以显式传入其他仓库路径。
+
+在浏览器设置页配置该 Device 的 Provider，然后提交任务。Provider 配置在浏览器中加密，由 Device 解密并保存在 `<device-data>/providers/providers.sqlite3`。Worker 从该目录读取配置。
+
+其他管理命令共用相同默认数据目录：
 
 ```sh
-./bin/wwc device lock --data-dir "$WWC_DEVICE_DATA_DIRECTORY"
-./bin/wwc device unlock --data-dir "$WWC_DEVICE_DATA_DIRECTORY"
+./target/debug/wwc device logs
+./target/debug/wwc device lock
+./target/debug/wwc device unlock
 ```
 
-在 Device Client 所在机器注册仓库：
+`wwc init` 和 `wwc repo attach` 处理本地仓库基线。`wwc repo add --init` 可以初始化尚未成为 Git 仓库的目录。Snapshot 操作要求显式确认。
 
-```sh
-./bin/wwc repo add /absolute/path/to/repository \
-  --data-dir "$WWC_DEVICE_DATA_DIRECTORY"
-./bin/wwc repo list --data-dir "$WWC_DEVICE_DATA_DIRECTORY"
-```
-
-`wwc init` 和 `wwc repo attach` 只处理本地仓库基线。它们不启动 Server。`wwc repo add --init` 可以初始化尚未成为 Git 仓库的目录。所有 Snapshot 操作都要求显式确认。
-
-### Provider 凭据位置
-
-在 Web 设置页提交 Provider 配置时，浏览器使用 Device Client 公钥加密配置。Server 只转发密文。Device Client 解密后把配置写入：
-
-```text
-<WWC_DEVICE_DATA_DIRECTORY>/providers/providers.sqlite3
-```
-
-Worker 会读取这个 Device 目录。不要在 Server 上设置 `OPENAI_API_KEY`、`ANTHROPIC_API_KEY` 或其他模型 Provider 密钥。`compose.yaml` 中名为 `model-secrets` 的 Server 卷不代表当前 Device Provider 凭据位置。
-
-实现依据：[`supervisor.rs`](../../crates/winwincode-device-client/src/supervisor.rs) 中的 `SessionSupervisor::launch_process`、`managed_session_config_json` 和 `SessionSupervisor::resolve_worker_binary`；[`main.rs`](../../crates/winwincode-worker/src/main.rs) 中的 `run_worker` 和 `production_codex`；[`device-production-fixture.mjs`](../../scripts/device-production-fixture.mjs) 中的 `establishDeviceOnlyExecutionPath`。fixture 会额外注入 Worker 环境。它不构成生产配置来源。
+发布包中的 `service/` 模板支持 `launchd` 或用户级 `systemd`。将 `__WWC_BINARY__` 替换为 `wwc` 的绝对路径。模板使用相同默认值。Linux 可在 `$HOME/.config/winwincode/device-client.env` 中覆盖环境变量。
 
 ## 从源码构建
-
-源码构建需要以下固定工具：
 
 | 工具 | 要求 |
 | --- | --- |
 | Node.js | `.node-version` 为 24.19.0；运行检查接受 24.x。 |
 | pnpm | `package.json` 固定为 11.7.0。通过 Corepack 调用。 |
 | Rust | `rust-toolchain.toml` 固定为 1.95.0，并包含 `rust-src`、`clippy` 和 `rustfmt`。 |
-| Git | Server 仓库操作和来源校验需要。 |
+| Git | 仓库操作和来源校验使用。 |
 
 macOS 需要 Apple 编译工具链和 libclang。发布流水线安装 Homebrew `llvm@19`，并设置 `LIBCLANG_PATH` 和 `CLANG_PATH`。
 
-Linux 发布构建支持 Ubuntu 24.04 和 Debian 12 的依赖组合。`scripts/install-code-mode-linux-build-deps.sh` 安装 LLVM 23、Clang 23、libclang、compiler-rt、lld、binutils、`pkg-config`、`libcap-dev`、`libglib2.0-dev` 和 `bubblewrap`。它还准备 Rust V8 构建需要的 compiler-rt 路径。
+Linux 支持 Ubuntu 24.04 和 Debian 12 的依赖组合。`scripts/install-code-mode-linux-build-deps.sh` 安装 LLVM 23、Clang 23、libclang、compiler-rt、lld、binutils、`pkg-config`、`libcap-dev`、`libglib2.0-dev` 和 `bubblewrap`。它还准备 Rust V8 构建需要的 compiler-rt 路径。
 
-仓库的 `.cargo/config.toml` 强制 `V8_FROM_SOURCE=1`。首次完整构建会下载并编译 V8。它还使用 `scripts/code-mode-ninja.mjs` 作为 Ninja 入口。构建机需要外网、足够的磁盘空间和较长的编译时间。
+`.cargo/config.toml` 强制 `V8_FROM_SOURCE=1`。首次完整构建会下载并编译 V8。构建机需要外网、足够的磁盘空间和较长的编译时间。
 
 ```sh
 corepack enable
 corepack pnpm install --frozen-lockfile
 corepack pnpm build
-cargo build --locked -p winwincode-cli --bin wwc
 ```
 
-`pnpm build` 构建 Client、Server、Worker 和内核辅助进程，但不构建 `wwc`。`pnpm start` 只是运行 Server 的开发入口。它仍然要求完整的 Server 环境变量，也不会启动浏览器 Client、Device Client 或 Worker 服务。
+`pnpm build` 产出浏览器 Client、`wwc`、Server、Worker 和内核辅助进程。Rust 程序默认位于 `target/debug/`。设置 `CARGO_TARGET_DIR` 后使用该目录。`pnpm start` 运行 Server 的开发入口。
 
-源码构建不会生成正式发布签名清单和来源封印。需要可分发制品时使用[发布指南](release.md)中的发布流水线。
+## Docker Compose
 
-## Docker Compose 现状
+Compose 在容器中运行 Server 和 Web。Device Client 在宿主机器上运行，以访问宿主仓库和 Provider 数据。
 
-根目录 `compose.yaml` 是源码部署参考。当前文件不能作为 0.2.0 的可直接启动配置。
+先在宿主完成源码构建，然后执行：
 
-已知差异如下：
+```sh
+docker compose up --build -d
+./target/debug/wwc device serve
+```
 
-- `WWC_VERSION` 默认仍是 `0.1.0-alpha.2`。部署 0.2.0 时必须显式设置 `WWC_VERSION=0.2.0`。
-- Server 镜像只构建 `winwincode-server`。它不包含 `wwc`、Worker、内核辅助进程或正式发布签名清单。
-- Compose 没有设置必填的 `WWC_SERVER_ACTION_SIGNING_KEY_HEX`。
-- Compose 设置的 `WWC_SERVER_WORKER_MODE` 和静态远程 Worker 凭据变量不被当前 Server 入口读取。
-- 默认绑定地址是 `0.0.0.0:8443`。认证模式因而默认为 `password`。空数据卷没有 Owner，Server 会在监听前失败。
-- `repository-data` 是一个新卷。它不会自动包含有效 Git 仓库或与 `WWC_SERVER_CHECKOUT_REVISION` 对应的 tree。
-- `model-secrets` 位于 Server。当前模型 Provider 凭据实际保存在 Device Client。
+访问 `http://127.0.0.1:8080`。按照[接入 Device Client](#接入-device-client)生成连接码、连接设备、注册宿主仓库和配置 Provider。
 
-如果继续使用 Compose，先修正这些差异，并为 repository volume 准备精确的 Git 内容。不要只复制 `deploy/compose.env.example` 后执行 `docker compose up`。
+Server 容器监听 `0.0.0.0:8443`，Compose 将端口发布到宿主 `127.0.0.1:8443`。浏览器和宿主 Device 都使用宿主地址 `http://127.0.0.1:8443`。Web 容器只提供静态资源，浏览器自行连接 Server。容器内健康检查的 `127.0.0.1` 指向该容器自身。
+
+`backend-data` 卷保存 Server 数据。Compose 把 `${WWC_SERVER_REPOSITORY_ROOT:-.}` 绑定到容器 `/workspace/repository`。默认使用当前仓库目录。该目录需要包含可在容器内读取的 Git 元数据。Git worktree 的 `.git` 文件可能指向宿主上的外部目录；这种情况下，设置 `WWC_SERVER_REPOSITORY_ROOT` 指向普通 clone。
+
+`deploy/compose.env.example` 列出版本、Web 端口、Server 端口和宿主仓库路径。调整 Server 端口后，宿主 Device 也要使用对应的 `--server-url`。
 
 ## 数据目录与 schema
 
@@ -347,6 +283,8 @@ Device Client 的主要数据包括：
 - `worker-sessions/`、`execution-workspaces/`、日志和临时运行状态。
 
 `control-plane.sqlite3` 和 `device-client.sqlite3` 分别由 `SqliteStorage` 与 `DeviceStore` 的 `initialize_schema` 检查 `user_version`，在同一事务内初始化和校验。版本不匹配时拒绝打开。这个行为不能推广到其他产品数据库。
+
+Gate 决策和运行追踪还会检查持久化 JSON 的字段结构。SQLite 版本匹配不代表这些记录可读。恢复备份时须使用与记录结构匹配的程序。
 
 Worker 的 Codex 数据目录仍有迁移和回填路径。重开旧目录可能修改 schema、迁移标记或持久记录。打开前先保留原目录和匹配程序的备份。实际实现与已批准的开发目标见 [当前数据库 schema](../invariants.md#当前数据库-schema)。已发布用户数据的升级政策尚未定义，发布说明必须逐次说明兼容范围。
 
@@ -397,7 +335,7 @@ Device Client 快照：
   --from /srv/backups/winwincode-server-2026-10-14
 ```
 
-Device 恢复使用相同参数，并把 `--store` 改为 `device`。Device 快照会清零设备凭据。恢复时，命令从目标机器的现有 `device-client.sqlite3` 按 digest 回绑凭据。目标目录没有活的本机凭据、设备身份不同或凭据已经轮换时，恢复会拒绝执行。它不是跨设备克隆机制。
+Device 恢复使用相同参数，并把 `--store` 改为 `device`。Device 快照保存设备身份和运行状态，可以恢复到空目录。恢复前停止原 Device，避免两个进程使用同一设备身份。
 
 诊断默认只读：
 
@@ -413,16 +351,13 @@ Device 恢复使用相同参数，并把 `--store` 改为 `device`。Device 快�
 
 ## 故障定位
 
-- Server 启动即退出：检查所有必填变量、action signing key、TLS 成对配置、Owner 初始化状态和数据 schema。
-- `/health` 返回 503：Server 已监听，但内部应用健康检查失败。查看 Server 标准错误输出。
-- 浏览器显示启动失败：检查 `client/runtime-config.js` 和 `WWC_SERVER_ALLOWED_ORIGINS`。
-- Device Client 拒绝 URL：它要求没有路径、查询和凭据的 `https://` origin。
-- Device Client 无法建立自签名 TLS：检查 `WWC_DEVICE_TLS_ROOT_DER_FILE` 是否为 DER 证书。
-- 任务提示没有 Provider：在 Web 设置页为该 Device 配置 Provider。不要把密钥放到 Server 环境。
-- Worker 在注册前退出：先用 `wwc device logs` 检查缺失的 `WWC_WORKER_*` 变量。未设置 `WWC_WORKER_TLS_ROOT_DER_FILE` 时，Worker 使用 `WWC_DEVICE_TLS_ROOT_DER_FILE`。
-- Worker 找不到可执行文件：检查 `wwc` 与 `winwincode-worker` 是否位于同一 `bin` 目录。同目录发现只解决 Worker 可执行文件路径。
-- Worker 拒绝 helper：检查 `WWC_WORKER_HELPER_EXECUTABLE` 和 `WWC_WORKER_HELPER_RELEASE_MANIFEST` 是否指向同一已校验发布包中的配对文件。不要绕过签名、摘要、文件模式或 helper 身份校验。
-- 数据库提示 unsupported schema version：停止进程。恢复匹配版本的程序和备份。不要手改 `PRAGMA user_version`。
+- Server 启动即退出：检查绑定端口、数据目录权限和数据库 schema。
+- `/health` 返回 503：查看 Server 标准错误输出。
+- 浏览器连接失败：检查 `runtime-config.js`、Server 地址和 `WWC_SERVER_ALLOWED_ORIGINS`。
+- Device 离线：检查 `wwc device status`、Server 地址和 Device 日志。
+- 任务提示没有 Provider：在浏览器设置页为该 Device 配置 Provider。
+- Worker 启动失败：检查 `wwc device logs`，以及 Worker 和内核辅助进程的实际路径与执行权限。
+- 数据库提示 unsupported schema version：停止进程，恢复匹配版本的程序和备份。
 
 ## 相关文档
 

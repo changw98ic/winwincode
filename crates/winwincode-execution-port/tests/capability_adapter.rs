@@ -11,8 +11,7 @@ use winwincode_domain::{
     WorkerId, WorkerInstanceId, WorkerSessionId, WorkspaceId,
 };
 use winwincode_execution_port::action_enforcement::{
-    ActionEnforcementIssuer, ActionEnforcementSigningKey, ActionReceiptClaim,
-    ActionReceiptUseError, ActionReceiptUseStore, action_enforcement_facts,
+    ActionReceiptClaim, ActionReceiptUseError, ActionReceiptUseStore, action_enforcement_facts,
 };
 use winwincode_execution_port::action_gateway::{
     ActionGatewayError, ActiveWorkerAuthority, CodexToolExecutor, DeterministicActionGate,
@@ -238,16 +237,10 @@ fn adapter(
     WorkerCapabilityAdapter::new(catalog, grants, unmanaged_policy, gateway)
 }
 
-fn issuer() -> ActionEnforcementIssuer {
-    ActionEnforcementIssuer::new(
-        ActionEnforcementSigningKey::from_bytes([9_u8; 32]).expect("signing key"),
-    )
-}
-
 fn enforcement_receipt(action: &WorkerActionRequest) -> ActionEnforcementReceiptMessage {
     let normalization = normalize_action(&action.intent, &action.request).expect("normalization");
     let facts = action_enforcement_facts(&normalization).expect("action facts");
-    let mut receipt = ActionEnforcementReceiptMessage {
+    ActionEnforcementReceiptMessage {
         actor: UserActor {
             id: UserId(id("usr", 'A')),
             kind: UserActorKind::User,
@@ -263,7 +256,6 @@ fn enforcement_receipt(action: &WorkerActionRequest) -> ActionEnforcementReceipt
         policy_kind: facts.policy_kind,
         policy_mode: None,
         policy_version: None,
-        receipt_signature: Sha256Digest(format!("sha256:{}", "0".repeat(64))),
         request_id: action.invocation_request_id.clone(),
         resource: facts.resource,
         schema_version: SchemaVersion::WinwincodeV1,
@@ -278,9 +270,7 @@ fn enforcement_receipt(action: &WorkerActionRequest) -> ActionEnforcementReceipt
         session_identity: action.authority.session_identity.clone(),
         subject_sha256: facts.subject_sha256,
         worker_session_id: action.authority.worker_session_id.clone(),
-    };
-    issuer().sign(&mut receipt).expect("sign receipt");
-    receipt
+    }
 }
 
 struct FreshReceiptStore;
@@ -311,12 +301,7 @@ fn invoke_action(
         action,
         enforcement_receipt: &receipt,
     };
-    adapter.invoke(
-        now,
-        invocation,
-        &issuer().verifier(),
-        &mut FreshReceiptStore,
-    )
+    adapter.invoke(now, invocation, &mut FreshReceiptStore)
 }
 
 fn rejection_code(

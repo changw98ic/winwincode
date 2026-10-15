@@ -13,7 +13,6 @@ const DEFAULT_IO_TIMEOUT: Duration = Duration::from_secs(10);
 pub struct HttpExchangeTransport {
     endpoint: Mutex<String>,
     io_timeout: Duration,
-    tls_root_der: Option<Vec<u8>>,
 }
 
 impl HttpExchangeTransport {
@@ -22,14 +21,7 @@ impl HttpExchangeTransport {
         Self {
             endpoint: Mutex::new(endpoint.into()),
             io_timeout: DEFAULT_IO_TIMEOUT,
-            tls_root_der: None,
         }
-    }
-
-    #[must_use]
-    pub fn with_tls_root_der(mut self, tls_root_der: Vec<u8>) -> Self {
-        self.tls_root_der = Some(tls_root_der);
-        self
     }
 
     #[must_use]
@@ -49,72 +41,38 @@ impl HttpExchangeTransport {
 }
 
 impl ExchangeTransport for HttpExchangeTransport {
-    fn exchange(
-        &self,
-        credential: Option<&str>,
-        request_bytes: &[u8],
-    ) -> Result<Vec<u8>, ExchangeTransportError> {
-        post_json(
-            &self.endpoint(),
-            credential,
-            request_bytes,
-            self.io_timeout,
-            self.tls_root_der.as_deref(),
-            &|| true,
-        )
+    fn exchange(&self, request_bytes: &[u8]) -> Result<Vec<u8>, ExchangeTransportError> {
+        post_json(&self.endpoint(), request_bytes, self.io_timeout, &|| true)
     }
     fn exchange_authorized(
         &self,
-        credential: Option<&str>,
         request_bytes: &[u8],
         can_start: &(dyn Fn() -> bool + Sync),
     ) -> Result<Vec<u8>, ExchangeTransportError> {
-        post_json(
-            &self.endpoint(),
-            credential,
-            request_bytes,
-            self.io_timeout,
-            self.tls_root_der.as_deref(),
-            can_start,
-        )
+        post_json(&self.endpoint(), request_bytes, self.io_timeout, can_start)
     }
 }
 
-fn post_json(
+pub(crate) fn post_json(
     endpoint: &str,
-    credential: Option<&str>,
     body: &[u8],
     io_timeout: Duration,
-    tls_root_der: Option<&[u8]>,
     can_start: &(dyn Fn() -> bool + Sync),
 ) -> Result<Vec<u8>, ExchangeTransportError> {
     validate_endpoint(endpoint)?;
-    let root_certs = tls_root_der.map_or(ureq::tls::RootCerts::WebPki, |value| {
-        vec![ureq::tls::Certificate::from_der(value).to_owned()].into()
-    });
-    let tls = ureq::tls::TlsConfig::builder()
-        .provider(ureq::tls::TlsProvider::Rustls)
-        .root_certs(root_certs)
-        .use_sni(true)
-        .disable_verification(false)
-        .build();
     let config = ureq::Agent::config_builder()
         .http_status_as_error(false)
         .max_redirects(0)
         .proxy(None)
         .timeout_global(Some(io_timeout))
-        .tls_config(tls)
         .build();
     let agent = ureq::Agent::new_with_config(config);
     let response = winwincode_network::http::execute_http_once(
         &agent,
         |agent| {
-            let mut request = agent
+            let request = agent
                 .post(endpoint)
                 .header("Content-Type", "application/json");
-            if let Some(credential) = credential {
-                request = request.header("Authorization", &format!("Bearer {credential}"));
-            }
             request.send(body)
         },
         MAX_RESPONSE_BYTES as u64,
@@ -145,7 +103,7 @@ fn invalid_endpoint() -> ExchangeTransportError {
 
 fn validate_endpoint(endpoint: &str) -> Result<(), ExchangeTransportError> {
     let uri = http::Uri::from_str(endpoint).map_err(|_| invalid_endpoint())?;
-    if !matches!(uri.scheme_str(), Some("http" | "https")) || uri.authority().is_none() {
+    if uri.scheme_str() != Some("http") || uri.authority().is_none() {
         return Err(invalid_endpoint());
     }
     Ok(())
@@ -156,9 +114,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn http_and_https_endpoints_are_accepted() {
+    fn only_http_endpoints_are_accepted() {
         assert!(validate_endpoint("http://127.0.0.1:8080/internal/v1/client/exchange").is_ok());
-        assert!(validate_endpoint("https://server.example/internal/v1/client/exchange").is_ok());
+        assert!(validate_endpoint("https://server.example/internal/v1/client/exchange").is_err());
     }
 
     #[test]

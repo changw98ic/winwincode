@@ -376,8 +376,6 @@ pub struct ClientNode {
     pub architecture: String,
     #[serde(rename = "clientVersion")]
     pub client_version: String,
-    #[serde(rename = "deviceCredentialDigest")]
-    pub device_credential_digest: Option<String>,
     #[serde(rename = "currentInstanceId")]
     pub current_instance_id: Option<String>,
     #[serde(rename = "presenceState")]
@@ -586,8 +584,6 @@ pub struct WorkerLaunchGrant {
     pub worker_id: String,
     #[serde(rename = "workerInstanceId")]
     pub worker_instance_id: String,
-    #[serde(rename = "credentialDigest")]
-    pub credential_digest: String,
     #[serde(rename = "expiresAt")]
     pub expires_at: String,
     pub state: WorkerLaunchGrantState,
@@ -674,7 +670,6 @@ mod tests {
                 "platform": "darwin",
                 "architecture": "arm64",
                 "clientVersion": "0.1.0-alpha.1",
-                "deviceCredentialDigest": "sha256:aa11",
                 "currentInstanceId": "inst_01j2",
                 "presenceState": "online",
                 "acceptingConnections": true,
@@ -865,7 +860,6 @@ mod tests {
                 "workerSessionId": "wsn_01j2",
                 "workerId": "worker_1",
                 "workerInstanceId": "winst_01j2",
-                "credentialDigest": "sha256:dd44",
                 "expiresAt": "2026-01-02T12:10:00.000Z",
                 "state": "issued",
                 "revision": 1
@@ -881,8 +875,7 @@ mod tests {
                 "clientInstanceId":"inst_01j2","occupancyLeaseId":"lease_01j2",
                 "occupancyFencingToken":"7","repositoryBindingId":"rb_01j2",
                 "productSessionId":"ps_01j2","workerSessionId":"wsn_01j2",
-                "workerId":"worker_1","workerInstanceId":"winst_01j2",
-                "credentialDigest":"sha256:dd44","expiresAt":"2026-01-02T12:10:00.000Z",
+                "workerId":"worker_1","workerInstanceId":"winst_01j2","expiresAt":"2026-01-02T12:10:00.000Z",
                 "state":"issued","revision":1
             }"#,
         )

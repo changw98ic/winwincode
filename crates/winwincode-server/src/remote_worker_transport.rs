@@ -2,31 +2,24 @@
 
 use std::collections::HashMap;
 use std::fmt;
-use std::fs;
-use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::path::PathBuf;
+use std::sync::Mutex;
 
 use sha2::{Digest, Sha256};
 use winwincode_control_plane::{
-    ProductStateStorage, RemoteWorkerAuthenticationError, RemoteWorkerAuthenticator,
-    RemoteWorkerCredential, RemoteWorkerPoolAdapter, RemoteWorkerPoolError,
-    RemoteWorkerPoolErrorKind, RemoteWorkerPrincipal,
+    ProductStateStorage, RemoteWorkerPoolAdapter, RemoteWorkerPoolError, RemoteWorkerPoolErrorKind,
+    RemoteWorkerPrincipal,
 };
-use winwincode_domain::{ExecutionMessageId, Instant, WorkerId, WorkerInstanceId};
+use winwincode_domain::{ExecutionMessageId, Instant, RepositoryScope, WorkerId, WorkerInstanceId};
 use winwincode_execution_port::generated::ExecutionPortMessage;
 use winwincode_execution_port::transport::{
     EndpointSide, ExecutionPortCore, FrameDirection, FrameError, RemoteExchangeDelivery,
     RemoteExchangeRequest, RemoteExchangeResponse, RemoteTransportAdapter, TypedFrame,
     execution_message_id,
 };
-use winwincode_storage::{
-    SqliteStorage, WorkerPoolId, WorkerRegistryScope, WorkerSessionCredentialState,
-};
+use winwincode_storage::{SqliteStorage, WorkerPoolId, WorkerRegistryScope};
 
-use crate::{
-    RepositoryRuntimeScheduler, RuntimeControlOutbound, RuntimeSupervisorError,
-    WorkerSessionCredentialErrorKind, WorkerSessionCredentialService,
-};
+use crate::{RepositoryRuntimeScheduler, RuntimeControlOutbound, RuntimeSupervisorError};
 
 const MAX_PENDING_REMOTE_DELIVERIES: usize = 256;
 
@@ -68,23 +61,20 @@ impl RemoteWorkerTransportError {
             Self::invalid_frame()
         }
     }
-    const fn authentication() -> Self {
+    const fn invalid_route() -> Self {
         Self {
-            message: "remote Worker authentication rejected",
-            status: 401,
+            message: "Worker route does not match its Device session",
+            status: 400,
         }
     }
     fn from_pool(error: RemoteWorkerPoolError) -> Self {
         match error.kind() {
-            RemoteWorkerPoolErrorKind::AuthenticationRejected
-            | RemoteWorkerPoolErrorKind::AuthenticationRevoked => Self::authentication(),
             RemoteWorkerPoolErrorKind::InvalidConnection
             | RemoteWorkerPoolErrorKind::UnsupportedMessage => Self {
                 message: "remote Worker frame rejected",
                 status: 400,
             },
-            RemoteWorkerPoolErrorKind::AuthenticationUnavailable
-            | RemoteWorkerPoolErrorKind::Registry => {
+            RemoteWorkerPoolErrorKind::Registry => {
                 Self::new("remote Worker authority is unavailable")
             }
         }
@@ -104,316 +94,26 @@ impl fmt::Display for RemoteWorkerTransportError {
 impl std::error::Error for RemoteWorkerTransportError {}
 
 pub trait RemoteWorkerExchangePort: Send + Sync {
-    /// Advances Server-owned cleanup without accepting an incoming Worker frame.
     fn recover_accepted_outcomes(&self) -> Result<usize, RemoteWorkerTransportError>;
     fn accounting(
         &self,
-        _token: &str,
+        _client_node_id: &str,
+        _worker_id: &str,
+        _worker_instance_id: &str,
         _body: Option<&[u8]>,
         _offset: u64,
         _now: Instant,
     ) -> Result<Vec<u8>, RemoteWorkerTransportError> {
-        Err(RemoteWorkerTransportError::authentication())
+        Err(RemoteWorkerTransportError::unavailable())
     }
     fn exchange(
         &self,
-        credential: Vec<u8>,
+        client_node_id: &str,
+        worker_id: &str,
+        worker_instance_id: &str,
         request_body: &[u8],
         now: Instant,
     ) -> Result<Vec<u8>, RemoteWorkerTransportError>;
-}
-
-pub struct FileRemoteWorkerAuthenticator {
-    credential_path: PathBuf,
-    principal: RemoteWorkerPrincipal,
-    credential_fingerprint: winwincode_domain::Sha256Digest,
-    expires_at: Instant,
-}
-
-impl FileRemoteWorkerAuthenticator {
-    #[allow(clippy::too_many_arguments)]
-    pub fn open(
-        credential_path: impl Into<PathBuf>,
-        worker_id: WorkerId,
-        worker_pool_id: WorkerPoolId,
-        scope: WorkerRegistryScope,
-        issuer: String,
-        subject: String,
-        security_zone: String,
-        expires_at: Instant,
-        now: &Instant,
-    ) -> Result<Self, RemoteWorkerTransportError> {
-        let expires_at_value = time::OffsetDateTime::parse(
-            &expires_at.0,
-            &time::format_description::well_known::Rfc3339,
-        )
-        .map_err(|_| {
-            RemoteWorkerTransportError::new("remote Worker credential expiry is invalid")
-        })?;
-        let now_value =
-            time::OffsetDateTime::parse(&now.0, &time::format_description::well_known::Rfc3339)
-                .map_err(|_| RemoteWorkerTransportError::new("remote Worker clock is invalid"))?;
-        if expires_at_value <= now_value {
-            return Err(RemoteWorkerTransportError::new(
-                "remote Worker credential is expired",
-            ));
-        }
-        let credential_path = credential_path.into();
-        let proof = read_private_credential(&credential_path)?;
-        let fingerprint =
-            winwincode_domain::Sha256Digest(format!("sha256:{:x}", Sha256::digest(&proof)));
-        let principal = RemoteWorkerPrincipal::new(
-            worker_id,
-            worker_pool_id,
-            scope,
-            issuer,
-            subject,
-            fingerprint.clone(),
-            security_zone,
-        )
-        .map_err(|_| RemoteWorkerTransportError::new("remote Worker identity is invalid"))?;
-        Ok(Self {
-            credential_path,
-            principal,
-            credential_fingerprint: fingerprint,
-            expires_at,
-        })
-    }
-
-    fn current_fingerprint(
-        &self,
-    ) -> Result<winwincode_domain::Sha256Digest, RemoteWorkerAuthenticationError> {
-        let proof = read_private_credential(&self.credential_path)
-            .map_err(|_| RemoteWorkerAuthenticationError::unavailable())?;
-        Ok(winwincode_domain::Sha256Digest(format!(
-            "sha256:{:x}",
-            Sha256::digest(&proof)
-        )))
-    }
-}
-
-impl RemoteWorkerAuthenticator for FileRemoteWorkerAuthenticator {
-    fn authenticate(
-        &self,
-        credential: &RemoteWorkerCredential,
-        now: &Instant,
-    ) -> Result<RemoteWorkerPrincipal, RemoteWorkerAuthenticationError> {
-        if now.0 >= self.expires_at.0 {
-            return Err(RemoteWorkerAuthenticationError::revoked());
-        }
-        let supplied = winwincode_domain::Sha256Digest(format!(
-            "sha256:{:x}",
-            Sha256::digest(credential.expose_for_verification())
-        ));
-        if supplied != self.credential_fingerprint || supplied != self.current_fingerprint()? {
-            return Err(RemoteWorkerAuthenticationError::rejected());
-        }
-        Ok(self.principal.clone())
-    }
-
-    fn ensure_active(
-        &self,
-        principal: &RemoteWorkerPrincipal,
-        now: &Instant,
-    ) -> Result<(), RemoteWorkerAuthenticationError> {
-        if now.0 >= self.expires_at.0 || principal != &self.principal {
-            return Err(RemoteWorkerAuthenticationError::revoked());
-        }
-        if self.current_fingerprint()? != self.credential_fingerprint {
-            return Err(RemoteWorkerAuthenticationError::revoked());
-        }
-        Ok(())
-    }
-}
-
-pub struct WorkerSessionRemoteAuthenticator {
-    data_directory: PathBuf,
-    scope: WorkerRegistryScope,
-}
-
-impl WorkerSessionRemoteAuthenticator {
-    #[must_use]
-    pub fn new(data_directory: impl Into<PathBuf>, scope: WorkerRegistryScope) -> Self {
-        Self {
-            data_directory: data_directory.into(),
-            scope,
-        }
-    }
-}
-
-impl RemoteWorkerAuthenticator for WorkerSessionRemoteAuthenticator {
-    fn authenticate(
-        &self,
-        credential: &RemoteWorkerCredential,
-        now: &Instant,
-    ) -> Result<RemoteWorkerPrincipal, RemoteWorkerAuthenticationError> {
-        let mut storage = SqliteStorage::open(&self.data_directory)
-            .map_err(|_| RemoteWorkerAuthenticationError::unavailable())?;
-        let record = WorkerSessionCredentialService::new(&mut storage)
-            .verify_credential(credential.expose_for_verification(), now)
-            .map_err(|error| session_authentication_error(&error))?;
-        let worker_pool_id = device_session_pool(&mut storage, &record)?;
-        RemoteWorkerPrincipal::new_bound(
-            WorkerId(record.worker_id),
-            WorkerInstanceId(record.worker_instance_id),
-            worker_pool_id,
-            self.scope.clone(),
-            "winwincode-server".to_owned(),
-            format!("worker-session:{}", record.worker_session_id),
-            winwincode_domain::Sha256Digest(record.credential_digest),
-            "device-client".to_owned(),
-        )
-    }
-
-    fn ensure_active(
-        &self,
-        principal: &RemoteWorkerPrincipal,
-        now: &Instant,
-    ) -> Result<(), RemoteWorkerAuthenticationError> {
-        if principal.scope() != &self.scope {
-            return Err(RemoteWorkerAuthenticationError::revoked());
-        }
-        let mut storage = SqliteStorage::open(&self.data_directory)
-            .map_err(|_| RemoteWorkerAuthenticationError::unavailable())?;
-        let record = storage
-            .worker_session_credential_ledger()
-            .map_err(|_| RemoteWorkerAuthenticationError::unavailable())?
-            .find_by_digest(&principal.credential_fingerprint().0)
-            .map_err(|_| RemoteWorkerAuthenticationError::unavailable())?
-            .ok_or_else(RemoteWorkerAuthenticationError::revoked)?;
-        if principal.worker_pool_id() != &device_session_pool(&mut storage, &record)?
-            || record.state != WorkerSessionCredentialState::Active
-            || record.expires_at.0 <= now.0
-            || record.worker_id != principal.worker_id().0
-            || principal.worker_instance_id().map(|id| id.0.as_str())
-                != Some(record.worker_instance_id.as_str())
-        {
-            return Err(RemoteWorkerAuthenticationError::revoked());
-        }
-        Ok(())
-    }
-}
-
-fn device_session_pool(
-    storage: &mut SqliteStorage,
-    record: &winwincode_storage::WorkerSessionCredentialRecord,
-) -> Result<WorkerPoolId, RemoteWorkerAuthenticationError> {
-    let grant = winwincode_control_plane::WorkerLaunchGrantService::new(storage)
-        .snapshot(&record.worker_launch_grant_id)
-        .map_err(|_| RemoteWorkerAuthenticationError::unavailable())?
-        .ok_or_else(RemoteWorkerAuthenticationError::revoked)?;
-    let lease = winwincode_control_plane::ClientOccupancyService::new(storage)
-        .active_lease_for_node(&grant.client_node_id)
-        .map_err(|_| RemoteWorkerAuthenticationError::unavailable())?
-        .ok_or_else(RemoteWorkerAuthenticationError::revoked)?;
-    let occupancy_authorized = match lease.state {
-        winwincode_control_plane::OccupancyLeaseState::Occupied
-        | winwincode_control_plane::OccupancyLeaseState::Draining => true,
-        winwincode_control_plane::OccupancyLeaseState::RecoveryPending => {
-            grant.state == winwincode_storage::WorkerLaunchGrantState::Consumed
-        }
-        _ => false,
-    };
-    if !grant.state.is_non_terminal()
-        || lease.occupancy_lease_id != grant.occupancy_lease_id
-        || lease.fencing_token != grant.occupancy_fencing_token
-        || !occupancy_authorized
-    {
-        return Err(RemoteWorkerAuthenticationError::revoked());
-    }
-    if grant.worker_session_id != record.worker_session_id
-        || grant.worker_id != record.worker_id
-        || grant.worker_instance_id != record.worker_instance_id
-    {
-        return Err(RemoteWorkerAuthenticationError::revoked());
-    }
-    Ok(WorkerPoolId(
-        if grant.work_run_id.is_some() {
-            winwincode_control_plane::STRONGFLOW_DEVICE_WORKER_POOL_ID
-        } else {
-            winwincode_control_plane::QUICK_DEVICE_WORKER_POOL_ID
-        }
-        .to_owned(),
-    ))
-}
-
-pub struct CompositeRemoteWorkerAuthenticator {
-    fleet: FileRemoteWorkerAuthenticator,
-    sessions: WorkerSessionRemoteAuthenticator,
-}
-
-impl CompositeRemoteWorkerAuthenticator {
-    #[must_use]
-    pub const fn new(
-        fleet: FileRemoteWorkerAuthenticator,
-        sessions: WorkerSessionRemoteAuthenticator,
-    ) -> Self {
-        Self { fleet, sessions }
-    }
-}
-
-impl RemoteWorkerAuthenticator for CompositeRemoteWorkerAuthenticator {
-    fn authenticate(
-        &self,
-        credential: &RemoteWorkerCredential,
-        now: &Instant,
-    ) -> Result<RemoteWorkerPrincipal, RemoteWorkerAuthenticationError> {
-        match self.fleet.authenticate(credential, now) {
-            Ok(principal) => Ok(principal),
-            Err(error)
-                if error.kind()
-                    == winwincode_control_plane::RemoteWorkerAuthenticationErrorKind::Rejected =>
-            {
-                self.sessions.authenticate(credential, now)
-            }
-            Err(error) => Err(error),
-        }
-    }
-
-    fn ensure_active(
-        &self,
-        principal: &RemoteWorkerPrincipal,
-        now: &Instant,
-    ) -> Result<(), RemoteWorkerAuthenticationError> {
-        if principal == &self.fleet.principal {
-            self.fleet.ensure_active(principal, now)
-        } else {
-            self.sessions.ensure_active(principal, now)
-        }
-    }
-}
-
-fn session_authentication_error(
-    error: &crate::WorkerSessionCredentialError,
-) -> RemoteWorkerAuthenticationError {
-    match error.kind() {
-        WorkerSessionCredentialErrorKind::AuthenticationRejected
-        | WorkerSessionCredentialErrorKind::UnknownCredential => {
-            RemoteWorkerAuthenticationError::rejected()
-        }
-        _ => RemoteWorkerAuthenticationError::unavailable(),
-    }
-}
-
-#[cfg(unix)]
-fn read_private_credential(path: &Path) -> Result<Vec<u8>, RemoteWorkerTransportError> {
-    use std::os::unix::fs::PermissionsExt;
-
-    let metadata = fs::metadata(path)
-        .map_err(|_| RemoteWorkerTransportError::new("remote Worker credential is unavailable"))?;
-    if !metadata.is_file() || metadata.permissions().mode() & 0o077 != 0 {
-        return Err(RemoteWorkerTransportError::new(
-            "remote Worker credential permissions are invalid",
-        ));
-    }
-    let bytes = fs::read(path)
-        .map_err(|_| RemoteWorkerTransportError::new("remote Worker credential is unavailable"))?;
-    if bytes.is_empty() || bytes.len() > 16 * 1024 {
-        return Err(RemoteWorkerTransportError::new(
-            "remote Worker credential is invalid",
-        ));
-    }
-    Ok(bytes)
 }
 
 type RemoteDelivery = (WorkerId, WorkerInstanceId, ExecutionMessageId, Vec<u8>);
@@ -421,7 +121,6 @@ type RemoteDelivery = (WorkerId, WorkerInstanceId, ExecutionMessageId, Vec<u8>);
 #[derive(Default)]
 struct RemoteDeliveryQueue {
     pending: Mutex<Vec<RemoteDelivery>>,
-    authorities: Mutex<HashMap<(WorkerId, WorkerInstanceId), RemoteWorkerPrincipal>>,
     confirmed: Mutex<HashMap<(WorkerId, WorkerInstanceId), ConfirmedControls>>,
 }
 
@@ -456,42 +155,9 @@ fn suppress_confirmed_redelivery(message: &ExecutionPortMessage) -> bool {
 }
 
 impl RemoteDeliveryQueue {
-    fn retire_inactive(
-        &self,
-        authenticator: &dyn RemoteWorkerAuthenticator,
-        now: &Instant,
-    ) -> Result<(), RemoteWorkerTransportError> {
-        let mut authorities = self.authorities.lock().map_err(|_| {
-            RemoteWorkerTransportError::new("remote Worker authority cache is unavailable")
-        })?;
-        let mut pending = self.pending.lock().map_err(|_| {
-            RemoteWorkerTransportError::new("remote Worker delivery queue is unavailable")
-        })?;
-        let mut retired_instances = Vec::new();
-        authorities.retain(|(worker, instance), principal| {
-            let retired = authenticator.ensure_active(principal, now).is_err_and(|error| matches!(error.kind(), winwincode_control_plane::RemoteWorkerAuthenticationErrorKind::Revoked | winwincode_control_plane::RemoteWorkerAuthenticationErrorKind::Rejected));
-            if retired {
-                pending.retain(|(target, boot, _, _)| target != worker || boot != instance);
-                retired_instances.push((worker.clone(), instance.clone()));
-            }
-            !retired && pending.iter().any(|(target, boot, _, _)| target == worker && boot == instance)
-        });
-        drop(pending);
-        if !retired_instances.is_empty() {
-            let mut confirmed = self.confirmed.lock().map_err(|_| {
-                RemoteWorkerTransportError::new("remote Worker delivery queue is unavailable")
-            })?;
-            for key in retired_instances {
-                confirmed.remove(&key);
-            }
-        }
-        Ok(())
-    }
-
     fn prepare_ingress(
         &self,
         request: &RemoteExchangeRequest,
-        principal: &RemoteWorkerPrincipal,
     ) -> Result<bool, RemoteWorkerTransportError> {
         self.acknowledge(
             request.worker_id(),
@@ -510,18 +176,6 @@ impl RemoteDeliveryQueue {
             <= MAX_PENDING_REMOTE_DELIVERIES
                 - winwincode_execution_port::transport::MAX_REMOTE_DELIVERIES;
         drop(pending);
-        self.authorities
-            .lock()
-            .map_err(|_| {
-                RemoteWorkerTransportError::new("remote Worker authority cache is unavailable")
-            })?
-            .insert(
-                (
-                    request.worker_id().clone(),
-                    request.worker_instance_id().clone(),
-                ),
-                principal.clone(),
-            );
         Ok(can_accept)
     }
     fn retire_other_instances(
@@ -719,11 +373,9 @@ impl ExecutionPortCore for NoopCore {
 }
 
 pub struct ProductionRemoteWorkerExchange<Core> {
-    accounting_key:
-        Option<winwincode_execution_port::action_enforcement::ActionEnforcementSigningKey>,
     exchange_gate: Mutex<()>,
     data_directory: PathBuf,
-    authenticator: Arc<dyn RemoteWorkerAuthenticator>,
+    repository_scope: RepositoryScope,
     scheduler: Mutex<RepositoryRuntimeScheduler>,
     core: Mutex<Core>,
     queue: RemoteDeliveryQueue,
@@ -733,27 +385,18 @@ impl<Core> ProductionRemoteWorkerExchange<Core> {
     #[must_use]
     pub fn new(
         data_directory: impl Into<PathBuf>,
-        authenticator: Arc<dyn RemoteWorkerAuthenticator>,
+        repository_scope: RepositoryScope,
         scheduler: RepositoryRuntimeScheduler,
         core: Core,
     ) -> Self {
         Self {
-            accounting_key: None,
             exchange_gate: Mutex::new(()),
             data_directory: data_directory.into(),
-            authenticator,
+            repository_scope,
             scheduler: Mutex::new(scheduler),
             core: Mutex::new(core),
             queue: RemoteDeliveryQueue::default(),
         }
-    }
-    #[must_use]
-    pub fn with_accounting_key(
-        mut self,
-        key: winwincode_execution_port::action_enforcement::ActionEnforcementSigningKey,
-    ) -> Self {
-        self.accounting_key = Some(key);
-        self
     }
 }
 
@@ -775,36 +418,40 @@ where
 
     fn accounting(
         &self,
-        token: &str,
+        client_node_id: &str,
+        worker_id: &str,
+        worker_instance_id: &str,
         body: Option<&[u8]>,
         offset: u64,
         now: Instant,
     ) -> Result<Vec<u8>, RemoteWorkerTransportError> {
-        let key = self
-            .accounting_key
-            .as_ref()
-            .ok_or_else(RemoteWorkerTransportError::authentication)?;
-        let expected = key.accounting_query_token();
-        if token.len() != expected.0.len()
-            || token
-                .bytes()
-                .zip(expected.0.bytes())
-                .fold(0_u8, |difference, (a, b)| difference | (a ^ b))
-                != 0
-        {
-            return Err(RemoteWorkerTransportError::authentication());
-        }
         let mut storage = SqliteStorage::open(&self.data_directory)
             .map_err(|_| RemoteWorkerTransportError::new("accounting storage unavailable"))?;
+        let owner = storage
+            .worker_launch_grant_ledger()
+            .map_err(|_| RemoteWorkerTransportError::unavailable())?
+            .client_node_for_worker(worker_id, worker_instance_id)
+            .map_err(|_| RemoteWorkerTransportError::unavailable())?;
+        if owner.as_deref() != Some(client_node_id) {
+            return Err(RemoteWorkerTransportError::invalid_route());
+        }
         if let Some(body) = body {
             let statement =
                 winwincode_execution_port::accounting::AttemptAccountingStatement::decode(body)
                     .map_err(|_| RemoteWorkerTransportError::invalid_frame())?;
-            let verified = statement
-                .verified(key)
-                .map_err(|_| RemoteWorkerTransportError::authentication())?;
+            statement
+                .validate()
+                .map_err(|_| RemoteWorkerTransportError::invalid_frame())?;
+            if statement.lease.worker_id.0 != worker_id
+                || statement.lease.worker_instance_id.0 != worker_instance_id
+            {
+                return Err(RemoteWorkerTransportError::invalid_frame());
+            }
+            if !accounting_lease_matches_device(&mut storage, &statement.lease, client_node_id)? {
+                return Err(RemoteWorkerTransportError::invalid_route());
+            }
             storage
-                .reconcile_provider_attempt(&verified, &now)
+                .reconcile_provider_attempt(&statement, &now)
                 .map_err(|error| {
                     if error.kind() == winwincode_storage::StorageErrorKind::InvalidInput {
                         RemoteWorkerTransportError::invalid_frame()
@@ -814,7 +461,7 @@ where
                 })?;
             Ok(b"{}".to_vec())
         } else {
-            let leases = storage.pending_accounting_leases(offset).map_err(|_| {
+            let mut leases = storage.pending_accounting_leases(offset).map_err(|_| {
                 RemoteWorkerTransportError::new("accounting lease query unavailable")
             })?;
             let next_offset = if leases.len() == 100 {
@@ -826,6 +473,16 @@ where
             } else {
                 None
             };
+            let mut leases_for_device = Vec::new();
+            for lease in leases {
+                if lease.worker_id.0 == worker_id
+                    && lease.worker_instance_id.0 == worker_instance_id
+                    && accounting_lease_matches_device(&mut storage, &lease, client_node_id)?
+                {
+                    leases_for_device.push(lease);
+                }
+            }
+            leases = leases_for_device;
             serde_json::to_vec(
                 &winwincode_execution_port::accounting::PendingAccountingPage {
                     leases,
@@ -838,7 +495,9 @@ where
 
     fn exchange(
         &self,
-        credential: Vec<u8>,
+        client_node_id: &str,
+        worker_id: &str,
+        worker_instance_id: &str,
         request_body: &[u8],
         now: Instant,
     ) -> Result<Vec<u8>, RemoteWorkerTransportError> {
@@ -847,15 +506,18 @@ where
         })?;
         let request = RemoteExchangeRequest::decode(request_body)
             .map_err(RemoteWorkerTransportError::frame_error)?;
-        let credential = RemoteWorkerCredential::new(credential)
-            .map_err(|_| RemoteWorkerTransportError::authentication())?;
+        if request.worker_id().0 != worker_id
+            || request.worker_instance_id().0 != worker_instance_id
+        {
+            return Err(RemoteWorkerTransportError::invalid_frame());
+        }
         let frame = RemoteTransportAdapter::<NoopCore>::decode(request.frame())
             .map_err(RemoteWorkerTransportError::frame_error)?;
         let mut storage = SqliteStorage::open(&self.data_directory).map_err(|_| {
             RemoteWorkerTransportError::new("remote Worker Registry is unavailable")
         })?;
         let (responses, principal, frame_accepted) =
-            self.accept_ingress(&mut storage, &credential, &request, &frame, &now)?;
+            self.accept_ingress(&mut storage, client_node_id, &request, &frame, &now)?;
         Box::new(storage)
             .close()
             .map_err(|_| RemoteWorkerTransportError::new("remote Worker Registry close failed"))?;
@@ -922,16 +584,87 @@ where
     }
 }
 
+fn accounting_lease_matches_device(
+    storage: &mut SqliteStorage,
+    lease: &winwincode_execution_port::generated::ExecutionLeaseStamp,
+    node: &str,
+) -> Result<bool, RemoteWorkerTransportError> {
+    let owner = storage
+        .worker_launch_grant_ledger()
+        .map_err(|_| RemoteWorkerTransportError::new("accounting device authority unavailable"))?
+        .client_node_for_worker(&lease.worker_id.0, &lease.worker_instance_id.0)
+        .map_err(|_| RemoteWorkerTransportError::new("accounting device authority unavailable"))?;
+    Ok(owner.as_deref() == Some(node))
+}
+
 impl<Core> ProductionRemoteWorkerExchange<Core>
 where
     Core: ExecutionPortCore<Output = Vec<ExecutionPortMessage>> + Send,
     Core::Error: Send + fmt::Display,
 {
+    fn route_principal(
+        &self,
+        storage: &mut SqliteStorage,
+        client_node_id: &str,
+        worker_id: &str,
+        worker_instance_id: &str,
+    ) -> Result<RemoteWorkerPrincipal, RemoteWorkerTransportError> {
+        let grant = storage
+            .worker_launch_grant_ledger()
+            .map_err(|_| RemoteWorkerTransportError::unavailable())?
+            .active_grant_for_worker(worker_id, worker_instance_id)
+            .map_err(|_| RemoteWorkerTransportError::unavailable())?
+            .ok_or_else(RemoteWorkerTransportError::invalid_route)?;
+        if grant.client_node_id != client_node_id {
+            return Err(RemoteWorkerTransportError::invalid_route());
+        }
+        let occupancy = winwincode_control_plane::ClientOccupancyService::new(storage)
+            .active_lease_for_node(client_node_id)
+            .map_err(|_| RemoteWorkerTransportError::unavailable())?
+            .ok_or_else(RemoteWorkerTransportError::invalid_route)?;
+        let allowed = match occupancy.state {
+            winwincode_control_plane::OccupancyLeaseState::Occupied
+            | winwincode_control_plane::OccupancyLeaseState::Draining => true,
+            winwincode_control_plane::OccupancyLeaseState::RecoveryPending => {
+                grant.state == winwincode_storage::WorkerLaunchGrantState::Consumed
+            }
+            _ => false,
+        };
+        if !allowed
+            || occupancy.occupancy_lease_id != grant.occupancy_lease_id
+            || occupancy.fencing_token != grant.occupancy_fencing_token
+        {
+            return Err(RemoteWorkerTransportError::invalid_route());
+        }
+        let scope = WorkerRegistryScope::Repository {
+            organization_id: self.repository_scope.organization_id.clone(),
+            workspace_id: self.repository_scope.workspace_id.clone(),
+            project_id: self.repository_scope.project_id.clone(),
+            repository_id: self.repository_scope.repository_id.clone(),
+        };
+        RemoteWorkerPrincipal::new(
+            WorkerId(worker_id.to_owned()),
+            WorkerInstanceId(worker_instance_id.to_owned()),
+            WorkerPoolId(
+                if grant.work_run_id.is_some() {
+                    winwincode_control_plane::STRONGFLOW_DEVICE_WORKER_POOL_ID
+                } else {
+                    winwincode_control_plane::QUICK_DEVICE_WORKER_POOL_ID
+                }
+                .to_owned(),
+            ),
+            scope,
+            client_node_id.to_owned(),
+            grant.worker_session_id,
+        )
+        .map_err(RemoteWorkerTransportError::from_pool)
+    }
+
     #[allow(clippy::too_many_lines)]
     fn accept_ingress(
         &self,
         storage: &mut SqliteStorage,
-        credential: &RemoteWorkerCredential,
+        client_node_id: &str,
         request: &RemoteExchangeRequest,
         frame: &TypedFrame,
         now: &Instant,
@@ -996,33 +729,27 @@ where
         }) {
             return Err(RemoteWorkerTransportError::invalid_frame());
         }
-        let mut pool = RemoteWorkerPoolAdapter::new(storage, self.authenticator.as_ref());
+        let principal = self.route_principal(
+            storage,
+            client_node_id,
+            &request.worker_id().0,
+            &request.worker_instance_id().0,
+        )?;
+        let mut pool = RemoteWorkerPoolAdapter::new(storage);
         let mut connection = if matches!(
             frame.message(),
             ExecutionPortMessage::WorkerRegisterMessage(_)
         ) {
-            pool.connect(credential, now)
+            pool.connect(principal.clone())
         } else {
             pool.resume(
-                credential,
+                principal.clone(),
                 request.worker_id(),
                 request.worker_instance_id(),
-                now,
             )
-        }
-        .map_err(RemoteWorkerTransportError::from_pool)?;
-        let principal = connection.principal().clone();
-        if principal.worker_id() != request.worker_id()
-            || principal
-                .worker_instance_id()
-                .is_some_and(|instance| instance != request.worker_instance_id())
-        {
-            return Err(RemoteWorkerTransportError::authentication());
-        }
-        self.queue
-            .retire_inactive(self.authenticator.as_ref(), now)?;
-
-        let can_accept = self.queue.prepare_ingress(request, &principal)?;
+            .map_err(RemoteWorkerTransportError::from_pool)?
+        };
+        let can_accept = self.queue.prepare_ingress(request)?;
         if !can_accept {
             if request.supports_acceptance_receipt() {
                 return Ok((Vec::new(), principal, false));
@@ -1062,47 +789,8 @@ where
                     RemoteWorkerTransportError::new("remote Worker ingress rejected a frame")
                 })
         }?;
-        if let ExecutionPortMessage::WorkerHeartbeatMessage(heartbeat) = frame.message()
-            && heartbeat_was_accepted(heartbeat, &responses)
-        {
-            WorkerSessionCredentialService::new(storage)
-                .renew_after_accepted_heartbeat(
-                    &principal.credential_fingerprint().0,
-                    heartbeat,
-                    now,
-                )
-                .map_err(|_| {
-                    RemoteWorkerTransportError::new(
-                        "remote Worker credential renewal is unavailable",
-                    )
-                })?;
-        }
         Ok((responses, principal, true))
     }
-}
-
-fn heartbeat_was_accepted(
-    heartbeat: &winwincode_execution_port::generated::WorkerHeartbeatMessage,
-    responses: &[ExecutionPortMessage],
-) -> bool {
-    use winwincode_execution_port::generated::WorkerHeartbeatAckMessageStatus;
-    if heartbeat.active_leases.is_empty() {
-        return false;
-    }
-    let mut matching = responses.iter().filter_map(|message| {
-        let ExecutionPortMessage::WorkerHeartbeatAckMessage(ack) = message else {
-            return None;
-        };
-        (ack.message_id == heartbeat.message_id
-            && ack.worker_id == heartbeat.worker_id
-            && ack.worker_instance_id == heartbeat.worker_instance_id
-            && ack.heartbeat_sequence == heartbeat.heartbeat_sequence)
-            .then_some(ack)
-    });
-    let accepted = matching.next().is_some_and(|ack| {
-        ack.status == WorkerHeartbeatAckMessageStatus::Accepted && ack.error.is_none()
-    });
-    accepted && matching.next().is_none()
 }
 
 fn log_dispatch_result(message: &ExecutionPortMessage) {
@@ -1137,7 +825,6 @@ where
 
 #[cfg(test)]
 mod tests {
-    use std::os::unix::fs::PermissionsExt;
 
     use winwincode_domain::{ExecutionSequence, SchemaVersion};
     use winwincode_execution_port::generated::{
@@ -1314,17 +1001,6 @@ mod tests {
         let queue = RemoteDeliveryQueue::default();
         let worker = WorkerId("wrk_00000000000000000000000001".into());
         let instance = WorkerInstanceId("wki_00000000000000000000000001".into());
-        let principal = RemoteWorkerPrincipal::new_bound(
-            worker.clone(),
-            instance.clone(),
-            WorkerPoolId("wpl_00000000000000000000000001".into()),
-            WorkerRegistryScope::local_default(),
-            "issuer".into(),
-            "subject".into(),
-            winwincode_domain::Sha256Digest(format!("sha256:{}", "e".repeat(64))),
-            "zone".into(),
-        )
-        .unwrap();
         for seed in 0..MAX_PENDING_REMOTE_DELIVERIES {
             queue
                 .enqueue_for(
@@ -1368,7 +1044,7 @@ mod tests {
                 RemoteExchangeRequest::new(worker.clone(), instance.clone(), ids, frame.clone())
                     .unwrap();
             assert!(
-                queue.prepare_ingress(&request, &principal).is_ok(),
+                queue.prepare_ingress(&request).is_ok(),
                 "ACK and pull must remain available under backpressure"
             );
             assert!(delivered <= 256);
@@ -1446,171 +1122,6 @@ mod tests {
     }
 
     #[test]
-    fn retirement_requires_authoritative_revocation_and_backpressure_precedes_ingress() {
-        struct Authority {
-            retired: WorkerId,
-        }
-        impl RemoteWorkerAuthenticator for Authority {
-            fn authenticate(
-                &self,
-                _: &RemoteWorkerCredential,
-                _: &Instant,
-            ) -> Result<RemoteWorkerPrincipal, RemoteWorkerAuthenticationError> {
-                Err(RemoteWorkerAuthenticationError::rejected())
-            }
-            fn ensure_active(
-                &self,
-                principal: &RemoteWorkerPrincipal,
-                _: &Instant,
-            ) -> Result<(), RemoteWorkerAuthenticationError> {
-                if principal.worker_id() == &self.retired {
-                    Err(RemoteWorkerAuthenticationError::revoked())
-                } else {
-                    Ok(())
-                }
-            }
-        }
-        let queue = RemoteDeliveryQueue::default();
-        let dead = WorkerId("wrk_00000000000000000000000001".into());
-        let live = WorkerId("wrk_00000000000000000000000002".into());
-        let instance = WorkerInstanceId("wki_00000000000000000000000001".into());
-        for worker in [&dead, &live] {
-            let principal = RemoteWorkerPrincipal::new_bound(
-                worker.clone(),
-                instance.clone(),
-                WorkerPoolId("wpl_00000000000000000000000001".into()),
-                WorkerRegistryScope::local_default(),
-                "issuer".into(),
-                "subject".into(),
-                winwincode_domain::Sha256Digest(format!("sha256:{}", "e".repeat(64))),
-                "zone".into(),
-            )
-            .unwrap();
-            queue
-                .authorities
-                .lock()
-                .unwrap()
-                .insert((worker.clone(), instance.clone()), principal);
-            queue
-                .enqueue_for(worker, &instance, queue_message(1, worker, &instance, 0))
-                .unwrap();
-        }
-        queue
-            .retire_inactive(
-                &Authority {
-                    retired: dead.clone(),
-                },
-                &Instant("2026-10-02T00:00:00.000Z".into()),
-            )
-            .unwrap();
-        assert!(queue.snapshot(&dead, &instance).unwrap().is_empty());
-        assert_eq!(queue.snapshot(&live, &instance).unwrap().len(), 1);
-        for seed in 2..=130 {
-            queue
-                .enqueue_for(&live, &instance, queue_message(seed, &live, &instance, 0))
-                .unwrap();
-        }
-        let fixture: serde_json::Value = serde_json::from_str(include_str!(
-            "../../../tests/fixtures/contracts/execution-port.valid.json"
-        ))
-        .unwrap();
-        let mut heartbeat = fixture["messages"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .find(|value| value["kind"] == "worker.heartbeat")
-            .unwrap()
-            .clone();
-        heartbeat["workerId"] = serde_json::json!(live.0);
-        heartbeat["workerInstanceId"] = serde_json::json!(instance.0);
-        let frame = TypedFrame::new(
-            FrameDirection::WorkerToControlPlane,
-            serde_json::from_value(heartbeat).unwrap(),
-        )
-        .unwrap();
-        let request = RemoteExchangeRequest::new(
-            live.clone(),
-            instance.clone(),
-            Vec::new(),
-            RemoteTransportAdapter::<NoopCore>::encode(&frame).unwrap(),
-        )
-        .unwrap();
-        let principal = queue
-            .authorities
-            .lock()
-            .unwrap()
-            .get(&(live, instance))
-            .unwrap()
-            .clone();
-        assert!(!queue.prepare_ingress(&request, &principal).unwrap());
-    }
-
-    #[test]
-    fn renewal_requires_one_matching_fresh_accepted_lease_heartbeat() {
-        use winwincode_domain::{ExecutionAckSequence, ExecutionJobId, FencingToken, LeaseId};
-        use winwincode_execution_port::generated::{
-            ActiveLeaseSummary, WorkerCapacity, WorkerHeartbeatMessage, WorkerHeartbeatMessageKind,
-        };
-        let mut heartbeat = WorkerHeartbeatMessage {
-            active_leases: vec![ActiveLeaseSummary {
-                attempt: 1,
-                expires_at: Instant("2030-01-01T01:00:00.000Z".into()),
-                fencing_token: FencingToken("1".into()),
-                job_id: ExecutionJobId("job_test".into()),
-                last_event_sequence: ExecutionAckSequence(0),
-                lease_id: LeaseId("lease_test".into()),
-            }],
-            capacity: WorkerCapacity {
-                available_slots: 0,
-                running_jobs: 1,
-            },
-            heartbeat_sequence: ExecutionSequence(7),
-            kind: WorkerHeartbeatMessageKind::WorkerHeartbeat,
-            message_id: ExecutionMessageId("xmsg_00000000000000000000000007".into()),
-            observed_at: Instant("2030-01-01T00:00:00.000Z".into()),
-            schema_version: SchemaVersion::WinwincodeV1,
-            sent_at: Instant("2030-01-01T00:00:00.000Z".into()),
-            worker_id: WorkerId("wrk_test".into()),
-            worker_instance_id: WorkerInstanceId("wki_test".into()),
-        };
-        let ack = WorkerHeartbeatAckMessage {
-            error: None,
-            heartbeat_sequence: heartbeat.heartbeat_sequence.clone(),
-            kind: WorkerHeartbeatAckMessageKind::WorkerHeartbeatAck,
-            message_id: heartbeat.message_id.clone(),
-            next_heartbeat_within_ms: 1000,
-            schema_version: SchemaVersion::WinwincodeV1,
-            sent_at: heartbeat.sent_at.clone(),
-            server_time: heartbeat.sent_at.clone(),
-            status: WorkerHeartbeatAckMessageStatus::Accepted,
-            worker_id: heartbeat.worker_id.clone(),
-            worker_instance_id: heartbeat.worker_instance_id.clone(),
-        };
-        let responses = vec![ExecutionPortMessage::WorkerHeartbeatAckMessage(ack.clone())];
-        assert!(heartbeat_was_accepted(&heartbeat, &responses));
-        for status in [
-            WorkerHeartbeatAckMessageStatus::Duplicate,
-            WorkerHeartbeatAckMessageStatus::RejectedWorkerInstance,
-        ] {
-            let mut rejected = ack.clone();
-            rejected.status = status;
-            assert!(!heartbeat_was_accepted(
-                &heartbeat,
-                &[ExecutionPortMessage::WorkerHeartbeatAckMessage(rejected)]
-            ));
-        }
-        assert!(!heartbeat_was_accepted(
-            &heartbeat,
-            &[responses[0].clone(), responses[0].clone()]
-        ));
-        heartbeat.heartbeat_sequence = ExecutionSequence(8);
-        assert!(!heartbeat_was_accepted(&heartbeat, &responses));
-        heartbeat.heartbeat_sequence = ExecutionSequence(7);
-        heartbeat.active_leases.clear();
-        assert!(!heartbeat_was_accepted(&heartbeat, &responses));
-    }
-
-    #[test]
     fn duplicate_delivery_id_replays_the_first_response() {
         let queue = RemoteDeliveryQueue::default();
         let worker_id = WorkerId("wrk_00000000000000000000000001".to_owned());
@@ -1673,81 +1184,5 @@ mod tests {
         assert_eq!(queue.snapshot(&worker_id, &old).unwrap().len(), 1);
         queue.retire_other_instances(&worker_id, &next).unwrap();
         assert!(queue.snapshot(&worker_id, &old).unwrap().is_empty());
-    }
-
-    #[test]
-    fn credential_file_is_private_short_lived_and_revalidated_after_rotation() {
-        let root = std::env::temp_dir().join(format!(
-            "winwincode-remote-credential-{}",
-            std::process::id()
-        ));
-        let _ = fs::remove_dir_all(&root);
-        fs::create_dir_all(&root).expect("credential test directory");
-        let path = root.join("worker.token");
-        fs::write(&path, b"fixture-remote-token").expect("credential write");
-        fs::set_permissions(&path, fs::Permissions::from_mode(0o600))
-            .expect("private credential mode");
-        let now = Instant("2026-08-30T00:00:00.000Z".to_owned());
-        let authenticator = FileRemoteWorkerAuthenticator::open(
-            &path,
-            WorkerId("wrk_00000000000000000000000001".to_owned()),
-            WorkerPoolId("wpl_00000000000000000000000001".to_owned()),
-            WorkerRegistryScope::local_default(),
-            "fixture-issuer".to_owned(),
-            "fixture-subject".to_owned(),
-            "fixture-zone".to_owned(),
-            Instant("2026-08-30T01:00:00.000Z".to_owned()),
-            &now,
-        )
-        .expect("private active credential");
-        let credential =
-            RemoteWorkerCredential::new(b"fixture-remote-token".to_vec()).expect("bounded proof");
-        let principal = authenticator
-            .authenticate(&credential, &now)
-            .expect("credential authentication");
-        fs::write(&path, b"rotated-remote-token").expect("credential rotation");
-        assert_eq!(
-            authenticator
-                .ensure_active(&principal, &now)
-                .expect_err("rotation revokes established request")
-                .kind(),
-            winwincode_control_plane::RemoteWorkerAuthenticationErrorKind::Revoked
-        );
-        fs::remove_dir_all(root).expect("credential test release");
-    }
-
-    #[test]
-    fn device_worker_credential_requires_its_durable_launch_grant() {
-        let root = std::env::temp_dir().join(format!(
-            "winwincode-device-worker-credential-{}",
-            std::process::id()
-        ));
-        let _ = fs::remove_dir_all(&root);
-        let now = Instant("2026-09-12T00:00:00.000Z".to_owned());
-        let material = crate::issue_credential_material().expect("credential material");
-        let mut storage = SqliteStorage::open(&root).expect("storage");
-        WorkerSessionCredentialService::new(&mut storage)
-            .issue_for_launch(
-                "wsn_00000000000000000000000001",
-                "wrk_00000000000000000000000001",
-                "wki_00000000000000000000000001",
-                "wlg_00000000000000000000000001",
-                material.credential_digest(),
-                &now,
-            )
-            .expect("issue session credential");
-        drop(storage);
-        let authenticator =
-            WorkerSessionRemoteAuthenticator::new(&root, WorkerRegistryScope::local_default());
-        let proof = RemoteWorkerCredential::new(material.material().as_bytes().to_vec())
-            .expect("credential proof");
-        assert_eq!(
-            authenticator
-                .authenticate(&proof, &now)
-                .expect_err("orphaned credential must not register a Worker")
-                .kind(),
-            winwincode_control_plane::RemoteWorkerAuthenticationErrorKind::Revoked
-        );
-        fs::remove_dir_all(root).expect("credential test release");
     }
 }

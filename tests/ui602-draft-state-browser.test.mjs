@@ -4,7 +4,6 @@ import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import test from 'node:test'
 import {
-  certificate,
   chromeBinary,
   closeServer,
   command,
@@ -29,10 +28,8 @@ test('real Chrome keeps Settings drafts separate from live server snapshots', as
   }
   command(root, 'corepack', ['pnpm', '--filter', '@winwincode/client', 'build'])
   const directory = mkdtempSync(join(tmpdir(), 'winwincode-settings-draft-'))
-  const certificateFiles = certificate(root, directory)
   const clientServer = staticClientServer({
     root,
-    certificateFiles,
     fixturePath,
     configuration: () => ({}),
   })
@@ -57,7 +54,7 @@ test('real Chrome keeps Settings drafts separate from live server snapshots', as
   await devtools.send('Runtime.enable', {}, sessionId)
   await devtools.send('Page.enable', {}, sessionId)
   await devtools.send('Page.navigate', {
-    url: `https://client.localhost:${String(clientPort)}`,
+    url: `http://127.0.0.1:${String(clientPort)}`,
   }, sessionId)
   await waitForGlobal(devtools, sessionId, 'runSettingsDraftStateScenario')
 

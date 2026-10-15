@@ -60,7 +60,6 @@ const canonicalTestFiles = Object.freeze([
   'tests/code-mode-dispatch-patch-replay.test.mjs',
   'tests/code-mode-native-build.test.mjs',
   'tests/native-kernel-acceptance-runner.test.mjs',
-  'tests/compact-kernel-helper.test.mjs',
   'tests/engineering-runtime-contract.test.mjs',
   'tests/contract-codegen.test.mjs',
   'tests/contextual-decision.test.mjs',

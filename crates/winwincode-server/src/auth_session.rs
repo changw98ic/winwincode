@@ -189,7 +189,7 @@ impl SqliteAuthSessionManager {
         clock: Arc<dyn AuthSessionClock>,
         token_generator: Arc<dyn AuthSessionTokenGenerator>,
     ) -> Result<Self, AuthSessionError> {
-        if bootstraps.is_empty() {
+        if bootstraps.is_empty() && !config.local_open {
             return Err(AuthSessionError::configuration());
         }
         AuthSessionConfig::new(config.bootstrap_window, config.session_ttl)?;

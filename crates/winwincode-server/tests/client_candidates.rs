@@ -41,7 +41,7 @@ use winwincode_domain::Instant;
 use winwincode_server::{
     ApiError, AuthSessionBootstrap, AuthSessionConfig, AuthenticatedPrincipal,
     ClientExchangeApplication, ClientExchangeConfig, ClientExchangePort, ControlPlaneApiPort,
-    EventSubscription, RequestAuthenticator, ServerConfig, ServerTls, SqliteAuthSessionManager,
+    EventSubscription, RequestAuthenticator, ServerConfig, SqliteAuthSessionManager,
     UserAccountService, start_server_with_remote_worker,
 };
 use winwincode_storage::{
@@ -151,7 +151,6 @@ fn server_config(data_directory: &Path) -> ServerConfig {
     ServerConfig::new(
         "127.0.0.1:0".parse().expect("loopback address"),
         "http://control.example",
-        ServerTls::Disabled,
         BTreeSet::from([ORIGIN.to_owned()]),
         data_directory.to_path_buf(),
         Duration::from_secs(2),
@@ -318,17 +317,10 @@ async fn login(address: std::net::SocketAddr, username: &str, password: &str) ->
     (session_cookie_from_response(&response), user_id)
 }
 
-async fn post_exchange(
-    address: std::net::SocketAddr,
-    body: &str,
-    credential: Option<&str>,
-) -> (String, Option<Value>) {
+async fn post_exchange(address: std::net::SocketAddr, body: &str) -> (String, Option<Value>) {
     let mut stream = TcpStream::connect(address).await.expect("connect server");
-    let authorization = credential
-        .map(|value| format!("Authorization: Bearer {value}\r\n"))
-        .unwrap_or_default();
     let request = format!(
-        "POST /internal/v1/client/exchange HTTP/1.1\r\nHost: control.example\r\n{authorization}Content-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        "POST /internal/v1/client/exchange HTTP/1.1\r\nHost: control.example\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
         body.len()
     );
     stream
@@ -363,6 +355,7 @@ fn frame(node: &str, instance: &str, sequence: u64, message: ClientToServerMessa
 fn exchange_request(frames: &[Value], ack_sequence: u64) -> String {
     json!({
         "schemaVersion": SCHEMA_VERSION,
+        "clientNodeId": frames[0]["clientNodeId"],
         "frames": frames,
         "ackSequence": ack_sequence,
     })
@@ -378,7 +371,7 @@ fn capacity(running: u32) -> ClientCapacityReport {
     }
 }
 
-async fn enroll_device(address: std::net::SocketAddr) -> (String, String, String) {
+async fn enroll_device(address: std::net::SocketAddr) -> (String, String) {
     let enroll = ClientToServerMessage::Enroll(Box::new(ClientEnrollPayload {
         command: CommandContext {
             expected_revision: 0,
@@ -392,7 +385,6 @@ async fn enroll_device(address: std::net::SocketAddr) -> (String, String, String
     let (status, body) = post_exchange(
         address,
         &exchange_request(&[frame(FRESH_NODE, ENROLL_INSTANCE, 1, enroll)], 0),
-        None,
     )
     .await;
     assert!(status.starts_with("HTTP/1.1 200"), "{status}");
@@ -406,11 +398,7 @@ async fn enroll_device(address: std::net::SocketAddr) -> (String, String, String
         .as_str()
         .expect("public client id")
         .to_owned();
-    let credential = enrollment["deviceCredential"]
-        .as_str()
-        .expect("credential")
-        .to_owned();
-    (node, public_client_id, credential)
+    (node, public_client_id)
 }
 
 async fn walk_hello(
@@ -418,7 +406,6 @@ async fn walk_hello(
     data_directory: &Path,
     node: &str,
     instance: &str,
-    credential: &str,
 ) {
     let hello = ClientToServerMessage::Hello(ClientHelloPayload {
         client_version: "0.1.0-alpha.1".to_owned(),
@@ -434,7 +421,6 @@ async fn walk_hello(
             &[frame(node, instance, sequence, hello)],
             downlink_ack_cursor(data_directory, node),
         ),
-        Some(credential),
     )
     .await;
     assert!(status.starts_with("HTTP/1.1 200"), "{status}");
@@ -447,10 +433,10 @@ async fn walk_hello(
 async fn enroll_online_device(
     address: std::net::SocketAddr,
     data_directory: &Path,
-) -> (String, String, String) {
-    let (node, public_client_id, credential) = enroll_device(address).await;
-    walk_hello(address, data_directory, &node, DEVICE_INSTANCE, &credential).await;
-    (node, public_client_id, credential)
+) -> (String, String) {
+    let (node, public_client_id) = enroll_device(address).await;
+    walk_hello(address, data_directory, &node, DEVICE_INSTANCE).await;
+    (node, public_client_id)
 }
 
 fn publish_connect_code(data_directory: &Path, node: &str, code: &str) -> String {
@@ -619,7 +605,6 @@ async fn send_retained(
     address: std::net::SocketAddr,
     data_directory: &Path,
     node: &str,
-    credential: &str,
     lease_id: &str,
     token: u64,
     mirror_revision: u64,
@@ -652,7 +637,6 @@ async fn send_retained(
             &[frame(node, DEVICE_INSTANCE, sequence, retained.clone())],
             downlink_ack_cursor(data_directory, node),
         ),
-        Some(credential),
     )
     .await;
     assert!(status.starts_with("HTTP/1.1 200"), "{status}");
@@ -664,7 +648,6 @@ async fn send_apply_result(
     address: std::net::SocketAddr,
     data_directory: &Path,
     node: &str,
-    credential: &str,
     lease_id: &str,
     token: u64,
     receipt_id: &str,
@@ -702,7 +685,6 @@ async fn send_apply_result(
             &[frame(node, DEVICE_INSTANCE, sequence, apply_result)],
             downlink_ack_cursor(data_directory, node),
         ),
-        Some(credential),
     )
     .await;
     assert!(status.starts_with("HTTP/1.1 200"), "{status}");
@@ -735,7 +717,6 @@ fn spawn_candidate_responder(
     data_directory: PathBuf,
     address: std::net::SocketAddr,
     node: String,
-    credential: String,
     mut inbox_ack: u64,
     mut next_sequence: u64,
     verdict: ApplyVerdict,
@@ -833,7 +814,7 @@ fn spawn_candidate_responder(
                     stored.sequence,
                 );
                 next_sequence += 1;
-                let (status, _) = post_exchange(address, &request, Some(&credential)).await;
+                let (status, _) = post_exchange(address, &request).await;
                 assert!(status.starts_with("HTTP/1.1 200"), "{status}");
             }
         }
@@ -959,7 +940,7 @@ async fn retained_frames_project_into_the_dual_authorized_list() {
     let running = start_server(&data_directory, &auth_directory).await;
     let address = running.local_address();
     let (owner_cookie, owner_id) = initialize_and_login_owner(address).await;
-    let (node, public_client_id, credential) = enroll_online_device(address, &data_directory).await;
+    let (node, public_client_id) = enroll_online_device(address, &data_directory).await;
     consume_code_as(
         &data_directory,
         &node,
@@ -986,7 +967,6 @@ async fn retained_frames_project_into_the_dual_authorized_list() {
         address,
         &data_directory,
         &node,
-        &credential,
         "ocl_test",
         1,
         1,
@@ -998,7 +978,6 @@ async fn retained_frames_project_into_the_dual_authorized_list() {
         address,
         &data_directory,
         &node,
-        &credential,
         "ocl_test",
         1,
         1,
@@ -1047,7 +1026,6 @@ async fn retained_frames_project_into_the_dual_authorized_list() {
             )],
             downlink_ack_cursor(&data_directory, &node),
         ),
-        Some(&credential),
     )
     .await;
     assert!(status.starts_with("HTTP/1.1 200"), "{status}");
@@ -1090,7 +1068,7 @@ async fn branch_chain_runs_http_downlink_device_ack_and_is_idempotent() {
     let address = running.local_address();
     let (owner_cookie, owner_id) = initialize_and_login_owner(address).await;
 
-    let (node, public_client_id, credential) = enroll_online_device(address, &data_directory).await;
+    let (node, public_client_id) = enroll_online_device(address, &data_directory).await;
     consume_code_as(
         &data_directory,
         &node,
@@ -1104,7 +1082,6 @@ async fn branch_chain_runs_http_downlink_device_ack_and_is_idempotent() {
         address,
         &data_directory,
         &node,
-        &credential,
         &lease_id,
         token,
         1,
@@ -1117,7 +1094,6 @@ async fn branch_chain_runs_http_downlink_device_ack_and_is_idempotent() {
         data_directory.clone(),
         address,
         node.clone(),
-        credential,
         downlink_ack_cursor(&data_directory, &node),
         next_client_sequence(&data_directory, &node),
         ApplyVerdict::BranchCreated,
@@ -1208,7 +1184,7 @@ async fn apply_chain_settles_both_outcomes_and_repeats_the_original_receipt() {
     let address = running.local_address();
     let (owner_cookie, owner_id) = initialize_and_login_owner(address).await;
 
-    let (node, public_client_id, credential) = enroll_online_device(address, &data_directory).await;
+    let (node, public_client_id) = enroll_online_device(address, &data_directory).await;
     consume_code_as(
         &data_directory,
         &node,
@@ -1223,7 +1199,6 @@ async fn apply_chain_settles_both_outcomes_and_repeats_the_original_receipt() {
         address,
         &data_directory,
         &node,
-        &credential,
         &lease_id,
         token,
         1,
@@ -1235,7 +1210,6 @@ async fn apply_chain_settles_both_outcomes_and_repeats_the_original_receipt() {
         address,
         &data_directory,
         &node,
-        &credential,
         &lease_id,
         token,
         1,
@@ -1248,7 +1222,6 @@ async fn apply_chain_settles_both_outcomes_and_repeats_the_original_receipt() {
         data_directory.clone(),
         address,
         node.clone(),
-        credential.clone(),
         downlink_ack_cursor(&data_directory, &node),
         next_client_sequence(&data_directory, &node),
         ApplyVerdict::Applied,
@@ -1320,7 +1293,6 @@ async fn apply_chain_settles_both_outcomes_and_repeats_the_original_receipt() {
         data_directory.clone(),
         address,
         node.clone(),
-        credential,
         downlink_ack_cursor(&data_directory, &node),
         next_client_sequence(&data_directory, &node),
         ApplyVerdict::BaseStale,
@@ -1370,8 +1342,7 @@ async fn superseded_apply_tickets_are_refused_and_the_current_token_settles() {
     let address = running.local_address();
     let (_owner_cookie, owner_id) = initialize_and_login_owner(address).await;
 
-    let (node, _public_client_id, credential) =
-        enroll_online_device(address, &data_directory).await;
+    let (node, _public_client_id) = enroll_online_device(address, &data_directory).await;
     consume_code_as(
         &data_directory,
         &node,
@@ -1385,7 +1356,6 @@ async fn superseded_apply_tickets_are_refused_and_the_current_token_settles() {
         address,
         &data_directory,
         &node,
-        &credential,
         &first_lease,
         first_token,
         1,
@@ -1402,7 +1372,6 @@ async fn superseded_apply_tickets_are_refused_and_the_current_token_settles() {
         address,
         &data_directory,
         &node,
-        &credential,
         &first_lease,
         first_token,
         &fresh_receipt_id("lar_"),
@@ -1426,7 +1395,6 @@ async fn superseded_apply_tickets_are_refused_and_the_current_token_settles() {
         address,
         &data_directory,
         &node,
-        &credential,
         &second_lease,
         second_token - 1,
         &fresh_receipt_id("lar_"),
@@ -1445,7 +1413,6 @@ async fn superseded_apply_tickets_are_refused_and_the_current_token_settles() {
         address,
         &data_directory,
         &node,
-        &credential,
         &second_lease,
         second_token,
         &fresh_receipt_id("lar_"),
@@ -1478,7 +1445,7 @@ async fn discard_settles_terminal_and_idempotent() {
     let address = running.local_address();
     let (owner_cookie, owner_id) = initialize_and_login_owner(address).await;
 
-    let (node, public_client_id, credential) = enroll_online_device(address, &data_directory).await;
+    let (node, public_client_id) = enroll_online_device(address, &data_directory).await;
     consume_code_as(
         &data_directory,
         &node,
@@ -1492,7 +1459,6 @@ async fn discard_settles_terminal_and_idempotent() {
         address,
         &data_directory,
         &node,
-        &credential,
         &lease_id,
         token,
         1,
@@ -1566,7 +1532,7 @@ async fn branch_and_apply_require_the_dual_authorization() {
     let running = start_server(&data_directory, &auth_directory).await;
     let address = running.local_address();
     let (owner_cookie, owner_id) = initialize_and_login_owner(address).await;
-    let (node, public_client_id, credential) = enroll_online_device(address, &data_directory).await;
+    let (node, public_client_id) = enroll_online_device(address, &data_directory).await;
     consume_code_as(
         &data_directory,
         &node,
@@ -1582,7 +1548,6 @@ async fn branch_and_apply_require_the_dual_authorization() {
         address,
         &data_directory,
         &node,
-        &credential,
         &lease_id,
         token,
         1,
@@ -1594,7 +1559,6 @@ async fn branch_and_apply_require_the_dual_authorization() {
         address,
         &data_directory,
         &node,
-        &credential,
         &lease_id,
         token,
         1,

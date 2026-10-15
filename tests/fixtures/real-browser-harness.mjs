@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import { spawn, spawnSync } from 'node:child_process'
-import { existsSync, readFileSync, writeFileSync } from 'node:fs'
-import { createServer } from 'node:https'
+import { existsSync, readFileSync } from 'node:fs'
+import { createServer } from 'node:http'
 import { createServer as createNetServer } from 'node:net'
 import { normalize, resolve } from 'node:path'
 
@@ -108,29 +108,6 @@ export function command(root, name, args) {
   assert.equal(result.status, 0, `${name} failed:\n${result.stdout}${result.stderr}`)
 }
 
-export function certificate(root, directory) {
-  const configuration = resolve(directory, 'openssl.cnf')
-  const key = resolve(directory, 'fixture-key.pem')
-  const cert = resolve(directory, 'fixture-cert.pem')
-  writeFileSync(configuration, `[req]
-distinguished_name = dn
-x509_extensions = extensions
-prompt = no
-[dn]
-CN = control.localhost
-[extensions]
-subjectAltName = @names
-[names]
-DNS.1 = control.localhost
-DNS.2 = client.localhost
-`)
-  command(root, 'openssl', [
-    'req', '-x509', '-newkey', 'rsa:2048', '-nodes', '-sha256', '-days', '1',
-    '-config', configuration, '-keyout', key, '-out', cert,
-  ])
-  return { key, cert }
-}
-
 export async function listen(server, port = 0) {
   await new Promise((resolvePromise, reject) => {
     server.once('error', reject)
@@ -199,7 +176,7 @@ function signalChild(child, signal) {
   child.kill(signal)
 }
 
-export function staticClientServer({ root, certificateFiles, fixturePath, configuration }) {
+export function staticClientServer({ root, fixturePath, configuration }) {
   const moduleRoot = resolve(root, 'apps/client/dist/module')
   const browserCoreRoot = resolve(root, 'packages/browser-core/dist')
   const browserUiRoot = resolve(root, 'packages/browser-ui/dist')
@@ -215,11 +192,8 @@ export function staticClientServer({ root, certificateFiles, fixturePath, config
       /<script type="module" src="\.\/assets\/client\.js"><\/script>/u,
       `<script type="module" src="/fixture/${fixturePath.split('/').at(-1)}"></script>`,
     )
-  return createServer({
-    key: readFileSync(certificateFiles.key),
-    cert: readFileSync(certificateFiles.cert),
-  }, (request, response) => {
-    const path = new URL(request.url, 'https://client.localhost').pathname
+  return createServer((request, response) => {
+    const path = new URL(request.url, 'http://127.0.0.1').pathname
     if (path === '/') {
       response.writeHead(200, {
         'Content-Type': 'text/html; charset=utf-8',
@@ -319,21 +293,16 @@ export function staticClientServer({ root, certificateFiles, fixturePath, config
 
 export function startStandaloneServer({
   root,
-  certificateFiles,
   clientOrigin,
   controlPort,
   directory,
   proof,
   errors,
-  actionSigningKeyHex,
   checkoutRevision,
-  helperExecutable,
-  helperReleaseManifest,
   repositoryRoot,
   serverBinary,
-  sourceRoot,
 }) {
-  const controlUrl = `https://control.localhost:${String(controlPort)}`
+  const controlUrl = `http://127.0.0.1:${String(controlPort)}`
   const child = spawn(serverBinary, [], {
     cwd: root,
     detached: process.platform !== 'win32',
@@ -345,12 +314,7 @@ export function startStandaloneServer({
       WWC_SERVER_ALLOWED_ORIGINS: clientOrigin,
       WWC_SERVER_BOOTSTRAP_PROOF: proof,
       WWC_SERVER_REPOSITORY_ROOT: repositoryRoot,
-      WWC_SERVER_SOURCE_ROOT: sourceRoot,
       WWC_SERVER_CHECKOUT_REVISION: checkoutRevision,
-      WWC_SERVER_HELPER_EXECUTABLE: helperExecutable,
-      WWC_SERVER_HELPER_RELEASE_MANIFEST: helperReleaseManifest,
-      WWC_SERVER_ACTION_SIGNING_KEY_HEX: actionSigningKeyHex,
-      WWC_SERVER_MODEL_CREDENTIAL_REFERENCE_ID: 'crd_01J00000000000000000000001',
       WWC_SERVER_ORGANIZATION_ID: 'org_01J00000000000000000000000',
       WWC_SERVER_WORKSPACE_ID: 'wsp_01J00000000000000000000000',
       WWC_SERVER_PROJECT_ID: 'prj_01J00000000000000000000000',
@@ -362,8 +326,6 @@ export function startStandaloneServer({
       PUBLICATION_REQUESTERS: 'usr_01J00000000000000000000000',
       PUBLICATION_APPROVERS: 'usr_01J00000000000000000000000',
       PUBLICATION_APPROVAL_MAX_AGE_MILLIS: '86400000',
-      WWC_SERVER_TLS_CERTIFICATE: certificateFiles.cert,
-      WWC_SERVER_TLS_PRIVATE_KEY: certificateFiles.key,
       GIT_CONFIG_NOSYSTEM: '1',
     },
     stdio: ['ignore', 'pipe', 'pipe'],
@@ -382,7 +344,7 @@ export async function waitForServer(controlUrl, child, errors) {
     assert.equal(child.exitCode, null, `standalone Server exited:\n${errors.join('')}`)
     const response = spawnSync(
       'curl',
-      ['-ksS', '--noproxy', '*', `https://127.0.0.1:${port}/health`],
+      ['-sS', '--noproxy', '*', `http://127.0.0.1:${port}/health`],
       { encoding: 'utf8' },
     )
     if (response.status === 0 && JSON.parse(response.stdout).status === 'ready') return
@@ -441,7 +403,6 @@ export class DevTools {
     const chrome = spawn(chromePath, [
       '--headless=new',
       '--disable-gpu',
-      '--ignore-certificate-errors',
       '--no-first-run',
       '--no-default-browser-check',
       `--remote-debugging-port=${String(debugPort)}`,

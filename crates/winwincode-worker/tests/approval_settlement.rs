@@ -128,14 +128,21 @@ impl Fixture {
         let helper = test_helper_path::kernel_helper_path();
         let configuration = ProductionCodexConfig::try_new(ProductionCodexOptions {
             data_directory: self.0.join("worker"),
-            helper_release_manifest: winwincode_codex::HelperReleaseManifest::from_test_helper(&helper).unwrap(),
+
             helper_executable: helper,
-            provider: "winwincode-loopback".into(), model: "loopback-model".into(),
-            gateway_route: wire::ModelGatewayRoute { capability: "reasoning".into(), route: "embedded-canonical-loopback".into() },
-            registered_capabilities: config.capabilities.clone(), discovered_capabilities: Vec::new(),
-            action_signing_key: winwincode_execution_port::action_enforcement::ActionEnforcementSigningKey::from_bytes([31; 32]).unwrap(),
-            execution_mode: mode, observer_mode: winwincode_codex::ObserverMode::Off,
-        }).unwrap();
+            provider: Some("winwincode-loopback".into()),
+            model: Some("loopback-model".into()),
+            gateway_route: wire::ModelGatewayRoute {
+                capability: "reasoning".into(),
+                route: "embedded-canonical-loopback".into(),
+            },
+            registered_capabilities: config.capabilities.clone(),
+            discovered_capabilities: Vec::new(),
+
+            execution_mode: mode,
+            observer_mode: winwincode_codex::ObserverMode::Off,
+        })
+        .unwrap();
         let configuration = if hosted {
             configuration.with_host_action_approvals()
         } else {

@@ -313,11 +313,6 @@ impl LocalDeliveryAuthority {
                 "failed to resolve the configured Delivery repository: {error}"
             ))
         })?;
-        if !repository_root.join(".git").exists() {
-            return Err(LocalDeliveryAdapterError::new(
-                "configured Delivery repository is not a Git worktree",
-            ));
-        }
         let repository_source_root = data_directory.join("delivery-sources");
         let repository_locator = portable_repository_locator(&repository_root)?;
         let storage = SqliteStorage::open(data_directory).map_err(|error| {

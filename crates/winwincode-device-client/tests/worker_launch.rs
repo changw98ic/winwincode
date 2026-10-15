@@ -10,7 +10,6 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use serde_json::Value;
-use sha2::{Digest, Sha256};
 use winwincode_client_port::domain::{
     ClientArchitecture, ClientCapacityReport, ClientOccupancyForceFenceReason,
     ClientPlatformTarget, ClientWorkerStopReason, WorkerLaunchGrant, WorkerLaunchGrantState,
@@ -23,9 +22,9 @@ use winwincode_client_port::messages::{
 use winwincode_device_client::{
     DaemonConfig, DeviceDaemon, DeviceIdentitySeed, DeviceStore, ExchangeRequest, ExchangeResponse,
     ExchangeTransport, ExchangeTransportError, IdentityRecord, IssuedEnrollment, SessionSupervisor,
-    SupervisorConfig, WORKER_STATE_RUNNING, WorkerCredentialIssuance, WorkerLaunchDirectories,
-    WorkerLaunchMaterialSource, WorkerProcessRecord, WorkerStopIntentRecord, adopt_enrollment,
-    ensure_device_identity, load_device_identity,
+    SupervisorConfig, WORKER_STATE_RUNNING, WorkerLaunchDirectories, WorkerLaunchMaterialSource,
+    WorkerProcessRecord, WorkerStopIntentRecord, adopt_enrollment, ensure_device_identity,
+    load_device_identity,
 };
 
 static NEXT_TEMP_DIRECTORY: AtomicU64 = AtomicU64::new(1);
@@ -53,34 +52,18 @@ fn seed() -> DeviceIdentitySeed {
 
 const ASSIGNED_NODE: &str = "cnd_A1A1A1A1A1A1A1A1A1A1A1A1A1";
 const ASSIGNED_PUBLIC_CLIENT_ID: &str = "0123456789";
-const ISSUED_SECRET: [u8; 32] = [0x5d; 32];
 const STAMP: &str = "2026-09-04T00:00:00.000Z";
 const LEASE: &str = "ocl_AAAAAAAAAAAAAAAAAAAAAAAAAA";
 const CLAIM: &str = "ocq_CCCCCCCCCCCCCCCCCCCCCCCCCC";
 const HOLDER: &str = "usr_HOLDER0000000000000000000";
-const ORIGIN: &str = "https://127.0.0.1:8443";
+const ORIGIN: &str = "http://127.0.0.1:8443";
 const GRANT: &str = "wlg_TESTGRANT000000000000001";
 const WORKER_SESSION: &str = "wsn_TESTSESSION00000000000001";
 const WORKER_ID: &str = "wrk_TESTWORKER0000000000001";
 const WORKER_INSTANCE: &str = "wki_TESTINSTANCE00000000001";
-const WORKER_CREDENTIAL: &str = "wsc-launch-test-material";
 const BINDING: &str = "rbd_TESTBINDING00000000000001";
 const PRODUCT_SESSION: &str = "ps_TESTPRODUCT000000000000001";
 const WORK_RUN: &str = "wrn_01J00000000000000000000001";
-
-fn worker_credential_digest() -> String {
-    format!("sha256:{:x}", Sha256::digest(ISSUED_SECRET))
-}
-
-fn issued_credential_material() -> String {
-    const HEX: &[u8; 16] = b"0123456789abcdef";
-    let mut encoded = String::with_capacity(ISSUED_SECRET.len() * 2);
-    for byte in ISSUED_SECRET {
-        encoded.push(char::from(HEX[usize::from(byte >> 4)]));
-        encoded.push(char::from(HEX[usize::from(byte & 0x0f)]));
-    }
-    encoded
-}
 
 fn open_enrolled(root: &Path) -> (DeviceStore, IdentityRecord) {
     let mut store = DeviceStore::open(root).expect("device store should open");
@@ -97,8 +80,6 @@ fn open_enrolled(root: &Path) -> (DeviceStore, IdentityRecord) {
         &IssuedEnrollment {
             client_node_id: ASSIGNED_NODE.to_owned(),
             public_client_id: ASSIGNED_PUBLIC_CLIENT_ID.to_owned(),
-            credential_material: issued_credential_material(),
-            credential_digest: worker_credential_digest(),
         },
         STAMP,
     )
@@ -123,7 +104,7 @@ struct ServerState {
 
 struct ServerSim {
     state: Mutex<ServerState>,
-    downlink: Mutex<VecDeque<(Vec<Value>, Vec<WorkerCredentialIssuance>)>>,
+    downlink: Mutex<VecDeque<Vec<Value>>>,
     next_sequence: AtomicU64,
 }
 
@@ -137,14 +118,6 @@ impl ServerSim {
     }
 
     fn queue_downlink(&self, message: ServerToClientMessage) -> ServerToClientEnvelope {
-        self.queue_downlink_with_credentials(message, Vec::new())
-    }
-
-    fn queue_downlink_with_credentials(
-        &self,
-        message: ServerToClientMessage,
-        credentials: Vec<WorkerCredentialIssuance>,
-    ) -> ServerToClientEnvelope {
         let sequence = self.next_sequence.fetch_add(1, Ordering::Relaxed);
         let envelope = ServerToClientEnvelope {
             schema_version: CLIENT_CONTROL_PORT_SCHEMA_VERSION.to_owned(),
@@ -155,20 +128,16 @@ impl ServerSim {
             occurred_at: STAMP.to_owned(),
             message,
         };
-        self.queue_downlink_envelope(&envelope, credentials);
+        self.queue_downlink_envelope(&envelope);
         envelope
     }
 
-    fn queue_downlink_envelope(
-        &self,
-        envelope: &ServerToClientEnvelope,
-        credentials: Vec<WorkerCredentialIssuance>,
-    ) {
+    fn queue_downlink_envelope(&self, envelope: &ServerToClientEnvelope) {
         let frame = serde_json::to_value(envelope).expect("downlink frame value");
         self.downlink
             .lock()
             .expect("downlink lock")
-            .push_back((vec![frame], credentials));
+            .push_back(vec![frame]);
     }
 
     fn frames_with_kind(&self, kind: &str) -> Vec<SimFrame> {
@@ -184,14 +153,10 @@ impl ServerSim {
 }
 
 impl ExchangeTransport for ServerSim {
-    fn exchange(
-        &self,
-        _credential: Option<&str>,
-        request_bytes: &[u8],
-    ) -> Result<Vec<u8>, ExchangeTransportError> {
+    fn exchange(&self, request_bytes: &[u8]) -> Result<Vec<u8>, ExchangeTransportError> {
         let request: ExchangeRequest = serde_json::from_slice(request_bytes)
             .map_err(|error| ExchangeTransportError::new(format!("fake decode: {error}")))?;
-        let (ack, frames, worker_credentials) = {
+        let (ack, frames) = {
             let mut state = self.state.lock().expect("server sim lock");
             for frame in &request.frames {
                 let kind = frame
@@ -215,13 +180,13 @@ impl ExchangeTransport for ServerSim {
                 ack = next;
                 next += 1;
             }
-            let (frames, worker_credentials) = self
+            let frames = self
                 .downlink
                 .lock()
                 .expect("downlink lock")
                 .pop_front()
                 .unwrap_or_default();
-            (ack, frames, worker_credentials)
+            (ack, frames)
         };
         let response = ExchangeResponse {
             schema_version: CLIENT_CONTROL_PORT_SCHEMA_VERSION.to_owned(),
@@ -229,7 +194,6 @@ impl ExchangeTransport for ServerSim {
             replay_from_sequence: None,
             frames,
             enrollment: None,
-            worker_credentials,
         };
         serde_json::to_vec(&response)
             .map_err(|error| ExchangeTransportError::new(format!("fake encode: {error}")))
@@ -279,34 +243,18 @@ fn write_executable_script(path: &Path, body: &str) {
 }
 
 struct FixedMaterial {
-    credential: Mutex<Option<String>>,
     directories: Mutex<Option<WorkerLaunchDirectories>>,
 }
 
 impl FixedMaterial {
     fn new(directories: WorkerLaunchDirectories) -> Self {
         Self {
-            credential: Mutex::new(Some(WORKER_CREDENTIAL.to_owned())),
-            directories: Mutex::new(Some(directories)),
-        }
-    }
-
-    fn without_credential(directories: WorkerLaunchDirectories) -> Self {
-        Self {
-            credential: Mutex::new(None),
             directories: Mutex::new(Some(directories)),
         }
     }
 }
 
 impl WorkerLaunchMaterialSource for FixedMaterial {
-    fn worker_credential(&self, credential_digest: &str) -> Option<String> {
-        if credential_digest != worker_credential_digest() {
-            return None;
-        }
-        self.credential.lock().expect("credential lock").clone()
-    }
-
     fn launch_directories(
         &self,
         worker_session_id: &str,
@@ -400,7 +348,6 @@ fn grant(client_instance_id: &str, lease: &str, token: u64) -> WorkerLaunchGrant
         worker_session_id: WORKER_SESSION.to_owned(),
         worker_id: WORKER_ID.to_owned(),
         worker_instance_id: WORKER_INSTANCE.to_owned(),
-        credential_digest: worker_credential_digest(),
         expires_at: "2100-01-01T00:00:00.000Z".to_owned(),
         state: WorkerLaunchGrantState::Issued,
         revision: 1,
@@ -579,20 +526,12 @@ fn launch_command_spawns_the_worker_and_answers_the_grant_ack() {
 
     let directories = lane.directories();
     wait_for_ready_marker(&directories.data_directory);
-    for private in ["managed-session.json", "worker-credential"] {
-        let mode = fs::metadata(directories.data_directory.join(private))
-            .expect("private file metadata")
-            .permissions()
-            .mode()
-            & 0o777;
-        assert_eq!(mode, 0o600, "{private} must be mode 0600");
-    }
-    assert_eq!(
-        fs::read_to_string(directories.data_directory.join("worker-credential"))
-            .expect("credential read"),
-        WORKER_CREDENTIAL,
-        "the one-time material crossed to the credential file"
-    );
+    let mode = fs::metadata(directories.data_directory.join("managed-session.json"))
+        .expect("managed config metadata")
+        .permissions()
+        .mode()
+        & 0o777;
+    assert_eq!(mode, 0o600, "managed-session.json must be mode 0600");
 
     daemon.into_store().close().expect("store close");
     drop(lane);
@@ -807,7 +746,7 @@ fn initial_worker_stop_without_supervisor_retries_the_same_envelope() {
 
     let lane = WorkerLane::open(&root, identity.current_instance_id(), "unknown");
     daemon.set_worker_supervisor(lane.supervisor.clone());
-    sim.queue_downlink_envelope(&stop_envelope, Vec::new());
+    sim.queue_downlink_envelope(&stop_envelope);
     drive_until(&mut daemon, |daemon| {
         daemon.status().downlink_accepted_through == 2
     });
@@ -972,7 +911,7 @@ fn a_stale_launch_stamp_is_refused_without_touching_the_device() {
         !lane
             .directories()
             .data_directory
-            .join("worker-credential")
+            .join("managed-session.json")
             .exists(),
         "a refused launch writes no private files"
     );
@@ -984,7 +923,7 @@ fn a_stale_launch_stamp_is_refused_without_touching_the_device() {
 
 #[test]
 #[allow(clippy::too_many_lines)]
-fn a_launch_bound_to_another_instance_or_exchange_credential() {
+fn launch_rejects_another_instance_and_accepts_the_current_instance() {
     let root = temporary_directory("launch-binding");
     let sim = Arc::new(ServerSim::new());
     let (store, identity) = open_enrolled(&root);
@@ -993,7 +932,7 @@ fn a_launch_bound_to_another_instance_or_exchange_credential() {
         .expect("daemon should start enrolled");
     let lane = WorkerLane::open(&root, &instance_id, "binding");
     daemon.set_worker_supervisor(lane.supervisor.clone());
-    let material = Arc::new(FixedMaterial::without_credential(lane.directories()));
+    let material = Arc::new(FixedMaterial::new(lane.directories()));
     daemon.set_worker_launch_material_source(material);
 
     sim.queue_downlink(offer(LEASE, 7));
@@ -1007,18 +946,10 @@ fn a_launch_bound_to_another_instance_or_exchange_credential() {
         daemon.status().worker_launches_rejected == 1
     });
 
-    sim.queue_downlink_with_credentials(
-        launch(
-            occupancy_stamp(1, "srv-launch", LEASE, 7),
-            grant(&instance_id, LEASE, 7),
-        ),
-        vec![WorkerCredentialIssuance {
-            worker_launch_grant_id: GRANT.to_owned(),
-            worker_session_id: WORKER_SESSION.to_owned(),
-            credential_digest: worker_credential_digest(),
-            worker_credential: issued_credential_material(),
-        }],
-    );
+    sim.queue_downlink(launch(
+        occupancy_stamp(1, "srv-launch", LEASE, 7),
+        grant(&instance_id, LEASE, 7),
+    ));
     drive_until(&mut daemon, |daemon| {
         daemon.status().worker_launches_accepted == 1 && settled(daemon)
     });
@@ -1035,18 +966,6 @@ fn a_launch_bound_to_another_instance_or_exchange_credential() {
     assert_eq!(acks[1]["status"], json_str("accepted"));
     let directories = lane.directories();
     wait_for_ready_marker(&directories.data_directory);
-    let credential_path = directories.data_directory.join("worker-credential");
-    assert_eq!(
-        fs::read_to_string(&credential_path).expect("credential read"),
-        issued_credential_material(),
-        "the launch-response credential lands in the 0600 credential file"
-    );
-    assert_eq!(file_mode(&credential_path), 0o600);
-    let unknown = daemon
-        .receive_worker_credential("sha256:unknown", WORKER_CREDENTIAL)
-        .expect("unknown delivery");
-    assert!(!unknown);
-
     assert!(
         lane.supervisor
             .worker_process(WORKER_SESSION)
@@ -1177,11 +1096,6 @@ fn the_written_config_is_accepted_by_the_real_worker_entry_reader() {
     assert_eq!(config.worker_instance_id.0, WORKER_INSTANCE);
     assert_eq!(config.source_directory, directories.source_directory);
     assert_eq!(config.data_directory, directories.data_directory);
-    assert_eq!(config.server_origin, ORIGIN);
-    assert_eq!(
-        config.worker_credential_path,
-        directories.data_directory.join("worker-credential")
-    );
 
     daemon.into_store().close().expect("store close");
     drop(lane);
@@ -1190,14 +1104,6 @@ fn the_written_config_is_accepted_by_the_real_worker_entry_reader() {
 
 fn json_str(value: &str) -> Value {
     Value::String(value.to_owned())
-}
-
-fn file_mode(path: &Path) -> u32 {
-    fs::metadata(path)
-        .expect("file metadata")
-        .permissions()
-        .mode()
-        & 0o777
 }
 
 #[test]

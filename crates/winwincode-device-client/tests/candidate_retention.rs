@@ -8,7 +8,6 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use serde_json::Value;
-use sha2::{Digest, Sha256};
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 use winwincode_client_port::domain::{
@@ -60,7 +59,6 @@ fn seed() -> DeviceIdentitySeed {
 
 const ASSIGNED_NODE: &str = "cnd_B2B2B2B2B2B2B2B2B2B2B2B2B2";
 const ASSIGNED_PUBLIC_CLIENT_ID: &str = "0123456789";
-const ISSUED_SECRET: [u8; 32] = [0x5d; 32];
 const STAMP: &str = "2026-09-04T00:00:00.000Z";
 const MID_STAMP: &str = "2026-09-04T01:00:00.000Z";
 const NEW_STAMP: &str = "2026-09-04T02:00:00.000Z";
@@ -72,20 +70,6 @@ const FOREIGN_BINDING: &str = "rbd_FOREIGNBINDING000000000000000";
 const UNMAPPED_BINDING: &str = "rbd_UNMAPPEDBINDING0000000000000";
 const SESSION: &str = "wks_RETENTIONSESSION00000000000000";
 const SLUG: &str = "fix-login";
-
-fn issued_credential_material() -> String {
-    const HEX: &[u8; 16] = b"0123456789abcdef";
-    let mut encoded = String::with_capacity(ISSUED_SECRET.len() * 2);
-    for byte in ISSUED_SECRET {
-        encoded.push(HEX[usize::from(byte >> 4)] as char);
-        encoded.push(HEX[usize::from(byte & 0x0f)] as char);
-    }
-    encoded
-}
-
-fn issued_credential_digest() -> String {
-    format!("sha256:{:x}", Sha256::digest(ISSUED_SECRET))
-}
 
 fn open_enrolled(root: &Path) -> (DeviceStore, IdentityRecord) {
     let mut store = DeviceStore::open(root).expect("device store should open");
@@ -102,8 +86,6 @@ fn open_enrolled(root: &Path) -> (DeviceStore, IdentityRecord) {
         &IssuedEnrollment {
             client_node_id: ASSIGNED_NODE.to_owned(),
             public_client_id: ASSIGNED_PUBLIC_CLIENT_ID.to_owned(),
-            credential_material: issued_credential_material(),
-            credential_digest: issued_credential_digest(),
         },
         STAMP,
     )
@@ -125,11 +107,7 @@ fn open_resumed(root: &Path) -> (DeviceStore, IdentityRecord) {
 struct NeverTransport;
 
 impl ExchangeTransport for NeverTransport {
-    fn exchange(
-        &self,
-        _credential: Option<&str>,
-        _request_bytes: &[u8],
-    ) -> Result<Vec<u8>, ExchangeTransportError> {
+    fn exchange(&self, _request_bytes: &[u8]) -> Result<Vec<u8>, ExchangeTransportError> {
         Err(ExchangeTransportError::new(
             "the retention suite must not exchange on its own",
         ))

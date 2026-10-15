@@ -330,8 +330,6 @@ mod tests {
         identity
     }
 
-    const DIGEST: &str = "sha256:00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff";
-
     fn seed_fixture(storage: &mut SqliteStorage, seed: u64) -> (String, String, u64, String) {
         let node = format!("cnd_{}", suffix(seed));
         let holder = format!("usr_{}", suffix(seed + 1));
@@ -343,7 +341,6 @@ mod tests {
                 "aarch64-apple-darwin",
                 "aarch64",
                 "1.2.3",
-                None,
                 Some(format!("cix_{}", suffix(seed + 2))),
                 4,
             )
@@ -458,7 +455,6 @@ mod tests {
             format!("wsn_{}", suffix(seed + 8)),
             format!("wrk_{}", suffix(seed + 9)),
             format!("wki_{}", suffix(seed + 10)),
-            DIGEST,
             Some(format!("ps_{}", suffix(seed + 11))),
             Some(winwincode_domain::WorkRunId(format!(
                 "wrn_{}",
@@ -501,7 +497,6 @@ mod tests {
             format!("wsn_{}", suffix(6)),
             format!("wrk_{}", suffix(7)),
             format!("wki_{}", suffix(8)),
-            DIGEST,
             None,
             None,
             instant("2026-01-01T01:00:00.000Z"),
@@ -526,7 +521,6 @@ mod tests {
             format!("wsn_{}", suffix(26)),
             format!("wrk_{}", suffix(27)),
             format!("wki_{}", suffix(28)),
-            DIGEST,
             None,
             None,
             instant("2026-01-01T01:00:00.000Z"),

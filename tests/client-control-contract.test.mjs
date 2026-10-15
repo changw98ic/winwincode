@@ -112,7 +112,6 @@ function workerLaunchGrant() {
     workerSessionId: crockfordId('wsn'),
     workerId: crockfordId('wrk'),
     workerInstanceId: crockfordId('wki'),
-    credentialDigest: DIGEST,
     expiresAt: T1,
     state: 'issued',
     revision: 1,

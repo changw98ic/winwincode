@@ -31,10 +31,6 @@ fn instance_id(seed: u64) -> String {
     format!("cix_{seed:026}")
 }
 
-fn digest(seed: u64) -> String {
-    format!("sha256:{seed:064x}")
-}
-
 const T0: &str = "2026-01-01T00:00:00.000Z";
 const T1: &str = "2026-01-01T00:01:00.000Z";
 const T2: &str = "2026-01-01T00:02:00.000Z";
@@ -48,7 +44,6 @@ fn registration(seed: u64) -> ClientNodeRegistration {
         "aarch64-apple-darwin",
         "aarch64",
         "1.2.3",
-        Some(digest(seed)),
         Some(instance_id(seed)),
         4,
     )
@@ -74,10 +69,7 @@ fn registers_new_client_node_in_pending_enrollment_with_zeroed_cursors() {
     assert_eq!(record.platform, "aarch64-apple-darwin");
     assert_eq!(record.architecture, "aarch64");
     assert_eq!(record.client_version, "1.2.3");
-    assert_eq!(
-        record.device_credential_digest.as_deref(),
-        Some(digest(1).as_str())
-    );
+
     assert_eq!(
         record.current_instance_id.as_deref(),
         Some(instance_id(1).as_str())
@@ -120,7 +112,6 @@ fn refreshes_device_reported_projection_on_re_registration() {
         "x86_64-unknown-linux-gnu",
         "x86_64",
         "2.0.0",
-        None,
         Some("cix_99999999999999999999999999".to_owned()),
         8,
     )
@@ -133,7 +124,7 @@ fn refreshes_device_reported_projection_on_re_registration() {
     assert_eq!(second.record.platform, "x86_64-unknown-linux-gnu");
     assert_eq!(second.record.architecture, "x86_64");
     assert_eq!(second.record.client_version, "2.0.0");
-    assert_eq!(second.record.device_credential_digest, None);
+
     assert_eq!(
         second.record.current_instance_id.as_deref(),
         Some("cix_99999999999999999999999999")
@@ -163,7 +154,6 @@ fn rejects_public_client_id_rebinding_and_stale_revisions() {
         "aarch64-apple-darwin",
         "aarch64",
         "1.2.3",
-        None,
         None,
         2,
     )
@@ -429,7 +419,6 @@ fn rejects_malformed_registration_facts() {
         "aarch64",
         "1.2.3",
         None,
-        None,
         1,
     )
     .expect_err("non-canonical client node id must be rejected");
@@ -445,7 +434,6 @@ fn rejects_malformed_registration_facts() {
         "aarch64-apple-darwin",
         "aarch64",
         "1.2.3",
-        None,
         None,
         1,
     )
@@ -463,7 +451,6 @@ fn rejects_malformed_registration_facts() {
         "x86_64",
         "1.2.3",
         None,
-        None,
         1,
     )
     .expect_err("unsupported platform must be rejected");
@@ -480,7 +467,6 @@ fn rejects_malformed_registration_facts() {
         "aarch64",
         "one.two.three",
         None,
-        None,
         1,
     )
     .expect_err("non-semantic version must be rejected");
@@ -489,20 +475,6 @@ fn rejects_malformed_registration_facts() {
         ClientRegistryErrorKind::InvalidInput
     );
 
-    let invalid_digest = ClientNodeRegistration::try_new(
-        node_id(1),
-        "000000001",
-        "Device",
-        "aarch64-apple-darwin",
-        "aarch64",
-        "1.2.3",
-        Some("sha256:not-a-digest".to_owned()),
-        None,
-        1,
-    )
-    .expect_err("non-canonical credential digest must be rejected");
-    assert_eq!(invalid_digest.kind(), ClientRegistryErrorKind::InvalidInput);
-
     let invalid_capacity = ClientNodeRegistration::try_new(
         node_id(1),
         "000000001",
@@ -510,7 +482,6 @@ fn rejects_malformed_registration_facts() {
         "aarch64-apple-darwin",
         "aarch64",
         "1.2.3",
-        None,
         None,
         2000,
     )

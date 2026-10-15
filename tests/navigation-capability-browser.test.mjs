@@ -5,7 +5,6 @@ import { join, resolve } from 'node:path'
 import test from 'node:test'
 
 import {
-  certificate,
   chromeBinary,
   closeServer,
   command,
@@ -37,10 +36,8 @@ test('real Chrome projects personal, organization, disabled, and read-only navig
   assert.notEqual(chromePath, null, 'Chrome or Chromium is required for navigation validation')
   command(root, 'corepack', ['pnpm', '--filter', '@winwincode/client', 'build'])
   const directory = mkdtempSync(join(tmpdir(), 'winwincode-navigation-capability-'))
-  const certificateFiles = certificate(root, directory)
   const clientServer = staticClientServer({
     root,
-    certificateFiles,
     fixturePath: 'tests/fixtures/browser-navigation-capability.mjs',
     configuration: () => ({}),
   })
@@ -73,7 +70,7 @@ test('real Chrome projects personal, organization, disabled, and read-only navig
 
   async function navigate(mode) {
     await devtools.send('Page.navigate', {
-      url: `https://client.localhost:${String(clientPort)}/?mode=${mode}#/chat`,
+      url: `http://127.0.0.1:${String(clientPort)}/?mode=${mode}#/chat`,
     }, sessionId)
     await waitForMode(devtools, sessionId, mode)
     return evaluate(devtools, sessionId, 'globalThis.inspectNavigationCapability()')

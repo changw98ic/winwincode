@@ -2,8 +2,7 @@
 
 use serde::{Deserialize, Serialize};
 use winwincode_domain::{
-    Instant, OrganizationId, ProjectId, RepositoryId, Sha256Digest, WorkerId, WorkerInstanceId,
-    WorkspaceId,
+    Instant, OrganizationId, ProjectId, RepositoryId, WorkerId, WorkerInstanceId, WorkspaceId,
 };
 
 pub const EXECUTION_PROTOCOL_VERSION: &str = "winwincode/v1;usage=2";
@@ -96,14 +95,7 @@ pub struct WorkerManagementPage {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case", tag = "kind", deny_unknown_fields)]
 pub enum WorkerAuthenticationIdentity {
-    LocalEmbedded {
-        control_plane_principal: String,
-    },
-    TransportPrincipal {
-        issuer: String,
-        subject: String,
-        credential_fingerprint: Sha256Digest,
-    },
+    LocalEmbedded { control_plane_principal: String },
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]

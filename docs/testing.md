@@ -72,7 +72,7 @@ TypeScript 测试使用 Node.js 内置的 `node:test` 和 `node:assert/strict`�
 2. macOS 的 Google Chrome 或 Chromium 应用路径
 3. `PATH` 中的 `google-chrome` 或 `chromium`
 
-浏览器测试还需要 `openssl`。测试用它生成只在本次测试中使用的本地证书。
+浏览器测试的静态 Client 和产品 Server 使用本机 HTTP。Provider HTTPS 测试使用的证书由对应 fixture 生成。
 
 当前 `canonicalTestFiles` 包含以下真实浏览器测试：
 
@@ -122,7 +122,7 @@ CI 的 `test` 和 `e2e` lane 安装固定版本的 cargo-nextest。CI 因此不�
 cargo test --all-features --locked -p <package> --test <target>
 ```
 
-Worker 集成测试依赖 `winwincode-kernel-helper`。`pnpm test:rust` 会先构建该二进制，并由 `scripts/compact-kernel-helper.mjs` 处理 64 MiB 的认证镜像上限。直接运行 `pnpm test:rust:built` 或 Worker 定向测试前，必须先准备同一 `CARGO_TARGET_DIR` 下的 `debug/winwincode-kernel-helper`。CI 还把 `WWC_WORKER_HELPER_EXECUTABLE` 显式设为该路径。
+Worker 集成测试依赖 `winwincode-kernel-helper`。`pnpm test:rust` 会先构建该二进制。直接运行 `pnpm test:rust:built` 或 Worker 定向测试前，必须先准备同一 `CARGO_TARGET_DIR` 下的 `debug/winwincode-kernel-helper`。CI 还把 `WWC_WORKER_HELPER_EXECUTABLE` 显式设为该路径。
 
 ### 外置 `CARGO_TARGET_DIR`
 
@@ -195,7 +195,6 @@ node --experimental-test-module-mocks --test --test-concurrency=1 tests/<name>.t
 | `canonical TypeScript test is missing: <路径>` | 恢复文件，或同步 `canonicalTestFiles` |
 | `Chrome or Chromium is required ...` | 安装浏览器，或设置 `CHROME_BIN` |
 | helper 路径报 `ENOENT` | 使用 `pnpm test:rust`，或先在同一 `CARGO_TARGET_DIR` 构建 helper |
-| `Kernel helper exceeds the authenticated image limit` | 检查 release helper 的体积和 `scripts/compact-kernel-helper.mjs` |
 | `generated contract drift` | 运行 `pnpm contracts:generate`，审查并提交全部生成产物 |
 | API 会话验证的 source seal 失败 | 在同一 checkout 和目标目录先运行 `verify:api-production-vertical` |
 | 未安装 cargo-nextest | 本地脚本会回退到 `cargo test`；CI 仍使用 cargo-nextest |

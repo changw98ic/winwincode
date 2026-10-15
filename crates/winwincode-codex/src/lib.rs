@@ -11,7 +11,6 @@ pub use failure_diagnostic::CodexFailureDiagnostic;
 mod durable_fusion;
 pub use durable_fusion::FusionPanelFuture;
 pub mod fusion_provider;
-mod helper_release;
 mod judge_bridge;
 mod model_bridge;
 pub mod model_port_client;
@@ -57,7 +56,6 @@ pub use diagnostic_artifact_outbox::{
     DiagnosticArtifactAckOutcome, DiagnosticArtifactAuthority, DiagnosticArtifactUpload,
     RetainedDiagnosticArtifact,
 };
-pub use helper_release::{HelperReleaseManifest, HelperReleaseManifestError};
 pub use model_bridge::set_model_intake_log_path;
 pub use winwincode_execution_port::runtime_trace_outbox::{ExecutionMode, ObserverMode};
 pub use winwincode_kernel::{RoleExecutionMode, recover_interrupted_tool_calls};

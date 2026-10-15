@@ -13,7 +13,6 @@ pub(super) struct ToolRuntimeContract {
     schema_version: u32,
     kernel_interface_version: u32,
     runtime_digest: Sha256Digest,
-    host_binary_digest: Sha256Digest,
     catalog_digest: Sha256Digest,
     policy_digest: Sha256Digest,
 }
@@ -33,7 +32,6 @@ impl ToolRuntimeContract {
                 "sha256:{:x}",
                 Sha256::digest(include_bytes!("../../../upstream/sources.lock.json"))
             )),
-            host_binary_digest: config.helper_release_manifest.binary_digest().clone(),
             catalog_digest: Sha256Digest(format!("sha256:{:x}", Sha256::digest(catalog))),
             policy_digest: profile.snapshot_digest.clone(),
         })

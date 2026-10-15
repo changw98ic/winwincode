@@ -41,16 +41,6 @@ fn apply_patch_aliases_accept_stdin_and_argument_patches() {
             );
         }
     }
-    let handshake = Command::new(env!("CARGO_BIN_EXE_winwincode-kernel-helper"))
-        .arg("--winwincode-helper-handshake")
-        .output()
-        .unwrap();
-    assert!(handshake.status.success());
-    assert!(
-        String::from_utf8(handshake.stdout)
-            .unwrap()
-            .contains("winwincode-kernel-helper")
-    );
     let host = Command::new(env!("CARGO_BIN_EXE_winwincode-kernel-helper"))
         .stdin(Stdio::null())
         .output()
