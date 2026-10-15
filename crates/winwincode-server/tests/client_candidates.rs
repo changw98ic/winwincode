@@ -452,6 +452,15 @@ async fn enroll_online_device(
 }
 
 fn publish_connect_code(data_directory: &Path, node: &str, code: &str) -> String {
+    publish_connect_code_for_instance(data_directory, node, DEVICE_INSTANCE, code)
+}
+
+fn publish_connect_code_for_instance(
+    data_directory: &Path,
+    node: &str,
+    instance: &str,
+    code: &str,
+) -> String {
     let mut storage = SqliteStorage::open(data_directory).expect("storage");
     let mut connect = ConnectCodeService::new(&mut storage);
     let digest = format!("sha256:{:x}", Sha256::digest(code.as_bytes()));
@@ -459,7 +468,7 @@ fn publish_connect_code(data_directory: &Path, node: &str, code: &str) -> String
         fresh_code_id(),
         digest,
         node,
-        DEVICE_INSTANCE,
+        instance,
         1,
         instant(VALID_UNTIL),
         5,
@@ -984,6 +993,248 @@ fn apply_history_len(data_directory: &Path, node: &str, candidate_ref: &str) -> 
             .expect("history")
             .len()
     })
+}
+
+fn drive_candidate_daemon_until(
+    daemon: &mut winwincode_device_client::DeviceDaemon,
+    mut ready: impl FnMut(&mut winwincode_device_client::DeviceDaemon) -> bool,
+) {
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    let mut now = std::time::Instant::now();
+    while std::time::Instant::now() < deadline {
+        if ready(daemon) {
+            return;
+        }
+        match daemon.tick(now).unwrap() {
+            winwincode_device_client::TickOutcome::Waiting { ready_in } => now += ready_in,
+            winwincode_device_client::TickOutcome::Retrying { after, .. } => now += after,
+            winwincode_device_client::TickOutcome::Exchanged { .. } => {}
+        }
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    panic!("Device recovery did not settle: {:?}", daemon.status());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::too_many_lines)]
+async fn restarted_device_announces_before_applied_recovery_and_repeats_it_in_a_new_epoch() {
+    use winwincode_device_client::{
+        DaemonConfig, DeviceDaemon, DeviceIdentitySeed, DeviceStore, HttpExchangeTransport,
+        OccupancyMirrorUpdate, ensure_device_identity,
+    };
+    let data_directory = test_directory("candidates-device-recovery");
+    let auth_directory = test_directory("candidates-device-recovery-auth");
+    let device_directory = test_directory("candidates-device-recovery-device");
+    let running = start_server(&data_directory, &auth_directory).await;
+    let address = running.local_address();
+    let (cookie, owner) = initialize_and_login_owner(address).await;
+    let seed = DeviceIdentitySeed {
+        display_name: "Recovery Device".into(),
+        platform: "darwin".into(),
+        architecture: "arm64".into(),
+        client_version: "0.1.0-alpha.1".into(),
+    };
+    let mut store = DeviceStore::open(&device_directory).unwrap();
+    let identity = ensure_device_identity(&mut store, &seed, T0).unwrap();
+    let config = DaemonConfig {
+        base_url: format!("http://{address}/internal/v1/client/exchange"),
+        heartbeat_interval: Duration::from_mins(2),
+        enroll_poll_interval: Duration::from_millis(1),
+        capacity: capacity(0),
+        ..DaemonConfig::default()
+    };
+    let transport = Arc::new(HttpExchangeTransport::new(config.base_url.clone()));
+    let mut daemon =
+        DeviceDaemon::start(config.clone(), store, transport.clone(), &identity).unwrap();
+    drive_candidate_daemon_until(&mut daemon, |daemon| {
+        daemon.is_enrolled() && daemon.status().acked_through >= 4
+    });
+    let node = daemon.client_node_id().to_owned();
+    let public = winwincode_device_client::load_device_identity(daemon.store_mut())
+        .unwrap()
+        .unwrap()
+        .identity()
+        .public_client_id()
+        .to_owned();
+    consume_code_as(
+        &data_directory,
+        &node,
+        &publish_connect_code_for_instance(
+            &data_directory,
+            &node,
+            identity.current_instance_id(),
+            "82828282",
+        ),
+        &owner,
+    );
+    let binding = stage_visible_binding(&data_directory, &node, &owner);
+    let (lease, epoch) = stage_occupied_lease(&data_directory, &node, &owner);
+    daemon
+        .store_mut()
+        .advance_occupancy_mirror(&OccupancyMirrorUpdate {
+            occupancy_lease_id: lease.clone(),
+            fencing_token: epoch,
+            holder_user_id: Some(owner.clone()),
+            claim_request_id: None,
+            idle_expires_at: None,
+            acknowledged_at: T0.into(),
+        })
+        .unwrap();
+    let commit = "0f9e8d7c6b5a4938271605f4e3d2c1b0a9988776";
+    daemon
+        .enqueue(ClientToServerMessage::CandidateRetained(
+            ClientCandidateRetainedPayload {
+                occupancy: occupancy_stamp(&lease, epoch, 1, "device-recovery-retained"),
+                worker_session_id: "wsn_000000000000000000000001".into(),
+                receipt: winwincode_client_port::domain::LocalCandidateReceipt {
+                    local_candidate_receipt_id: fresh_receipt_id("lcr_"),
+                    candidate_ref: candidate_ref_of(commit),
+                    repository_binding_id: binding.clone(),
+                    candidate_commit: commit.into(),
+                    base_commit: FIXTURE_BASE_COMMIT.into(),
+                    local_ref_name: candidate_ref_of(commit),
+                    state: LocalCandidateState::Retained,
+                    created_at: T0.into(),
+                    revision: 1,
+                },
+            },
+        ))
+        .unwrap();
+    drive_candidate_daemon_until(&mut daemon, |daemon| {
+        daemon.outbox_snapshot().unwrap().frames.is_empty()
+    });
+    let application = stage_application_approval(
+        &data_directory,
+        &node,
+        &owner,
+        &lease,
+        epoch,
+        &binding,
+        commit,
+        "cherry_pick",
+    );
+    let receipt = winwincode_client_port::domain::LocalApplyReceipt {
+        local_apply_receipt_id: application.application_id.clone(),
+        candidate_ref: application.candidate_ref.clone(),
+        repository_binding_id: binding.clone(),
+        target_branch: "main".into(),
+        expected_head: FIXTURE_BASE_COMMIT.into(),
+        strategy: ApplyStrategy::CherryPick,
+        result: ApplyResult::Applied,
+        resulting_commit: Some(RESULTING_COMMIT.into()),
+        conflict_artifact_ref: None,
+        created_at: T0.into(),
+        revision: 1,
+    };
+    let database = rusqlite::Connection::open(daemon.store_mut().database_path()).unwrap();
+    database.execute(
+        "INSERT INTO candidate_applications (application_id, approval_id, repository_binding_id,
+         candidate_ref, candidate_digest, target_branch, base_commit, strategy, original_lease_id,
+         original_epoch, started_at, finished_receipt_json) VALUES (?1,?2,?3,?4,?5,'main',?6,?7,?8,?9,?10,?11)",
+        rusqlite::params![application.application_id, application.approval_id, binding,
+            application.candidate_ref, application.candidate_digest, FIXTURE_BASE_COMMIT,
+            serde_json::to_string(&ApplyStrategy::CherryPick).unwrap(), lease, i64::try_from(epoch).unwrap(), T0,
+            serde_json::to_string(&receipt).unwrap()],
+    ).unwrap();
+    drop(database);
+    daemon
+        .enqueue(ClientToServerMessage::Heartbeat(
+            winwincode_client_port::messages::ClientHeartbeatPayload {
+                capacity: capacity(0),
+                accepting_connections: true,
+                lock_state: ClientLockState::Unlocked,
+                presence_state: PresenceState::Online,
+                occupancy_lease_id: Some(lease.clone()),
+            },
+        ))
+        .unwrap();
+    let retained = daemon.outbox_snapshot().unwrap();
+    daemon.into_store().close().unwrap();
+    let mut store = DeviceStore::open(&device_directory).unwrap();
+    let restarted = ensure_device_identity(&mut store, &seed, T0).unwrap();
+    assert_ne!(
+        restarted.current_instance_id(),
+        identity.current_instance_id()
+    );
+    let mut daemon = DeviceDaemon::start(config, store, transport, &restarted).unwrap();
+    winwincode_device_client::apply_engine::recover_started_applications(&mut daemon).unwrap();
+    assert_eq!(daemon.outbox_snapshot().unwrap(), retained);
+    drive_candidate_daemon_until(&mut daemon, |daemon| {
+        daemon.outbox_snapshot().unwrap().frames.is_empty()
+            && SqliteStorage::open(&data_directory)
+                .unwrap()
+                .candidate_application(&application.application_id)
+                .unwrap()
+                .unwrap()
+                .outcome
+                .as_deref()
+                == Some("applied")
+    });
+    assert_eq!(
+        next_client_sequence(&data_directory, &node),
+        daemon.outbox_snapshot().unwrap().highest_sequence + 1
+    );
+    let release =
+        json!({"schemaVersion":SCHEMA_VERSION,"clientId":public,"mode":"release"}).to_string();
+    let response = http_request(
+        address,
+        &cookie_post("/api/v1/clients/occupancy", &release, &cookie)
+            .replacen("POST ", "DELETE ", 1),
+    )
+    .await;
+    assert_eq!(status_of(&response), "200", "{response}");
+    let claim = cookie_post(
+        "/api/v1/clients/occupancy",
+        &json!({"schemaVersion":SCHEMA_VERSION,"clientId":public}).to_string(),
+        &cookie,
+    );
+    let claim_task = tokio::spawn(async move { http_request(address, &claim).await });
+    drive_candidate_daemon_until(&mut daemon, |daemon| {
+        daemon
+            .occupancy_mirror()
+            .is_some_and(|mirror| mirror.fencing_token > epoch)
+            && daemon.outbox_snapshot().unwrap().frames.is_empty()
+    });
+    let response = claim_task.await.unwrap();
+    assert_eq!(status_of(&response), "201", "{response}");
+    let new_epoch = daemon.occupancy_mirror().unwrap().fencing_token;
+    let storage = SqliteStorage::open(&data_directory).unwrap();
+    let database = rusqlite::Connection::open(storage.database_path()).unwrap();
+    let mut events = database
+        .prepare(
+            "SELECT epoch,payload FROM candidate_application_events WHERE application_id=?1
+         AND kind='application.reconciled' ORDER BY epoch",
+        )
+        .unwrap();
+    let facts: Vec<(i64, String)> = events
+        .query_map([&application.application_id], |row| {
+            Ok((row.get(0)?, row.get(1)?))
+        })
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    assert_eq!(
+        facts.iter().map(|fact| fact.0).collect::<Vec<_>>(),
+        [
+            i64::try_from(epoch).unwrap(),
+            i64::try_from(new_epoch).unwrap()
+        ]
+    );
+    for (_, payload) in facts {
+        let payload: ClientApplicationReconciledPayload = serde_json::from_str(&payload).unwrap();
+        assert_eq!(payload.original_epoch, epoch);
+        assert_eq!(payload.approval_id, application.approval_id);
+        assert_eq!(payload.result_commit.as_deref(), Some(RESULTING_COMMIT));
+    }
+    assert_eq!(
+        apply_history_len(&data_directory, &node, &application.candidate_ref),
+        1
+    );
+    daemon.into_store().close().unwrap();
+    running.shutdown().await.unwrap();
+    let _ = std::fs::remove_dir_all(data_directory);
+    let _ = std::fs::remove_dir_all(auth_directory);
+    let _ = std::fs::remove_dir_all(device_directory);
 }
 
 #[tokio::test]

@@ -1390,6 +1390,110 @@ fn daemon_applies_the_complete_reworked_candidate_from_its_downlink() {
 
 #[test]
 #[cfg(feature = "test-support")]
+fn restart_bootstrap_keeps_old_frames_and_announces_before_recovery_reports() {
+    use winwincode_device_client::apply_engine::{
+        ApplicationCrashPoint, apply_candidate_with_crash_point, recover_started_applications,
+    };
+    use winwincode_device_client::{SessionSupervisor, SupervisorConfig, WorkerStopIntentRecord};
+    let (repo, base) = init_repository("recover-bootstrap");
+    let integration_root = temporary_directory("recover-bootstrap-integration");
+    let root = temporary_directory("recover-bootstrap-store");
+    let candidate = candidate_commit_on_main(&repo, "recover-bootstrap", "1");
+    let mut daemon = started_daemon("recover-bootstrap", &root);
+    bind(daemon.store_mut(), &repo);
+    retain_candidate(daemon.store_mut(), &candidate, &base);
+    write_candidate_ref(&repo, &candidate);
+    daemon.tick(std::time::Instant::now()).unwrap();
+    let old_instance = daemon.client_instance_id().to_owned();
+    let retained = daemon.outbox_snapshot().unwrap();
+    assert!(!retained.frames.is_empty());
+    let request = apply_request(&candidate, "workspace", &base, ApplyStrategy::Merge);
+    apply_candidate_with_crash_point(
+        &mut daemon,
+        &request,
+        &integration_root,
+        ApplicationCrashPoint::AfterRepositoryCommit,
+    )
+    .unwrap_err();
+    let applied = git(&repo, &["rev-parse", "HEAD"]);
+    let commits = git(&repo, &["rev-list", "--count", "HEAD"]);
+    daemon
+        .store_mut()
+        .record_worker_stop_intent(&WorkerStopIntentRecord {
+            command_message_id: "recover-bootstrap-stop".into(),
+            idempotency_key: "recover-bootstrap-stop".into(),
+            worker_session_id: WORKER_SESSION.into(),
+            worker_id: "wrk_BOOTSTRAP000000000000000000".into(),
+            reason: winwincode_client_port::domain::ClientWorkerStopReason::LeaseRecovered,
+            occupancy_lease_id: LEASE.into(),
+            fencing_token: TOKEN,
+            expected_revision: 1,
+            receipt_payload: None,
+            recorded_at: STAMP.into(),
+            completed_at: None,
+        })
+        .unwrap();
+    daemon.into_store().close().unwrap();
+    let mut store = DeviceStore::open(&root).unwrap();
+    let identity = ensure_device_identity(&mut store, &seed(), STAMP).unwrap();
+    assert_ne!(identity.current_instance_id(), old_instance);
+    let mut daemon = DeviceDaemon::start(
+        daemon_config("recover-bootstrap"),
+        store,
+        Arc::new(NeverTransport),
+        &identity,
+    )
+    .unwrap();
+    recover_started_applications(&mut daemon).unwrap();
+    assert_eq!(daemon.outbox_snapshot().unwrap(), retained);
+    let supervisor = SessionSupervisor::new(
+        SupervisorConfig {
+            client_node_id: ASSIGNED_NODE.into(),
+            client_instance_id: identity.current_instance_id().into(),
+            server_origin: "http://127.0.0.1:8443".into(),
+            model_route: None,
+            worker_binary_path: None,
+            max_concurrent_worker_sessions: 4,
+            stop_grace_period: Duration::from_millis(10),
+        },
+        DeviceStore::open(&root).unwrap(),
+    )
+    .unwrap();
+    daemon.set_worker_supervisor(supervisor);
+    daemon.tick(std::time::Instant::now()).unwrap();
+    let queued = daemon.outbox_snapshot().unwrap();
+    assert_eq!(&queued.frames[..retained.frames.len()], &retained.frames);
+    let new_frames = queued.frames[retained.frames.len()..]
+        .iter()
+        .map(|frame| serde_json::from_slice::<ClientToServerEnvelope>(&frame.frame).unwrap())
+        .collect::<Vec<_>>();
+    assert!(matches!(
+        new_frames[0].message,
+        ClientToServerMessage::Hello(_)
+    ));
+    assert!(
+        new_frames
+            .iter()
+            .all(|frame| frame.client_instance_id == identity.current_instance_id())
+    );
+    assert!(new_frames.iter().any(|frame| matches!(
+        &frame.message,
+        ClientToServerMessage::ApplicationReconciled(payload)
+            if payload.application_id == request.application_id && payload.result_commit.as_deref() == Some(applied.as_str())
+    )));
+    assert!(new_frames.iter().any(|frame| matches!(
+        &frame.message,
+        ClientToServerMessage::CommandAck(payload) if payload.command_message_id == "recover-bootstrap-stop"
+    )));
+    assert_eq!(git(&repo, &["rev-list", "--count", "HEAD"]), commits);
+    daemon.into_store().close().unwrap();
+    cleanup(&root);
+    cleanup(&integration_root);
+    cleanup(&repo);
+}
+
+#[test]
+#[cfg(feature = "test-support")]
 fn committed_application_is_recovered_after_a_crash_without_a_second_commit() {
     use winwincode_device_client::apply_engine::{
         ApplicationCrashPoint, apply_candidate_with_crash_point, recover_started_applications,

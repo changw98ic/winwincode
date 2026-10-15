@@ -1216,7 +1216,7 @@ async function runOfflineScenarios({ configuration, api, caPem, attempt, result,
 }
 
 export async function runCandidateScenarios({ configuration, api, binding, repository, deviceCall, result, attempt, createCandidate, observedHooks }) {
-  const waitForReady = (previousInstanceId = null, requireOccupancy = true) => waitFor(async () => {
+  const waitForReady = (previousInstanceId = null) => waitFor(async () => {
     const snapshot = await deviceCall('snapshot')
     if (!snapshot.agent?.deviceRunning || !snapshot.identity.instanceId
       || snapshot.identity.instanceId === previousInstanceId) return false
@@ -1226,7 +1226,6 @@ export async function runCandidateScenarios({ configuration, api, binding, repos
       LEFT JOIN client_occupancy_leases l ON l.client_node_id=n.client_node_id AND l.state IN ('occupied','draining')
       WHERE n.client_node_id=?`).get(binding.clientNodeId))
     if (authority?.instanceId !== snapshot.identity.instanceId || authority.presence !== 'online') return false
-    if (!requireOccupancy) return snapshot
     const mirror = snapshot.mirror
     if (!mirror || !mirror.holderUserId || mirror.leaseId !== authority.leaseId
       || mirror.epoch !== authority.epoch || mirror.holderUserId !== authority.holderUserId) return false
@@ -1235,10 +1234,10 @@ export async function runCandidateScenarios({ configuration, api, binding, repos
         .get(binding.clientNodeId)?.revision)
     return mirror.revision > 0 && mirror.revision === revision ? snapshot : false
   }, 'current Device instance and application authority', 60_000)
-  const restart = async (environment = {}, requireOccupancy = true) => {
+  const restart = async (environment = {}) => {
     const before = await deviceCall('snapshot')
     await deviceCall('restart', { environment })
-    return waitForReady(before.identity.instanceId, requireOccupancy)
+    return waitForReady(before.identity.instanceId)
   }
   const list = async () => {
     const response = await api.request(`/api/v1/clients/${binding.publicClientId}/candidates`)
@@ -1281,20 +1280,21 @@ export async function runCandidateScenarios({ configuration, api, binding, repos
   assert.equal(stale.baseCommit, applied.baseCommit)
   assert.equal(unknown.baseCommit, applied.baseCommit)
   const branchFixture = await deviceCall('prepare-application-branches', { baseCommit: applied.baseCommit })
-  const apply = async (candidate, targetBranch, expectedStatus = 201, expectedCode = null) => {
-    const response = await api.request('/api/v1/clients/candidates/apply', {
-      method: 'POST', timeoutMillis: 45_000, body: { schemaVersion: SCHEMA,
-        clientId: binding.publicClientId, candidateRef: candidate.candidateRef,
-        repositoryBindingId: repository.repositoryBindingId, targetBranch, expectedHead: candidate.baseCommit,
-      },
-    })
+  const requireResponse = (response, expectedStatus, expectedCode = null) => {
     if (response.status !== expectedStatus || (expectedCode !== null && response.json?.error?.code !== expectedCode)) {
-      throw withResponseFailure(Object.assign(new Error(`candidate apply returned HTTP ${response.status}`), {
+      throw withResponseFailure(Object.assign(new Error(`candidate operation returned HTTP ${response.status}`), {
         code: response.json?.error?.code ?? 'HTTP_ERROR', status: response.status, response: response.json,
       }), response)
     }
     return response
   }
+  const apply = async (candidate, targetBranch, expectedStatus = 201, expectedCode = null) => requireResponse(
+    await api.request('/api/v1/clients/candidates/apply', {
+      method: 'POST', timeoutMillis: 45_000, body: { schemaVersion: SCHEMA,
+        clientId: binding.publicClientId, candidateRef: candidate.candidateRef,
+        repositoryBindingId: repository.repositoryBindingId, targetBranch, expectedHead: candidate.baseCommit,
+      },
+    }), expectedStatus, expectedCode)
   const crash = async (candidate, point, targetBranch) => {
     await restart({ WWC_TEST_APPLICATION_CRASH_POINT: point })
     const response = await apply(candidate, targetBranch, 504, 'APPLY_RESULT_TIMEOUT')
@@ -1313,20 +1313,20 @@ export async function runCandidateScenarios({ configuration, api, binding, repos
     return { application, snapshot }
   }
   const renewOccupancy = async () => {
-    const released = await api.request('/api/v1/clients/occupancy/force-release', {
-      method: 'POST', body: { schemaVersion: SCHEMA, clientId: binding.publicClientId },
+    await restart()
+    const released = await api.request('/api/v1/clients/occupancy', {
+      method: 'DELETE', body: { schemaVersion: SCHEMA, clientId: binding.publicClientId, mode: 'release' },
     })
-    assert.equal(released.status, 200)
-    await restart({}, false)
+    requireResponse(released, 200)
     await waitFor(async () => {
       const response = await api.request(`/api/v1/clients/${binding.publicClientId}/occupancy`)
-      assert.equal(response.status, 200, JSON.stringify(response.json))
+      requireResponse(response, 200)
       return response.json.occupancy === 'available'
     }, 'a current Device occupancy can be claimed', 60_000)
     const claimed = await api.request('/api/v1/clients/occupancy', { method: 'POST', timeoutMillis: 45_000, body: {
       schemaVersion: SCHEMA, clientId: binding.publicClientId,
     } })
-    assert.equal(claimed.status, 201)
+    requireResponse(claimed, 201)
     return (await waitForReady()).mirror
   }
   const recovered = await attempt('apply-commit-crash-recovery', async () => {

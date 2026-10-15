@@ -310,8 +310,6 @@ fn run_device_service_with_roots_until(
         )?;
         crate::apply_engine::recover_started_applications(&mut daemon)
             .map_err(|error| DeviceServiceError::InvalidConfig(error.to_string()))?;
-        crate::apply_engine::report_recovered_applications(&mut daemon)
-            .map_err(|error| DeviceServiceError::InvalidConfig(error.to_string()))?;
         let mut worker_lane_wired = false;
         let mut preview_tunnel = None;
         if identity.identity().is_enrolled() {
@@ -466,7 +464,6 @@ fn wire_worker_lane(
     )?;
     supervisor.set_worker_relay_transport(transport);
     daemon.set_worker_supervisor(supervisor.clone());
-    daemon.recover_worker_stop_intents()?;
     daemon
         .set_worker_capacity_source(Arc::new(supervisor.clone()) as Arc<dyn WorkerCapacitySource>);
     daemon.set_lease_worker_controller(Arc::new(supervisor) as Arc<dyn LeaseWorkerController>);
@@ -836,6 +833,162 @@ mod tests {
                 .contains("service started")
         );
         fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)]
+    fn service_restart_announces_before_application_and_worker_stop_recovery() {
+        use winwincode_client_port::domain::{ApplyResult, ApplyStrategy, LocalApplyReceipt};
+        use winwincode_client_port::messages::{ClientToServerEnvelope, ClientToServerMessage};
+        let root = temporary_directory("recovery-order");
+        let _ = fs::remove_dir_all(&root);
+        let address = std::net::TcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap();
+        let config = DeviceServiceConfig {
+            data_directory: root.clone(),
+            server_url: format!("http://{address}"),
+            server_display_name: "Server".into(),
+            device_display_name: "Device".into(),
+        };
+        let mut store = DeviceStore::open(&root).unwrap();
+        let seed = device_identity_seed("Device");
+        let identity = ensure_device_identity(&mut store, &seed, &stamp()).unwrap();
+        crate::adopt_enrollment(
+            &mut store,
+            identity.identity().device_id(),
+            &crate::IssuedEnrollment {
+                client_node_id: format!("cnd_{}", "A".repeat(26)),
+                public_client_id: "0123456789".into(),
+            },
+            &stamp(),
+        )
+        .unwrap();
+        store
+            .advance_occupancy_mirror(&OccupancyMirrorUpdate {
+                occupancy_lease_id: "ocl_service_recovery".into(),
+                fencing_token: 7,
+                holder_user_id: Some("usr_service_owner".into()),
+                claim_request_id: None,
+                idle_expires_at: None,
+                acknowledged_at: stamp(),
+            })
+            .unwrap();
+        let identity = load_device_identity(&store).unwrap().unwrap();
+        let mut daemon = DeviceDaemon::start(
+            DaemonConfig {
+                server_profile_id: "default".into(),
+                base_url: format!("http://{address}{EXCHANGE_PATH}"),
+                ..DaemonConfig::default()
+            },
+            store,
+            Arc::new(HttpExchangeTransport::new(format!(
+                "http://{address}{EXCHANGE_PATH}"
+            ))),
+            &identity,
+        )
+        .unwrap();
+        daemon
+            .enqueue(ClientToServerMessage::Heartbeat(
+                winwincode_client_port::messages::ClientHeartbeatPayload {
+                    capacity: service_worker_capacity(),
+                    accepting_connections: true,
+                    lock_state: winwincode_client_port::domain::ClientLockState::Unlocked,
+                    presence_state: winwincode_client_port::domain::PresenceState::Online,
+                    occupancy_lease_id: Some("ocl_service_recovery".into()),
+                },
+            ))
+            .unwrap();
+        let retained = daemon.outbox_snapshot().unwrap();
+        let request = crate::apply_engine::CandidateApplyRequest {
+            application_id: "lar_service_recovery".into(),
+            approval_id: "apr_service_recovery".into(),
+            candidate_digest: "sha256:service_recovery".into(),
+            reconciled_retry: false,
+            repository_binding_id: "rbd_service_recovery".into(),
+            candidate_ref: format!("refs/winwincode/candidates/{}", "a".repeat(40)),
+            target_branch: "main".into(),
+            expected_head: "b".repeat(40),
+            strategy: ApplyStrategy::CherryPick,
+            occupancy_lease_id: "ocl_service_recovery".into(),
+            occupancy_fencing_token: 7,
+        };
+        crate::application_journal::start_application(daemon.store_mut(), &request, &stamp())
+            .unwrap();
+        crate::application_journal::finish_application(
+            daemon.store_mut(),
+            &LocalApplyReceipt {
+                local_apply_receipt_id: request.application_id.clone(),
+                candidate_ref: request.candidate_ref.clone(),
+                repository_binding_id: request.repository_binding_id.clone(),
+                target_branch: request.target_branch.clone(),
+                expected_head: request.expected_head.clone(),
+                strategy: request.strategy,
+                result: ApplyResult::Applied,
+                resulting_commit: Some("c".repeat(40)),
+                conflict_artifact_ref: None,
+                created_at: stamp(),
+                revision: 1,
+            },
+        )
+        .unwrap();
+        daemon
+            .store_mut()
+            .record_worker_stop_intent(&crate::WorkerStopIntentRecord {
+                command_message_id: "service-recovery-stop".into(),
+                idempotency_key: "service-recovery-stop".into(),
+                worker_session_id: "wsn_service_recovery".into(),
+                worker_id: "wrk_service_recovery".into(),
+                reason: winwincode_client_port::domain::ClientWorkerStopReason::LeaseRecovered,
+                occupancy_lease_id: request.occupancy_lease_id.clone(),
+                fencing_token: 7,
+                expected_revision: 1,
+                receipt_payload: None,
+                recorded_at: stamp(),
+                completed_at: None,
+            })
+            .unwrap();
+        daemon.into_store().close().unwrap();
+        let mut polls = 0;
+        run_device_service_until(&config, || {
+            polls += 1;
+            polls > 1
+        })
+        .unwrap();
+        let mut store = DeviceStore::open(&root).unwrap();
+        let restarted = load_device_identity(&store).unwrap().unwrap();
+        assert_ne!(
+            restarted.current_instance_id(),
+            identity.current_instance_id()
+        );
+        store
+            .bind_outbox_stream(
+                restarted.identity().client_node_id(),
+                restarted.current_instance_id(),
+            )
+            .unwrap();
+        let queued = winwincode_client_port::exchange::FrameOutbox::load(&mut store)
+            .unwrap()
+            .unwrap();
+        assert_eq!(&queued.frames[..retained.frames.len()], &retained.frames);
+        let new_frames = queued.frames[retained.frames.len()..]
+            .iter()
+            .map(|frame| serde_json::from_slice::<ClientToServerEnvelope>(&frame.frame).unwrap())
+            .collect::<Vec<_>>();
+        assert!(matches!(
+            new_frames[0].message,
+            ClientToServerMessage::Hello(_)
+        ));
+        assert!(
+            new_frames
+                .iter()
+                .all(|frame| frame.client_instance_id == restarted.current_instance_id())
+        );
+        assert!(new_frames.iter().any(|frame| matches!(&frame.message, ClientToServerMessage::ApplicationReconciled(payload) if payload.application_id == request.application_id)));
+        assert!(new_frames.iter().any(|frame| matches!(&frame.message, ClientToServerMessage::CommandAck(payload) if payload.command_message_id == "service-recovery-stop")));
+        store.close().unwrap();
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

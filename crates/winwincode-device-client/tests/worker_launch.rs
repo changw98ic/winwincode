@@ -775,6 +775,7 @@ fn initial_worker_stop_without_supervisor_retries_the_same_envelope() {
 }
 
 #[test]
+#[allow(clippy::too_many_lines)]
 fn daemon_and_supervisor_restart_recover_stop_after_fencing_changes() {
     let root = temporary_directory("stop-recovery-restart");
     let sim = Arc::new(ServerSim::new());
@@ -818,10 +819,20 @@ fn daemon_and_supervisor_restart_recover_stop_after_fencing_changes() {
     crash_store.close().expect("crash store closes");
     daemon.into_store().close().expect("daemon process closes");
 
-    let restarted_store = DeviceStore::open(&root).expect("restarted store opens");
-    let restarted_identity = load_device_identity(&restarted_store)
-        .expect("restarted identity reads")
-        .expect("restarted identity exists");
+    let mut restarted_store = DeviceStore::open(&root).expect("restarted store opens");
+    let mirror = restarted_store.occupancy_mirror().unwrap().unwrap();
+    restarted_store
+        .advance_occupancy_mirror(&winwincode_device_client::OccupancyMirrorUpdate {
+            occupancy_lease_id: mirror.occupancy_lease_id,
+            fencing_token: 9,
+            holder_user_id: mirror.holder_user_id,
+            claim_request_id: mirror.claim_request_id,
+            idle_expires_at: mirror.idle_expires_at,
+            acknowledged_at: STAMP.into(),
+        })
+        .unwrap();
+    let restarted_identity = ensure_device_identity(&mut restarted_store, &seed(), STAMP).unwrap();
+    assert_ne!(restarted_identity.current_instance_id(), instance_id);
     let mut restarted = DeviceDaemon::start(
         daemon_config(),
         restarted_store,
@@ -829,24 +840,29 @@ fn daemon_and_supervisor_restart_recover_stop_after_fencing_changes() {
         &restarted_identity,
     )
     .expect("restarted daemon should start");
-    let restarted_lane = WorkerLane::open(&root, &instance_id, "recovery-restarted");
+    let restarted_lane = WorkerLane::open(
+        &root,
+        restarted_identity.current_instance_id(),
+        "recovery-restarted",
+    );
     restarted.set_worker_supervisor(restarted_lane.supervisor.clone());
-    sim.queue_downlink(force_fence(occupancy_stamp(
-        1,
-        "srv-force-recovery",
-        LEASE,
-        9,
-    )));
     drive_until(&mut restarted, |daemon| {
         daemon
-            .occupancy_mirror()
-            .is_some_and(|mirror| mirror.fencing_token == 9)
+            .store_mut()
+            .pending_worker_stop_intents()
+            .unwrap()
+            .is_empty()
+            && settled(daemon)
     });
-    assert_eq!(
-        restarted.recover_worker_stop_intents().expect("recovery"),
-        1
+    assert!(
+        restarted
+            .store_mut()
+            .worker_stop_intent("srv-stop-recovery")
+            .unwrap()
+            .unwrap()
+            .completed_at
+            .is_some()
     );
-    drive_until(&mut restarted, settled);
     assert_eq!(
         fs::read_to_string(original_config.with_extension("json.recovery-request"))
             .expect("the stopped instance receives the one-shot recovery request"),

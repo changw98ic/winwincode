@@ -1017,8 +1017,11 @@ impl DeviceDaemon {
             }))?;
             self.publish_provider_state(None)?;
             self.publish_extension_state(None)?;
+            self.recover_worker_stop_intents()?;
             self.publish_worker_exits()?;
             self.publish_worker_reconciliation()?;
+            crate::apply_engine::report_recovered_applications(self)
+                .map_err(|error| DaemonError::Protocol(error.to_string()))?;
             self.hello_announced = true;
             self.next_heartbeat_at = now + self.heartbeat_interval;
             return Ok(());

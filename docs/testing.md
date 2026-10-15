@@ -188,6 +188,8 @@ Device 的绑定测试使用本机 HTTP fixture 丢弃成功响应。重开数�
 
 两机 runner 重启 Device 后，先等待 Server 确认当前实例，再核对两端的占用租约、持有者、epoch 和镜像 revision。就绪后才发送应用命令。崩溃场景同时要求 API 返回 `504 APPLY_RESULT_TIMEOUT`、Device 退出码为 `86`，以及对应应用的 journal 和故障标记。其他 API 结果保留在失败报告中。
 
+应用恢复场景通过正常占用释放和重新申请建立新 epoch。runner 先恢复 Device，再调用 `DELETE /api/v1/clients/occupancy`，使用 `mode: release`。占用变为 `available` 后重新申请，并等待新租约和镜像一致。
+
 真实两机验收须使用独立的 Server 主机和 Device 主机。验收至少保存以下证据：
 
 - 两端精确源码版本、二进制摘要、对外 HTTPS 地址与证书校验结果。

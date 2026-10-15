@@ -42,7 +42,7 @@ function candidateScenarioFixture(t, applyFailure = null) {
     repositoryBindingId: 'repository', baseCommit: 'a'.repeat(40) }))
   const branches = { 'wwc-acceptance-applied': 'a'.repeat(40), 'wwc-acceptance-stale': 'b'.repeat(40),
     'wwc-acceptance-unknown': 'a'.repeat(40) }
-  const applications = []; const results = []; const sends = []; const restarts = []
+  const applications = []; const results = []; const sends = []; const restarts = []; const releases = []
   let instanceId = 'instance-0'; let epoch = 1; let revision = 1; let running = true
   let mirror = { leaseId: 'lease-1', epoch, holderUserId: 'owner', revision }
   let transition = null; let crashPoint = null; let dirty = false; let prematureApply = false
@@ -55,7 +55,7 @@ function candidateScenarioFixture(t, applyFailure = null) {
     }
     if (operation === 'snapshot') {
       assert.equal(prematureApply, false, 'apply issued before readiness')
-      if (transition) {
+      if (transition && transition.checks < 5) {
         transition.checks += 1
         if (transition.checks >= 2) { instanceId = transition.next; mirror = null }
         if (transition.checks >= 3) database.prepare('UPDATE client_nodes SET current_instance_id=?').run(instanceId)
@@ -77,14 +77,27 @@ function candidateScenarioFixture(t, applyFailure = null) {
   const api = { request: async (path, options = {}) => {
     if (path.endsWith('/candidates')) return { status: 200, json: { candidates } }
     if (path === '/api/v1/clients/occupancy/force-release') {
-      database.prepare("UPDATE client_occupancy_leases SET state='released'").run()
-      return { status: 200 }
+      return { status: 409, json: { error: { code: 'WRONG_STATE', message: 'only a recovery-pending lease can be force-released' } } }
     }
-    if (path === '/api/v1/clients/device-public/occupancy') return { status: 200, json: { occupancy: 'available' } }
+    if (path === '/api/v1/clients/device-public/occupancy') return { status: 200, json: { occupancy:
+      database.prepare("SELECT 1 FROM client_occupancy_leases WHERE state='occupied'").get() ? 'occupied' : 'available' } }
     if (path === '/api/v1/clients/occupancy') {
       assert.equal(database.prepare('SELECT current_instance_id AS instanceId FROM client_nodes').get().instanceId, instanceId)
-      assert.ok(transition.checks >= 3, 'occupancy claim must wait for the new Server instance')
+      assert.equal(transition.checks, 5, 'occupancy operations must wait for the current Device authority')
+      if (options.method === 'DELETE') {
+        assert.equal(options.body.mode, 'release')
+        assert.ok(running && mirror, 'restart the crashed Device before releasing its occupancy')
+        database.prepare("UPDATE client_occupancy_leases SET state='released'").run()
+        releases.push({ instanceId, epoch, revision })
+        return { status: 200, json: { occupancy: 'released' } }
+      }
+      assert.equal(options.method, 'POST')
+      assert.equal(releases.at(-1).epoch, epoch, 'claim must follow release of the previous occupancy')
+      assert.equal(mirror.epoch, epoch, 'normal release retains the Device mirror until the next offer')
       epoch += 1
+      revision += 1
+      mirror = { leaseId: `lease-${epoch}`, epoch, holderUserId: 'owner', revision }
+      revisions.prepare('UPDATE client_occupancy_mirror_revisions SET mirror_revision=?').run(revision)
       database.prepare('INSERT INTO client_occupancy_leases VALUES(?,?,?,?,?)').run('device', `lease-${epoch}`, epoch, 'owner', 'occupied')
       if (dirty) candidates[2].application = { status: 'blocked', applicationId: 'application-unknown' }
       else database.prepare('INSERT INTO candidate_application_events VALUES(?,?,?)')
@@ -113,7 +126,7 @@ function candidateScenarioFixture(t, applyFailure = null) {
     }
     assert.fail(`unexpected API request ${path}`)
   } }
-  return { api, restarts, sends, results, run: () => runCandidateScenarios({
+  return { api, restarts, sends, results, releases, run: () => runCandidateScenarios({
     configuration: { ...configuration(), testSupport: true, server: { database: join(directory, 'control-plane.sqlite3') } },
     api, binding: { clientNodeId: 'device', publicClientId: 'device-public' }, repository: { repositoryBindingId: 'repository' },
     deviceCall, observedHooks: [], result: (...args) => results.push(args),
@@ -126,6 +139,8 @@ test('application faults wait for each new Device instance and matching occupanc
   const fixture = candidateScenarioFixture(t)
   await fixture.run()
   assert.equal(fixture.restarts.length, 5)
+  assert.equal(fixture.releases.length, 2)
+  assert.deepEqual(fixture.releases.map(item => item.epoch), [1, 2])
   assert.deepEqual(fixture.sends.map(item => item.candidateRef), ['applied', 'applied', 'stale', 'unknown', 'unknown', 'unknown'])
   assert.ok(fixture.sends.every(item => item.checks >= 5))
   assert.deepEqual(fixture.results.map(item => item.id), ['apply-commit-crash-recovery', 'apply-current-epoch-reconciliation',
@@ -147,6 +162,18 @@ test('baseline application retains a 504 response as a failure', async t => {
     ? response : request(path, options)
   await assert.rejects(fixture.run(), error => error.status === response.status
     && JSON.stringify(error.response) === JSON.stringify(response.json))
+})
+
+test('application recovery retains occupancy release and claim errors', async t => {
+  for (const method of ['DELETE', 'POST']) {
+    const fixture = candidateScenarioFixture(t)
+    const request = fixture.api.request
+    const response = { status: 409, json: { error: { code: 'WRONG_STATE', message: `${method} occupancy diagnostic` } } }
+    fixture.api.request = (path, options) => path === '/api/v1/clients/occupancy' && options.method === method
+      ? response : request(path, options)
+    await assert.rejects(fixture.run(), error => error.status === response.status
+      && JSON.stringify(error.response) === JSON.stringify(response.json))
+  }
 })
 
 test('Worker registration retries only the original RESOURCE_NOT_FOUND response', async () => {

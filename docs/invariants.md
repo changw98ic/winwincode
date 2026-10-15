@@ -133,7 +133,7 @@ Device 必须先把带 `started_at` 的应用记录写入 `candidate_application
 
 Device 重启后核对原基线到目标分支 HEAD 之间的应用尾注。找到原应用提交时补记结果。目标分支仍在原基线、工作树干净且没有残留应用工作区时，记录 `not_started`。其他无法确定的结果记录为 `outcome_unknown`。
 
-Device 启动完成日志核对后，在有效的当前占用授权下主动补报。每次新的占用 offer 安装本地 mirror 后，也执行相同补报。journal 保存已进入持久 outbox 的 `reported_epoch`，避免同一 epoch 重复补报。旧 instance 或旧占用下的应用命令返回拒绝 ACK 并消费游标，使后续恢复授权能够到达。
+Device 启动完成日志核对后，在有效的当前占用授权下主动补报。已绑定 Device 的新实例先入队 Hello，再入队恢复的应用结果和 Worker 停止回执。已有未确认消息保留原序列与原字节。每次新的占用 offer 安装本地 mirror 后，也执行相同应用补报。journal 保存已进入持久 outbox 的 `reported_epoch`，避免同一 epoch 重复补报。旧 instance 或旧占用下的应用命令返回拒绝 ACK 并消费游标，使后续恢复授权能够到达。
 
 恢复事实通过当前占用授权下的 `client.application.reconciled` 上报。Server 同时核对原审批与候选绑定。旧 epoch 的普通 `apply_result` 只写事实。候选已到终态时，补报保留真实应用事实。`not_started` 进入 `awaiting_retry`，用户再次申请后，Server 才能在当前租约下授予同一应用的 `reconciledRetry`。`outcome_unknown` 进入 blocked，后续应用请求返回 `409 WRONG_STATE`。
 
