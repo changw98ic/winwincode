@@ -11,7 +11,7 @@ const mainlineWorkflow = readFileSync(mainlineWorkflowPath, 'utf8')
 const rustBuildWorkflow = readFileSync(resolve(root, '.github/workflows/rust-build.yml'), 'utf8')
 const buildWorkflows = `${mainlineWorkflow}\n${rustBuildWorkflow}`
 
-test('ordinary CI aggregates every lane and shares one exact-SHA Rust test producer', () => {
+test('ordinary CI aggregates every lane and shares exact-SHA Rust test and runtime producers', () => {
   assert.match(mainlineWorkflow, /^name: Mainline verification$/mu)
   assert.match(mainlineWorkflow, /^  push:$/mu)
   assert.match(mainlineWorkflow, /^    branches:\n      - main$/mu)
@@ -20,7 +20,18 @@ test('ordinary CI aggregates every lane and shares one exact-SHA Rust test produ
   assert.match(mainlineWorkflow, /^  typescript:$/mu)
   assert.match(mainlineWorkflow, /^  rust:$/mu)
   assert.match(mainlineWorkflow, /^    name: rust-\$\{\{ matrix\.lane \}\}$/mu)
-  assert.match(mainlineWorkflow, /^        lane: \[lint, runtime\]$/mu)
+  assert.match(mainlineWorkflow, /^    name: rust-lint$/mu)
+  assert.match(mainlineWorkflow, /^      lane: lint$/mu)
+  assert.match(mainlineWorkflow, /^  rust-runtime-build:$/mu)
+  assert.match(mainlineWorkflow, /^      lane: runtime$/mu)
+  assert.match(mainlineWorkflow, /^    needs: rust-runtime-build$/mu)
+  assert.match(mainlineWorkflow, /^        group: \[load, api, recovery, boundaries\]$/mu)
+  assert.match(mainlineWorkflow, /^          artifact-ids: \$\{\{ needs\.rust-runtime-build\.outputs\.artifact_id \}\}$/mu)
+  for (const output of ['producer_attempt', 'archive_sha256']) {
+    assert.ok(mainlineWorkflow.includes(`needs.rust-runtime-build.outputs.${output}`))
+    assert.ok(rustBuildWorkflow.includes(`steps.runtime-produce.outputs.${output}`))
+  }
+  assert.ok(rustBuildWorkflow.includes('steps.runtime-upload.outputs.artifact-id'))
   assert.match(mainlineWorkflow, /^        lane: \[test, e2e\]$/mu)
   assert.match(mainlineWorkflow, /^  rust-test-build:$/mu)
   assert.match(mainlineWorkflow, /^      lane: archive$/mu)
@@ -31,7 +42,7 @@ test('ordinary CI aggregates every lane and shares one exact-SHA Rust test produ
     assert.ok(rustBuildWorkflow.includes(`steps.produce.outputs.${output}`))
   }
   assert.ok(rustBuildWorkflow.includes('steps.upload.outputs.artifact-id'))
-  assert.equal([...mainlineWorkflow.matchAll(/^    uses: \.\/\.github\/workflows\/rust-build\.yml$/gmu)].length, 2)
+  assert.equal([...mainlineWorkflow.matchAll(/^    uses: \.\/\.github\/workflows\/rust-build\.yml$/gmu)].length, 3)
   for (const lane of ['lint', 'runtime', 'archive']) assert.ok(rustBuildWorkflow.includes(`inputs.lane == '${lane}'`))
   assert.match(mainlineWorkflow, /^  verify:$/mu)
   assert.equal([...mainlineWorkflow.matchAll(/corepack pnpm verify:source$/gmu)].length, 1)
@@ -58,15 +69,25 @@ test('ordinary CI aggregates every lane and shares one exact-SHA Rust test produ
   assert.doesNotMatch(mainlineWorkflow, /corepack pnpm verify$/mu)
   assert.ok(mainlineWorkflow.includes('github.event.pull_request.number || github.ref'))
   assert.match(rustBuildWorkflow, /^      CARGO_INCREMENTAL: "0"$/mu)
-  assert.equal([...rustBuildWorkflow.matchAll(/corepack pnpm verify:api-production-sessions$/gmu)].length, 1)
+  assert.doesNotMatch(rustBuildWorkflow, /corepack pnpm verify:api-production-sessions$/mu)
+  assert.match(rustBuildWorkflow, /run: node scripts\/runtime-products\.mjs produce/u)
+  const sessions = mainlineWorkflow.split('  rust-runtime-sessions:\n')[1].split('  rust-test-build:\n')[0]
+  assert.match(sessions, /^      fail-fast: false$/mu)
+  assert.match(sessions, /node scripts\/runtime-products\.mjs restore/u)
+  assert.match(sessions, /node scripts\/run-api-production-sessions\.mjs --group \$\{\{ matrix\.group \}\}/u)
+  assert.match(sessions, /^      WWC_API_SKIP_BUILD: "1"$/mu)
+  assert.ok(sessions.includes('WWC_CODE_MODE_ACCEPTANCE_BIN_DIR: ${{ github.workspace }}/target/debug'))
+  assert.ok(sessions.includes('WWC_CLI_BINARY: ${{ github.workspace }}/target/debug/wwc'))
+  assert.ok(sessions.includes('for compiler in cargo rustc; do'))
+  assert.doesNotMatch(sessions, /rustup|build:rust|sccache|install-code-mode-linux-build-deps/u)
   assert.match(rustBuildWorkflow, /^      CARGO_PROFILE_DEV_DEBUG: "0"$/mu)
   assert.match(rustBuildWorkflow, /^      CARGO_PROFILE_TEST_DEBUG: "0"$/mu)
   assert.match(mainlineWorkflow, /^    name: Canonical workspace verification$/mu)
-  for (const lane of ['source', 'typescript', 'rust', 'rust-test-build', 'rust-tests']) {
+  for (const lane of ['source', 'typescript', 'rust', 'rust-runtime-build', 'rust-runtime-sessions', 'rust-test-build', 'rust-tests']) {
     assert.match(mainlineWorkflow, new RegExp(`^      - ${lane}$`, 'mu'))
   }
   assert.match(mainlineWorkflow, /^    if: \$\{\{ always\(\) \}\}$/mu)
-  for (const [variable, need] of Object.entries({ SOURCE_RESULT: 'source', TYPESCRIPT_RESULT: 'typescript', RUST_RESULT: 'rust', ARCHIVE_RESULT: 'rust-test-build', TESTS_RESULT: 'rust-tests' })) {
+  for (const [variable, need] of Object.entries({ SOURCE_RESULT: 'source', TYPESCRIPT_RESULT: 'typescript', RUST_RESULT: 'rust', RUNTIME_BUILD_RESULT: 'rust-runtime-build', RUNTIME_SESSIONS_RESULT: 'rust-runtime-sessions', ARCHIVE_RESULT: 'rust-test-build', TESTS_RESULT: 'rust-tests' })) {
     assert.ok(mainlineWorkflow.includes(variable + ': ${{ needs.' + need + '.result }}'))
     assert.ok(mainlineWorkflow.includes('test "${' + variable + '}" = "success"'))
   }
