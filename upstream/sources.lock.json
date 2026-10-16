@@ -1311,7 +1311,7 @@
       "id": "codex-tool-review-rollout-budget-diagnostics",
       "file": "upstream/patches/codex/0092-tool-review-rollout-budget-diagnostics.patch",
       "planned": false,
-      "patchSha256": "e0d724c4738ad452c697673417f7388b564d6054e9e844cd2062b39a58c0559f",
+      "patchSha256": "3b1b090c05a133f4011a0d15ea92e9d05860c243df6953908fd9bbe82d90ec58",
       "targets": [
         "codex-rs/core/tests/suite/rollout_budget.rs"
       ]
@@ -1718,7 +1718,7 @@
       "id": "codex-tool-review-supervised-process-shutdown",
       "file": "upstream/patches/codex/0121-tool-review-supervised-process-shutdown.patch",
       "planned": false,
-      "patchSha256": "ffa99ad3aaf6ca92f1ea37025f35f2efcce22be62309584d3747c8e159dd8b50",
+      "patchSha256": "e4e894eecafd2b1d72a2b17793ce3b14274084d13abaa3c63b447b28190e29f8",
       "targets": [
         "codex-rs/core/src/session/handlers.rs",
         "codex-rs/core/src/unified_exec/mod.rs",

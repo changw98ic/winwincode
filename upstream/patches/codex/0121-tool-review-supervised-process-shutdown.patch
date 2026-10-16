@@ -243,7 +243,7 @@ diff --git a/codex-rs/core/src/spawn.rs b/codex-rs/core/src/spawn.rs
      let SpawnChildRequest {
          program,
          args,
-@@ -92,6 +100,12 @@
+@@ -92,6 +100,14 @@
      // to also be terminated.
  
      #[cfg(unix)]
@@ -251,12 +251,14 @@ diff --git a/codex-rs/core/src/spawn.rs b/codex-rs/core/src/spawn.rs
 +        .then(codex_utils_pty::process_group::ProcessGroupLifeline::new)
 +        .transpose()?;
 +    #[cfg(unix)]
-+    let lifeline_fds = lifeline.as_ref().map(|lifeline| lifeline.child_fds());
++    let lifeline_fds = lifeline
++        .as_ref()
++        .map(codex_utils_pty::process_group::ProcessGroupLifeline::child_fds);
 +    #[cfg(unix)]
      unsafe {
          let detach_from_tty = matches!(stdio_policy, StdioPolicy::RedirectForShellTool);
          #[cfg(target_os = "linux")]
-@@ -99,6 +113,9 @@
+@@ -99,6 +115,9 @@
          cmd.pre_exec(move || {
              if detach_from_tty {
                  codex_utils_pty::process_group::detach_from_tty()?;
@@ -266,7 +268,7 @@ diff --git a/codex-rs/core/src/spawn.rs b/codex-rs/core/src/spawn.rs
              }
  
              // This relies on prctl(2), so it only works on Linux.
-@@ -133,5 +150,9 @@
+@@ -133,5 +152,9 @@
          }
      }
  
@@ -274,7 +276,7 @@ diff --git a/codex-rs/core/src/spawn.rs b/codex-rs/core/src/spawn.rs
 +    Ok(SpawnedChild {
 +        child: cmd.kill_on_drop(true).spawn()?,
 +        #[cfg(unix)]
-+        _lifeline: lifeline.map(|lifeline| lifeline.into_writer()),
++        _lifeline: lifeline.map(codex_utils_pty::process_group::ProcessGroupLifeline::into_writer),
 +    })
  }
 diff --git a/codex-rs/core/src/exec.rs b/codex-rs/core/src/exec.rs
