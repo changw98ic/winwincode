@@ -126,6 +126,18 @@ producer 用原来的 `--workspace --exclude winwincode-kernel-helper --all-feat
 
 producer 通过 reusable-workflow outputs 传递实际 artifact ID、producer attempt 和 archive 摘要。消费者按 ID 下载，并校验这些成功依赖的输出，不猜测当前 consumer attempt 对应的产物；单独重跑失败消费者可复用成功 producer 的 archive。artifact 名称包含 run、producer attempt、SHA、OS 和架构，只供本次 workflow 使用，保留一天。它不是跨次构建缓存。Clippy 仍检查 all-targets/all-features；runtime 仍单独构建和验证默认 features 的产品。
 
+### CI 产品运行时拆分
+
+默认 features 的产品由 `rust-runtime-build` 单独构建，保留 `build:rust`、`verify-products --scope rust` 和短 API vertical。`scripts/runtime-products.mjs produce` 验证该 vertical 生成的原始 `winwincode-api-production.source.json`，把它和 `target/debug` 中四个产品程序封装到 tar。tar 保留执行权限；消费者不生成新 seal。
+
+四个 `rust-runtime-sessions` matrix 消费者按确切 artifact ID 下载同一产品包。manifest 校验 checkout commit、workflow run、producer attempt、OS、架构和包摘要；下载摘要和 attempt 来自成功 producer 的 outputs。消费者的当前 attempt 不参与产物身份，因此可以单独重跑。产品包保留七天，供同一 run 重跑使用，不作为跨次构建缓存。
+
+消费者保持 Ubuntu 24.04、固定 Node.js、bubblewrap/libcap2 和原 sandbox 检查，恢复到 canonical `target/debug`。消费者不安装 Rust 或构建依赖；运行 Session 时用失败桩替代 PATH 中的 `cargo`、`rustc`，确保意外编译会使该组失败。消费者设置 `WWC_API_SKIP_BUILD=1`、`WWC_CODE_MODE_ACCEPTANCE_BIN_DIR` 和 `WWC_CLI_BINARY`。恢复及每组执行前后均验证原 seal；执行结束还要求 seal 字节未改变。
+
+`run-api-production-sessions.mjs --group load|api|recovery|boundaries` 选择分组。不传分组仍串行运行原来的 14 个文件。组内保持 `--test-concurrency=1`，组间独立运行，`fail-fast: false`。load 文件独占一组；其余按历史耗时分为 API、恢复与边界三组。`tests/runtime-products.test.mjs` 检查四组恰好覆盖原 14 个文件，并用迁移后的 synthetic fixture 验证权限、原 seal、身份拒绝和禁止编译的单消费者重跑。实际产品耗时由 CI 测量，不把约 30 分钟目标作为已实现结论。
+
+失败时沿用场景保留临时目录的机制。消费者将临时目录限定到自己的 runner 目录，`scripts/collect-runtime-diagnostics.mjs` 导出测试日志、通过现有凭据扫描的 Device 日志和指定运行表的 SQLite 行数。扫描拒绝的日志只记录摘要与拒绝规则。数据库查询失败只记录错误代码；不上传原始数据库、私钥、凭据、源码仓库或 Provider 负载。诊断收集不改变业务测试结果，产物保留七天。
+
 ### `test-support` 与 helper 前置条件
 
 多个 crate 把测试专用端口和故障注入点放在 `test-support` feature 后面。相关测试目标在各自的 `Cargo.toml` 中用 `required-features = ["test-support"]` 声明。根测试脚本使用 `--all-features`，所以会启用这些目标。
@@ -287,8 +299,9 @@ runner 核对两端操作系统主机身份、源码 commit、API 来源摘要�
 | `rust-test-build` | 构建 helper 和完整 nextest archive，记录原过滤器的测试 ID |
 | `rust-tests/test` | 下载本次 archive，运行原标准测试过滤器和 helper 测试 |
 | `rust-tests/e2e` | 下载本次 archive，运行原重负载过滤器和 helper 测试 |
-| `rust/runtime` | 构建 Rust 产品，检查产物，并运行两个 API 生产链路验证 |
-| `verify` | 要求 source、typescript、Rust 构建、producer 和两个测试消费者成功 |
+| `rust-runtime-build` | 构建默认 features 产品、检查产物、运行短 API vertical 并上传封印产品包 |
+| `rust-runtime-sessions` | 四组复用同一封印产品，串行运行每组原始 Session 场景 |
+| `verify` | 要求 source、typescript、lint、两个 producer、两个 Rust 测试消费者及全部 Session 分组成功 |
 
 本地定向验证用于快速反馈。主线 CI 是合入前的完整组合门禁。
 

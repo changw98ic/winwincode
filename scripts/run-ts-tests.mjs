@@ -9,6 +9,7 @@ const root = resolve(import.meta.dirname, '..')
 const canonicalTestFiles = Object.freeze([
   'tests/rust-build-cache.test.mjs',
   'tests/rust-test-archive.test.mjs',
+  'tests/runtime-products.test.mjs',
   'tests/api-production-vertical-runner.test.mjs',
   'tests/api-production-device-prerequisites.test.mjs',
   'tests/network-request.test.mjs',

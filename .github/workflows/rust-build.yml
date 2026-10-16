@@ -23,9 +23,9 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 360
     outputs:
-      artifact_id: ${{ steps.upload.outputs.artifact-id }}
-      producer_attempt: ${{ steps.produce.outputs.producer_attempt }}
-      archive_sha256: ${{ steps.produce.outputs.archive_sha256 }}
+      artifact_id: ${{ steps.upload.outputs.artifact-id || steps.runtime-upload.outputs.artifact-id }}
+      producer_attempt: ${{ steps.produce.outputs.producer_attempt || steps.runtime-produce.outputs.producer_attempt }}
+      archive_sha256: ${{ steps.produce.outputs.archive_sha256 || steps.runtime-produce.outputs.archive_sha256 }}
     env:
       CARGO_INCREMENTAL: "0"
       CARGO_PROFILE_DEV_DEBUG: "0"
@@ -162,10 +162,23 @@ jobs:
         shell: bash
         run: corepack pnpm verify:api-production-vertical
 
-      - name: Verify shared Device product Sessions
+      - name: Seal runtime product archive
+        id: runtime-produce
         if: ${{ inputs.lane == 'runtime' }}
         shell: bash
-        run: corepack pnpm verify:api-production-sessions
+        run: node scripts/runtime-products.mjs produce
+
+      - name: Upload runtime products with original source seal
+        id: runtime-upload
+        if: ${{ inputs.lane == 'runtime' }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: runtime-products-${{ github.run_id }}-${{ github.run_attempt }}-${{ github.sha }}-Linux-X64
+          path: .cache/runtime-products/
+          if-no-files-found: error
+          include-hidden-files: true
+          compression-level: 0
+          retention-days: 7
 
       - name: Report safe compiler cache diagnostics
         if: ${{ always() }}

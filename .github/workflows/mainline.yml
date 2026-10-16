@@ -73,14 +73,96 @@ jobs:
         run: corepack pnpm verify:typescript
 
   rust:
-    name: rust-${{ matrix.lane }}
+    name: rust-lint
+    uses: ./.github/workflows/rust-build.yml
+    with:
+      lane: lint
+
+  rust-runtime-build:
+    name: Rust runtime producer
+    uses: ./.github/workflows/rust-build.yml
+    with:
+      lane: runtime
+
+  rust-runtime-sessions:
+    name: runtime-sessions-${{ matrix.group }}
+    needs: rust-runtime-build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
-        lane: [lint, runtime]
-    uses: ./.github/workflows/rust-build.yml
-    with:
-      lane: ${{ matrix.lane }}
+        group: [load, api, recovery, boundaries]
+    env:
+      CI: "1"
+      WWC_API_SKIP_BUILD: "1"
+      WWC_CODE_MODE_ACCEPTANCE_BIN_DIR: ${{ github.workspace }}/target/debug
+      WWC_CLI_BINARY: ${{ github.workspace }}/target/debug/wwc
+      WWC_RUNTIME_PRODUCER_ATTEMPT: ${{ needs.rust-runtime-build.outputs.producer_attempt }}
+      WWC_RUNTIME_ARCHIVE_SHA256: ${{ needs.rust-runtime-build.outputs.archive_sha256 }}
+    steps:
+      - name: Check out identical source
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Install pinned Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version-file: .node-version
+
+      - name: Install runtime dependencies and verify sandbox
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "${RUNNER_TEMP}/runtime-sessions"
+          sudo apt-get update -y
+          sudo apt-get install -y --no-install-recommends bubblewrap libcap2
+          if [[ -e /proc/sys/kernel/apparmor_restrict_unprivileged_userns ]]; then
+            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          fi
+          bwrap --ro-bind / / --unshare-user --unshare-pid --unshare-net --as-pid-1 -- true
+
+      - name: Download exact producer runtime products
+        uses: actions/download-artifact@v8
+        with:
+          artifact-ids: ${{ needs.rust-runtime-build.outputs.artifact_id }}
+          path: .cache/runtime-products/
+
+      - name: Restore canonical runtime products and verify original source seal
+        run: node scripts/runtime-products.mjs restore
+
+      - name: Verify shared Device product Sessions without compiling
+        env:
+          TMPDIR: ${{ runner.temp }}/runtime-sessions
+        shell: bash
+        run: |
+          set -euo pipefail
+          tools="${RUNNER_TEMP}/no-runtime-compilers"
+          mkdir -p "${tools}"
+          for compiler in cargo rustc; do
+            printf '#!/bin/sh\nprintf "Unexpected runtime compilation\\n" >&2\nexit 91\n' > "${tools}/${compiler}"
+            chmod +x "${tools}/${compiler}"
+          done
+          export PATH="${tools}:${PATH}"
+          node scripts/run-api-production-sessions.mjs --group ${{ matrix.group }} 2>&1 | tee "${RUNNER_TEMP}/runtime-sessions.log"
+
+      - name: Collect safe failed scenario diagnostics
+        if: ${{ failure() }}
+        continue-on-error: true
+        env:
+          TMPDIR: ${{ runner.temp }}/runtime-sessions
+        run: node scripts/collect-runtime-diagnostics.mjs
+
+      - name: Retain failed scenario diagnostics
+        if: ${{ failure() }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: runtime-diagnostics-${{ matrix.group }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: .cache/runtime-diagnostics/
+          if-no-files-found: ignore
+          include-hidden-files: true
+          retention-days: 7
 
   rust-test-build:
     name: Rust test producer
@@ -142,6 +224,8 @@ jobs:
       - source
       - typescript
       - rust
+      - rust-runtime-build
+      - rust-runtime-sessions
       - rust-test-build
       - rust-tests
     runs-on: ubuntu-24.04
@@ -149,6 +233,8 @@ jobs:
     steps:
       - name: Require every independent lane to pass
         env:
+          RUNTIME_BUILD_RESULT: ${{ needs.rust-runtime-build.result }}
+          RUNTIME_SESSIONS_RESULT: ${{ needs.rust-runtime-sessions.result }}
           RUST_RESULT: ${{ needs.rust.result }}
           ARCHIVE_RESULT: ${{ needs.rust-test-build.result }}
           TESTS_RESULT: ${{ needs.rust-tests.result }}
@@ -160,5 +246,7 @@ jobs:
           test "${SOURCE_RESULT}" = "success"
           test "${TYPESCRIPT_RESULT}" = "success"
           test "${RUST_RESULT}" = "success"
+          test "${RUNTIME_BUILD_RESULT}" = "success"
+          test "${RUNTIME_SESSIONS_RESULT}" = "success"
           test "${ARCHIVE_RESULT}" = "success"
           test "${TESTS_RESULT}" = "success"
