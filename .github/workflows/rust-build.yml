@@ -6,6 +6,13 @@ on:
       lane:
         required: true
         type: string
+    outputs:
+      artifact_id:
+        value: ${{ jobs.build.outputs.artifact_id }}
+      producer_attempt:
+        value: ${{ jobs.build.outputs.producer_attempt }}
+      archive_sha256:
+        value: ${{ jobs.build.outputs.archive_sha256 }}
 
 permissions:
   contents: read
@@ -15,6 +22,10 @@ jobs:
     name: rust-${{ inputs.lane }}
     runs-on: ubuntu-24.04
     timeout-minutes: 360
+    outputs:
+      artifact_id: ${{ steps.upload.outputs.artifact-id }}
+      producer_attempt: ${{ steps.produce.outputs.producer_attempt }}
+      archive_sha256: ${{ steps.produce.outputs.archive_sha256 }}
     env:
       CARGO_INCREMENTAL: "0"
       CARGO_PROFILE_DEV_DEBUG: "0"
@@ -122,10 +133,12 @@ jobs:
         run: node --experimental-test-module-mocks --test --test-concurrency=1 tests/rust-test-archive.test.mjs
 
       - name: Build shared Rust test archive
+        id: produce
         if: ${{ inputs.lane == 'archive' }}
         run: node scripts/rust-test-archive.mjs produce
 
       - name: Upload shared Rust test archive
+        id: upload
         if: ${{ inputs.lane == 'archive' }}
         uses: actions/upload-artifact@v7
         with:

@@ -124,7 +124,7 @@ producer 用原来的 `--workspace --exclude winwincode-kernel-helper --all-feat
 
 消费者用 `--workspace-remap` 和 target/build 目录重映射执行。运行时使用的源码目录与 `CARGO_BIN_EXE_*` 从环境变量读取。`CARGO_TARGET_DIR`、`WWC_WORKER_HELPER_EXECUTABLE` 和 Code Mode helper 都指向解包目录。禁止缺文件后重新编译。`tests/rust-test-archive.test.mjs` 的真实 Rust fixture 在旧 checkout 不可用且 `cargo`、`rustc` 被失败桩替代时验证这条路径。producer CI 通过 `WWC_NEXTEST_INTEGRATION=1` 运行它。
 
-artifact 名称包含 run、attempt、SHA、OS 和架构，只供本次 workflow 使用，保留一天。它不是跨次构建缓存。Clippy 仍检查 all-targets/all-features；runtime 仍单独构建和验证默认 features 的产品。
+producer 通过 reusable-workflow outputs 传递实际 artifact ID、producer attempt 和 archive 摘要。消费者按 ID 下载，并校验这些成功依赖的输出，不猜测当前 consumer attempt 对应的产物；单独重跑失败消费者可复用成功 producer 的 archive。artifact 名称包含 run、producer attempt、SHA、OS 和架构，只供本次 workflow 使用，保留一天。它不是跨次构建缓存。Clippy 仍检查 all-targets/all-features；runtime 仍单独构建和验证默认 features 的产品。
 
 ### `test-support` 与 helper 前置条件
 
@@ -157,7 +157,7 @@ pnpm test:rust
 
 每个桶使用内核独占锁。进入构建时记录实际选择的桶，结束后更新时间，再扫描并整桶删除连续 86400 秒未使用的受管缓存。命中构建即使没有重写产物也会更新时间；失败构建同样收尾，清理或时间更新失败不会覆盖构建退出码。其他活跃构建持锁的桶会被跳过；等待构建与清理使用相同的锁。锁文件保留，避免删除再创建锁导致两个进程锁住不同 inode。
 
-访问粒度是一次 Cargo 构建选择的整个兼容桶，不是桶内每个 Cargo 文件。清理不使用 mtime，不逐个删除 Cargo 内部文件，也不扫描源码、用户数据、其他项目缓存或发布制品。缺少合法所有权记录、symlink 根目录或异常元数据时保留或拒绝，目录内部的 symlink 不会被递归跟随。已存在的传统 `target` 不会被接管或清理。没有定时任务。
+访问粒度是一次 Cargo 构建选择的整个兼容桶，不是桶内每个 Cargo 文件。清理不使用 mtime，不逐个删除 Cargo 内部文件，也不扫描源码、用户数据、其他项目缓存或发布制品。新桶在专用暂存目录完成所有权记录后原子发布。首次写入失败不会留下最终桶；中断遗留的未发布目录不会被当作可复用桶，不明暂存数据保留。缺少合法所有权记录、symlink 根目录或异常元数据时保留或拒绝，目录内部的 symlink 不会被递归跟随。已存在的传统 `target` 不会被接管或清理。没有定时任务。
 
 显式设置 `CARGO_BUILD_BUILD_DIR` 表示目录由调用方管理。`WWC_RUST_CACHE=off` 关闭本地缓存管理；发布制品门禁明确使用此值，保留同一输出目录的两次刻意清空重建。不要并行构建会覆盖同一产品输出路径的任务；需要隔离时设置不同的 `CARGO_TARGET_DIR`。
 

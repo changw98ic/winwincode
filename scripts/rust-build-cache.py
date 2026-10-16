@@ -14,6 +14,7 @@ import signal
 import stat
 import subprocess
 import sys
+import tempfile
 import time
 
 MAX_IDLE_SECONDS = 24 * 60 * 60
@@ -42,9 +43,33 @@ def read_record(path):
 
 def write_record(path, record):
     temporary = path.with_name(f"{path.name}.{os.getpid()}.tmp")
-    with os.fdopen(regular_open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL), "w") as stream:
-        json.dump(record, stream, sort_keys=True)
-    os.replace(temporary, path)
+    fd = regular_open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL)
+    try:
+        with os.fdopen(fd, "w") as stream:
+            json.dump(record, stream, sort_keys=True)
+        os.replace(temporary, path)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def prepare_entry(base, root, profile, key, record):
+    entry = base / profile / key
+    if entry.exists() or entry.is_symlink():
+        directory(entry)
+        if not valid_record(read_record(entry / "usage.json"), root, profile, key):
+            raise ValueError("refusing an unowned Rust build cache")
+        write_record(entry / "usage.json", record)
+        directory(entry / "build")
+    else:
+        staging = Path(tempfile.mkdtemp(prefix=f".initializing-{key}-", dir=base / profile))
+        try:
+            write_record(staging / "usage.json", record)
+            directory(staging / "build")
+            os.rename(staging, entry)
+        finally:
+            if staging.exists():
+                shutil.rmtree(staging)
+    return entry
 
 
 def cache_root(root):
@@ -66,7 +91,7 @@ def lock_entry(base, profile, key, blocking=True):
 
 
 def valid_record(record, root, profile, key):
-    return (record.get("schema") == SCHEMA and record.get("project") == str(root)
+    return (isinstance(record, dict) and record.get("schema") == SCHEMA and record.get("project") == str(root)
             and record.get("profile") == profile and record.get("key") == key
             and type(record.get("last_used")) in (int, float)
             and 0 <= record["last_used"] < float("inf"))
@@ -77,7 +102,12 @@ def cleanup(root, now=None):
     now = time.time() if now is None else now
     for profile in ("debug", "release"):
         for entry in (base / profile).iterdir():
-            if not re.fullmatch(r"[a-f0-9]{64}", entry.name) or not stat.S_ISDIR(entry.lstat().st_mode):
+            if not re.fullmatch(r"[a-f0-9]{64}", entry.name):
+                continue
+            try:
+                if not stat.S_ISDIR(entry.lstat().st_mode):
+                    continue
+            except FileNotFoundError:
                 continue
             fd = lock_entry(base, profile, entry.name, blocking=False)
             if fd is None:
@@ -138,14 +168,9 @@ def run_cached(root, profile, variant, command, environment=None):
     base = cache_root(root)
     fd = lock_entry(base, profile, key)
     try:
-        entry = base / profile / key
-        existed = entry.exists()
-        directory(entry)
         record = {"schema": SCHEMA, "project": str(root), "profile": profile, "key": key, "last_used": time.time()}
-        if existed and not valid_record(read_record(entry / "usage.json"), root, profile, key):
-            raise ValueError("refusing an unowned Rust build cache")
-        write_record(entry / "usage.json", record)
-        build = directory(entry / "build")
+        entry = prepare_entry(base, root, profile, key, record)
+        build = entry / "build"
     except BaseException:
         os.close(fd)
         raise

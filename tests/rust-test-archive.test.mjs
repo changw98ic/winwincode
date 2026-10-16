@@ -45,7 +45,7 @@ if (process.env.WWC_NEXTEST_INTEGRATION === '1') {
       file(`fixture/tests/${binary}.rs`, '#[test] fn uses_helper() { let p=std::env::var_os("WWC_WORKER_HELPER_EXECUTABLE").unwrap(); assert!(std::process::Command::new(p).status().unwrap().success()); }\n')
     }
     file('.config/nextest.toml', '[profile.default]\narchive.include=[{path="debug/winwincode-kernel-helper",relative-to="target",on-missing="error"}]\n')
-    const env = { ...process.env, CARGO_TARGET_DIR: join(root, 'target'), CARGO_BUILD_BUILD_DIR: join(root, 'intermediates') }
+    const env = { ...process.env, GITHUB_RUN_ID: '12345', GITHUB_RUN_ATTEMPT: '1', GITHUB_OUTPUT: join(base, 'producer-outputs'), CARGO_TARGET_DIR: join(root, 'target'), CARGO_BUILD_BUILD_DIR: join(root, 'intermediates') }
     function run(command, args, cwd = root, environment = env) {
       const result = spawnSync(command, args, { cwd, env: environment, encoding: 'utf8' })
       assert.equal(result.status, 0, `${result.stdout}${result.stderr}`)
@@ -68,9 +68,13 @@ if (process.env.WWC_NEXTEST_INTEGRATION === '1') {
     const tools = join(base, 'no-compilers')
     mkdirSync(tools)
     for (const command of ['cargo', 'rustc']) writeFileSync(join(tools, command), '#!/bin/sh\necho unexpected-compiler-call >&2\nexit 91\n', { mode: 0o700 })
-    const consumerEnv = { ...env, PATH: `${tools}:${env.PATH}` }
+    const producerManifest = JSON.parse(readFileSync(join(output, 'manifest.json')))
+    assert.ok(readFileSync(env.GITHUB_OUTPUT, 'utf8').includes(`archive_sha256=${producerManifest.sha256}\nproducer_attempt=1\n`))
+    const consumerEnv = { ...env, GITHUB_RUN_ATTEMPT: '2', WWC_RUST_TEST_PRODUCER_ATTEMPT: '1', WWC_RUST_TEST_ARCHIVE_SHA256: producerManifest.sha256, PATH: `${tools}:${env.PATH}` }
     consumeArchive(moved, output, 'test', consumerEnv)
     consumeArchive(moved, output, 'e2e', consumerEnv)
+    assert.throws(() => consumeArchive(moved, output, 'test', { ...consumerEnv, WWC_RUST_TEST_PRODUCER_ATTEMPT: '3' }), /archive attempt mismatch/u)
+    assert.throws(() => consumeArchive(moved, output, 'test', { ...consumerEnv, WWC_RUST_TEST_ARCHIVE_SHA256: '0'.repeat(64) }), /producer archive digest mismatch/u)
     assert.throws(() => consumeArchive(moved, output, 'test', { ...consumerEnv, GITHUB_RUN_ID: 'wrong-run' }), /archive run mismatch/u)
     const manifest = JSON.parse(readFileSync(join(output, 'manifest.json')))
     manifest.baseline.test.push('missing::test')
@@ -85,6 +89,8 @@ if (process.env.WWC_NEXTEST_INTEGRATION === '1') {
     { ...env, CARGO_TARGET_DIR: join(old, 'target'), CARGO_BUILD_BUILD_DIR: join(old, 'intermediates') })
     manifest.sha256 = sha256(missing)
     writeFileSync(join(output, 'manifest.json'), JSON.stringify(manifest))
-    assert.throws(() => consumeArchive(moved, output, 'e2e', consumerEnv), /ENOENT/u)
+    assert.throws(() => consumeArchive(moved, output, 'e2e', { ...consumerEnv, WWC_RUST_TEST_ARCHIVE_SHA256: manifest.sha256 }), /ENOENT/u)
+    run('git', ['-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', 'commit', '--allow-empty', '-qm', 'changed commit'], moved, consumerEnv)
+    assert.throws(() => consumeArchive(moved, output, 'test', consumerEnv), /archive commit mismatch/u)
   })
 }

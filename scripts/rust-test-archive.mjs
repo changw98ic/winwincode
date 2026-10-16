@@ -3,7 +3,7 @@
 import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
-import { accessSync, closeSync, constants, mkdirSync, mkdtempSync, openSync, readFileSync, readSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { accessSync, appendFileSync, closeSync, constants, mkdirSync, mkdtempSync, openSync, readFileSync, readSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -75,17 +75,30 @@ export function produceArchive(root, output, env = process.env) {
     ], root, env, true)))
   }
   assert.deepEqual(identity(root, env), before)
+  const digest = archiveDigest(file)
   writeFileSync(join(output, 'manifest.json'), `${JSON.stringify({
-    ...before, sha256: archiveDigest(file), baseline,
+    ...before, sha256: digest, baseline,
   }, null, 2)}\n`)
+  if (env.GITHUB_OUTPUT) {
+    appendFileSync(env.GITHUB_OUTPUT, `archive_sha256=${digest}\nproducer_attempt=${before.attempt}\n`)
+  }
   process.stdout.write(`Rust test archive: ${file} (${statSync(file).size} bytes)\n`)
 }
 
 export function consumeArchive(root, output, lane, env = process.env) {
   assert.ok(['test', 'e2e'].includes(lane), 'archive consumer requires test or e2e lane')
   const manifest = JSON.parse(readFileSync(join(output, 'manifest.json'), 'utf8'))
-  for (const [key, value] of Object.entries(identity(root, env))) {
+  const expected = identity(root, env)
+  expected.attempt = env.WWC_RUST_TEST_PRODUCER_ATTEMPT ?? null
+  if (env.GITHUB_RUN_ID) {
+    assert.match(expected.attempt ?? '', /^\d+$/u, 'producer attempt output is required')
+    assert.match(env.WWC_RUST_TEST_ARCHIVE_SHA256 ?? '', /^[a-f0-9]{64}$/u, 'producer archive digest output is required')
+  }
+  for (const [key, value] of Object.entries(expected)) {
     assert.equal(manifest[key], value, `archive ${key} mismatch`)
+  }
+  if (env.WWC_RUST_TEST_ARCHIVE_SHA256) {
+    assert.equal(manifest.sha256, env.WWC_RUST_TEST_ARCHIVE_SHA256, 'producer archive digest mismatch')
   }
   const file = join(output, 'tests.tar.zst')
   assert.equal(archiveDigest(file), manifest.sha256, 'archive checksum mismatch')

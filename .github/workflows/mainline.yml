@@ -99,6 +99,8 @@ jobs:
         lane: [test, e2e]
     env:
       CI: "1"
+      WWC_RUST_TEST_PRODUCER_ATTEMPT: ${{ needs.rust-test-build.outputs.producer_attempt }}
+      WWC_RUST_TEST_ARCHIVE_SHA256: ${{ needs.rust-test-build.outputs.archive_sha256 }}
     steps:
       - name: Check out identical source
         uses: actions/checkout@v7
@@ -127,7 +129,7 @@ jobs:
       - name: Download this run's Rust test archive
         uses: actions/download-artifact@v8
         with:
-          name: rust-tests-${{ github.run_id }}-${{ github.run_attempt }}-${{ github.sha }}-Linux-X64
+          artifact-ids: ${{ needs.rust-test-build.outputs.artifact_id }}
           path: .cache/rust-test-archive/
 
       - name: Run original Rust test selection without compiling
