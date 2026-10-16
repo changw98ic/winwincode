@@ -6,9 +6,9 @@
 use rusqlite::params;
 use winwincode_execution_port::generated::ModelOpenMessage;
 
-use crate::{DeviceProviderError, DeviceProviderStore};
+use crate::{DeviceProviderError, ProviderRuntimeStore};
 
-impl DeviceProviderStore {
+impl ProviderRuntimeStore {
     pub(crate) fn retain_cancelled_model_open(
         &self,
         open: &ModelOpenMessage,

@@ -145,7 +145,7 @@ function retainedRuns(deviceData, jobId) {
 }
 
 function providerExchangeFacts(deviceData, exchangeId) {
-  const paths = globSync('**/providers.sqlite3', { cwd: deviceData })
+  const paths = globSync('**/provider-runtime.sqlite3', { cwd: deviceData })
   assert.ok(paths.length > 0, 'the real Device Provider store exists')
   return paths.flatMap(path => {
     const store = new DatabaseSync(join(deviceData, path), { readOnly: true })
@@ -559,6 +559,99 @@ test('Chat replaces a crashed real Worker and embedded Core through trusted Devi
   assert.equal(report.flow.scenario.peakHttp, 3)
   assert.equal(report.flow.scenario.oldPhysicalAttempts, 0)
   assert.equal(report.flow.scenario.realCommands, 1)
+  t.diagnostic(JSON.stringify(report.flow.scenario))
+  complete = true
+})
+
+test('Chat Worker replacement preserves the original sent Provider exchange without reissuing its physical request', async t => {
+  const directory = mkdtempSync(join(tmpdir(), 'wwc-provider-worker-restart-'))
+  const productSessionId = 'psn_01J00000000000000000000231'
+  const requestId = 'req_01J00000000000000000000231'
+  const marker = 'provider-boundary-worker-restart'
+  let complete = false
+  t.after(() => {
+    if (complete) rmSync(directory, { recursive: true, force: true })
+    else t.diagnostic(`Failed Provider Worker restart evidence retained at ${directory}`)
+  })
+  const report = await runApiProductionVertical({
+    directory, restart: false, repeat: false, includeStrongFlow: false, ...sealedBinaries(),
+    serverEnvironment: { WWC_SERVER_EXECUTION_LEASE_SECONDS: '10' },
+    deviceProvider: { ...deterministicDeviceProvider(), responseGateMarkers: [marker] },
+    scenario: { async run({ api, modelRoute, devicePath }) {
+      const database = new DatabaseSync(join(directory, 'server-data/control-plane.sqlite3'), { readOnly: true })
+      const device = new DatabaseSync(join(devicePath.deviceData, 'device-client.sqlite3'), { readOnly: true })
+      for (const store of [database, device]) store.exec('PRAGMA busy_timeout=5000')
+      const server = devicePath.modelServer
+      try {
+        await api.command('session.create', 0, { productSessionId,
+          projectId: 'prj_01J00000000000000000000000', repositoryId: 'rep_01J00000000000000000000000',
+          title: 'Provider sent request survives Worker replacement', modelRoute })
+        await devicePath.launchAnchor({ productSessionId })
+        const payload = { productSessionId, message: marker }
+        const submitted = await api.command('chat.submit', 1, payload, requestId)
+        const jobs = () => database.prepare('SELECT * FROM scheduler_execution_jobs WHERE submission_request_id=?').all(requestId)
+        assert.equal(jobs().length, 1)
+        const job = jobs()[0]
+        const original = await waitFor(() => {
+          const run = retainedRuns(devicePath.deviceData, job.job_id).find(value => value.run.job.attempt === 1)
+          if (!run?.requests.length) return false
+          const [fact] = providerExchangeFacts(devicePath.deviceData, run.requests[0].modelExchangeId)
+          const attempt = fact?.attempts[0]
+          const physical = attempt && server.requests.find(request => request.idempotencyKey === attempt.adapter_request_id && request.active)
+          return fact?.attempts.length === 1 && attempt.state === 'invoking' && physical ? { run, fact, attempt } : false
+        }, 'the original exchange has one actual accepted HTTPS request', 60_000)
+        const originalExchangeId = original.run.requests[0].modelExchangeId
+        const originalKey = original.attempt.adapter_request_id
+        const authority = database.prepare('SELECT * FROM execution_dispatch_authorities WHERE job_id=?').get(job.job_id)
+        const worker = actualWorkerProcess(device, authority)
+        assert.equal(worker.state, 'running')
+        assert.ok(worker.data_directory.startsWith(`${devicePath.deviceData}/`))
+        process.kill(-worker.pid, 'SIGKILL')
+        const interrupted = await waitFor(() => {
+          const [fact] = providerExchangeFacts(devicePath.deviceData, originalExchangeId)
+          return fact?.attempts.length === 1 && fact.attempts[0].state === 'interrupted_unknown' && fact.exchange.chunks ? fact : false
+        }, 'trusted Device recovery closes the original physical attempt in the runtime ledger', 30_000)
+        assert.equal(interrupted.exchange.request_open, original.fact.exchange.request_open)
+        assert.equal(interrupted.attempts[0].adapter_request_id, originalKey)
+        assert.equal(interrupted.attempts[0].accounting_chunks, null)
+        const replacement = await waitFor(() => {
+          const current = jobs()[0]
+          const next = database.prepare('SELECT * FROM execution_dispatch_authorities WHERE job_id=?').get(job.job_id)
+          const run = retainedRuns(devicePath.deviceData, job.job_id).find(value => value.run.job.attempt === 2)
+          const physical = server.requests.find(request => request.gateMarker === marker && request.idempotencyKey !== originalKey && request.active)
+          return current?.attempt === 2 && next?.attempt === 2 && run?.requests.length === 1 && physical
+            ? { authority: next, run, physical } : false
+        }, 'the official successor starts its own exchange after trusted Worker exit', 90_000)
+        assert.equal(jobs().length, 1)
+        assert.notEqual(replacement.authority.worker_instance_id, authority.worker_instance_id)
+        assert.notEqual(replacement.run.requests[0].modelExchangeId, originalExchangeId)
+        assert.equal(server.requests.filter(request => request.idempotencyKey === originalKey).length, 1)
+        const assertOriginalExchange = () => {
+          const facts = providerExchangeFacts(devicePath.deviceData, originalExchangeId)
+          assert.equal(facts.length, 1)
+          assert.equal(facts[0].exchange.request_open, interrupted.exchange.request_open)
+          assert.equal(facts[0].exchange.chunks, interrupted.exchange.chunks)
+          assert.deepEqual(facts[0].attempts, interrupted.attempts,
+            'new credential resolution leaves the original interrupted physical attempt unchanged')
+        }
+        assertOriginalExchange()
+        const session = (await api.query('session.get', { productSessionId })).result
+        await api.command('session.cancel', session.revision, { productSessionId,
+          reason: 'Cancel the observed successor while every response gate remains held' })
+        await waitFor(() => server.activeRequests === 0,
+          'cancellation closes the successor HTTPS request without releasing its response gate', 10_000)
+        server.releaseResponseGate(marker)
+        assert.deepEqual((await api.command('chat.submit', 1, payload, requestId)).result, submitted.result)
+        assert.equal(server.requests.filter(request => request.idempotencyKey === originalKey).length, 1)
+        assertOriginalExchange()
+        return { originalExchangeId, originalPhysicalRequests: 1,
+          successorExchangeId: replacement.run.requests[0].modelExchangeId,
+          originalWorkerInstanceId: authority.worker_instance_id,
+          successorWorkerInstanceId: replacement.authority.worker_instance_id }
+      } finally { server.releaseResponseGate(marker); device.close(); database.close() }
+    } },
+  })
+  assert.equal(report.flow.scenario.originalPhysicalRequests, 1)
   t.diagnostic(JSON.stringify(report.flow.scenario))
   complete = true
 })
@@ -1419,7 +1512,7 @@ test('Chat reopens the same durable Provider retry in a fresh Store and thread w
     scenario: { async run({ api, modelRoute, devicePath }) {
       const database = new DatabaseSync(join(directory, 'server-data/control-plane.sqlite3'), { readOnly: true })
       const device = new DatabaseSync(join(devicePath.deviceData, 'device-client.sqlite3'), { readOnly: true })
-      const provider = new DatabaseSync(join(devicePath.deviceData, 'providers/providers.sqlite3'), { readOnly: true })
+      const provider = new DatabaseSync(join(devicePath.deviceData, 'providers/runtime/provider-runtime.sqlite3'), { readOnly: true })
       for (const store of [database, device, provider]) store.exec('PRAGMA busy_timeout=5000')
       const server = devicePath.modelServer
       const submitted = []

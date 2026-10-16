@@ -252,8 +252,8 @@ fn serve(
 
 fn seed_and_crash(directory: &Path, endpoint: &str) -> ! {
     let _ = DeviceProviderStore::open(directory).unwrap();
-    let mut models = DeviceModels::new(directory);
-    let database = rusqlite::Connection::open(directory.join("providers.sqlite3")).unwrap();
+    let mut models = DeviceModels::for_test(directory);
+    let database = crate::device_model::concurrency_tests::runtime_database(directory);
     for (provider, protocol) in [
         ("qwen", "openai_chat_completions"),
         ("glm", "anthropic_messages"),
@@ -261,7 +261,7 @@ fn seed_and_crash(directory: &Path, endpoint: &str) -> ! {
         let config = serde_json::json!({"providerId":provider,"displayName":"fixture","endpoint":format!("{endpoint}/{provider}"),"protocol":protocol,"modelIds":[format!("{provider}-model")],"enabled":true});
         database
             .execute(
-                "INSERT INTO providers VALUES (?1,?2,?3)",
+                "INSERT INTO configuration.providers VALUES (?1,?2,?3)",
                 rusqlite::params![provider, config.to_string(), b"fixture-only-key".as_slice()],
             )
             .unwrap();
@@ -297,9 +297,9 @@ fn seed_and_crash(directory: &Path, endpoint: &str) -> ! {
     reason = "restored retries, exact replay and cancellation share the same three physically occupied slots"
 )]
 fn recover_under_three_live_requests(directory: &Path) {
-    let database = rusqlite::Connection::open(directory.join("providers.sqlite3")).unwrap();
+    let database = crate::device_model::concurrency_tests::runtime_database(directory);
     let store = DeviceProviderStore::open(directory).unwrap();
-    let mut models = DeviceModels::new(directory);
+    let mut models = DeviceModels::for_test(directory);
     for (member, index) in LIVE.into_iter().enumerate() {
         send(&mut models, &open("qwen", index, &format!("live-{member}")));
     }

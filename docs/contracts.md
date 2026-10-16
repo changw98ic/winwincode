@@ -139,6 +139,20 @@ WebSocket 入口是 `/api/v1/events`。它只传输订阅控制帧和服务端�
 
 `ExecutionPortMessage` 是 Control Plane 与 Worker 之间的消息联合。每种消息有自己的精确字段。不要为整个联合假设一个不存在的统一请求信封。
 
+### Device 与 Worker 私有管道
+
+父 Device 创建并独占受管 Worker 的 stdio 管道。`crates/winwincode-client-port/src/private_worker_channel.rs` 定义该本地管道的请求和响应。`requestId` 只关联一次本地收发；不同请求可以交错返回。它不替代执行请求、模型 exchange 或物理尝试的身份。
+
+`Relay` 请求沿已有 `WorkerRelayRequest` 转发给 Server。`Provider` 和 `RefreshExtensions` 由父 Device 本地处理。Server 的 `DeviceWorkerRelayRequest` 只接受前者的 HTTP 类型。凭据响应只在私有管道上传输，不进入持久 outbox。
+
+父 Device 根据监管记录和 Server 下发的 dispatch、租约续期及取消消息判断当前执行权限。请求必须属于该 Worker 实例、执行尝试和 ProductSession 或 WorkRun。Provider 路由来自该 dispatch 的模型选择和父 Device 管理的配置。Worker 提供的 session、thread、exchange 和 request 标识用于关联，不能建立新的执行权限。
+
+`ProviderExecutionSource` 提供非秘密 JEV 参数和单次请求所需的连接材料。端点、协议、密钥、自定义 header 和账户路由由 Device 的配置解析。Worker 在材料返回后重新检查原执行许可，再通过已有 Provider adapter 发出请求。等待凭据不占用控制交换的串行队列。
+
+运行账本使用独立的 `ProviderRuntimeStore`。账本保留原 exchange、请求、物理尝试、流序号和费用事实；重新取得连接材料不产生新的外部调用身份。数据搬移和代码回退范围见 [Provider 账本迁移与回退](operations/deploy.md#provider-账本迁移与回退)。
+
+### 派发与租约
+
 `JobDispatchMessage` 要求：
 
 - `kind`

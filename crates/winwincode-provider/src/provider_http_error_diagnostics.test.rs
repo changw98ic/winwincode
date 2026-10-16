@@ -88,7 +88,7 @@ fn fixture_http_failure(
 }
 
 #[test]
-fn non_success_json_body_keeps_private_reference_and_original_http_failure() {
+fn credential_echo_is_filtered_while_http_failure_and_capture_facts_remain() {
     let fixture = TlsFixture::start(vec![TestResponse {
         status: "400 Bad Request",
         content_type: "application/json",
@@ -107,14 +107,14 @@ fn non_success_json_body_keeps_private_reference_and_original_http_failure() {
     assert_eq!(failure.kind, winwincode_network::ErrorKind::RequestInvalid);
     assert!(!failure.retryable());
     let (metadata, body) = retained_http_error(&directory, failure);
-    assert_eq!(body, PRIVATE_HTTP_ERROR.as_bytes());
+    assert!(body.is_empty());
     assert_eq!(metadata["capture"]["complete"], true);
     assert_eq!(metadata["capture"]["truncated"], false);
     assert!(metadata["capture"]["readFailure"].is_null());
 }
 
 #[test]
-fn all_http_status_classes_keep_exact_body_and_original_retry_policy() {
+fn all_http_status_classes_filter_credentials_and_keep_original_retry_policy() {
     for (status, number) in [
         ("401 Unauthorized", 401),
         ("413 Content Too Large", 413),
@@ -141,10 +141,7 @@ fn all_http_status_classes_keep_exact_body_and_original_retry_policy() {
         assert_eq!(failure.phase, expected.phase);
         assert_eq!(failure.acceptance, expected.acceptance);
         assert_eq!(failure.retryable(), expected.retryable());
-        assert_eq!(
-            retained_http_error(&directory, failure).1,
-            PRIVATE_HTTP_ERROR.as_bytes()
-        );
+        assert!(retained_http_error(&directory, failure).1.is_empty());
     }
 }
 
@@ -233,7 +230,7 @@ fn slow_http_error_body_obeys_original_total_deadline_and_keeps_400() {
 }
 
 #[test]
-fn interrupted_http_error_body_preserves_received_status_and_partial_bytes() {
+fn interrupted_http_error_body_filters_credentials_and_preserves_received_status() {
     let fixture = TlsFixture::start(vec![TestResponse {
         status: "400 Bad Request",
         content_type: "text/plain",
@@ -247,7 +244,7 @@ fn interrupted_http_error_body_preserves_received_status_and_partial_bytes() {
     assert_eq!(failure.http_status, Some(400));
     assert!(!failure.retryable());
     let (metadata, bytes) = retained_http_error(&directory, failure);
-    assert_eq!(bytes, PRIVATE_HTTP_ERROR.as_bytes());
+    assert!(bytes.is_empty());
     assert_eq!(metadata["capture"]["complete"], false);
     assert!(metadata["capture"]["readFailure"].is_object());
 }
@@ -358,9 +355,58 @@ fn native_protocols_share_the_same_private_http_error_capture() {
             "protocol {protocol} must reach the local HTTP boundary"
         );
         assert_eq!(fixture.finish().len(), 1);
-        assert_eq!(
-            retained_http_error(&directory, failure).1,
-            PRIVATE_HTTP_ERROR.as_bytes()
+        assert!(retained_http_error(&directory, failure).1.is_empty());
+    }
+}
+
+#[test]
+fn failure_body_filter_covers_key_custom_header_and_account_routing() {
+    let header = "fixture-sensitive-header";
+    let account = "fixture-sensitive-account";
+    for (body, use_account) in [
+        (SECRET, false),
+        (header.as_bytes(), false),
+        (account.as_bytes(), true),
+    ] {
+        let directory = HttpErrorLogDirectory::new();
+        let mut settings = HttpsSseProviderConfig::try_new(
+            "fixture".into(),
+            crate::codex_login::CODEX_ENDPOINT.into(),
+            HttpsSseProviderTimeouts {
+                connect: Duration::from_secs(1),
+                idle: Duration::from_secs(1),
+                total: Duration::from_secs(1),
+            },
+            HttpsSseProviderLimits {
+                response_bytes: 4096,
+                event_bytes: 1024,
+                events: 16,
+            },
+        )
+        .unwrap();
+        settings = if use_account {
+            settings.with_codex_chatgpt(account.into()).unwrap()
+        } else {
+            settings
+                .with_custom_headers([("x-fixture-key".into(), header.into())])
+                .unwrap()
+        };
+        let adapter = HttpsSseProviderAdapter::try_new(settings)
+            .unwrap()
+            .with_sse_failure_log(directory.0.clone());
+        let mut gate = crate::CredentialLeakGate::new();
+        gate.track_secret(&ResolvedSecret::from_bytes(SECRET.to_vec()).unwrap());
+        let failure = adapter.retain_failed_response(
+            winwincode_network::NetworkFailure::http(400, None),
+            &serde_json::json!({"schemaVersion":1}),
+            body,
+            &adapter.output_leak_gate(&gate),
         );
+        assert_eq!(failure.http_status, Some(400));
+        assert!(!failure.retryable());
+        let (metadata, retained) = retained_http_error(&directory, failure);
+        assert!(retained.is_empty());
+        assert_eq!(metadata["bodyRetained"], false);
+        assert_eq!(metadata["responseBytesReceived"], body.len());
     }
 }

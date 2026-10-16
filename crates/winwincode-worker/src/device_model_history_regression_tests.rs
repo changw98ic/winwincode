@@ -26,7 +26,7 @@ fn mechanism_actual_empty_worker_model_queue_does_not_reload_foreign_history() {
         let root = tempfile::tempdir().unwrap();
         let directory = root.path().join("device");
         let store = DeviceProviderStore::open(&directory).unwrap();
-        let mut models = DeviceModels::new(&directory);
+        let mut models = DeviceModels::for_test(&directory);
         let mut stored_bytes = 0_u64;
         for index in 0..3 {
             let mut open = template.clone();

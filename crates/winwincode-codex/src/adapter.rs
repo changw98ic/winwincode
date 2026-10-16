@@ -189,7 +189,6 @@ pub struct ProductionCodexConfig {
     fusion: Option<winwincode_execution_port::agent_config::AgentFusionSettings>,
     jev_context: Option<AgentJevContextSettings>,
     jev_judge: Option<String>,
-    sealed_benchmark_tools: bool,
     host_action_approvals: bool,
     gateway_route: ModelGatewayRoute,
     registered_capabilities: WorkerCapabilitySet,
@@ -302,7 +301,6 @@ impl ProductionCodexConfig {
             fusion: None,
             jev_judge: None,
             jev_context: None,
-            sealed_benchmark_tools: false,
             host_action_approvals: false,
             gateway_route: options.gateway_route,
             registered_capabilities: options.registered_capabilities,
@@ -334,12 +332,6 @@ impl ProductionCodexConfig {
     #[must_use]
     pub fn with_test_closed_kernel_before_session_start(mut self) -> Self {
         self.lifecycle_faults.close_kernel_before_session_start = true;
-        self
-    }
-
-    #[must_use]
-    pub fn with_sealed_benchmark_tools(mut self) -> Self {
-        self.sealed_benchmark_tools = true;
         self
     }
 
@@ -495,7 +487,7 @@ impl fmt::Debug for ProductionCodexInstallation {
 
 pub struct ProductionCodexAdapter {
     config: ProductionCodexConfig,
-    device_extension_directory: Option<PathBuf>,
+    device_extension_source: Option<Arc<dyn winwincode_provider::DeviceExtensionSource>>,
     kernel: Arc<Kernel>,
     bridge: Arc<ExecutionPortModelBridge>,
     action_gate: Arc<ExecutionPortActionGate>,
@@ -562,7 +554,7 @@ impl ProductionCodexAdapter {
         );
         Ok(Self {
             config,
-            device_extension_directory: None,
+            device_extension_source: None,
             kernel,
             bridge,
             action_gate,
@@ -667,41 +659,37 @@ impl ProductionCodexAdapter {
         ))
     }
 
-    pub fn with_device_extensions(
-        mut self,
-        directory: PathBuf,
-    ) -> Result<Self, ProductionCodexError> {
+    pub fn with_provider_runtime(self, directory: PathBuf) -> Result<Self, ProductionCodexError> {
         if !directory.is_absolute() {
             return Err(invalid_configuration());
         }
-        // Primary accounting includes every physical Provider attempt, including
-        // Chat runs whose sealed configuration disables both JEv extensions.
         self.bridge
-            .attach_device_provider_directory(directory.clone())
+            .attach_provider_runtime_directory(directory)
             .map_err(map_bridge_error)?;
-        self.device_extension_directory = Some(directory);
         Ok(self)
+    }
+
+    #[must_use]
+    pub fn with_device_extension_source(
+        mut self,
+        source: Arc<dyn winwincode_provider::DeviceExtensionSource>,
+    ) -> Self {
+        self.device_extension_source = Some(source);
+        self
     }
 
     fn refresh_device_extensions(
         &mut self,
-        job: &ExecutionJob,
+        lease: &winwincode_execution_port::generated::ExecutionLeaseStamp,
     ) -> Result<(), ProductionCodexError> {
-        let Some(directory) = &self.device_extension_directory else {
+        let Some(source) = &self.device_extension_source else {
             return Ok(());
         };
         if !self.runs.is_empty() {
             return Err(conflict());
         }
-        let benchmark_server =
-            sealed_benchmark_mcp_server(job, self.config.sealed_benchmark_tools)?;
-        let extensions = winwincode_provider::DeviceProviderStore::open(directory)
-            .and_then(|store| match benchmark_server {
-                Some(server) => {
-                    store.refresh_benchmark_extensions(&self.config.kernel_home, server)
-                }
-                None => store.refresh_extensions(&self.config.kernel_home),
-            })
+        let extensions = source
+            .refresh_extensions(lease)
             .map_err(|_| unavailable())?;
         let mut discovered = Vec::new();
         for server in extensions {
@@ -4440,7 +4428,7 @@ impl CodexCoreAdapter for ProductionCodexAdapter {
             .map_err(|_| unavailable())?
             .0;
         if !self.runs.contains_key(&run_key) && load_stored_run(&self.store, &run_key)?.is_none() {
-            self.refresh_device_extensions(start.job)?;
+            self.refresh_device_extensions(start.lease)?;
         }
         let job_digest = stage_product_job_digest(start.job).map_err(|_| invalid_job())?;
         let role_policy = sealed_role_session_policy(start.job)?;
@@ -6793,31 +6781,13 @@ impl StoredTerminal {
     }
 }
 
+#[cfg(test)]
 fn sealed_benchmark_mcp_server(
     job: &ExecutionJob,
     benchmark_enabled: bool,
 ) -> Result<Option<&str>, ProductionCodexError> {
-    const PREFIX: &str = "benchmark_public_smoke_";
-    if !benchmark_enabled {
-        return Ok(None);
-    }
-    let Some(input) = &job.work_input else {
-        return Ok(None);
-    };
-    let mut servers = input
-        .work_contract
-        .objective
-        .split(|character: char| {
-            !(character.is_ascii_alphanumeric() || matches!(character, '_' | '-'))
-        })
-        .filter(|word| word.starts_with(PREFIX));
-    let Some(server) = servers.next() else {
-        return Ok(None);
-    };
-    if server.len() == PREFIX.len() || server.len() > 64 || servers.any(|other| other != server) {
-        return Err(invalid_configuration());
-    }
-    Ok(Some(server))
+    winwincode_provider::benchmark_mcp_server(job, benchmark_enabled)
+        .map_err(|_| invalid_configuration())
 }
 
 fn validate_start(start: CodexThreadStart<'_>) -> Result<(), ProductionCodexError> {

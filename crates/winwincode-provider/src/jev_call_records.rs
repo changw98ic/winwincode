@@ -10,7 +10,7 @@ use rusqlite::{Connection, params};
 pub(super) struct Invocation {
     connection: Connection,
     operation: String,
-    sequence: i64,
+    pub(super) sequence: i64,
 }
 
 impl JevRuntime {

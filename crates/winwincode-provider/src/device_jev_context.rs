@@ -6,7 +6,7 @@ use winwincode_execution_port::jev_decision::{JevPolicy, validate_policy};
 
 use crate::{
     DeviceProviderError, DeviceProviderStore, JevContextEvaluation, JevContextRequest,
-    JevExecutionOptions, JevRun, JevRuntime,
+    JevExecutionOptions, JevRun, JevRuntime, ProviderRuntimeStore,
 };
 
 #[cfg(test)]
@@ -32,7 +32,7 @@ pub struct DeviceJevReceipt<T = JevContextEvaluation> {
     pub run: Option<JevRun<T>>,
 }
 
-impl DeviceProviderStore {
+impl ProviderRuntimeStore {
     pub fn model_jev_source_item(
         &self,
         open: &winwincode_execution_port::generated::ModelOpenMessage,
@@ -131,7 +131,9 @@ impl DeviceProviderStore {
         })
         .collect()
     }
+}
 
+impl DeviceProviderStore {
     pub fn save_jev_settings(
         &self,
         settings: &crate::OpenJevRemoteSettings,
@@ -192,6 +194,59 @@ impl DeviceProviderStore {
         }
         validated_system_one_settings(settings)
     }
+}
+
+impl ProviderRuntimeStore {
+    pub(crate) fn jev_execution_request(
+        &self,
+        operation_id: &str,
+        provider: &str,
+        judge: bool,
+    ) -> Result<crate::device_execution_source::ProviderExecutionRequest, DeviceProviderError> {
+        let context = if let Some(operation) =
+            operation_id.strip_prefix(if judge { "judge:" } else { "jev:" })
+        {
+            let (exchange, _) = operation
+                .rsplit_once(':')
+                .ok_or(DeviceProviderError::StateInvalid)?;
+            let saved: Option<String> = self
+                .connection
+                .query_row(
+                    "SELECT request_open FROM exchanges WHERE exchange_id=?1",
+                    [exchange],
+                    |row| row.get(0),
+                )
+                .optional()?
+                .flatten();
+            saved
+                .map(|saved| {
+                    serde_json::from_str::<winwincode_execution_port::generated::ModelOpenMessage>(
+                        &saved,
+                    )
+                })
+                .transpose()?
+                .as_ref()
+                .map(Into::into)
+        } else {
+            None
+        };
+        Ok(crate::device_execution_source::ProviderExecutionRequest {
+            context,
+            provider_id: provider.to_owned(),
+            model_id: None,
+            purpose: if judge {
+                crate::device_execution_source::ProviderExecutionPurpose::JevJudge {
+                    operation_id: operation_id.to_owned(),
+                }
+            } else {
+                crate::device_execution_source::ProviderExecutionPurpose::JevContext {
+                    operation_id: operation_id.to_owned(),
+                }
+            },
+            physical_attempt: None,
+            adapter_request_id: None,
+        })
+    }
 
     pub async fn evaluate_configured_context_once(
         &self,
@@ -220,7 +275,12 @@ impl DeviceProviderStore {
             .jev_context
             .as_ref()
             .ok_or(DeviceProviderError::StateInvalid)?;
-        let settings = self.resolve_jev_settings(&context.provider)?;
+        let execution_request =
+            self.jev_execution_request(operation_id, &context.provider, false)?;
+        let parameters = self
+            .execution_source()?
+            .jev_parameters(&execution_request)?;
+        let settings = parameters.settings();
         let (config, retry) = settings
             .to_config_and_runtime()
             .map_err(|_| DeviceProviderError::StateInvalid)?;
@@ -235,7 +295,14 @@ impl DeviceProviderStore {
             ))],
             retry,
         )
-        .with_cancellation(cancellation);
+        .with_cancellation(cancellation)
+        .with_execution_source(
+            self.execution_source
+                .clone()
+                .ok_or(DeviceProviderError::StateInvalid)?,
+            execution_request,
+            parameters,
+        );
         self.evaluate_context_once_authorized(
             operation_id,
             &configuration_digest,
@@ -334,7 +401,15 @@ impl DeviceProviderStore {
         let Some(context) = session.profile.source.settings.jev_context.as_ref() else {
             return Ok(());
         };
-        let settings = self.resolve_jev_settings(&context.provider)?;
+        let execution_request = self.jev_execution_request(
+            &format!("jev:{}:0", open.model_exchange_id.0),
+            &context.provider,
+            false,
+        )?;
+        let settings = self
+            .execution_source()?
+            .jev_parameters(&execution_request)?
+            .settings();
         let configuration_digest = configured_context_digest(session, &settings)?;
         let task_text = context_task_text(job, request)?;
         let input = request
@@ -742,7 +817,7 @@ mod tests {
                     .is_err()
             );
             let rows: i64 = store
-                .connection
+                .runtime.connection
                 .query_row("SELECT count(*) FROM jev_context_exchanges", [], |row| {
                     row.get(0)
                 })
@@ -797,7 +872,7 @@ mod tests {
                 .unwrap();
             assert_eq!(provider.calls(), 2);
             store
-                .connection
+                .runtime.connection
                 .execute(
                     "UPDATE jev_context_exchanges SET result=NULL,call_status='pending' WHERE operation_id='jev:first'",
                     [],
@@ -1033,7 +1108,7 @@ mod tests {
             .block_on(async {
                 let mut not_started = original.clone();
                 assert!(store.prepare_jev_model_request(&open, &mut not_started, &|| false).await.is_err());
-                let rows: i64 = store.connection.query_row("SELECT count(*) FROM jev_context_exchanges", [], |row| row.get(0)).unwrap();
+                let rows: i64 = store.runtime.connection.query_row("SELECT count(*) FROM jev_context_exchanges", [], |row| row.get(0)).unwrap();
                 assert_eq!(rows, 0, "the real preparation entry must forward the live guard");
                 let stored = store
                     .evaluate_context_once(
@@ -1068,7 +1143,7 @@ mod tests {
                     }
                 );
                 assert_eq!(run.observation.unwrap().input_tokens, 40);
-                let (saved_digest, saved_request): (String, String) = store.connection.query_row(
+                let (saved_digest, saved_request): (String, String) = store.runtime.connection.query_row(
                     "SELECT digest, request_json FROM jev_context_exchanges WHERE operation_id=?1",
                     [format!("jev:{}:1", open.model_exchange_id.0)],
                     |row| Ok((row.get(0)?, row.get(1)?)),
@@ -1106,7 +1181,7 @@ mod tests {
                 unchanged.as_object_mut().unwrap().remove("winwincodeJevTask");
                 store.prepare_jev_model_request(&open, &mut oversized, &|| true).await.unwrap();
                 assert_eq!(oversized, unchanged);
-                assert_eq!(store.connection.query_row(
+                assert_eq!(store.runtime.connection.query_row(
                     "SELECT COUNT(*) FROM jev_context_exchanges", [], |row| row.get::<_, i64>(0)
                 ).unwrap(), 1);
                 for omit in [true, false] {
@@ -1178,14 +1253,14 @@ mod tests {
                 let mut foreign_score = saved.clone();
                 foreign_score[2]["candidate"] = serde_json::json!("{\"foreign\":true}");
                 let foreign_score = serde_json::to_string(&foreign_score).unwrap();
-                store.connection.execute(
+                store.runtime.connection.execute(
                     "UPDATE jev_context_exchanges SET request_json=?1,digest=?2",
                     params![foreign_score, format!("{:x}", Sha256::digest(foreign_score.as_bytes()))],
                 ).unwrap();
                 assert!(store.model_jev_source_item(&open, &receipts[0].operation_id).is_err());
-                assert!(store.connection.execute("UPDATE jev_context_exchanges SET request_json=NULL", []).is_err());
+                assert!(store.runtime.connection.execute("UPDATE jev_context_exchanges SET request_json=NULL", []).is_err());
                 assert!(store.model_jev_source_item(&open, &receipts[0].operation_id).is_err());
-                store.connection.execute(
+                store.runtime.connection.execute(
                     "UPDATE jev_context_exchanges SET request_json=?1,digest=?2",
                     params![saved_request, saved_digest],
                 ).unwrap();
@@ -1198,7 +1273,7 @@ mod tests {
                 assert_eq!(replay, expected);
                 assert_eq!(reopened.model_jev_receipts(&open).unwrap(), receipts);
                 reopened
-                    .connection
+                    .runtime.connection
                     .execute("UPDATE jev_context_exchanges SET result=NULL,call_status='pending'", [])
                     .unwrap();
                 let pending = reopened.model_jev_receipts(&open).unwrap();
@@ -1219,7 +1294,7 @@ mod tests {
                     .unwrap()
                     .remove("winwincodeJevTask");
                 assert_eq!(interrupted, retained);
-                reopened.connection.execute("UPDATE jev_context_exchanges SET request_json='tampered'", []).unwrap();
+                reopened.runtime.connection.execute("UPDATE jev_context_exchanges SET request_json='tampered'", []).unwrap();
                 assert!(reopened.model_jev_receipts(&open).is_err());
                 let mut corrupt_replay = original.clone();
                 assert!(reopened.prepare_jev_model_request(&open, &mut corrupt_replay, &|| true).await.is_err());
@@ -1236,6 +1311,7 @@ mod tests {
                 );
             });
         let count: i64 = store
+            .runtime
             .connection
             .query_row("SELECT count(*) FROM jev_context_exchanges", [], |r| {
                 r.get(0)

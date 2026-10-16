@@ -71,9 +71,23 @@ fn run_live_network_fixture() {
         .unwrap();
     let mut originals = BTreeMap::new();
     for marker in ["retry", "cancel", "authority"] {
-        let request = requests
-            .recv_timeout(WAIT)
-            .expect("original actual retry failure request");
+        let request = match requests.recv_timeout(WAIT) {
+            Ok(request) => request,
+            Err(error) => {
+                let _ = child.kill();
+                let output = child.wait_with_output().unwrap();
+                stopped.store(true, Ordering::Release);
+                let server_result = server.join();
+                let retained = root.keep();
+                panic!(
+                    "original actual retry failure request {marker}: {error}; retained at {} (server completed={}): {} {}",
+                    retained.display(),
+                    server_result.is_ok(),
+                    String::from_utf8_lossy(&output.stdout),
+                    String::from_utf8_lossy(&output.stderr),
+                );
+            }
+        };
         assert_eq!(request.1, marker);
         request.3.send(false).unwrap();
         originals.insert(marker, request.2);
@@ -177,13 +191,13 @@ fn store_entries(directory: &Path, request: &ModelOpenMessage) -> Vec<String> {
 )]
 fn run_live_worker(directory: &Path, endpoint: &str) {
     let _ = DeviceProviderStore::open(directory).unwrap();
-    let mut models = DeviceModels::new(directory);
+    let mut models = DeviceModels::for_test(directory);
     models.set_intake_log(Some(directory.join("intake.log")));
-    let database = rusqlite::Connection::open(directory.join("providers.sqlite3")).unwrap();
+    let database = crate::device_model::concurrency_tests::runtime_database(directory);
     let config = serde_json::json!({"providerId":"qwen","displayName":"fixture","endpoint":format!("{endpoint}/qwen"),"protocol":"openai_chat_completions","modelIds":["qwen-model"],"enabled":true});
     database
         .execute(
-            "INSERT INTO providers VALUES (?1,?2,?3)",
+            "INSERT INTO configuration.providers VALUES (?1,?2,?3)",
             rusqlite::params!["qwen", config.to_string(), b"fixture-only-key".as_slice()],
         )
         .unwrap();
@@ -225,7 +239,7 @@ fn run_live_worker(directory: &Path, endpoint: &str) {
         );
         assert_eq!(attempts(&database, request), vec!["failed"]);
         assert_eq!(store_entries(directory, request).len(), 1);
-        let owner_path = directory.join("model-exchange-owners").join(format!(
+        let owner_path = models.directory.join("model-exchange-owners").join(format!(
             "{:x}",
             Sha256::digest(request.model_exchange_id.0.as_bytes())
         ));

@@ -3,7 +3,9 @@
 use std::collections::BTreeMap;
 use std::fmt;
 use std::fs;
-use std::io::{BufRead, BufReader, Read, Write};
+#[cfg(test)]
+use std::io::{BufRead, BufReader};
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
@@ -262,7 +264,7 @@ impl SessionSupervisor {
             .ok_or_else(|| SupervisorError::invalid("device data directory is unavailable"))?
             .join("worker-logs");
         let worker_logs = WorkerLogRecorder::open(&logs_root, WorkerLogConfig::default())?;
-        Ok(Self {
+        let supervisor = Self {
             inner: Arc::new(SupervisorInner {
                 config,
                 store: Mutex::new(store),
@@ -270,7 +272,51 @@ impl SessionSupervisor {
                 worker_logs,
                 worker_relay_transport: Mutex::new(None),
             }),
-        })
+        };
+        supervisor.prepare_provider_runtime()?;
+        Ok(supervisor)
+    }
+
+    fn provider_directory(&self) -> Result<PathBuf, SupervisorError> {
+        self.lock_store()
+            .database_path()
+            .parent()
+            .map(|path| path.join("providers"))
+            .ok_or_else(|| SupervisorError::invalid("device Provider directory is unavailable"))
+    }
+
+    fn prepare_provider_runtime(&self) -> Result<(), SupervisorError> {
+        let directory = self.provider_directory()?;
+        let database = directory.join("providers.sqlite3");
+        if !database.exists() {
+            return Ok(());
+        }
+        let connection = rusqlite::Connection::open_with_flags(
+            &database,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )
+        .map_err(|_| SupervisorError::invalid("Provider storage version is unavailable"))?;
+        let version: i64 = connection
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .map_err(|_| SupervisorError::invalid("Provider storage version is unavailable"))?;
+        drop(connection);
+        if version == 16 {
+            for record in self.worker_processes()? {
+                if record.state == WORKER_STATE_RUNNING {
+                    self.stop_with_fencing(&record.worker_session_id, true, false)?;
+                } else if probe_process(record.pid, &record.process_start_identity)
+                    != ProcessProbe::Gone
+                {
+                    return Err(SupervisorError::UnverifiableExisting {
+                        worker_session_id: record.worker_session_id,
+                        pid: record.pid,
+                    });
+                }
+            }
+            winwincode_provider::DeviceProviderStore::open(&directory)
+                .map_err(|_| SupervisorError::invalid("Provider runtime migration failed"))?;
+        }
+        Ok(())
     }
 
     #[must_use]
@@ -280,6 +326,7 @@ impl SessionSupervisor {
 
     /// Required request/result recovery before reporting a confirmed process
     /// closure. The shipped Worker delegates model and tool writes to their owners.
+    #[allow(clippy::too_many_lines)]
     pub(crate) fn recover_terminated_calls(
         &self,
         record: &WorkerProcessRecord,
@@ -293,7 +340,7 @@ impl SessionSupervisor {
             ));
         }
         let config_path = Path::new(&record.data_directory).join(MANAGED_SESSION_CONFIG_FILE);
-        let config: serde_json::Value = serde_json::from_slice(
+        let mut config: serde_json::Value = serde_json::from_slice(
             &fs::read(&config_path)
                 .map_err(|error| SupervisorError::InvalidInput(error.to_string()))?,
         )
@@ -305,12 +352,41 @@ impl SessionSupervisor {
                 "call recovery process identity mismatch".into(),
             ));
         }
+        if config.get("providerDirectory").is_some() {
+            let runtime_directory = self.provider_directory()?.join("runtime");
+            let object = config
+                .as_object_mut()
+                .ok_or_else(|| SupervisorError::invalid("managed configuration is invalid"))?;
+            object.remove("providerDirectory");
+            object.insert(
+                "providerRuntimeDirectory".into(),
+                serde_json::json!(runtime_directory),
+            );
+            object.insert("providerExecutionProfile".into(), serde_json::json!({}));
+            let bytes = serde_json::to_vec(&config)
+                .map_err(|_| SupervisorError::invalid("managed configuration cannot be encoded"))?;
+            let temporary = config_path.with_extension("runtime.tmp");
+            write_private_file(&temporary, &bytes)?;
+            fs::File::open(&temporary)
+                .and_then(|file| file.sync_all())
+                .map_err(|_| SupervisorError::invalid("managed configuration cannot be synced"))?;
+            fs::rename(&temporary, &config_path).map_err(|_| {
+                SupervisorError::invalid("managed configuration cannot be replaced")
+            })?;
+            if let Some(parent) = config_path.parent() {
+                fs::File::open(parent)
+                    .and_then(|directory| directory.sync_all())
+                    .map_err(|_| {
+                        SupervisorError::invalid("managed configuration directory cannot be synced")
+                    })?;
+            }
+        }
         let has_core = Path::new(&record.data_directory)
             .join("codex-runtime/kernel-home")
             .is_dir();
-        let has_model = config["providerDirectory"]
+        let has_model = config["providerRuntimeDirectory"]
             .as_str()
-            .is_some_and(|path| Path::new(path).join("providers.sqlite3").is_file());
+            .is_some_and(|path| Path::new(path).join("provider-runtime.sqlite3").is_file());
         if !has_core && !has_model {
             return Ok(());
         }
@@ -326,6 +402,7 @@ impl SessionSupervisor {
             .env_remove("WWC_DEVICE_CA_FILE")
             .env_remove("WWC_DEVICE_PAIRING_TOKEN")
             .env_remove("WWC_DEVICE_SERVER_URL")
+            .env_remove("WWC_DEVICE_JEV_SETTINGS_FILE")
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(recovery_stderr)
@@ -431,16 +508,25 @@ impl SessionSupervisor {
         create_directory(request.data_directory, "worker data directory")?;
         create_directory(request.worker_root, "worker root")?;
         let config_path = request.data_directory.join(MANAGED_SESSION_CONFIG_FILE);
+        let provider_directory = store
+            .database_path()
+            .parent()
+            .ok_or_else(|| SupervisorError::invalid("device data directory is unavailable"))?
+            .join("providers");
+        let provider_store = winwincode_provider::DeviceProviderStore::open(&provider_directory)
+            .map_err(|_| SupervisorError::invalid("Provider runtime is unavailable"))?;
+        let runtime_directory = provider_store.runtime_directory().to_path_buf();
+        drop(provider_store);
+        let provider_execution_profile =
+            crate::worker_channel::provider_execution_profile(&provider_directory)
+                .map_err(|_| SupervisorError::invalid("Provider execution profile is invalid"))?;
         let config_json = managed_session_config_json(
             &self.inner.config,
             request,
             worker_id,
             worker_instance_id,
-            &store
-                .database_path()
-                .parent()
-                .ok_or_else(|| SupervisorError::invalid("device data directory is unavailable"))?
-                .join("providers"),
+            &runtime_directory,
+            &provider_execution_profile,
         )?;
         let mut config_value: serde_json::Value = serde_json::from_str(&config_json)
             .map_err(|_| SupervisorError::invalid("managed config cannot be decoded"))?;
@@ -463,7 +549,6 @@ impl SessionSupervisor {
         write_private_file(&config_path, config_json.as_bytes())?;
 
         let mut child = self.launch_process(&config_path, request)?;
-        let log_readers = self.start_log_readers(&mut child, request);
         let record = match self.register_child(
             &mut store,
             request,
@@ -476,10 +561,16 @@ impl SessionSupervisor {
             Err(error) => {
                 let _ = child.kill();
                 let _ = child.wait();
-                join_log_readers(log_readers);
                 return Err(error);
             }
         };
+        let log_readers = self.start_log_readers(
+            &mut child,
+            request,
+            &provider_execution_profile,
+            &provider_directory,
+            &record,
+        );
         self.lock_children().insert(
             request.worker_session_id.to_owned(),
             TrackedChild { child, log_readers },
@@ -545,6 +636,7 @@ impl SessionSupervisor {
             .env_remove("WWC_DEVICE_CA_FILE")
             .env_remove("WWC_DEVICE_PAIRING_TOKEN")
             .env_remove("WWC_DEVICE_SERVER_URL")
+            .env_remove("WWC_DEVICE_JEV_SETTINGS_FILE")
             .current_dir(request.worker_root)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -560,12 +652,22 @@ impl SessionSupervisor {
         &self,
         child: &mut Child,
         request: SpawnRequest<'_>,
+        profile: &winwincode_client_port::private_worker_channel::ProviderExecutionProfile,
+        provider_directory: &Path,
+        record: &WorkerProcessRecord,
     ) -> Vec<thread::JoinHandle<()>> {
         let mut readers = Vec::with_capacity(2);
         if let Some(pipe) = child.stdout.take()
             && let Some(input) = child.stdin.take()
         {
-            readers.push(self.start_worker_relay(pipe, input, request));
+            readers.push(self.start_worker_relay(
+                pipe,
+                input,
+                request,
+                profile,
+                provider_directory,
+                record,
+            ));
         }
         if let Some(pipe) = child.stderr.take() {
             readers.push(self.start_log_reader(pipe, WorkerLogStream::Stderr, request));
@@ -576,8 +678,11 @@ impl SessionSupervisor {
     fn start_worker_relay<R: Read + Send + 'static>(
         &self,
         output: R,
-        mut input: std::process::ChildStdin,
+        input: std::process::ChildStdin,
         request: SpawnRequest<'_>,
+        profile: &winwincode_client_port::private_worker_channel::ProviderExecutionProfile,
+        provider_directory: &Path,
+        record: &WorkerProcessRecord,
     ) -> thread::JoinHandle<()> {
         let endpoint = format!(
             "{}/internal/v1/client/worker-exchange",
@@ -592,29 +697,50 @@ impl SessionSupervisor {
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .clone();
-        thread::spawn(move || {
-            use winwincode_client_port::worker_relay::{
-                DeviceWorkerRelayRequest, WorkerRelayRequest,
+        let supervisor = self.clone();
+        let expected = record.clone();
+        let occupancy_token = request.occupancy_fencing_token;
+        let live_process = Arc::new(move || {
+            let store = supervisor.lock_store();
+            let Ok(Some(current)) = store.worker_process(&expected.worker_session_id) else {
+                return false;
             };
-            for line in BufReader::new(output).lines() {
-                let Ok(line) = line else { break };
-                let Ok(request) = serde_json::from_str::<WorkerRelayRequest>(&line) else {
-                    break;
-                };
-                let payload = DeviceWorkerRelayRequest {
-                    client_node_id: node.clone(),
-                    worker_id: worker.clone(),
-                    worker_instance_id: instance.clone(),
-                    request,
-                };
-                let response = relay_worker_request(&endpoint, transport.as_deref(), &payload);
-                if serde_json::to_writer(&mut input, &response).is_err()
-                    || input.write_all(b"\n").is_err()
-                    || input.flush().is_err()
-                {
-                    break;
-                }
+            if current.state != WORKER_STATE_RUNNING
+                || current.worker_id != expected.worker_id
+                || current.worker_instance_id != expected.worker_instance_id
+                || current.pid != expected.pid
+                || current.process_start_identity != expected.process_start_identity
+                || current.launch_grant_id != expected.launch_grant_id
+            {
+                return false;
             }
+            let Ok(guard) = FencingGuard::from_store(&store) else {
+                return false;
+            };
+            matches!(
+                guard.authorize_command(
+                    FencedCommandKind::WorkerLaunch,
+                    &expected.occupancy_lease_id,
+                    occupancy_token
+                ),
+                FencingVerdict::Authorized(_)
+            ) && probe_process(expected.pid, &expected.process_start_identity)
+                == ProcessProbe::Alive
+        });
+        let broker = Arc::new(crate::provider_broker::ProviderBroker::new(
+            provider_directory.to_path_buf(),
+            request.data_directory.join("codex-runtime/kernel-home"),
+            worker.clone(),
+            instance.clone(),
+            request.product_session_id.map(str::to_owned),
+            request.work_run_id.map(str::to_owned),
+            profile.clone(),
+            live_process,
+        ));
+        thread::spawn(move || {
+            crate::worker_channel::serve(
+                output, input, endpoint, transport, node, worker, instance, &broker,
+            );
         })
     }
 
@@ -1033,7 +1159,7 @@ impl SessionSupervisor {
     }
 }
 
-fn relay_worker_request(
+pub(crate) fn relay_worker_request(
     endpoint: &str,
     transport: Option<&dyn ExchangeTransport>,
     payload: &winwincode_client_port::worker_relay::DeviceWorkerRelayRequest,
@@ -1244,7 +1370,8 @@ fn managed_session_config_json(
     request: SpawnRequest<'_>,
     worker_id: &str,
     worker_instance_id: &str,
-    provider_directory: &Path,
+    runtime_directory: &Path,
+    provider_execution_profile: &winwincode_client_port::private_worker_channel::ProviderExecutionProfile,
 ) -> Result<String, SupervisorError> {
     let local_path = |path: &Path, label: &str| -> Result<String, SupervisorError> {
         path.to_str()
@@ -1262,7 +1389,8 @@ fn managed_session_config_json(
         "workerInstanceId": worker_instance_id,
         "sourceDirectory": local_path(request.source_directory, "source directory")?,
         "dataDirectory": local_path(request.data_directory, "data directory")?,
-        "providerDirectory": local_path(provider_directory, "Provider directory")?,
+        "providerRuntimeDirectory": local_path(runtime_directory, "Provider runtime directory")?,
+        "providerExecutionProfile": provider_execution_profile,
         "helperExecutable": local_path(&helper_executable()?, "helper executable")?,
     });
     if let Some(product_session_id) = request.product_session_id {
@@ -1790,9 +1918,7 @@ mod tests {
     #[allow(clippy::too_many_lines)]
     async fn worker_relay_retries_the_same_message_after_http_backoff_and_keeps_cancel() {
         use std::os::unix::net::UnixStream;
-        use winwincode_client_port::worker_relay::{
-            DeviceWorkerRelayRequest, WorkerRelayRequest, WorkerRelayResponse,
-        };
+        use winwincode_client_port::worker_relay::{DeviceWorkerRelayRequest, WorkerRelayResponse};
         use winwincode_worker::WorkerExecutionPort;
         use winwincode_worker::composition::{
             ExecutionPortCore, ExecutionPortMessage, FrameDirection, RemoteTransportAdapter,
@@ -1856,7 +1982,11 @@ mod tests {
         let relay = thread::spawn(move || {
             let mut output = device.try_clone().unwrap();
             for line in BufReader::new(device).lines() {
-                let request = serde_json::from_str::<WorkerRelayRequest>(&line.unwrap()).unwrap();
+                let envelope = serde_json::from_str::<
+                    winwincode_client_port::private_worker_channel::PrivateWorkerRequest,
+                >(&line.unwrap())
+                .unwrap();
+                let winwincode_client_port::private_worker_channel::PrivateWorkerRequestBody::Relay { request } = envelope.request else { panic!("relay request"); };
                 let response = relay_worker_request(
                     &endpoint,
                     None,
@@ -1867,7 +1997,7 @@ mod tests {
                         request,
                     },
                 );
-                serde_json::to_writer(&mut output, &response).unwrap();
+                serde_json::to_writer(&mut output, &winwincode_client_port::private_worker_channel::PrivateWorkerResponse { request_id: envelope.request_id, response: winwincode_client_port::private_worker_channel::PrivateWorkerResponseBody::Relay { response } }).unwrap();
                 output.write_all(b"\n").unwrap();
                 output.flush().unwrap();
             }
@@ -2029,11 +2159,12 @@ mod tests {
         write_executable_script(
             &binary,
             r#"
+            if [ "$1" = "--recover-interrupted-calls" ]; then exit 0; fi
             trap 'exit 0' TERM
-            printf '%s\n' '{"kind":"exchange","body":"{}"}'
+            printf '%s\n' '{"requestId":1,"request":{"kind":"relay","request":{"kind":"exchange","body":"{}"}}}'
             IFS= read -r response
             printf '%s' "$response" > "$(dirname "$2")/exchange-response.json"
-            printf '%s\n' '{"kind":"accounting","body":"[]","offset":7}'
+            printf '%s\n' '{"requestId":2,"request":{"kind":"relay","request":{"kind":"accounting","body":"[]","offset":7}}}'
             IFS= read -r response
             printf '%s' "$response" > "$(dirname "$2")/accounting-response.json"
             printf 'worker diagnostic\n' >&2
@@ -2063,8 +2194,14 @@ mod tests {
         wait_for_ready_marker(&data, "wss_RELAY");
         server.join().unwrap();
         for file in ["exchange-response.json", "accounting-response.json"] {
-            let response: WorkerRelayResponse =
+            let envelope: winwincode_client_port::private_worker_channel::PrivateWorkerResponse =
                 serde_json::from_slice(&fs::read(data.join(file)).unwrap()).unwrap();
+            let winwincode_client_port::private_worker_channel::PrivateWorkerResponseBody::Relay {
+                response,
+            } = envelope.response
+            else {
+                panic!("relay response");
+            };
             assert_eq!(response.status, 202);
             assert_eq!(response.body, "relayed");
         }
@@ -2172,7 +2309,7 @@ mod tests {
         );
     }
 
-    const WORKER_CONFIG_CONTRACT_FIELDS: [&str; 16] = [
+    const WORKER_CONFIG_CONTRACT_FIELDS: [&str; 17] = [
         "clientNodeId",
         "clientInstanceId",
         "occupancyLeaseId",
@@ -2186,7 +2323,8 @@ mod tests {
         "sourceDirectory",
         "dataDirectory",
         "executionWorkspaceDirectory",
-        "providerDirectory",
+        "providerRuntimeDirectory",
+        "providerExecutionProfile",
         "helperExecutable",
         "modelRoute",
     ];
@@ -2202,7 +2340,9 @@ mod tests {
                 request,
                 WORKER_ID,
                 WORKER_INSTANCE,
-                Path::new("/workspace/providers"),
+                Path::new("/workspace/providers/runtime"),
+                &winwincode_client_port::private_worker_channel::ProviderExecutionProfile::default(
+                ),
             )
             .expect("managed config");
             let value: serde_json::Value = serde_json::from_str(&encoded).expect("JSON");
@@ -2291,7 +2431,8 @@ mod tests {
             "workerInstanceId",
             "sourceDirectory",
             "dataDirectory",
-            "providerDirectory",
+            "providerRuntimeDirectory",
+            "providerExecutionProfile",
             "helperExecutable",
         ] {
             assert!(
@@ -2538,6 +2679,165 @@ mod tests {
             .expect("row");
         assert_eq!(record.worker_instance_id, first.worker_instance_id);
         assert_eq!(record.pid, first.pid);
+    }
+
+    #[test]
+    fn consumed_historical_corrupt_config_does_not_block_current_provider_startup() {
+        let root = temp_root("consumed-corrupt-config");
+        let directory = root.join("history");
+        fs::create_dir(&directory).unwrap();
+        let path = directory.join(MANAGED_SESSION_CONFIG_FILE);
+        fs::write(&path, b"{").unwrap();
+        drop(winwincode_provider::DeviceProviderStore::open(&root.join("providers")).unwrap());
+        let mut store = DeviceStore::open(&root).unwrap();
+        let record = WorkerProcessRecord {
+            worker_session_id: "wss_HISTORY".into(),
+            worker_id: WORKER_ID.into(),
+            worker_instance_id: WORKER_INSTANCE.into(),
+            pid: 999_999,
+            process_start_identity: "already-exited".into(),
+            repository_binding_id: "rbn_HISTORY".into(),
+            occupancy_lease_id: LEASE.into(),
+            launch_grant_id: "wlg_HISTORY".into(),
+            data_directory: directory.to_str().unwrap().to_owned(),
+            state: WORKER_STATE_EXITED.into(),
+            exit_code: Some(0),
+            last_observed_at: STAMP.into(),
+        };
+        store.put_worker_process(&record).unwrap();
+        for family in ["exit", "reconcile"] {
+            store.worker_report_queued(family, &record).unwrap();
+            assert!(
+                store
+                    .worker_report_candidates(family, None)
+                    .unwrap()
+                    .is_empty()
+            );
+        }
+        drop(store);
+        let supervisor = SessionSupervisor::new(
+            test_config(&root.join("unused-worker-binary")),
+            DeviceStore::open(&root).unwrap(),
+        )
+        .expect("consumed historical configuration is not a startup dependency");
+        assert_eq!(supervisor.running_worker_sessions().unwrap(), 0);
+        assert_eq!(fs::read(&path).unwrap(), b"{");
+        assert_eq!(supervisor.worker_processes().unwrap(), vec![record]);
+        drop(supervisor);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)]
+    fn provider_runtime_upgrade_stops_legacy_worker_before_cutover_and_resumes_config_rewrite() {
+        let bin_root = temp_root("provider-upgrade-bin");
+        let binary = bin_root.join("winwincode-worker");
+        write_executable_script(
+            &binary,
+            r#"data="$(dirname "$2")"
+if [ "$1" = --recover-interrupted-calls ]; then
+    echo recovered > "$data/recovered"
+    exit 0
+fi
+trap 'if [ ! -d "$data/../providers/runtime" ]; then echo stopped > "$data/stopped-before-migration"; fi; exit 0' TERM
+echo ready > "$data/worker-ready"
+while :; do sleep 0.1; done"#,
+        );
+        let (previous, root) = supervisor_with_mirror("provider-upgrade", &binary, LEASE, 7);
+        let data = root.join("session");
+        previous
+            .spawn(spawn_request(
+                "wss_UPGRADE",
+                WORKER_INSTANCE,
+                &root.join("repo"),
+                &data,
+                &root.join("worker-root"),
+            ))
+            .unwrap();
+        let guard = StopOnDrop::watch(&previous, "wss_UPGRADE");
+        wait_for_ready_marker(&data, "wss_UPGRADE");
+        let path = data.join(MANAGED_SESSION_CONFIG_FILE);
+        let mut legacy: serde_json::Value =
+            serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        let object = legacy.as_object_mut().unwrap();
+        object.remove("providerRuntimeDirectory");
+        object.remove("providerExecutionProfile");
+        object.insert(
+            "providerDirectory".into(),
+            serde_json::json!(root.join("providers")),
+        );
+        write_private_file(&path, &serde_json::to_vec(&legacy).unwrap()).unwrap();
+        let configuration = root.join("providers/providers.sqlite3");
+        fs::remove_dir_all(root.join("providers/runtime")).unwrap();
+        let database = rusqlite::Connection::open(&configuration).unwrap();
+        database
+            .execute_batch("DROP TABLE provider_runtime_cutover; PRAGMA user_version=16;")
+            .unwrap();
+        database.execute("INSERT INTO accounting_closed_attempts(job_id,attempt,lease_id) VALUES('retained-job',1,'retained-lease')", []).unwrap();
+        drop(database);
+        let restarted =
+            SessionSupervisor::new(test_config(&binary), DeviceStore::open(&root).unwrap())
+                .unwrap();
+        assert_eq!(
+            fs::read_to_string(data.join("stopped-before-migration")).unwrap(),
+            "stopped\n"
+        );
+        let record = restarted.worker_process("wss_UPGRADE").unwrap().unwrap();
+        assert_ne!(record.state, WORKER_STATE_RUNNING);
+        assert_eq!(
+            probe_process(record.pid, &record.process_start_identity),
+            ProcessProbe::Gone
+        );
+        let retained: serde_json::Value =
+            serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        assert_eq!(
+            retained, legacy,
+            "startup does not rewrite historical configs"
+        );
+        restarted.recover_terminated_calls(&record).unwrap();
+        let rewritten: serde_json::Value =
+            serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        assert!(rewritten.get("providerDirectory").is_none());
+        assert_eq!(
+            rewritten["providerRuntimeDirectory"],
+            serde_json::json!(fs::canonicalize(root.join("providers/runtime")).unwrap())
+        );
+        assert_eq!(rewritten["providerExecutionProfile"], serde_json::json!({}));
+        assert_eq!(
+            fs::read_to_string(data.join("recovered")).unwrap(),
+            "recovered\n"
+        );
+        write_private_file(&path, &serde_json::to_vec(&legacy).unwrap()).unwrap();
+        let resumed =
+            SessionSupervisor::new(test_config(&binary), DeviceStore::open(&root).unwrap())
+                .unwrap();
+        let retained: serde_json::Value =
+            serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        assert_eq!(retained, legacy);
+        resumed.recover_terminated_calls(&record).unwrap();
+        let rewritten: serde_json::Value =
+            serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        assert!(rewritten.get("providerDirectory").is_none());
+        let database = rusqlite::Connection::open(&configuration).unwrap();
+        assert_eq!(
+            database
+                .query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
+                .unwrap(),
+            17
+        );
+        let runtime =
+            rusqlite::Connection::open(root.join("providers/runtime/provider-runtime.sqlite3"))
+                .unwrap();
+        assert_eq!(runtime.query_row("SELECT lease_id FROM accounting_closed_attempts WHERE job_id='retained-job' AND attempt=1", [], |row| row.get::<_, String>(0)).unwrap(), "retained-lease");
+        drop(runtime);
+        drop(database);
+        previous.reap().unwrap();
+        drop(guard);
+        drop(resumed);
+        drop(restarted);
+        drop(previous);
+        fs::remove_dir_all(root).unwrap();
+        fs::remove_dir_all(bin_root).unwrap();
     }
 
     #[test]

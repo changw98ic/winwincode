@@ -53,11 +53,79 @@ struct Fixture {
 mod validation_fixture;
 
 struct ObserverTerminalFixture {
-    _fixture: Fixture,
+    fixture: Fixture,
     runtime: JobWorkspaceRuntime,
     active: ActiveJob,
     open: ModelOpenMessage,
     completed: serde_json::Value,
+}
+
+#[tokio::test]
+async fn observer_model_open_uses_its_own_device_source_and_replays_the_original_identity() {
+    use std::sync::{Arc, Mutex};
+    use winwincode_provider::{
+        DeviceProviderError, DeviceProviderStore, ProviderConnectionMaterial,
+        ProviderExecutionPurpose, ProviderExecutionRequest, ProviderExecutionSource,
+        ProviderJevParameters, ProviderModelParameters, ProviderRuntimeStore,
+    };
+
+    #[derive(Debug)]
+    struct RecordingSource(Mutex<Vec<ProviderExecutionRequest>>);
+
+    impl ProviderExecutionSource for RecordingSource {
+        fn model_parameters(
+            &self,
+            _: &ProviderExecutionRequest,
+        ) -> Result<ProviderModelParameters, DeviceProviderError> {
+            Err(DeviceProviderError::StateInvalid)
+        }
+
+        fn jev_parameters(
+            &self,
+            _: &ProviderExecutionRequest,
+        ) -> Result<ProviderJevParameters, DeviceProviderError> {
+            Err(DeviceProviderError::StateInvalid)
+        }
+
+        fn resolve_connection(
+            &self,
+            request: &ProviderExecutionRequest,
+            can_start: &dyn Fn() -> bool,
+        ) -> Result<ProviderConnectionMaterial, DeviceProviderError> {
+            assert!(can_start());
+            self.0.lock().unwrap().push(request.clone());
+            Err(DeviceProviderError::StorageUnavailable)
+        }
+    }
+
+    let fixture = observer_terminal_fixture("observer-device-source").await;
+    let original = serde_json::to_vec(&fixture.open).unwrap();
+    let device = DeviceProviderStore::open(&fixture.fixture.root.join("providers")).unwrap();
+    let source = Arc::new(RecordingSource(Mutex::new(Vec::new())));
+    let runtime = ProviderRuntimeStore::open_existing(device.runtime_directory())
+        .unwrap()
+        .with_execution_source(source.clone());
+    drop(device);
+    let result = runtime.execute_model(&fixture.open).unwrap();
+    assert!(result.last().unwrap().is_final);
+    assert_eq!(result, runtime.execute_model(&fixture.open).unwrap());
+    let requests = source.0.lock().unwrap();
+    assert_eq!(
+        requests.len(),
+        1,
+        "replay does not request credentials again"
+    );
+    let request = &requests[0];
+    assert_eq!(request.purpose, ProviderExecutionPurpose::Observer);
+    assert_eq!(request.provider_id, "observer-provider");
+    assert_eq!(request.model_id.as_deref(), Some("observer-model"));
+    assert_eq!(request.physical_attempt, Some(1));
+    let context = request.context.as_ref().unwrap();
+    assert_eq!(context.lease, fixture.open.lease);
+    assert_eq!(context.session_identity, fixture.open.session_identity);
+    assert_eq!(context.model_exchange_id, fixture.open.model_exchange_id);
+    assert_eq!(context.request_id, fixture.open.request_id);
+    assert_eq!(serde_json::to_vec(&fixture.open).unwrap(), original);
 }
 
 async fn observer_terminal_fixture(name: &str) -> ObserverTerminalFixture {
@@ -116,7 +184,7 @@ async fn observer_terminal_fixture(name: &str) -> ObserverTerminalFixture {
             .unwrap();
     }
     ObserverTerminalFixture {
-        _fixture: fixture,
+        fixture,
         runtime,
         active,
         open,

@@ -9,7 +9,13 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use winwincode_client_port::worker_relay::{WorkerRelayRequest, WorkerRelayResponse};
+use winwincode_client_port::private_worker_channel::{
+    MAX_PRIVATE_LINE_BYTES, MAX_PRIVATE_PENDING, PrivateWorkerRequest, PrivateWorkerRequestBody,
+    PrivateWorkerResponse, PrivateWorkerResponseBody, ProviderOperation,
+};
+use winwincode_client_port::worker_relay::WorkerRelayRequest;
+#[cfg(test)]
+use winwincode_client_port::worker_relay::WorkerRelayResponse;
 use winwincode_codex::WorkerExecutionPort;
 use winwincode_domain::{ExecutionMessageId, WorkerId, WorkerInstanceId};
 use winwincode_execution_port::generated::{
@@ -52,10 +58,18 @@ impl fmt::Display for RemoteWorkerPortError {
 
 impl std::error::Error for RemoteWorkerPortError {}
 
+type PendingRelay =
+    std::sync::mpsc::Sender<Result<PrivateWorkerResponseBody, RemoteWorkerPortError>>;
+
 struct RelayIo {
-    input: Box<dyn BufRead + Send>,
+    input: Option<Box<dyn BufRead + Send>>,
     output: Box<dyn Write + Send>,
     retries: HashMap<RelayRetryQueue, RelayRetry>,
+    pending: BTreeMap<u64, PendingRelay>,
+    next_id: u64,
+    closed: bool,
+    wake: Arc<std::sync::Condvar>,
+    control: Arc<Mutex<()>>,
 }
 
 #[derive(Clone, Copy, Eq, Hash, PartialEq)]
@@ -74,9 +88,14 @@ struct RelayRetry {
 impl RelayIo {
     fn new(input: impl BufRead + Send + 'static, output: impl Write + Send + 'static) -> Self {
         Self {
-            input: Box::new(input),
+            input: Some(Box::new(input)),
             output: Box::new(output),
             retries: HashMap::new(),
+            pending: BTreeMap::new(),
+            next_id: 1,
+            closed: false,
+            wake: Arc::new(std::sync::Condvar::new()),
+            control: Arc::new(Mutex::new(())),
         }
     }
 }
@@ -105,83 +124,352 @@ fn relay_retry() -> winwincode_network::RequestRetryState {
     .state()
 }
 
+struct RelayOwner {
+    io: std::sync::Weak<Mutex<RelayIo>>,
+}
+
+impl Drop for RelayOwner {
+    fn drop(&mut self) {
+        let Some(io) = self.io.upgrade() else {
+            return;
+        };
+        if let Ok(mut state) = io.lock() {
+            state.closed = true;
+            for (_, sender) in std::mem::take(&mut state.pending) {
+                let _ = sender.send(Err(RemoteWorkerPortError::Transport));
+            }
+            state.output = Box::new(std::io::sink());
+            state.wake.notify_all();
+        }
+    }
+}
+
 #[derive(Clone)]
 struct DeviceRelay {
     io: Arc<Mutex<RelayIo>>,
+    _owner: Arc<RelayOwner>,
 }
 
 impl DeviceRelay {
+    fn new(input: impl BufRead + Send + 'static, output: impl Write + Send + 'static) -> Self {
+        let io = Arc::new(Mutex::new(RelayIo::new(input, output)));
+        let owner = Arc::new(RelayOwner {
+            io: Arc::downgrade(&io),
+        });
+        Self { io, _owner: owner }
+    }
+
+    fn start_reader(&self) -> Result<(), RemoteWorkerPortError> {
+        let mut guard = self
+            .io
+            .lock()
+            .map_err(|_| RemoteWorkerPortError::Transport)?;
+        let Some(mut input) = guard.input.take() else {
+            return Ok(());
+        };
+        let shared = Arc::clone(&self.io);
+        let wake = Arc::clone(&guard.wake);
+        drop(guard);
+        std::thread::Builder::new()
+            .name("worker-device-reader".into())
+            .spawn(move || {
+                let failure = loop {
+                    {
+                        let Ok(mut state) = shared.lock() else {
+                            return;
+                        };
+                        while state.pending.is_empty() && !state.closed {
+                            let Ok(next) = wake.wait(state) else {
+                                return;
+                            };
+                            state = next;
+                        }
+                        if state.closed {
+                            return;
+                        }
+                    }
+                    let mut line = Vec::new();
+                    let read = std::io::Read::take(&mut input, (MAX_PRIVATE_LINE_BYTES + 1) as u64)
+                        .read_until(b'\n', &mut line);
+                    if !matches!(read, Ok(count) if count > 0 && count <= MAX_PRIVATE_LINE_BYTES) {
+                        line.fill(0);
+                        break RemoteWorkerPortError::Transport;
+                    }
+                    let decoded = serde_json::from_slice::<PrivateWorkerResponse>(&line)
+                        .map(|reply| (reply.request_id, reply.response));
+                    line.fill(0);
+                    let Ok((id, response)) = decoded else {
+                        break RemoteWorkerPortError::Protocol;
+                    };
+                    let Ok(mut state) = shared.lock() else {
+                        return;
+                    };
+                    if let Some(sender) = state.pending.remove(&id) {
+                        let _ = sender.send(Ok(response));
+                    }
+                };
+                if let Ok(mut state) = shared.lock() {
+                    state.closed = true;
+                    for (_, sender) in std::mem::take(&mut state.pending) {
+                        let _ = sender.send(Err(failure));
+                    }
+                }
+            })
+            .map_err(|_| {
+                if let Ok(mut state) = self.io.lock() {
+                    state.closed = true;
+                    for (_, sender) in std::mem::take(&mut state.pending) {
+                        let _ = sender.send(Err(RemoteWorkerPortError::Transport));
+                    }
+                    state.wake.notify_all();
+                }
+                RemoteWorkerPortError::Transport
+            })?;
+        Ok(())
+    }
+
+    fn round_trip(
+        &self,
+        request: PrivateWorkerRequestBody,
+        can_start: &dyn Fn() -> bool,
+    ) -> Result<PrivateWorkerResponseBody, RemoteWorkerPortError> {
+        self.start_reader()?;
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let id = {
+            let mut state = self
+                .io
+                .lock()
+                .map_err(|_| RemoteWorkerPortError::Transport)?;
+            if state.closed {
+                return Err(RemoteWorkerPortError::Transport);
+            }
+            if state.pending.len() >= MAX_PRIVATE_PENDING {
+                return Err(RemoteWorkerPortError::Backpressure);
+            }
+            let id = state.next_id;
+            state.next_id = id.checked_add(1).ok_or(RemoteWorkerPortError::Protocol)?;
+            state.pending.insert(id, sender);
+            let result = serde_json::to_writer(
+                &mut state.output,
+                &PrivateWorkerRequest {
+                    request_id: id,
+                    request,
+                },
+            );
+            if result.is_err()
+                || state.output.write_all(b"\n").is_err()
+                || state.output.flush().is_err()
+            {
+                state.pending.remove(&id);
+                state.closed = true;
+                for (_, sender) in std::mem::take(&mut state.pending) {
+                    let _ = sender.send(Err(RemoteWorkerPortError::Transport));
+                }
+                state.wake.notify_all();
+                return Err(RemoteWorkerPortError::Transport);
+            }
+            state.wake.notify_one();
+            id
+        };
+        loop {
+            if !can_start() {
+                if let Ok(mut state) = self.io.lock() {
+                    state.pending.remove(&id);
+                }
+                return Err(RemoteWorkerPortError::Rejected);
+            }
+            match receiver.recv_timeout(Duration::from_millis(25)) {
+                Ok(result) => return result,
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                    return Err(RemoteWorkerPortError::Transport);
+                }
+            }
+        }
+    }
+
+    fn request_blocking(
+        &self,
+        request: WorkerRelayRequest,
+    ) -> Result<String, RemoteWorkerPortError> {
+        let control = self
+            .io
+            .lock()
+            .map_err(|_| RemoteWorkerPortError::Transport)?
+            .control
+            .clone();
+        let _ordered = control
+            .lock()
+            .map_err(|_| RemoteWorkerPortError::Transport)?;
+        let queue = relay_retry_queue(&request);
+        {
+            let state = self
+                .io
+                .lock()
+                .map_err(|_| RemoteWorkerPortError::Transport)?;
+            if let Some(retry) = state.retries.get(&queue)
+                && retry
+                    .retry_at
+                    .is_some_and(|at| std::time::Instant::now() < at)
+            {
+                return Err(retry
+                    .retry_error
+                    .unwrap_or(RemoteWorkerPortError::Transport));
+            }
+        }
+        let PrivateWorkerResponseBody::Relay { response } =
+            self.round_trip(PrivateWorkerRequestBody::Relay { request }, &|| true)?
+        else {
+            return Err(RemoteWorkerPortError::Protocol);
+        };
+        let mut state = self
+            .io
+            .lock()
+            .map_err(|_| RemoteWorkerPortError::Transport)?;
+        if let Some(failure) = response.failure.or_else(|| {
+            (response.status != 200).then(|| NetworkFailure::http(response.status, None))
+        }) {
+            if failure.kind == ErrorKind::ProtocolInvalid && failure.phase == Phase::Decode {
+                return Err(RemoteWorkerPortError::NetworkExhausted(failure));
+            }
+            let retry = state.retries.entry(queue).or_insert_with(|| RelayRetry {
+                retry: relay_retry(),
+                retry_at: None,
+                retry_error: None,
+            });
+            let error = match retry.retry.decision_after(&failure) {
+                winwincode_network::RetryDecision::RetryAfter(delay)
+                | winwincode_network::RetryDecision::DeferredUntil(delay) => {
+                    retry.retry_at = Some(std::time::Instant::now() + delay);
+                    RemoteWorkerPortError::Network(failure)
+                }
+                _ => RemoteWorkerPortError::NetworkExhausted(failure),
+            };
+            retry.retry_error = Some(error);
+            return Err(error);
+        }
+        state.retries.remove(&queue);
+        Ok(response.body)
+    }
+
     async fn request(&self, request: WorkerRelayRequest) -> Result<String, RemoteWorkerPortError> {
-        let io = Arc::clone(&self.io);
+        let relay = self.clone();
         let (sender, receiver) = tokio::sync::oneshot::channel();
         std::thread::Builder::new()
             .name("worker-device-relay".into())
             .spawn(move || {
-                let result = (|| {
-                    let mut io = io.lock().map_err(|_| RemoteWorkerPortError::Transport)?;
-                    let queue = relay_retry_queue(&request);
-                    if let Some(retry) = io.retries.get(&queue)
-                        && retry
-                            .retry_at
-                            .is_some_and(|at| std::time::Instant::now() < at)
-                    {
-                        return Err(retry
-                            .retry_error
-                            .unwrap_or(RemoteWorkerPortError::Transport));
-                    }
-                    serde_json::to_writer(&mut io.output, &request)
-                        .map_err(|_| RemoteWorkerPortError::Transport)?;
-                    io.output
-                        .write_all(b"\n")
-                        .map_err(|_| RemoteWorkerPortError::Transport)?;
-                    io.output
-                        .flush()
-                        .map_err(|_| RemoteWorkerPortError::Transport)?;
-                    let mut line = String::new();
-                    if io
-                        .input
-                        .read_line(&mut line)
-                        .map_err(|_| RemoteWorkerPortError::Transport)?
-                        == 0
-                    {
-                        return Err(RemoteWorkerPortError::Transport);
-                    }
-                    let response: WorkerRelayResponse =
-                        serde_json::from_str(&line).map_err(|_| RemoteWorkerPortError::Protocol)?;
-                    if let Some(failure) = response.failure.or_else(|| {
-                        (response.status != 200)
-                            .then(|| NetworkFailure::http(response.status, None))
-                    }) {
-                        if failure.kind == ErrorKind::ProtocolInvalid
-                            && failure.phase == Phase::Decode
-                        {
-                            return Err(RemoteWorkerPortError::NetworkExhausted(failure));
-                        }
-                        let retry = io.retries.entry(queue).or_insert_with(|| RelayRetry {
-                            retry: relay_retry(),
-                            retry_at: None,
-                            retry_error: None,
-                        });
-                        let error = match retry.retry.decision_after(&failure) {
-                            winwincode_network::RetryDecision::RetryAfter(delay)
-                            | winwincode_network::RetryDecision::DeferredUntil(delay) => {
-                                retry.retry_at = Some(std::time::Instant::now() + delay);
-                                RemoteWorkerPortError::Network(failure)
-                            }
-                            _ => RemoteWorkerPortError::NetworkExhausted(failure),
-                        };
-                        retry.retry_error = Some(error);
-                        return Err(error);
-                    }
-                    io.retries.remove(&queue);
-                    Ok(response.body)
-                })();
-                let _ = sender.send(result);
+                let _ = sender.send(relay.request_blocking(request));
             })
             .map_err(|_| RemoteWorkerPortError::Transport)?;
         receiver
             .await
             .map_err(|_| RemoteWorkerPortError::Transport)?
+    }
+
+    fn local<T: serde::de::DeserializeOwned>(
+        &self,
+        request: PrivateWorkerRequestBody,
+        can_start: &dyn Fn() -> bool,
+    ) -> Result<T, winwincode_provider::DeviceProviderError> {
+        use winwincode_provider::DeviceProviderError;
+        if !can_start() {
+            return Err(DeviceProviderError::AuthorityEnded);
+        }
+        let response = self
+            .round_trip(request, can_start)
+            .map_err(|error| match error {
+                RemoteWorkerPortError::Rejected => DeviceProviderError::AuthorityEnded,
+                _ => DeviceProviderError::StorageUnavailable,
+            })?;
+        let PrivateWorkerResponseBody::Local { payload, error } = response else {
+            return Err(DeviceProviderError::StateInvalid);
+        };
+        if let Some(code) = error {
+            return Err(match code.as_str() {
+                "LEASE_EXPIRED" => DeviceProviderError::AuthorityEnded,
+                "CANCELLED" => DeviceProviderError::Cancelled,
+                _ => DeviceProviderError::StateInvalid,
+            });
+        }
+        if !can_start() {
+            return Err(DeviceProviderError::AuthorityEnded);
+        }
+        serde_json::from_slice(&payload.0).map_err(|_| DeviceProviderError::EncodingInvalid)
+    }
+}
+
+impl fmt::Debug for DeviceRelay {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("DeviceRelay([PRIVATE])")
+    }
+}
+
+impl winwincode_provider::ProviderExecutionSource for DeviceRelay {
+    fn model_parameters(
+        &self,
+        request: &winwincode_provider::ProviderExecutionRequest,
+    ) -> Result<
+        winwincode_provider::ProviderModelParameters,
+        winwincode_provider::DeviceProviderError,
+    > {
+        let body = serde_json::to_string(request)
+            .map_err(|_| winwincode_provider::DeviceProviderError::EncodingInvalid)?;
+        self.local(
+            PrivateWorkerRequestBody::Provider {
+                operation: ProviderOperation::ModelParameters,
+                body,
+            },
+            &|| true,
+        )
+    }
+
+    fn jev_parameters(
+        &self,
+        request: &winwincode_provider::ProviderExecutionRequest,
+    ) -> Result<winwincode_provider::ProviderJevParameters, winwincode_provider::DeviceProviderError>
+    {
+        let body = serde_json::to_string(request)
+            .map_err(|_| winwincode_provider::DeviceProviderError::EncodingInvalid)?;
+        self.local(
+            PrivateWorkerRequestBody::Provider {
+                operation: ProviderOperation::JevParameters,
+                body,
+            },
+            &|| true,
+        )
+    }
+    fn resolve_connection(
+        &self,
+        request: &winwincode_provider::ProviderExecutionRequest,
+        can_start: &dyn Fn() -> bool,
+    ) -> Result<
+        winwincode_provider::ProviderConnectionMaterial,
+        winwincode_provider::DeviceProviderError,
+    > {
+        let body = serde_json::to_string(request)
+            .map_err(|_| winwincode_provider::DeviceProviderError::EncodingInvalid)?;
+        self.local(
+            PrivateWorkerRequestBody::Provider {
+                operation: ProviderOperation::ResolveConnection,
+                body,
+            },
+            can_start,
+        )
+    }
+}
+
+impl winwincode_provider::DeviceExtensionSource for DeviceRelay {
+    fn refresh_extensions(
+        &self,
+        lease: &winwincode_execution_port::generated::ExecutionLeaseStamp,
+    ) -> Result<Vec<winwincode_provider::InstalledMcpTools>, winwincode_provider::DeviceProviderError>
+    {
+        let body = serde_json::to_string(lease)
+            .map_err(|_| winwincode_provider::DeviceProviderError::EncodingInvalid)?;
+        self.local(
+            PrivateWorkerRequestBody::RefreshExtensions { body },
+            &|| true,
+        )
     }
 }
 
@@ -464,15 +752,23 @@ impl RemoteWorkerPort {
                 accounting_wake: Arc::new(tokio::sync::Notify::new()),
                 accounting_epoch: Arc::new(std::sync::atomic::AtomicU64::new(0)),
                 accounting_progress: tokio::sync::watch::channel(0).0,
-                relay: DeviceRelay {
-                    io: Arc::new(Mutex::new(RelayIo::new(input, output))),
-                },
+                relay: DeviceRelay::new(input, output),
                 worker_id,
                 worker_instance_id,
                 state: Arc::clone(&state),
             },
             RemoteWorkerTransportHandle { state },
         )
+    }
+
+    pub fn provider_execution_source(
+        &self,
+    ) -> Arc<dyn winwincode_provider::ProviderExecutionSource> {
+        Arc::new(self.relay.clone())
+    }
+
+    pub fn device_extension_source(&self) -> Arc<dyn winwincode_provider::DeviceExtensionSource> {
+        Arc::new(self.relay.clone())
     }
 
     #[cfg(feature = "test-support")]
@@ -567,7 +863,7 @@ impl RemoteWorkerPort {
     #[must_use]
     pub fn spawn_accounting_reconciler(
         &self,
-        provider_directory: PathBuf,
+        runtime_directory: PathBuf,
     ) -> tokio::task::JoinHandle<()> {
         self.accounting_enabled
             .store(true, std::sync::atomic::Ordering::Release);
@@ -596,9 +892,9 @@ impl RemoteWorkerPort {
                     {
                         offset = page.next_offset.unwrap_or(0);
                         for lease in page.leases {
-                            let directory = provider_directory.clone();
+                            let directory = runtime_directory.clone();
                             let statement = tokio::task::spawn_blocking(move || {
-                                winwincode_provider::DeviceProviderStore::open(&directory)
+                                winwincode_provider::ProviderRuntimeStore::open_existing(&directory)
                                     .and_then(|store| store.accounting_statement(&lease))
                             })
                             .await;
@@ -864,8 +1160,12 @@ mod tests {
     }
 
     fn relay_responses(responses: Vec<Vec<ExecutionPortMessage>>) -> Vec<u8> {
+        relay_responses_from(responses, 1)
+    }
+
+    fn relay_responses_from(responses: Vec<Vec<ExecutionPortMessage>>, first_id: u64) -> Vec<u8> {
         let mut input = Vec::new();
-        for messages in responses {
+        for (index, messages) in responses.into_iter().enumerate() {
             let deliveries = messages
                 .into_iter()
                 .map(
@@ -893,7 +1193,13 @@ mod tests {
                 .unwrap(),
                 failure: None,
             };
-            input.extend_from_slice(&serde_json::to_vec(&response).unwrap());
+            input.extend_from_slice(
+                &serde_json::to_vec(&PrivateWorkerResponse {
+                    request_id: first_id + index as u64,
+                    response: PrivateWorkerResponseBody::Relay { response },
+                })
+                .unwrap(),
+            );
             input.push(b'\n');
         }
         input
@@ -1127,14 +1433,19 @@ mod tests {
                 vec![ExecutionPortMessage::JobOutcomeAckMessage(ack)]
             })
             .collect();
-        let mut input = serde_json::to_vec(&WorkerRelayResponse {
-            status: 200,
-            body: "{}".into(),
-            failure: None,
+        let mut input = serde_json::to_vec(&PrivateWorkerResponse {
+            request_id: 1,
+            response: PrivateWorkerResponseBody::Relay {
+                response: WorkerRelayResponse {
+                    status: 200,
+                    body: "{}".into(),
+                    failure: None,
+                },
+            },
         })
         .unwrap();
         input.push(b'\n');
-        input.extend_from_slice(&relay_responses(acknowledgements));
+        input.extend_from_slice(&relay_responses_from(acknowledgements, 2));
         let (port, handle) = RemoteWorkerPort::with_io(
             registration.worker_id.clone(),
             registration.worker_instance_id.clone(),
@@ -1344,8 +1655,15 @@ mod tests {
                 },
             ];
             let mut input = Vec::new();
-            for response in responses {
-                serde_json::to_writer(&mut input, &response).unwrap();
+            for (index, response) in responses.into_iter().enumerate() {
+                serde_json::to_writer(
+                    &mut input,
+                    &PrivateWorkerResponse {
+                        request_id: index as u64 + 1,
+                        response: PrivateWorkerResponseBody::Relay { response },
+                    },
+                )
+                .unwrap();
                 input.push(b'\n');
             }
             let output = Output::default();
@@ -1391,7 +1709,13 @@ mod tests {
             let requests = requests
                 .split(|byte| *byte == b'\n')
                 .filter(|line| !line.is_empty())
-                .map(|line| serde_json::from_slice::<WorkerRelayRequest>(line).unwrap())
+                .map(|line| {
+                    let request = serde_json::from_slice::<PrivateWorkerRequest>(line).unwrap();
+                    let PrivateWorkerRequestBody::Relay { request } = request.request else {
+                        panic!("relay request");
+                    };
+                    request
+                })
                 .collect::<Vec<_>>();
             assert_eq!(
                 requests.len(),
@@ -1414,12 +1738,7 @@ mod tests {
     async fn exchange_and_accounting_share_one_json_lines_channel() {
         use std::os::unix::net::UnixStream;
         let (worker, device) = UnixStream::pair().unwrap();
-        let relay = DeviceRelay {
-            io: Arc::new(Mutex::new(RelayIo::new(
-                BufReader::new(worker.try_clone().unwrap()),
-                worker,
-            ))),
-        };
+        let relay = DeviceRelay::new(BufReader::new(worker.try_clone().unwrap()), worker);
         let server = std::thread::spawn(move || {
             let mut input = BufReader::new(device.try_clone().unwrap());
             let mut output = device;
@@ -1427,7 +1746,10 @@ mod tests {
             for _ in 0..2 {
                 let mut line = String::new();
                 input.read_line(&mut line).unwrap();
-                let request: WorkerRelayRequest = serde_json::from_str(&line).unwrap();
+                let envelope: PrivateWorkerRequest = serde_json::from_str(&line).unwrap();
+                let PrivateWorkerRequestBody::Relay { request } = envelope.request else {
+                    panic!("relay request");
+                };
                 let body = match &request {
                     WorkerRelayRequest::Exchange { body } => body.clone(),
                     WorkerRelayRequest::Accounting { offset, .. } => offset.to_string(),
@@ -1435,10 +1757,15 @@ mod tests {
                 requests.push(request);
                 serde_json::to_writer(
                     &mut output,
-                    &WorkerRelayResponse {
-                        status: 200,
-                        body,
-                        failure: None,
+                    &PrivateWorkerResponse {
+                        request_id: envelope.request_id,
+                        response: PrivateWorkerResponseBody::Relay {
+                            response: WorkerRelayResponse {
+                                status: 200,
+                                body,
+                                failure: None,
+                            },
+                        },
                     },
                 )
                 .unwrap();
@@ -1654,5 +1981,221 @@ mod tests {
             state.acknowledgements_for_exchange(),
             vec![ExecutionMessageId(format!("xmsg_{:026}", 128))]
         );
+    }
+    #[cfg(unix)]
+    fn private_relay(stream: std::os::unix::net::UnixStream) -> DeviceRelay {
+        DeviceRelay::new(BufReader::new(stream.try_clone().unwrap()), stream)
+    }
+
+    #[cfg(unix)]
+    fn read_private(reader: &mut impl BufRead) -> PrivateWorkerRequest {
+        let mut line = String::new();
+        reader.read_line(&mut line).unwrap();
+        serde_json::from_str(&line).unwrap()
+    }
+
+    #[cfg(unix)]
+    fn write_private(writer: &mut impl Write, id: u64, response: PrivateWorkerResponseBody) {
+        serde_json::to_writer(
+            &mut *writer,
+            &PrivateWorkerResponse {
+                request_id: id,
+                response,
+            },
+        )
+        .unwrap();
+        writer.write_all(b"\n").unwrap();
+        writer.flush().unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn slow_private_material_does_not_block_control_response() {
+        use winwincode_client_port::private_worker_channel::SensitivePayload;
+        let (client, mut server) = std::os::unix::net::UnixStream::pair().unwrap();
+        let relay = private_relay(client);
+        let (seen, waiting) = std::sync::mpsc::channel();
+        let (release, released) = std::sync::mpsc::channel();
+        let server_thread = std::thread::spawn(move || {
+            let mut reader = BufReader::new(server.try_clone().unwrap());
+            let material = read_private(&mut reader);
+            assert!(matches!(
+                material.request,
+                PrivateWorkerRequestBody::Provider { .. }
+            ));
+            seen.send(()).unwrap();
+            let control = read_private(&mut reader);
+            write_private(
+                &mut server,
+                control.request_id,
+                PrivateWorkerResponseBody::Relay {
+                    response: WorkerRelayResponse {
+                        status: 200,
+                        body: "control-ack".into(),
+                        failure: None,
+                    },
+                },
+            );
+            released.recv_timeout(Duration::from_secs(5)).unwrap();
+            write_private(
+                &mut server,
+                material.request_id,
+                PrivateWorkerResponseBody::Local {
+                    payload: SensitivePayload(b"material".to_vec()),
+                    error: None,
+                },
+            );
+        });
+        let material_relay = relay.clone();
+        let material = std::thread::spawn(move || {
+            material_relay.round_trip(
+                PrivateWorkerRequestBody::Provider {
+                    operation: ProviderOperation::ResolveConnection,
+                    body: "{}".into(),
+                },
+                &|| true,
+            )
+        });
+        waiting.recv_timeout(Duration::from_secs(5)).unwrap();
+        assert_eq!(
+            relay
+                .request_blocking(WorkerRelayRequest::Exchange { body: "{}".into() })
+                .unwrap(),
+            "control-ack"
+        );
+        release.send(()).unwrap();
+        let PrivateWorkerResponseBody::Local { payload, .. } = material.join().unwrap().unwrap()
+        else {
+            panic!("local response");
+        };
+        assert_eq!(payload.0, b"material");
+        server_thread.join().unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn cancelled_private_waiter_discards_late_material() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use winwincode_client_port::private_worker_channel::SensitivePayload;
+        let (client, mut server) = std::os::unix::net::UnixStream::pair().unwrap();
+        let relay = private_relay(client);
+        let active = Arc::new(AtomicBool::new(true));
+        let (seen, waiting) = std::sync::mpsc::channel();
+        let server_thread = std::thread::spawn(move || {
+            let mut reader = BufReader::new(server.try_clone().unwrap());
+            let material = read_private(&mut reader);
+            seen.send(()).unwrap();
+            let control = read_private(&mut reader);
+            write_private(
+                &mut server,
+                material.request_id,
+                PrivateWorkerResponseBody::Local {
+                    payload: SensitivePayload(b"late-secret".to_vec()),
+                    error: None,
+                },
+            );
+            write_private(
+                &mut server,
+                control.request_id,
+                PrivateWorkerResponseBody::Relay {
+                    response: WorkerRelayResponse {
+                        status: 200,
+                        body: "correct-control".into(),
+                        failure: None,
+                    },
+                },
+            );
+        });
+        let material_relay = relay.clone();
+        let can_start = active.clone();
+        let material = std::thread::spawn(move || {
+            material_relay.round_trip(
+                PrivateWorkerRequestBody::Provider {
+                    operation: ProviderOperation::ResolveConnection,
+                    body: "{}".into(),
+                },
+                &|| can_start.load(Ordering::Acquire),
+            )
+        });
+        waiting.recv_timeout(Duration::from_secs(5)).unwrap();
+        active.store(false, Ordering::Release);
+        assert!(matches!(
+            material.join().unwrap(),
+            Err(RemoteWorkerPortError::Rejected)
+        ));
+        assert_eq!(
+            relay
+                .request_blocking(WorkerRelayRequest::Exchange { body: "{}".into() })
+                .unwrap(),
+            "correct-control"
+        );
+        server_thread.join().unwrap();
+    }
+    #[cfg(unix)]
+    #[test]
+    fn private_pipe_eof_fails_every_pending_waiter() {
+        let (client, server) = std::os::unix::net::UnixStream::pair().unwrap();
+        let relay = private_relay(client);
+        let first = relay.clone();
+        let second = relay.clone();
+        let (completed, results) = std::sync::mpsc::channel();
+        for source in [first, second] {
+            let completed = completed.clone();
+            std::thread::spawn(move || {
+                let result = source.round_trip(
+                    PrivateWorkerRequestBody::Provider {
+                        operation: ProviderOperation::ResolveConnection,
+                        body: "{}".into(),
+                    },
+                    &|| true,
+                );
+                completed
+                    .send(matches!(result, Err(RemoteWorkerPortError::Transport)))
+                    .unwrap();
+            });
+        }
+        let mut reader = BufReader::new(server);
+        read_private(&mut reader);
+        read_private(&mut reader);
+        drop(reader);
+        assert!(results.recv_timeout(Duration::from_secs(5)).unwrap());
+        assert!(results.recv_timeout(Duration::from_secs(5)).unwrap());
+    }
+    #[cfg(unix)]
+    #[test]
+    fn last_external_relay_owner_closes_the_writer_after_a_response() {
+        let (client, mut server) = std::os::unix::net::UnixStream::pair().unwrap();
+        let relay = private_relay(client);
+        let (closed, closure) = std::sync::mpsc::channel();
+        let server_thread = std::thread::spawn(move || {
+            let mut reader = BufReader::new(server.try_clone().unwrap());
+            let request = read_private(&mut reader);
+            write_private(
+                &mut server,
+                request.request_id,
+                PrivateWorkerResponseBody::Relay {
+                    response: WorkerRelayResponse {
+                        status: 200,
+                        body: "ack".into(),
+                        failure: None,
+                    },
+                },
+            );
+            let mut line = String::new();
+            closed.send(reader.read_line(&mut line).unwrap()).unwrap();
+        });
+        assert_eq!(
+            relay
+                .request_blocking(WorkerRelayRequest::Exchange { body: "{}".into() })
+                .unwrap(),
+            "ack"
+        );
+        let second = relay.clone();
+        let first_drop = std::thread::spawn(move || drop(relay));
+        let second_drop = std::thread::spawn(move || drop(second));
+        first_drop.join().unwrap();
+        second_drop.join().unwrap();
+        assert_eq!(closure.recv_timeout(Duration::from_secs(5)).unwrap(), 0);
+        server_thread.join().unwrap();
     }
 }

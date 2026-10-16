@@ -167,7 +167,7 @@ function workerFacts(deviceData) {
 }
 
 function memberExchanges(deviceData, jobId) {
-  return globSync('**/providers.sqlite3', { cwd: deviceData }).flatMap(path => {
+  return globSync('**/provider-runtime.sqlite3', { cwd: deviceData }).flatMap(path => {
     const db = database(join(deviceData, path))
     try {
       return db.prepare('SELECT exchange_id,request_open,chunks FROM exchanges WHERE request_open IS NOT NULL')
@@ -557,6 +557,9 @@ for (const mode of ['complete-after-shared-slot-contention', 'cancel-in-flight-p
           assert.deepEqual(acknowledged.worker.message, cancelled.fact.terminal)
           assert.equal(cancelled.fact.panels[0].inputDigest, active.reviewer.panels[0].inputDigest)
           const originalTerminal = cancelled.fact.terminal
+          await waitFor(() => members.activeRequests === 0,
+            'cancellation closes every physical member request while its response gate remains held', 10_000)
+          assert.ok(members.records.every(record => !record.active && !record.completed))
           for (const member of MEMBERS) members.release(member.model)
           await waitFor(() => members.activeRequests === 0, 'cancelled physical member attempts release every shared Provider slot', 10_000)
           const latest = workerFacts(devicePath.deviceData).find(fact => fact.record.job.jobId === jobId)

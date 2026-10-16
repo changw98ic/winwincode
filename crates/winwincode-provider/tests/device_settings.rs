@@ -399,7 +399,8 @@ fn configured_jev_request_cannot_silently_run_as_baseline() {
         drop(store);
         let reopened = DeviceProviderStore::open(&directory).unwrap();
         assert_eq!(reopened.execute_model(&open).unwrap(), result);
-        let db = rusqlite::Connection::open(directory.join("providers.sqlite3")).unwrap();
+        let db =
+            rusqlite::Connection::open(directory.join("runtime/provider-runtime.sqlite3")).unwrap();
         let (saved, digest, prepared): (String, String, Option<Vec<u8>>) = db
             .query_row(
                 "SELECT request_open, digest, prepared_payload FROM exchanges WHERE exchange_id=?1",

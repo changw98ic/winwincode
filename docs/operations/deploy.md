@@ -265,7 +265,7 @@ globalThis.__WINWINCODE_CLIENT_CONFIG__ = Object.freeze({
 
 Device 默认连接 `http://127.0.0.1:8443`。数据目录默认是 `$HOME/.winwincode/device-client`。设置 `WINWINCODE_HOME` 后使用 `<WINWINCODE_HOME>/device-client`。`WWC_DEVICE_DATA_DIRECTORY` 或 `--data-dir` 可以覆盖数据目录。首次本机启动可用 `WWC_DEVICE_SERVER_URL` 或 `--server-url` 指定 Server 地址。已绑定远程 Device 优先复用保存的 Server URL。
 
-Device Client 以前台进程运行。它启动并监管 Worker。Worker 通过 stdin/stdout JSON-lines 与父 Device 通信，Device 将交换请求转发给 Server。Worker 的启动参数由 Device 写入 `managed-session.json`。
+Device Client 以前台进程运行。它启动并监管 Worker。Worker 通过 stdin/stdout JSON-lines 与父 Device 通信。私有管道区分远程交换、用量对账、本地凭据和扩展刷新请求，并使用 `requestId` 关联响应。Device 只将远程交换与用量对账转发给 Server。Worker 的启动参数由 Device 写入 `managed-session.json`。
 
 | 内部参数 | 来源与用途 |
 | --- | --- |
@@ -273,7 +273,8 @@ Device Client 以前台进程运行。它启动并监管 Worker。Worker 通过 
 | `sourceDirectory` | Device 已登记仓库的本机路径。任务从这里读取源码。 |
 | `dataDirectory` | `<device-data>/worker-sessions/<workerSessionId>/data`。保存该 Worker 的执行状态。 |
 | `executionWorkspaceDirectory` | Device 为会话准备的工作区。任务改动在这里执行。 |
-| `providerDirectory` | `<device-data>/providers`。实际模型调用时读取。 |
+| `providerRuntimeDirectory` | 运行账本目录 `<device-data>/providers/runtime`。Worker 只从此处读取 Provider 执行和恢复记录。 |
+| `providerExecutionProfile` | Device 根据配置生成的 Provider、模型和 JEV/Fusion 路由标识。它不包含 Provider 或 JEV 凭据。 |
 | `helperExecutable` | Device 解析出的辅助进程绝对路径。执行任务时直接启动。 |
 
 | 配置 | 默认值和覆盖方式 |
@@ -299,7 +300,11 @@ Device Client 以前台进程运行。它启动并监管 Worker。Worker 通过 
 
 `repo add` 默认使用当前目录。也可以显式传入其他仓库路径。
 
-在浏览器设置页配置该 Device 的 Provider，然后提交任务。Provider 配置在浏览器中加密，由 Device 解密并保存在 `<device-data>/providers/providers.sqlite3`。Worker 从该目录读取配置。
+在浏览器设置页配置该 Device 的 Provider，然后提交任务。Provider 配置在浏览器中加密，由 Device 解密并保存在 `<device-data>/providers/providers.sqlite3`。Device 按需向 Worker 提供本次调用所需的内存连接材料。Worker 打开独立运行账本，并直接发送 Provider HTTPS/SSE 请求。已有设备目录按 [Provider 账本迁移与回退](#provider-账本迁移与回退) 升级。
+
+`WWC_DEVICE_JEV_SETTINGS_FILE` 指定的 JEV 配置文件由 Device 在首次已授权的 JEV 调用中导入。启动时只装配 JEV 路由和策略，不预检 Provider 或 JEV 凭据。
+
+父 Device 将 MCP 配置物化到 Worker 的 `kernel_home`。该目录仍可能包含 MCP env 和 header，应按敏感数据保护。Provider 和 JEV 凭据通过内存连接材料提供。MCP 凭据宿主迁移（2D）尚未实施。
 
 其他管理命令共用相同默认数据目录：
 
@@ -370,7 +375,8 @@ Server 的主要数据包括：
 Device Client 的主要数据包括：
 
 - `device-client.sqlite3`。
-- `providers/providers.sqlite3`。
+- `providers/providers.sqlite3`：Provider 配置、长期凭据和配置回执。
+- `providers/runtime/provider-runtime.sqlite3`：独立执行与恢复账本，仍含敏感的用户请求和结果。
 - `worker-sessions/`、`execution-workspaces/`、日志和临时运行状态。
 
 `control-plane.sqlite3` 当前 schema 为 `8`，`device-client.sqlite3` 当前 schema 为 `11`。两者分别由 `SqliteStorage` 与 `DeviceStore` 的 `initialize_schema` 检查 `user_version`，在同一事务内初始化和校验。版本不匹配时拒绝打开。这个行为不能推广到其他产品数据库。
@@ -379,13 +385,56 @@ Gate 决策和运行追踪还会检查持久化 JSON 的字段结构。SQLite �
 
 Worker 的 Codex 数据目录仍有迁移和回填路径。重开旧目录可能修改 schema、迁移标记或持久记录。打开前先保留原目录和匹配程序的备份。实际实现与已批准的开发目标见 [当前数据库 schema](../invariants.md#当前数据库-schema)。已发布用户数据的升级政策尚未定义，发布说明必须逐次说明兼容范围。
 
-升级前先备份。备份只提供与原 schema 匹配的恢复点。`wwc backup` 不转换 schema，恢复操作也不执行 schema 升级。不要把备份流程当作升级流程。降级时恢复旧程序及与它匹配的数据备份。不要让不同版本的 Server 或 Device Client 共享同一数据目录。
+升级前先备份。备份只提供与原 schema 匹配的恢复点。`wwc backup` 不转换 schema，恢复操作也不执行 schema 升级。不要把备份流程当作升级流程。降级须同时匹配程序、schema 和已发生的调用事实；Provider 开始写入独立账本后的限制见下节。不要让不同版本的 Server 或 Device Client 共享同一数据目录。
+
+## Provider 账本迁移与回退
+
+`DeviceProviderStore` 将配置库版本 `16` 升到 `17`，并将执行记录复制到独立运行账本。该迁移只覆盖这次 Provider 存储拆分。其他数据库的 schema 处理仍按上一节执行。
+
+配置库默认位于 `<device-data>/providers/providers.sqlite3`。运行账本位于另一个文件 `<配置库目录>/runtime/provider-runtime.sqlite3`。旧配置库中的运行表保留为迁移留档，迁移后的执行、恢复和用量对账只写独立运行账本。
+
+升级步骤：
+
+1. 停止前台 `device serve`，或停止当前使用的 launchd/systemd 服务。确认该 Device 监管的 Worker 和已登记后代已退出。迁移期间不允许旧程序或其他进程写入该数据目录。
+2. 保留原程序及其源码版本和摘要。为整个 Device 数据目录制作停机副本，包含 SQLite 主文件、WAL、Worker 状态和 `kernel_home`。备份目标必须不存在，且位于原数据目录之外。以下示例要求先将 `WWC_DEVICE_DATA_DIRECTORY` 设为实际绝对路径，并准备 `/srv/backups`：
+
+   ```sh
+   cp -a "$WWC_DEVICE_DATA_DIRECTORY" /srv/backups/winwincode-device-pre-provider-split
+   sqlite3 -readonly /srv/backups/winwincode-device-pre-provider-split/providers/providers.sqlite3 'PRAGMA user_version; PRAGMA quick_check;'
+   ```
+
+3. 换成同一构建产出的 Device、Worker 和辅助程序，再运行正常启动命令。supervisor 检测到版本 `16` 后，先停止仍登记为运行中的旧 Worker，再迁移账本。实际恢复某个已终止 Worker 的调用时，恢复入口先核对该记录的会话与 instance，再将其旧 managed 配置中的 `providerDirectory` 改为 `providerRuntimeDirectory` 并补入 `providerExecutionProfile`。配置通过临时文件同步、原子替换后，再交给新 Worker 恢复。无需恢复的历史配置不参与启动检查。无法确认旧 Worker 已退出时，启动失败。不要手工创建空运行账本、删除源表或改写 `user_version`。
+
+   ```sh
+   ./bin/wwc device serve --data-dir "$WWC_DEVICE_DATA_DIRECTORY"
+   ```
+
+4. 迁移逐项复制并比对原 exchange、request、attempt、adapter request ID、prepared payload、模型结果、模型响应游标、重试状态、JEV 执行记录、closed-attempt 和用量对账记录。目标库同时建立模型响应索引和保护触发器。原身份和状态保持不变。历史诊断的原始 `response_bytes` 在目标库置为 NULL，费用和用量记录保持原值。完整复制与校验成功后，配置库才提交版本 `17` 和切换记录。
+5. 启动失败或迁移中断时，停止该次启动并保留原库、运行账本和错误证据。修复原因后用同一版本重入。源库尚未提交切换、目标已发布时，迁移核对两库来源和运行记录后复用目标。迁移本身不发出 Provider 请求。分别核对模型回放、终止恢复和用量对账，再恢复新任务。
+
+历史 JEV 结果会清理 Provider 回传的 resolved model 标签。context 的 `decision.model` 改用原 `observation.modelId`。context 与 judge 表新增可空的 `original_receipt_digest`；发生转换时，该字段保存原 typed 完整回执摘要，继续作为对账的来源摘要。原 operation、request、分数、用量和计费回执身份保持不变，原完整结果仍留在 Device 源库。核对历史回执时使用保留的摘要。新执行继续使用凭据泄漏检查，正常模型标签保留。
+
+可在停机后只读检查两个数据库的完整性：
+
+```sh
+sqlite3 -readonly "$WWC_DEVICE_DATA_DIRECTORY/providers/providers.sqlite3" 'PRAGMA user_version; PRAGMA quick_check;'
+sqlite3 -readonly "$WWC_DEVICE_DATA_DIRECTORY/providers/runtime/provider-runtime.sqlite3" 'PRAGMA user_version; PRAGMA quick_check;'
+```
+
+切换后的配置库版本为 `17`，运行账本版本为 `1`。运行账本包含 11 张运行表和 1 张来源表 `runtime_origin`。`quick_check` 不能证明两份账本的迁移语义一致。恢复验收仍须核对切换记录、原身份、状态、历史回执摘要和用量事实。版本 `17` 的正常打开只核对运行账本版本和来源，不再与留档运行表做全量比对。
+
+回退分两种情况：
+
+- 新程序尚未接受任何新执行或配置写入时，可以在停机后恢复匹配的旧程序和整份迁移前副本。先保留失败现场，并确认 Server 没有该副本之后已发生的执行事实。
+- 新运行账本已经接受调用或其他新事实后，迁移前副本和源库留档均已过期。不能只换回旧程序，也不能恢复旧副本后重新发送原请求。应保留当前两库和 Worker 状态，使用能读取当前账本的修复版本收尾。需要旧版本回退时，必须另有经过验证的反向数据转换，并保留已发生调用的身份、结果和用量事实。
+
+升级完成不要求删除原运行表或迁移前副本。旧数据清理必须另行确定保留期限与可恢复条件。
 
 ## 备份、校验和恢复
 
 `wwc backup` 支持 `server` 和 `device` 两种 store。它使用 SQLite `VACUUM INTO` 生成一致性快照，不会热拷贝 SQLite 文件。
 
-当前备份范围有限。Server backup 只发现 `WWC_SERVER_DATA_DIRECTORY` 根目录下的 `*.sqlite3`。它不包含嵌套的 auth session、event hub、artifact catalog、artifact object 或 `SECRET_DIRECTORY`。Device backup 只包含 `device-client.sqlite3`。它不包含 `providers/providers.sqlite3`、Provider 凭据或 Worker 工作目录。
+当前备份范围有限。Server backup 只发现 `WWC_SERVER_DATA_DIRECTORY` 根目录下的 `*.sqlite3`。它不包含嵌套的 auth session、event hub、artifact catalog、artifact object 或 `SECRET_DIRECTORY`。Device backup 只包含 `device-client.sqlite3`。它不包含 `providers/providers.sqlite3`、`providers/runtime/provider-runtime.sqlite3`、Provider 凭据或 Worker 工作目录。
 
 因此，`wwc backup` 当前不是完整灾难恢复包。运行下列命令前，先为未覆盖数据制定单独的停机备份方案。凭据必须按组织的秘密管理政策单独处理。不要热拷贝未覆盖的 SQLite 文件。
 

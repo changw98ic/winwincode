@@ -91,10 +91,14 @@ ExecutionPort 使用持久出站消息和确认游标。传输失败不会直接
 3. `crates/winwincode-cli/src/cli.rs::run_device_service_action` 启动 `crates/winwincode-device-client/src/service.rs::run_device_service`。`DeviceDaemon::tick` 完成登记，并交换设备消息。
 4. 浏览器创建执行会话后，`crates/winwincode-server/src/client_sessions.rs::ClientSessionsApplication::launch` 下发 Worker 启动消息。Device 根据仓库绑定取出本机路径。
 5. `crates/winwincode-device-client/src/supervisor.rs::SessionSupervisor::spawn` 写入会话配置，启动 `winwincode-worker --managed-session <配置路径>`，并接管其 stdin、stdout 和 stderr。
-6. `crates/winwincode-worker/src/main.rs::run_managed` 启动 Worker。`crates/winwincode-worker/src/remote_transport.rs::DeviceRelay::request` 把执行消息写入 stdout。Device 的 `SessionSupervisor::start_worker_relay` 转发 HTTP 请求，并把响应写回 Worker 的 stdin。stderr 用于诊断日志。
+6. `crates/winwincode-worker/src/main.rs::run_managed` 启动 Worker。`crates/winwincode-worker/src/remote_transport.rs::DeviceRelay` 通过私有 stdio 管道交换消息。Device 的 `SessionSupervisor::start_worker_relay` 将执行和用量对账请求转发给 Server，并在本机处理凭据请求。私有管道使用 `requestId` 关联请求与响应，stderr 用于诊断日志。本地凭据类型与远程 HTTP DTO 分开。
 7. Worker 收到任务后解析模型配置。`crates/winwincode-worker/src/main.rs::production_codex` 已在启动时将 helper 路径传给 Adapter 和 Kernel。实际工具调用启动该程序。
 
-Provider 的具体执行位置在 Worker。默认部署中，Server、Web、Device 和 Worker 位于同一台机器。Device 启动并监管 Worker 子进程。组合库还支持把 Worker 与 Control Plane 放在同一进程。`crates/winwincode-worker/src/device_model.rs::DeviceModels` 接收 `ModelOpenMessage`。它在实际模型调用时打开 `crates/winwincode-provider/src/device_store.rs::DeviceProviderStore`，再执行模型请求。`crates/winwincode-provider/src/provider_https_sse.rs::HttpsSseProviderAdapter` 负责 HTTPS/SSE Provider 调用和流转换。
+Provider 的具体执行位置在 Worker。默认部署中，Server、Web、Device 和 Worker 位于同一台机器。Device 启动并监管 Worker 子进程。`crates/winwincode-worker/src/device_model.rs::DeviceModels` 接收 `ModelOpenMessage`。`crates/winwincode-provider/src/provider_https_sse.rs::HttpsSseProviderAdapter` 负责 HTTPS/SSE Provider 调用和流转换。
+
+设备侧 Provider 分为两个职责。`DeviceProviderStore` 由 Device 持有，保存配置、长期凭据和配置回执。`ProviderRuntimeStore` 保存模型交换、物理调用、prepared payload、恢复游标、重试和用量事实。两个 store 使用不同的 SQLite 文件。Worker 的 managed 配置使用 `providerRuntimeDirectory` 指向运行账本目录，使用 `providerExecutionProfile` 携带模型与 JEV/Fusion 路由标识。Worker 通过 `ProviderExecutionSource` 取得本次调用的内存连接材料，并直接访问 Provider。
+
+同进程组合使用进程内 ExecutionPort。需要设备模型的组合通过 `WorkerMain::with_provider_runtime(directory, Arc<dyn ProviderExecutionSource>)` 显式注入运行账本和 Device 拥有的连接解析接口。`LocalLauncher::start` 保持通用的 `Core` 与 `Codex` 组合接口，不自动装配设备模型。同进程接口直接调用注入的 source，组件仍处于同一进程。
 
 Server 不直接持有设备 Provider 密钥。`crates/winwincode-server/src/device_providers.rs` 把加密配置写入设备下行队列。设备 Client 应用配置，并把快照和回执上报。模型输出以 `ModelChunkMessage` 经 ExecutionPort 返回 Worker 和 Control Plane。
 
@@ -105,6 +109,8 @@ Server 不直接持有设备 Provider 密钥。`crates/winwincode-server/src/dev
 `crates/kernel` 是 WinWinCode 对内嵌 Codex 的所有权边界。它通过 `codex-core-api` 创建线程和回合，并把工具调用交给 WinWinCode 的动作授权。`crates/kernel/src/model_port.rs::KernelModelStreamTransport` 把 Codex 的 `ModelStreamTransport` 接到 WinWinCode `ModelPort`。
 
 `crates/winwincode-codex` 把 Kernel 接入 Worker。它负责线程映射、执行回执、模型桥接、候选产物、运行时投影和持久 outbox。`crates/helper` 生成 `winwincode-kernel-helper`。该程序承载 Code Mode、沙箱和文件系统辅助入口。
+
+`ProductionCodexAdapter::with_provider_runtime` 为模型桥接附加运行账本。`with_device_extension_source` 独立注入扩展读取接口。managed Worker 通过父 Device 刷新扩展，Provider 运行账本不承担扩展配置读取。
 
 ## Chat、StrongFlow、Delivery 与 Publication
 
@@ -124,7 +130,7 @@ Control Plane 使用 `crates/winwincode-storage/src/lib.rs::SqliteStorage`。默
 
 设备 Client 使用 `crates/winwincode-device-client/src/store.rs::DeviceStore`。它使用独立 SQLite 数据库。它保存设备身份、远程绑定、上下行游标、仓库映射、占用镜像、Worker 进程记录和候选应用 journal。Server 当前 schema 为 `8`，Device 当前 schema 为 `11`。
 
-Provider 使用 `DeviceProviderStore` 保存设备侧 Provider 配置、调用回执和模型交换。`winwincode-codex` 也维护 Worker 侧执行状态。各数据库通过协议和回执协调，不共享内存事务。
+Provider 使用 `DeviceProviderStore` 保存设备侧配置、长期凭据和配置回执，使用 `ProviderRuntimeStore` 保存执行与恢复账本。默认文件分别为 `<device-data>/providers/providers.sqlite3` 和 `<device-data>/providers/runtime/provider-runtime.sqlite3`。运行账本仍含用户请求和结果，应按敏感数据保护。`winwincode-codex` 也维护 Worker 侧执行状态。各数据库通过协议和回执协调，不共享内存事务。配置库版本 `16` 打开时会迁移原运行记录，见 [迁移与回退](../operations/deploy.md#provider-账本迁移与回退)。
 
 审计数据由 `crates/winwincode-audit` 持久化。审计事件使用摘要链检测篡改。存储与恢复约束见 [系统不变量](../invariants.md) 和 [部署](../operations/deploy.md)。
 

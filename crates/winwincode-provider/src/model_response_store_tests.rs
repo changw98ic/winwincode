@@ -83,7 +83,7 @@ fn concurrent_first_open_uses_one_current_schema_and_identity() {
                         .connection
                         .query_row("PRAGMA user_version", [], |row| row.get(0))
                         .unwrap();
-                    assert_eq!(version, 16);
+                    assert_eq!(version, 17);
                     store
                         .snapshot("current-schema-test")
                         .unwrap()
@@ -129,6 +129,7 @@ fn sealed_response_is_duplicate_only_and_suffix_corruption_fails_closed() {
         chunks
     );
     store
+        .runtime
         .connection
         .execute(
             "UPDATE model_response_frame SET frame_json=?1 WHERE sequence=2",
@@ -140,6 +141,7 @@ fn sealed_response_is_duplicate_only_and_suffix_corruption_fails_closed() {
         "normalized changed bytes cannot reuse the seal"
     );
     store
+        .runtime
         .connection
         .execute(
             "UPDATE exchanges SET chunks=?1 WHERE exchange_id=?2",
@@ -156,6 +158,7 @@ fn sealed_response_is_duplicate_only_and_suffix_corruption_fails_closed() {
 }
 
 #[test]
+#[allow(clippy::too_many_lines)]
 fn sealed_response_read_does_not_mix_old_metadata_with_concurrently_changed_suffix() {
     use rusqlite::hooks::{AuthAction, AuthContext, Authorization};
     use std::sync::{Arc, Mutex};
@@ -180,13 +183,13 @@ fn sealed_response_read_does_not_mix_old_metadata_with_concurrently_changed_suff
     validate_response_frame(&changed).unwrap();
     let changed_bytes = serde_json::to_string(&changed).unwrap();
     let changed_digest = frame_digest(changed_bytes.as_bytes());
-    let writer_path = directory.0.join("providers.sqlite3");
+    let writer_path = store.runtime_directory().join("provider-runtime.sqlite3");
     let exchange = open.model_exchange_id.0.clone();
     let mutation = Arc::new(Mutex::new(None::<Result<i64, String>>));
     let mutation_for_hook = Arc::clone(&mutation);
 
     store
-        .connection
+        .runtime.connection
         .authorizer(Some(move |context: AuthContext<'_>| {
             if context.accessor.is_none()
                 && matches!(
@@ -225,6 +228,7 @@ fn sealed_response_read_does_not_mix_old_metadata_with_concurrently_changed_suff
         .unwrap();
     let response = store.replay_model(&open.model_exchange_id.0, 2);
     store
+        .runtime
         .connection
         .authorizer(None::<fn(AuthContext<'_>) -> Authorization>)
         .unwrap();
@@ -233,8 +237,9 @@ fn sealed_response_read_does_not_mix_old_metadata_with_concurrently_changed_suff
         Some(Ok(0)),
         "the second connection must actually commit and revoke the seal between metadata and suffix preparation"
     );
-    assert!(store.connection.is_autocommit());
+    assert!(store.runtime.connection.is_autocommit());
     let persisted: String = store
+        .runtime
         .connection
         .query_row(
             "SELECT frame_json FROM model_response_frame WHERE exchange_id=?1 AND sequence=2",
@@ -271,9 +276,9 @@ fn sealed_response_read_snapshot_preserves_caller_transaction_on_success_and_err
             .retain_stored_model_exchange_chunks(&open, &chunks)
             .unwrap();
         if revoked {
-            store.connection.execute("UPDATE model_response_frame SET frame_digest='invalid' WHERE exchange_id=?1 AND sequence=2", [&open.model_exchange_id.0]).unwrap();
+            store.runtime.connection.execute("UPDATE model_response_frame SET frame_digest='invalid' WHERE exchange_id=?1 AND sequence=2", [&open.model_exchange_id.0]).unwrap();
         }
-        store.connection.execute_batch("CREATE TABLE outer_reader_marker(value INTEGER); BEGIN; INSERT INTO outer_reader_marker(value) VALUES(1);").unwrap();
+        store.runtime.connection.execute_batch("CREATE TABLE outer_reader_marker(value INTEGER); BEGIN; INSERT INTO outer_reader_marker(value) VALUES(1);").unwrap();
         let response = store.replay_model(&open.model_exchange_id.0, 1);
         if revoked {
             assert!(response.is_err());
@@ -287,18 +292,20 @@ fn sealed_response_read_snapshot_preserves_caller_transaction_on_success_and_err
             );
         }
         assert!(
-            !store.connection.is_autocommit(),
+            !store.runtime.connection.is_autocommit(),
             "the reader must retain ownership of the caller's outer transaction"
         );
         let retained: i64 = store
+            .runtime
             .connection
             .query_row("SELECT COUNT(*) FROM outer_reader_marker", [], |row| {
                 row.get(0)
             })
             .unwrap();
         assert_eq!(retained, 1);
-        store.connection.execute_batch("ROLLBACK;").unwrap();
+        store.runtime.connection.execute_batch("ROLLBACK;").unwrap();
         let committed: i64 = store
+            .runtime
             .connection
             .query_row("SELECT COUNT(*) FROM outer_reader_marker", [], |row| {
                 row.get(0)
@@ -308,7 +315,7 @@ fn sealed_response_read_snapshot_preserves_caller_transaction_on_success_and_err
             committed, 0,
             "neither successful reads nor error cleanup may commit the caller's write"
         );
-        assert!(store.connection.is_autocommit());
+        assert!(store.runtime.connection.is_autocommit());
     }
 }
 
@@ -326,21 +333,23 @@ fn normalized_body_and_digest_mutation_delete_and_insert_invalidate_the_seal() {
         let bytes = serde_json::to_string(&changed).unwrap();
         match mode {
             "body-and-digest" => {
-                store.connection.execute("UPDATE model_response_frame SET frame_json=?1,frame_digest=?2 WHERE sequence=2",params![bytes,frame_digest(bytes.as_bytes())]).unwrap();
+                store.runtime.connection.execute("UPDATE model_response_frame SET frame_json=?1,frame_digest=?2 WHERE sequence=2",params![bytes,frame_digest(bytes.as_bytes())]).unwrap();
             }
             "delete" => {
                 store
+                    .runtime
                     .connection
                     .execute("DELETE FROM model_response_frame WHERE sequence=2", [])
                     .unwrap();
             }
             "insert" => {
-                store.connection.execute("INSERT INTO model_response_frame(exchange_id,sequence,frame_json,frame_digest) VALUES(?1,5,?2,?3)",params![open.model_exchange_id.0,bytes,frame_digest(bytes.as_bytes())]).unwrap();
+                store.runtime.connection.execute("INSERT INTO model_response_frame(exchange_id,sequence,frame_json,frame_digest) VALUES(?1,5,?2,?3)",params![open.model_exchange_id.0,bytes,frame_digest(bytes.as_bytes())]).unwrap();
             }
             _ => unreachable!(),
         }
         assert_eq!(
             store
+                .runtime
                 .connection
                 .query_row("SELECT COUNT(*) FROM model_response_exchange", [], |row| {
                     row.get::<_, i64>(0)
@@ -355,6 +364,7 @@ fn normalized_body_and_digest_mutation_delete_and_insert_invalidate_the_seal() {
         );
         assert_eq!(
             store
+                .runtime
                 .connection
                 .query_row("SELECT chunks FROM exchanges", [], |row| row
                     .get::<_, String>(0))
@@ -378,6 +388,7 @@ fn complete_response_publication_rolls_back_source_on_index_failure_then_reopens
     let (open, chunks) = fixture();
     let request_open = serde_json::to_string(&open).unwrap();
     store
+        .runtime
         .connection
         .execute(
             "INSERT INTO exchanges(exchange_id,digest,request_open) VALUES(?1,?2,?3)",
@@ -388,7 +399,7 @@ fn complete_response_publication_rolls_back_source_on_index_failure_then_reopens
             ],
         )
         .unwrap();
-    store.connection.execute_batch("CREATE TRIGGER inject_response_index_failure BEFORE INSERT ON model_response_exchange BEGIN SELECT RAISE(ABORT,'synthetic publication failure'); END;").unwrap();
+    store.runtime.connection.execute_batch("CREATE TRIGGER inject_response_index_failure BEFORE INSERT ON model_response_exchange BEGIN SELECT RAISE(ABORT,'synthetic publication failure'); END;").unwrap();
     assert!(
         store
             .retain_stored_model_exchange_chunks(&open, &chunks)
@@ -396,6 +407,7 @@ fn complete_response_publication_rolls_back_source_on_index_failure_then_reopens
     );
     assert!(
         store
+            .runtime
             .connection
             .query_row("SELECT chunks FROM exchanges", [], |row| row
                 .get::<_, Option<String>>(0))
@@ -404,6 +416,7 @@ fn complete_response_publication_rolls_back_source_on_index_failure_then_reopens
     );
     assert_eq!(
         store
+            .runtime
             .connection
             .query_row("SELECT COUNT(*) FROM model_response_frame", [], |row| row
                 .get::<_, i64>(
@@ -413,6 +426,7 @@ fn complete_response_publication_rolls_back_source_on_index_failure_then_reopens
         0
     );
     store
+        .runtime
         .connection
         .execute_batch("DROP TRIGGER inject_response_index_failure")
         .unwrap();
@@ -421,6 +435,7 @@ fn complete_response_publication_rolls_back_source_on_index_failure_then_reopens
         .unwrap();
     assert!(
         store
+            .runtime
             .connection
             .execute(
                 "UPDATE model_response_exchange SET response_digest=?1",
@@ -455,9 +470,10 @@ fn response_source_request_digest_and_exchange_mutation_invalidate_the_seal() {
             "exchange_id" => "UPDATE exchanges SET exchange_id='mdl_rebound'",
             _ => unreachable!(),
         };
-        store.connection.execute_batch(sql).unwrap();
+        store.runtime.connection.execute_batch(sql).unwrap();
         assert_eq!(
             store
+                .runtime
                 .connection
                 .query_row("SELECT COUNT(*) FROM model_response_exchange", [], |row| {
                     row.get::<_, i64>(0)
@@ -474,6 +490,7 @@ fn response_source_request_digest_and_exchange_mutation_invalidate_the_seal() {
         assert!(store.replay_model(exchange, 1).is_err(), "{field}");
         assert_eq!(
             store
+                .runtime
                 .connection
                 .query_row("SELECT chunks FROM exchanges", [], |row| row
                     .get::<_, String>(0))

@@ -12976,6 +12976,7 @@ dependencies = [
  "serde_json",
  "sha2 0.10.9",
  "winwincode-api",
+ "winwincode-execution-port",
  "winwincode-network",
 ]
 
@@ -13068,6 +13069,7 @@ dependencies = [
  "tokio-tungstenite",
  "ureq",
  "winwincode-api",
+ "winwincode-execution-port",
  "winwincode-client-port",
  "winwincode-network",
  "winwincode-provider",

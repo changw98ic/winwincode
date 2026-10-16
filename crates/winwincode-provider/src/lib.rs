@@ -60,6 +60,16 @@ mod device_call_records;
 mod device_store;
 pub use device_store::{DeviceProviderError, DeviceProviderStore, valid_device_provider_config};
 
+mod device_runtime_store;
+pub use device_runtime_store::ProviderRuntimeStore;
+
+mod device_execution_source;
+pub use device_execution_source::{
+    LocalDeviceProviderSource, ProviderConnectionMaterial, ProviderConnectionParameters,
+    ProviderExecutionContext, ProviderExecutionPurpose, ProviderExecutionRequest,
+    ProviderExecutionSource, ProviderJevParameters, ProviderModelParameters,
+};
+
 mod device_jev_context;
 pub use device_jev_context::{DeviceJevReceipt, StoredJevContext};
 
@@ -74,7 +84,7 @@ pub use device_model_concurrency::{DeviceModelAdmission, DeviceModelPermit};
 
 mod device_extensions;
 mod mcp_connection;
-pub use device_extensions::InstalledMcpTools;
+pub use device_extensions::{DeviceExtensionSource, InstalledMcpTools, benchmark_mcp_server};
 
 mod device_jev_judge;
 pub use device_jev_judge::StoredJevJudge;

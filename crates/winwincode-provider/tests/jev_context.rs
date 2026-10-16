@@ -282,7 +282,9 @@ fn device_context_receipt_replays_success_and_failure_after_reopen() {
                         .is_err()
                 );
                 assert_eq!(calls.load(Ordering::SeqCst), 1);
-                let db = rusqlite::Connection::open(directory.join("providers.sqlite3")).unwrap();
+                let db =
+                    rusqlite::Connection::open(directory.join("runtime/provider-runtime.sqlite3"))
+                        .unwrap();
                 let stored: String = db
                     .query_row("SELECT result FROM jev_context_exchanges", [], |row| {
                         row.get(0)
@@ -423,7 +425,8 @@ fn configured_context_rejects_unsealed_or_foreign_provider_before_claim() {
                 );
             }
         });
-    let database = rusqlite::Connection::open(directory.join("providers.sqlite3")).unwrap();
+    let database =
+        rusqlite::Connection::open(directory.join("runtime/provider-runtime.sqlite3")).unwrap();
     let count: i64 = database
         .query_row("SELECT COUNT(*) FROM jev_context_exchanges", [], |r| {
             r.get(0)

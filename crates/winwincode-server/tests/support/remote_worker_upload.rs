@@ -317,8 +317,9 @@ async fn scenario(chunks: usize) {
             let mut output = server_wire.try_clone().unwrap();
             for line in std::io::BufReader::new(server_wire).lines() {
                 let Ok(line) = line else { break };
-                let request: winwincode_client_port::worker_relay::WorkerRelayRequest =
+                let envelope: winwincode_client_port::private_worker_channel::PrivateWorkerRequest =
                     serde_json::from_str(&line).unwrap();
+                let winwincode_client_port::private_worker_channel::PrivateWorkerRequestBody::Relay { request } = envelope.request else { panic!("relay request"); };
                 let winwincode_client_port::worker_relay::WorkerRelayRequest::Exchange { body } =
                     request
                 else {
@@ -374,7 +375,7 @@ async fn scenario(chunks: usize) {
                     body: String::from_utf8(response).unwrap(),
                     failure: None,
                 };
-                serde_json::to_writer(&mut output, &response).unwrap();
+                serde_json::to_writer(&mut output, &winwincode_client_port::private_worker_channel::PrivateWorkerResponse { request_id: envelope.request_id, response: winwincode_client_port::private_worker_channel::PrivateWorkerResponseBody::Relay { response } }).unwrap();
                 output.write_all(b"\n").unwrap();
                 output.flush().unwrap();
             }

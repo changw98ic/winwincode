@@ -178,7 +178,7 @@ export function readDeviceExecutionReceipts(directory, scope) {
   const performance = []
   const interactionTimeouts = []
   const identities = new Set()
-  for (const path of (deviceDirectory === null ? [] : globSync('**/providers.sqlite3', { cwd: deviceDirectory }).map(path => join('device-data', path))).sort()) {
+  for (const path of (deviceDirectory === null ? [] : globSync('**/provider-runtime.sqlite3', { cwd: deviceDirectory }).map(path => join('device-data', path))).sort()) {
     const database = new DatabaseSync(join(directory, path), { readOnly: true })
     try {
       database.exec('PRAGMA busy_timeout=5000')

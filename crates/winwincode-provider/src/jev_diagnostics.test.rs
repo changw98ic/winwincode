@@ -229,7 +229,7 @@ fn malformed_json_diagnostic_is_persisted_and_replayed_without_another_call() {
     assert_eq!(encoded["network"]["diagnostic"]["line"], 2);
     assert!(encoded["network"]["diagnostic"]["column"].as_u64().unwrap() > 0);
     assert!(!encoded.to_string().contains("SYNTHETIC_PRIVATE"));
-    let journal: (String, String) = store.connection.query_row(
+    let journal: (String, String) = store.runtime.connection.query_row(
         "SELECT role,failure_json FROM jev_attempt_diagnostics WHERE operation_id=?1 AND sequence=1",
         ["jev:diagnostic-fixture:0"],
         |row| Ok((row.get(0)?, row.get(1)?)),
@@ -258,6 +258,7 @@ fn malformed_json_diagnostic_is_persisted_and_replayed_without_another_call() {
         }
     );
     let count: i64 = store
+        .runtime
         .connection
         .query_row("SELECT COUNT(*) FROM jev_attempt_diagnostics", [], |row| {
             row.get(0)
@@ -301,7 +302,7 @@ fn connection_wait_is_retained_before_authority_ends() {
     let allowed = Arc::new(AtomicBool::new(true));
     let runtime = runtime(Arc::new(DisconnectedTransport(Arc::clone(&allowed))))
         .with_attempt_journal(
-            store.connection.path().unwrap(),
+            store.runtime.connection.path().unwrap(),
             "jev:connection-wait:0",
             "context",
         );
@@ -324,6 +325,7 @@ fn connection_wait_is_retained_before_authority_ends() {
         "connection_refused"
     );
     let persisted: String = store
+        .runtime
         .connection
         .query_row(
             "SELECT failure_json FROM jev_attempt_diagnostics WHERE sequence=1",
@@ -341,6 +343,7 @@ fn connection_wait_is_retained_before_authority_ends() {
     assert_eq!(stopped["network"]["kind"], "authority_expired");
     assert_eq!(stopped["network"]["diagnostic"]["code"], "authority_ended");
     let persisted_stop: String = store
+        .runtime
         .connection
         .query_row(
             "SELECT failure_json FROM jev_attempt_diagnostics WHERE sequence=2",
@@ -392,6 +395,7 @@ fn failed_attempt_journal_prevents_a_second_inference_call() {
     let directory = TestDirectory::new("journal-failure");
     let store = DeviceProviderStore::open(&directory.0).unwrap();
     store
+        .runtime
         .connection
         .execute("DROP TABLE jev_attempt_diagnostics", [])
         .unwrap();
@@ -407,7 +411,7 @@ fn failed_attempt_journal_prevents_a_second_inference_call() {
         },
     )
     .with_attempt_journal(
-        store.connection.path().unwrap(),
+        store.runtime.connection.path().unwrap(),
         "jev:journal-failure:0",
         "context",
     );
@@ -464,7 +468,7 @@ fn stopping_before_send_is_durable_and_does_not_create_an_inference_attempt() {
         let runtime = runtime(Arc::new(CountedFailureTransport(Arc::clone(&calls))))
             .with_cancellation(Some(cancellation))
             .with_attempt_journal(
-                store.connection.path().unwrap(),
+                store.runtime.connection.path().unwrap(),
                 "jev:stop-before-send:0",
                 "context",
             );
@@ -485,6 +489,7 @@ fn stopping_before_send_is_durable_and_does_not_create_an_inference_attempt() {
         assert_eq!(encoded["network"]["acceptance"], "not_sent");
         assert_eq!(encoded["network"]["diagnostic"]["code"], "authority_ended");
         let persisted: String = store
+            .runtime
             .connection
             .query_row(
                 "SELECT failure_json FROM jev_attempt_diagnostics",
@@ -497,6 +502,7 @@ fn stopping_before_send_is_durable_and_does_not_create_an_inference_attempt() {
             encoded
         );
         let paid_rows: i64 = store
+            .runtime
             .connection
             .query_row(
                 "SELECT COUNT(*) FROM model_invocation_attempts",
@@ -532,7 +538,7 @@ fn cancelling_an_active_call_retains_unknown_acceptance_without_retry() {
     let runtime = runtime(Arc::new(PendingTransport(Arc::clone(&calls))))
         .with_cancellation(Some(Arc::clone(&cancellation)))
         .with_attempt_journal(
-            store.connection.path().unwrap(),
+            store.runtime.connection.path().unwrap(),
             "jev:stop-active-call:0",
             "judge",
         );
@@ -556,6 +562,7 @@ fn cancelling_an_active_call_retains_unknown_acceptance_without_retry() {
     assert_eq!(encoded["network"]["acceptance"], "unknown");
     assert_eq!(encoded["network"]["diagnostic"]["code"], "authority_ended");
     let persisted: String = store
+        .runtime
         .connection
         .query_row(
             "SELECT failure_json FROM jev_attempt_diagnostics",
@@ -579,7 +586,7 @@ fn field_failure_after_http_response_retains_status_and_safe_field() {
     .unwrap();
     let (transport, server) = response_transport(body);
     let runtime = runtime(Arc::new(transport)).with_attempt_journal(
-        store.connection.path().unwrap(),
+        store.runtime.connection.path().unwrap(),
         "jev:http-field:0",
         "judge",
     );
@@ -592,6 +599,7 @@ fn field_failure_after_http_response_retains_status_and_safe_field() {
     assert_eq!(encoded["network"]["diagnostic"]["code"], "json_schema");
     assert_eq!(encoded["network"]["diagnostic"]["field"], "entailment");
     let persisted: String = store
+        .runtime
         .connection
         .query_row(
             "SELECT failure_json FROM jev_attempt_diagnostics",

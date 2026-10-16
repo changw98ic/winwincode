@@ -83,6 +83,7 @@ fn finish(store: DeviceProviderStore) {
         .to_path_buf();
     assert_eq!(
         store
+            .runtime
             .connection
             .query_row("SELECT count(*) FROM jev_context_exchanges", [], |row| row
                 .get::<_, i64>(
@@ -93,6 +94,7 @@ fn finish(store: DeviceProviderStore) {
     );
     assert_eq!(
         store
+            .runtime
             .connection
             .query_row("SELECT count(*) FROM jev_judge_exchanges", [], |row| row
                 .get::<_, i64>(0))

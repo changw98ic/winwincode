@@ -34,6 +34,20 @@ const WAIT: Duration = Duration::from_secs(15);
 type ReceivedRequest = (String, serde_json::Value, mpsc::Sender<()>);
 type TlsStream = StreamOwned<ServerConnection, TcpStream>;
 
+fn runtime_database(directory: &Path) -> rusqlite::Connection {
+    let store = winwincode_provider::DeviceProviderStore::open(directory).unwrap();
+    let database =
+        rusqlite::Connection::open(store.runtime_directory().join("provider-runtime.sqlite3"))
+            .unwrap();
+    database
+        .execute(
+            "ATTACH DATABASE ?1 AS configuration",
+            [directory.join("providers.sqlite3").to_str().unwrap()],
+        )
+        .unwrap();
+    database
+}
+
 #[test]
 fn fusion_members_reach_device_https_concurrently_before_any_answer() {
     run_concurrent_members(
@@ -270,8 +284,8 @@ fn write_answer(stream: &mut TlsStream, provider: &str) {
 fn run_device_members(directory: &Path, endpoint: &str, per_provider: usize) {
     let _ = winwincode_provider::DeviceProviderStore::open(directory).unwrap();
     let expected = per_provider * PROVIDERS.len();
-    let mut models = DeviceModels::new(directory);
-    let database = rusqlite::Connection::open(directory.join("providers.sqlite3")).unwrap();
+    let mut models = DeviceModels::for_test(directory);
+    let database = runtime_database(directory);
     for provider in PROVIDERS {
         let protocol = if provider == "qwen" {
             "openai_chat_completions"
@@ -281,7 +295,7 @@ fn run_device_members(directory: &Path, endpoint: &str, per_provider: usize) {
         let config = serde_json::json!({"providerId":provider,"displayName":provider,"endpoint":format!("{endpoint}/{provider}"),"protocol":protocol,"modelIds":[format!("{provider}-model")],"enabled":true});
         database
             .execute(
-                "INSERT INTO providers VALUES (?1, ?2, ?3)",
+                "INSERT INTO configuration.providers VALUES (?1, ?2, ?3)",
                 rusqlite::params![provider, config.to_string(), b"fixture-only-key".as_slice()],
             )
             .unwrap();
@@ -375,7 +389,7 @@ fn wait_for_invoking_members(
     provider: &str,
     expected: usize,
 ) {
-    let database = rusqlite::Connection::open(directory.join("providers.sqlite3")).unwrap();
+    let database = runtime_database(directory);
     let exchanges = (0..expected)
         .map(|index| member_open(template, provider, index).model_exchange_id.0)
         .collect::<Vec<_>>();

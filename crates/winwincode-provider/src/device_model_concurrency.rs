@@ -10,7 +10,7 @@ use rusqlite::OptionalExtension as _;
 use sha2::{Digest as _, Sha256};
 use winwincode_execution_port::generated::ModelOpenMessage;
 
-use crate::{DeviceProviderError, DeviceProviderStore, device_model::validated_model_payload};
+use crate::{DeviceProviderError, ProviderRuntimeStore, device_model::validated_model_payload};
 
 #[cfg(test)]
 #[path = "device_model_concurrency_tests.rs"]
@@ -51,7 +51,7 @@ pub enum DeviceModelAdmission {
     Deferred,
 }
 
-impl DeviceProviderStore {
+impl ProviderRuntimeStore {
     pub(crate) fn try_model_exchange_owner(
         &self,
         exchange_id: &str,

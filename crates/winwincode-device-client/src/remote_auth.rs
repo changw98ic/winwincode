@@ -518,7 +518,7 @@ mod tests {
         ));
         std::fs::create_dir_all(&root).expect("fixture directory");
         let binary = root.join("winwincode-worker");
-        std::fs::write(&binary, "#!/bin/sh\ntrap 'exit 0' TERM\nprintf '%s\\n' '{\"kind\":\"exchange\",\"body\":\"{}\"}'\nIFS= read -r response\nprintf '%s' \"$response\" > \"$(dirname \"$2\")/relay-response.json\"\nwhile :; do sleep 0.1; done\n").expect("Worker fixture");
+        std::fs::write(&binary, "#!/bin/sh\nif [ \"$1\" = \"--recover-interrupted-calls\" ]; then exit 0; fi\ntrap 'exit 0' TERM\nprintf '%s\\n' '{\"requestId\":1,\"request\":{\"kind\":\"relay\",\"request\":{\"kind\":\"exchange\",\"body\":\"{}\"}}}'\nIFS= read -r response\nprintf '%s' \"$response\" > \"$(dirname \"$2\")/relay-response.json\"\nwhile :; do sleep 0.1; done\n").expect("Worker fixture");
         std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o755))
             .expect("Worker executable");
         let listener = TcpListener::bind("127.0.0.1:0").expect("HTTPS listener");
@@ -659,8 +659,8 @@ mod tests {
             &std::fs::read(response_path).expect("Worker receives HTTPS relay response"),
         )
         .expect("relay response");
-        assert_eq!(response["status"], 202);
-        assert_eq!(response["body"], "relayed");
+        assert_eq!(response["response"]["response"]["status"], 202);
+        assert_eq!(response["response"]["response"]["body"], "relayed");
         let config =
             std::fs::read_to_string(data.join("managed-session.json")).expect("Worker config");
         assert!(!config.contains(&origin));

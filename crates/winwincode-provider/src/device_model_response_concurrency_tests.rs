@@ -15,8 +15,9 @@ fn response_publication_waits_for_a_concurrent_writer_and_preserves_original_fra
     chunk.is_final = true;
     let original = vec![chunk];
     writer
+        .runtime
         .connection
-        .execute_batch("BEGIN IMMEDIATE; UPDATE identity SET revision=revision+1;")
+        .execute_batch("BEGIN IMMEDIATE; UPDATE runtime_origin SET source_id=source_id;")
         .unwrap();
     let (starting, started) = mpsc::channel();
     let (completed, completion) = mpsc::channel();
@@ -35,7 +36,7 @@ fn response_publication_waits_for_a_concurrent_writer_and_preserves_original_fra
         ),
         "a competing writer must leave publication waiting rather than fail its WAL upgrade"
     );
-    writer.connection.execute_batch("COMMIT").unwrap();
+    writer.runtime.connection.execute_batch("COMMIT").unwrap();
     let (result, publisher) = completion.recv_timeout(Duration::from_secs(10)).unwrap();
     result.unwrap();
     task.join().unwrap();
@@ -58,16 +59,20 @@ fn nested_response_publication_preserves_the_callers_rollback_boundary() {
     let mut chunk = model_chunk(&open, 1);
     chunk.is_final = true;
     let original = vec![chunk];
-    store.connection.execute_batch("BEGIN IMMEDIATE").unwrap();
+    store
+        .runtime
+        .connection
+        .execute_batch("BEGIN IMMEDIATE")
+        .unwrap();
     store
         .retain_stored_model_exchange_chunks(&open, &original)
         .unwrap();
-    assert!(!store.connection.is_autocommit());
+    assert!(!store.runtime.connection.is_autocommit());
     assert_eq!(
         store.replay_model(&open.model_exchange_id.0, 1).unwrap(),
         original
     );
-    store.connection.execute_batch("ROLLBACK").unwrap();
+    store.runtime.connection.execute_batch("ROLLBACK").unwrap();
     assert!(
         store
             .replay_model(&open.model_exchange_id.0, 1)

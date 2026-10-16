@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import { existsSync, globSync, mkdtempSync, readFileSync, rmSync, writeFileSync, mkdirSync, statSync } from 'node:fs'
-import { createHash } from 'node:crypto'
+import { createHash, randomBytes } from 'node:crypto'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
@@ -16,6 +16,7 @@ import { deviceTaskIdentities, withDeviceTaskRuntime } from '../scripts/device-t
 import { benchmarkConfiguration } from '../scripts/run-real-task-benchmark.mjs'
 import { deterministicDeviceProvider, installDevicePublicSmoke, waitFor } from '../scripts/device-production-fixture.mjs'
 import { cancellationEvidence } from './fixtures/code-mode-cancellation-evidence.mjs'
+import { assertManagedProviderWorker, assertProviderRuntimeBoundary } from './fixtures/provider-secret-boundary.mjs'
 import { assertSuccessfulRetainedCommands, completedCommandScript, loseCommittedCommandResponse,
   readRetainedCoreCommandResults } from './fixtures/chat-execution-transport-probe.mjs'
 
@@ -37,9 +38,13 @@ test('a scenario propagates its Device cleanup failure', async () => {
 
 test('standalone Server API drives Chat and StrongFlow through Device Worker production vertical', async t => {
   const fixture = createChatScenario(t, 'wwc-standalone-production-')
+  const providerKey = randomBytes(32).toString('hex')
+  const privateHeader = randomBytes(32).toString('hex')
   const report = await runApiProductionVertical({
     directory: fixture.directory,
     devicePrerequisites: true,
+    deviceProviderSecrets: [providerKey, privateHeader],
+    deviceProvider: { ...deterministicDeviceProvider(), customHeaders: { 'x-device-private': privateHeader } },
   })
   assert.equal(report.schemaVersion, 'winwincode.api-production-vertical.v1')
   assert.equal(report.execution, 'device-worker-only')
@@ -75,6 +80,8 @@ test('standalone Server API drives Chat and StrongFlow through Device Worker pro
     messageBytesStable: true,
     status: 'done',
   })
+  const boundary = assertProviderRuntimeBoundary({ directory: fixture.directory, secrets: [providerKey, privateHeader] })
+  assert.ok(boundary.files > boundary.configurations)
   fixture.complete()
 })
 
@@ -209,10 +216,13 @@ test('Chat replay preserves one execution and its durable terminal and accountin
 test('Chat Provider retry and exhaustion preserve physical accounting and one execution terminal', async t => {
   const fixture = createChatScenario(t, 'wwc-chat-provider-retry-')
   const { directory } = fixture
+  const providerKey = randomBytes(32).toString('hex')
+  const privateHeader = randomBytes(32).toString('hex')
   const productSessionId = 'psn_01J00000000000000000000022'
   const report = await runApiProductionVertical({
     directory, restart: false, repeat: false, ...apiProductionScenarioBinaries(),
-    deviceProvider: { ...deterministicDeviceProvider(), httpFailures: {
+    deviceProviderSecrets: [providerKey, privateHeader],
+    deviceProvider: { ...deterministicDeviceProvider(), customHeaders: { 'x-device-private': privateHeader }, httpFailures: {
       'retry-final-failure': { status: 429, count: 100 },
       'retry-once': { status: 503, count: 1 },
     } },
@@ -221,7 +231,8 @@ test('Chat Provider retry and exhaustion preserve physical accounting and one ex
         productSessionId, projectId: 'prj_01J00000000000000000000000',
         repositoryId: 'rep_01J00000000000000000000000', title: 'Chat Provider retry', modelRoute,
       })
-      await devicePath.launchAnchor({ productSessionId })
+      const launched = await devicePath.launchAnchor({ productSessionId })
+      await assertManagedProviderWorker({ deviceData: devicePath.deviceData, launched, secrets: [providerKey, privateHeader] })
       const database = new DatabaseSync(join(directory, 'server-data', 'control-plane.sqlite3'), { readOnly: true })
       try {
         database.exec('PRAGMA busy_timeout=5000')
@@ -271,11 +282,12 @@ test('Chat Provider retry and exhaustion preserve physical accounting and one ex
   })
   assert.ok(report.flow.scenario.retried)
   assert.ok(report.flow.scenario.exhausted)
+  assertProviderRuntimeBoundary({ directory, secrets: [providerKey, privateHeader] })
   fixture.complete()
 })
 
 function deviceProviderDatabases(deviceData, options = {}) {
-  const paths = globSync('**/providers.sqlite3', { cwd: deviceData }).map(path => join(deviceData, path))
+  const paths = globSync('**/provider-runtime.sqlite3', { cwd: deviceData }).map(path => join(deviceData, path))
   assert.ok(paths.length > 0, 'the real Device Provider store must already exist')
   return paths.map(path => {
     const database = new DatabaseSync(path, options)

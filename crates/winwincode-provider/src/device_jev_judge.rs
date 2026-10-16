@@ -1,8 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 
+#[cfg(test)]
+use crate::DeviceProviderStore;
 use crate::{
-    DeviceProviderError, DeviceProviderStore, JevExecutionOptions, JevHypothesis, JevRun,
-    JevRuntime, JevScores,
+    DeviceProviderError, JevExecutionOptions, JevHypothesis, JevRun, JevRuntime, JevScores,
+    ProviderRuntimeStore,
 };
 use rusqlite::{OptionalExtension, params};
 use sha2::{Digest, Sha256};
@@ -16,7 +18,7 @@ pub enum StoredJevJudge {
     Incomplete,
 }
 
-impl DeviceProviderStore {
+impl ProviderRuntimeStore {
     pub(crate) async fn prepare_jev_judge_request(
         &self,
         open: &winwincode_execution_port::generated::ModelOpenMessage,
@@ -44,7 +46,15 @@ impl DeviceProviderStore {
             .jev_judge
             .as_ref()
             .ok_or(DeviceProviderError::StateInvalid)?;
-        let settings = self.resolve_jev_settings(provider)?;
+        let execution_request = self.jev_execution_request(
+            &format!("judge:{}:0", open.model_exchange_id.0),
+            provider,
+            true,
+        )?;
+        let settings = self
+            .execution_source()?
+            .jev_parameters(&execution_request)?
+            .settings();
         let configuration_digest =
             crate::device_jev_context::configured_context_digest(session, &settings)?;
         let mut feedback = Vec::new();
@@ -174,7 +184,11 @@ impl DeviceProviderStore {
             .jev_judge
             .as_ref()
             .ok_or(DeviceProviderError::StateInvalid)?;
-        let settings = self.resolve_jev_settings(provider)?;
+        let execution_request = self.jev_execution_request(operation_id, provider, true)?;
+        let parameters = self
+            .execution_source()?
+            .jev_parameters(&execution_request)?;
+        let settings = parameters.settings();
         let (config, retry) = settings
             .to_config_and_runtime()
             .map_err(|_| DeviceProviderError::StateInvalid)?;
@@ -189,7 +203,14 @@ impl DeviceProviderStore {
             ))],
             retry,
         )
-        .with_cancellation(cancellation);
+        .with_cancellation(cancellation)
+        .with_execution_source(
+            self.execution_source
+                .clone()
+                .ok_or(DeviceProviderError::StateInvalid)?,
+            execution_request,
+            parameters,
+        );
         self.evaluate_judge_once_authorized(
             operation_id,
             &digest,
@@ -396,10 +417,10 @@ mod tests {
                 "claimKey":"next", "premise":"new evidence", "hypothesis":"next claim"
             }));
             assert!(store.prepare_jev_judge_request(&open,&session,&mut not_started, &|| false).await.is_err());
-            let rows: i64 = store.connection.query_row("SELECT count(*) FROM jev_judge_exchanges", [], |row| row.get(0)).unwrap();
+            let rows: i64 = store.runtime.connection.query_row("SELECT count(*) FROM jev_judge_exchanges", [], |row| row.get(0)).unwrap();
             assert_eq!(rows, 1, "the real Judge preparation entry must forward the live guard");
             assert_eq!(request,replay);
-            store.connection.execute("UPDATE jev_judge_exchanges SET result=NULL,call_status='pending' WHERE operation_id=?1",[operation]).unwrap();
+            store.runtime.connection.execute("UPDATE jev_judge_exchanges SET result=NULL,call_status='pending' WHERE operation_id=?1",[operation]).unwrap();
             let mut pending = original;
             store.prepare_jev_judge_request(&open,&session,&mut pending, &|| true).await.unwrap();
             let text = pending["request"]["input"][1]["content"][0]["text"].as_str().unwrap();
@@ -484,7 +505,7 @@ mod tests {
                     .is_err()
             );
             let rows: i64 = store
-                .connection
+                .runtime.connection
                 .query_row("SELECT count(*) FROM jev_judge_exchanges", [], |row| {
                     row.get(0)
                 })
@@ -539,7 +560,7 @@ mod tests {
                 .unwrap();
             assert_eq!(provider.calls(), 2);
             store
-                .connection
+                .runtime.connection
                 .execute(
                     "UPDATE jev_judge_exchanges SET result=NULL,call_status='pending' WHERE operation_id='judge:first'",
                     [],
@@ -576,11 +597,12 @@ mod tests {
                 .as_nanos()
         ));
         let store = DeviceProviderStore::open(&root).unwrap();
-        store.connection.execute("INSERT INTO jev_context_exchanges(operation_id,digest,request_json) VALUES('retained','digest','input')",[]).unwrap();
+        store.runtime.connection.execute("INSERT INTO jev_context_exchanges(operation_id,digest,request_json) VALUES('retained','digest','input')",[]).unwrap();
         drop(store);
         let store = DeviceProviderStore::open(&root).unwrap();
         assert_eq!(
             store
+                .runtime
                 .connection
                 .query_row(
                     "SELECT request_json FROM jev_context_exchanges WHERE operation_id='retained'",
@@ -642,6 +664,7 @@ mod tests {
         changed.hypothesis = "Changed claim".into();
         assert!(evaluate(&store, changed).is_err());
         store
+            .runtime
             .connection
             .execute(
                 "UPDATE jev_judge_exchanges SET result=NULL,call_status='pending'",

@@ -26,10 +26,10 @@ function calls(deviceData, jobId, attempt) {
     store.prepare('SELECT record_json FROM codex_run').all().map(row => JSON.parse(Buffer.from(row.record_json).toString()))
       .filter(run => run.job.jobId === jobId && run.job.attempt === attempt))
   const threads = new Set(runs.map(run => run.kernelSessionId))
-  const model = readStores(deviceData, '**/providers.sqlite3', 'exchanges', store =>
+  const model = readStores(deviceData, '**/provider-runtime.sqlite3', 'exchanges', store =>
     store.prepare(`SELECT exchange_id,request_open,call_status,chunks,accounting_chunks FROM exchanges
       WHERE json_extract(request_open,'$.lease.jobId')=? AND json_extract(request_open,'$.lease.attempt')=? ORDER BY exchange_id`).all(jobId, attempt))
-  const physical = readStores(deviceData, '**/providers.sqlite3', 'model_invocation_attempts', store =>
+  const physical = readStores(deviceData, '**/provider-runtime.sqlite3', 'model_invocation_attempts', store =>
     store.prepare(`SELECT exchange_id,attempt_number,request_json,request_payload,state,call_status,failure_chunks,accounting_chunks
       FROM model_invocation_attempts WHERE json_extract(request_json,'$.lease.jobId')=? AND json_extract(request_json,'$.lease.attempt')=?
       ORDER BY exchange_id,attempt_number`).all(jobId, attempt))

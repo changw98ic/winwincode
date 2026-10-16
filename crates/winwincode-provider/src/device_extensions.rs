@@ -84,10 +84,48 @@ struct ExtensionEntry {
     projection: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct InstalledMcpTools {
     pub server: String,
     pub digest: String,
     pub tools: Vec<String>,
+}
+
+pub trait DeviceExtensionSource: std::fmt::Debug + Send + Sync {
+    fn refresh_extensions(
+        &self,
+        lease: &winwincode_execution_port::generated::ExecutionLeaseStamp,
+    ) -> Result<Vec<InstalledMcpTools>, DeviceProviderError>;
+}
+
+pub fn benchmark_mcp_server(
+    job: &winwincode_execution_port::generated::ExecutionJob,
+    benchmark_enabled: bool,
+) -> Result<Option<&str>, DeviceProviderError> {
+    if !benchmark_enabled {
+        return Ok(None);
+    }
+    let Some(input) = &job.work_input else {
+        return Ok(None);
+    };
+    let mut servers = input
+        .work_contract
+        .objective
+        .split(|character: char| {
+            !(character.is_ascii_alphanumeric() || matches!(character, '_' | '-'))
+        })
+        .filter(|word| word.starts_with(BENCHMARK_MCP_PREFIX));
+    let Some(server) = servers.next() else {
+        return Ok(None);
+    };
+    if server.len() == BENCHMARK_MCP_PREFIX.len()
+        || server.len() > 64
+        || servers.any(|other| other != server)
+    {
+        return Err(DeviceProviderError::StateInvalid);
+    }
+    Ok(Some(server))
 }
 
 fn valid_id(id: &str) -> bool {

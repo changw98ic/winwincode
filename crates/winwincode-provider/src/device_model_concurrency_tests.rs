@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use super::*;
+use crate::DeviceProviderStore;
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use std::{
     io::{BufRead as _, BufReader, Read as _, Write as _},
@@ -232,8 +233,8 @@ fn unsafe_provider_slot_paths_are_hard_errors_and_never_report_a_full_queue() {
     let store = DeviceProviderStore::open(&directory.0).unwrap();
     let open = model_open("provider-a", 0);
     drop(permit(&store, &open));
-    let slots = directory
-        .0
+    let slots = store
+        .runtime_directory()
         .join("model-provider-slots")
         .join(format!("{:x}", Sha256::digest(b"provider-a")));
     let slot = slots.join("slot-0");

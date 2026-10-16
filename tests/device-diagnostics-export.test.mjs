@@ -15,8 +15,8 @@ const logId = `sse-${'a'.repeat(64)}.log`
 function fixture(t, { diagnostics = true } = {}) {
   const directory = mkdtempSync(join(tmpdir(), 'wwc-device-diagnostic-export-'))
   t.after(() => rmSync(directory, { recursive: true, force: true }))
-  mkdirSync(join(directory, 'device-data/providers'), { recursive: true })
-  const db = new DatabaseSync(join(directory, 'device-data/providers/providers.sqlite3'))
+  mkdirSync(join(directory, 'device-data/providers/runtime'), { recursive: true })
+  const db = new DatabaseSync(join(directory, 'device-data/providers/runtime/provider-runtime.sqlite3'))
   t.after(() => db.close())
   db.exec(`CREATE TABLE exchanges(exchange_id TEXT,request_open TEXT,chunks TEXT);
     CREATE TABLE jev_context_exchanges(operation_id TEXT,request_json TEXT,result TEXT);
@@ -80,6 +80,22 @@ test('SQLite export preserves four model attempts and JEV diagnostics using safe
   assert.deepEqual(JSON.parse(retained), evidence)
   assert.equal(retained.includes('SYNTHETIC_PRIVATE'), false)
   assert.equal(retained.includes('private.invalid'), false)
+})
+
+test('execution receipt export ignores the Device configuration database historical archive', t => {
+  const { directory, db } = fixture(t)
+  const archive = new DatabaseSync(join(directory, 'device-data/providers/providers.sqlite3'))
+  try {
+    archive.exec('CREATE TABLE exchanges(exchange_id TEXT,request_open TEXT,chunks TEXT)')
+    const original = db.prepare('SELECT * FROM exchanges LIMIT 1').get()
+    archive.prepare('INSERT INTO exchanges VALUES (?,?,?)').run(original.exchange_id, original.request_open, original.chunks)
+    const calls = readDeviceExecutionReceipts(directory).calls
+    assert.equal(calls.length, 1)
+    assert.equal(calls[0].exchangeId, original.exchange_id)
+    db.exec('DELETE FROM exchanges')
+    assert.equal(readDeviceExecutionReceipts(directory).calls.length, 0,
+      'configuration database archive rows cannot substitute for the current runtime ledger')
+  } finally { archive.close() }
 })
 
 test('an unfinished JEV operation exports its durable connection wait facts', t => {

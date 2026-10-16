@@ -317,6 +317,7 @@ fn interrupted_and_cancelled_attempts_close_with_honest_financial_facts() {
         open.request.payload_digest.0 = format!("sha256:{:x}", Sha256::digest(&payload));
         let request = serde_json::to_string(&open).unwrap();
         store
+            .runtime
             .connection
             .execute(
                 "INSERT INTO exchanges(exchange_id,digest,request_open) VALUES(?1,?2,?3)",
@@ -332,9 +333,9 @@ fn interrupted_and_cancelled_attempts_close_with_honest_financial_facts() {
         } else {
             "invoking"
         };
-        store.connection.execute("INSERT INTO model_invocation_attempts(exchange_id,attempt_number,adapter_request_id,state,request_json,request_payload) VALUES(?1,1,?2,?3,?4,?5)",params![open.model_exchange_id.0,format!("device-{}:attempt:1",open.model_exchange_id.0),state,request,payload]).unwrap();
-        store.connection.execute("INSERT INTO model_attempt_diagnostics VALUES (?1,1,1,10,20,'accepted',NULL,'original_terminal')",[&open.model_exchange_id.0]).unwrap();
-        store.connection.execute("INSERT INTO model_attempt_diagnostics VALUES (?1,2,1,30,NULL,'in_flight',NULL,NULL)",[&open.model_exchange_id.0]).unwrap();
+        store.runtime.connection.execute("INSERT INTO model_invocation_attempts(exchange_id,attempt_number,adapter_request_id,state,request_json,request_payload) VALUES(?1,1,?2,?3,?4,?5)",params![open.model_exchange_id.0,format!("device-{}:attempt:1",open.model_exchange_id.0),state,request,payload]).unwrap();
+        store.runtime.connection.execute("INSERT INTO model_attempt_diagnostics VALUES (?1,1,1,10,20,'accepted',NULL,'original_terminal')",[&open.model_exchange_id.0]).unwrap();
+        store.runtime.connection.execute("INSERT INTO model_attempt_diagnostics VALUES (?1,2,1,30,NULL,'in_flight',NULL,NULL)",[&open.model_exchange_id.0]).unwrap();
         if original_state == "completed_before_outer" {
             let accounting = observed_accounting_chunk(
                 &open,
@@ -349,6 +350,7 @@ fn interrupted_and_cancelled_attempts_close_with_honest_financial_facts() {
             )
             .unwrap();
             store
+                .runtime
                 .connection
                 .execute(
                     "UPDATE model_invocation_attempts SET state='completed',accounting_chunks=?1",
@@ -373,6 +375,7 @@ fn interrupted_and_cancelled_attempts_close_with_honest_financial_facts() {
                 "a dead owner cannot strand a genuine completed paid receipt"
             );
             let runtime: Option<String> = store
+                .runtime
                 .connection
                 .query_row("SELECT chunks FROM exchanges", [], |row| row.get(0))
                 .unwrap();
@@ -405,6 +408,7 @@ fn interrupted_and_cancelled_attempts_close_with_honest_financial_facts() {
             );
         }
         let final_state: String = store
+            .runtime
             .connection
             .query_row("SELECT state FROM model_invocation_attempts", [], |row| {
                 row.get(0)
@@ -450,14 +454,14 @@ fn interrupted_and_cancelled_attempts_close_with_honest_financial_facts() {
 }
 
 fn assert_interrupted_diagnostics_settled(store: &DeviceProviderStore, open: &ModelOpenMessage) {
-    let original: (i64, i64, String, Option<String>, String) = store.connection.query_row(
+    let original: (i64, i64, String, Option<String>, String) = store.runtime.connection.query_row(
         "SELECT started_ms,finished_ms,outcome,failure_json,stop_reason FROM model_attempt_diagnostics WHERE exchange_id=?1 AND sequence=1",
         [&open.model_exchange_id.0], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?))).unwrap();
     assert_eq!(
         original,
         (10, 20, "accepted".into(), None, "original_terminal".into())
     );
-    let interrupted: (String, i64, String, String) = store.connection.query_row(
+    let interrupted: (String, i64, String, String) = store.runtime.connection.query_row(
         "SELECT outcome,finished_ms,failure_json,stop_reason FROM model_attempt_diagnostics WHERE exchange_id=?1 AND sequence=2",
         [&open.model_exchange_id.0], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))).unwrap();
     assert_eq!(interrupted.0, "failed");
@@ -470,7 +474,7 @@ fn assert_interrupted_diagnostics_settled(store: &DeviceProviderStore, open: &Mo
     assert_eq!(failure.acceptance, winwincode_network::Acceptance::Unknown);
     assert_eq!(failure.phase, winwincode_network::Phase::Stream);
     assert_eq!(interrupted.3, "interrupted_unknown");
-    let remaining: i64 = store.connection.query_row(
+    let remaining: i64 = store.runtime.connection.query_row(
         "SELECT COUNT(*) FROM model_attempt_diagnostics WHERE exchange_id=?1 AND outcome='in_flight'",
         [&open.model_exchange_id.0], |row| row.get(0)).unwrap();
     assert_eq!(remaining, 0);
@@ -666,7 +670,7 @@ fn run_child(case: &str) {
         _ => None,
     };
     if let Some(fault) = fault {
-        store.connection.execute_batch(fault).unwrap();
+        store.runtime.connection.execute_batch(fault).unwrap();
     }
     let admissions = Cell::new(0);
     let releases = Cell::new(0);
@@ -714,8 +718,8 @@ fn run_child(case: &str) {
         releases.get(),
         "every attempt releases admission before waiting"
     );
-    let attempts:Vec<DeviceAttemptRow> = store.connection.prepare("SELECT attempt_number,state,failure_chunks,response_bytes FROM model_invocation_attempts ORDER BY attempt_number").unwrap().query_map([],|row|Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?))).unwrap().collect::<Result<_,_>>().unwrap();
-    let pairs: Vec<InvocationPairRow> = store.connection.prepare("SELECT call_status,request_json,request_payload,failure_chunks,accounting_chunks FROM model_invocation_attempts ORDER BY attempt_number").unwrap()
+    let attempts:Vec<DeviceAttemptRow> = store.runtime.connection.prepare("SELECT attempt_number,state,failure_chunks,response_bytes FROM model_invocation_attempts ORDER BY attempt_number").unwrap().query_map([],|row|Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?))).unwrap().collect::<Result<_,_>>().unwrap();
+    let pairs: Vec<InvocationPairRow> = store.runtime.connection.prepare("SELECT call_status,request_json,request_payload,failure_chunks,accounting_chunks FROM model_invocation_attempts ORDER BY attempt_number").unwrap()
         .query_map([],|row|Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?,row.get(4)?))).unwrap().collect::<Result<_,_>>().unwrap();
     for (status, request, input, failure, accounting) in &pairs {
         assert_eq!(request, &serde_json::to_string(&open).unwrap());
@@ -809,6 +813,7 @@ fn run_child(case: &str) {
             "missing formal accounting cannot report success"
         );
         store
+            .runtime
             .connection
             .execute_batch("DROP TRIGGER accounting_failure")
             .unwrap();
@@ -918,7 +923,13 @@ fn run_child(case: &str) {
         "one bounded financial aggregate retains all actual invocation facts"
     );
     if matches!(case, "incomplete" | "incomplete_reset") {
-        assert!(attempts[0].3.as_ref().unwrap().starts_with(b"data:"));
+        assert!(attempts[0].3.is_none());
+        let received: i64 = store.runtime.connection.query_row(
+            "SELECT response_bytes_received FROM model_invocation_attempts WHERE exchange_id=?1 AND attempt_number=1",
+            [&open.model_exchange_id.0],
+            |row| row.get(0),
+        ).unwrap();
+        assert!(received > 0);
         assert_eq!(
             statement.receipts.len(),
             1,
@@ -995,6 +1006,7 @@ fn serve(
         if let Some(root) = concurrent_root {
             let store = DeviceProviderStore::open(root).unwrap();
             let (exchange, request): (String, String) = store
+                .runtime
                 .connection
                 .query_row(
                     "SELECT exchange_id,request_open FROM exchanges",
@@ -1004,6 +1016,7 @@ fn serve(
                 .unwrap();
             store.cancel_model(&exchange).unwrap();
             let state: String = store
+                .runtime
                 .connection
                 .query_row("SELECT state FROM model_invocation_attempts", [], |row| {
                     row.get(0)

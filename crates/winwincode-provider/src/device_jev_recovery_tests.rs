@@ -118,7 +118,7 @@ fn exercise_case(case: &str) {
         );
     });
     let database = rusqlite::Connection::open_with_flags(
-        root.join("providers.sqlite3"),
+        root.join("runtime/provider-runtime.sqlite3"),
         rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
     )
     .unwrap();
@@ -458,12 +458,13 @@ fn run_child(root: &Path) {
     if case == "retry" && phase == "resume" {
         let original: serde_json::Value =
             serde_json::from_slice(&fs::read(root.join("retry.json")).unwrap()).unwrap();
-        assert_eq!(retry_snapshot(&store.connection, &open), original);
+        assert_eq!(retry_snapshot(&store.runtime.connection, &open), original);
         assert_eq!(original["attempt"], 2);
         assert_eq!(original["decision"], "deferred_until");
         // Advance only the fixture wake time. Preserve the real durable retry
         // decision, original exchange, prepared input and policy attempt.
         store
+            .runtime
             .connection
             .execute(
                 "UPDATE model_retry_state SET wake_ms=0 WHERE exchange_id=?1",

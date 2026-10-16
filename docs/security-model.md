@@ -35,7 +35,11 @@ Device Provider 配置在浏览器中加密。Browser Client 使用 Device 上�
 
 Device 创建并独占 Worker 的 stdin/stdout 管道，再启动 Worker。管道的创建、独占和受控继承关系确认通信对象。Device 把管道固定到配置的 Worker 与 Worker instance。内部 ExecutionPort 消息中的会话、任务、attempt 和 fencing 身份由 Worker 与 Server 核对。
 
-Worker 通过私有管道发送交换和用量对账请求。Device 为远程 HTTP 中继和 preview WSS upgrade 签名。Device 私钥保存在 Device 的私有数据目录。Worker 仅接收本机执行配置和必要凭据。Server 核对 Device 归属、启动授权、placement、设备占用和执行租约。
+Worker 通过私有管道发送交换和用量对账请求。Device 为远程 HTTP 中继和 preview WSS upgrade 签名。Device 私钥保存在 Device 的私有数据目录。Server 核对 Device 归属、启动授权、placement、设备占用和执行租约。
+
+Device 长期保管 Provider 配置和凭据。Worker 按需通过父 Device 的私有管道取得当前调用所需的连接材料，并只在内存中使用。Device 根据实际监管的 Worker、Worker instance，以及已观察派发的租约和 attempt 核对请求。它同时检查会话标识的一致性、产品会话和 WorkRun 归属。端点、Provider、模型和凭据的关联由 Device 保存的配置决定。
+
+本地凭据请求在 Device 终止，与 Server 的 Worker HTTP 中继 DTO 分开。私有管道使用 `requestId` 关联请求与响应。凭据解析和 OAuth 刷新在独立处理路径中执行，控制交换与用量对账继续使用远程中继路径。该父子继承管道使用上文的进程绑定关系确认通信对象。连接材料返回后，Worker 再次核对当前租约和取消状态。
 
 ### Worker 到内嵌 Codex
 
@@ -77,11 +81,17 @@ HTTP 会话 Cookie 使用 `HttpOnly` 和 `SameSite=Lax`。认证端点要求显�
 
 ### Device Provider
 
-Device Client 将 Provider 状态保存在设备数据目录下的 `providers/providers.sqlite3`。目录模式为 `0700`。数据库文件模式为 `0600`。SQLite 使用 `secure_delete=ON`。
+Device Client 将 Provider 配置保存在设备数据目录下的 `providers/providers.sqlite3`。目录模式为 `0700`。数据库文件模式为 `0600`。SQLite 使用 `secure_delete=ON`。
 
 API key 和 ChatGPT Plan OAuth 凭据保存在 `providers` 表的 `secret` 字段。自定义请求头保存在 `provider_headers` 表。0.2.0 没有对这些字段再做应用层静态加密。文件系统权限和主机安全是静态保护边界。设备数据备份也应按凭据备份处理。
 
-`codex_chatgpt` 配置保存本地 Codex 登录绑定。实际访问令牌由该绑定在 Device 上解析。Provider 状态投影只返回 `credentialConfigured`，不返回 secret。
+`codex_chatgpt` 配置保存本地 Codex 登录绑定。实际访问令牌由该绑定在 Device 上解析。ChatGPT Plan OAuth 刷新也由 Device 负责。Provider 状态投影只返回 `credentialConfigured`，不返回 secret。
+
+执行账本位于独立的 `providers/runtime/provider-runtime.sqlite3`。该文件不保存 Provider secret、敏感自定义请求头、Device 私钥、OAuth 刷新材料或 Codex 登录绑定。Worker 只打开运行账本。Device 按需提供 HTTPS/SSE 调用所需的最小连接材料，包括认证信息、敏感请求头和必要的账户路由。模型 HTTPS/SSE 请求仍由 Worker 发出。
+
+设置 `WWC_DEVICE_JEV_SETTINGS_FILE` 后，Device 在首次已授权的 JEV 调用中导入该文件。Worker 启动配置只携带 JEV 路由和策略标识。启动时不解析 Provider 或 JEV 凭据。
+
+运行账本保存请求、prepared payload、模型结果、恢复游标和用量事实。它仍是敏感数据。拆成不同数据库防止 Worker 经运行接口读取长期凭据，但不构成同一操作系统用户之间的强隔离。迁移与回退约束见 [Provider 账本迁移](operations/deploy.md#provider-账本迁移与回退)。
 
 ### Server 侧 secret
 
@@ -105,6 +115,8 @@ Server 核对当前执行权威后，生成动作授权回执。Worker 核对请
 只读角色仅允许明确的控制操作、结果轮询和受限的只读 shell 调用。其他动作直接拒绝。可写角色使用 workspace-write 权限，并把 sandbox 根固定到规范化工作区。权限配置使用 read-only 或 workspace-write profile。工具授权和 sandbox 是两个独立检查层。
 
 MCP 自身的审批模式由内嵌 Codex 配置处理。启用 host action approvals 时，自动 MCP 调用会改为由 Host Action Gate 审批。单次批准仍受当前动作回执和租约约束。
+
+父 Device 将 MCP 配置物化到 Worker 的 `kernel_home`。MCP 的 env 和 header 仍可能保存在该目录，Worker 和内嵌 Codex 可以读取。Provider 和 JEV 凭据通过内存连接材料提供。MCP 凭据宿主迁移（2D）尚未实施。
 
 ## 网络边界
 
@@ -136,7 +148,7 @@ macOS 发布二进制使用 `codesign --sign -` 进行 ad-hoc 签名。0.2.0 没
 
 以下风险仍需要部署者处理：
 
-- 主机 root、同等系统权限或 Owner 被攻破后，可以读取工作区和本机凭据。
+- 主机 root、同一操作系统用户或 Owner 被攻破后，可以读取工作区和本机凭据。
 - Device Provider secret 和 Device 签名私钥依赖设备文件权限，没有应用层静态加密。
 - `local-open` 把本机进程视为同一信任域。
 - 配置的 MCP server、Provider endpoint、proxy 和自定义 CA 会扩展信任边界。

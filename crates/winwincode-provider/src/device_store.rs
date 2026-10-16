@@ -99,9 +99,23 @@ struct Mutation {
 pub struct DeviceProviderStore {
     pub(crate) connection: Connection,
     key: SecretKey,
+    pub(crate) runtime: crate::device_runtime_store::ProviderRuntimeStore,
+}
+
+impl std::ops::Deref for DeviceProviderStore {
+    type Target = crate::device_runtime_store::ProviderRuntimeStore;
+
+    fn deref(&self) -> &Self::Target {
+        &self.runtime
+    }
 }
 
 impl DeviceProviderStore {
+    #[must_use]
+    pub fn runtime_directory(&self) -> &Path {
+        self.runtime.directory()
+    }
+
     pub(crate) fn sse_failure_log_directory(
         &self,
     ) -> Result<std::path::PathBuf, DeviceProviderError> {
@@ -125,7 +139,8 @@ impl DeviceProviderStore {
         if !meta.is_dir() || meta.permissions().mode() & 0o077 != 0 {
             return Err(DeviceProviderError::StateInvalid);
         }
-        let path = fs::canonicalize(directory)?.join("providers.sqlite3");
+        let directory = fs::canonicalize(directory)?;
+        let path = directory.join("providers.sqlite3");
         match fs::OpenOptions::new()
             .write(true)
             .create_new(true)
@@ -145,27 +160,74 @@ impl DeviceProviderStore {
         enable_device_wal(&connection)?;
         connection.execute_batch("PRAGMA synchronous=FULL; PRAGMA secure_delete=ON;")?;
         let version: i64 = connection.query_row("PRAGMA user_version", [], |row| row.get(0))?;
-        let key = if version == 16 {
-            load_device_key(&connection)?
-        } else if version == 0 {
-            // Only initialization needs the writer lock. Current-schema readers
-            // must not contend with an accounting transaction.
+        if version == 0 {
             let transaction =
                 connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
             let locked_version: i64 =
                 transaction.query_row("PRAGMA user_version", [], |row| row.get(0))?;
             match locked_version {
                 0 => initialize_device_store(&transaction)?,
-                16 => {}
+                16 | 17 => {}
                 _ => return Err(DeviceProviderError::StateInvalid),
             }
-            let key = load_device_key(&transaction)?;
             transaction.commit()?;
-            key
-        } else {
+        } else if !matches!(version, 16 | 17) {
             return Err(DeviceProviderError::StateInvalid);
+        }
+        let key = load_device_key(&connection)?;
+        let source_id = format!(
+            "{:x}",
+            Sha256::digest(key.public_key().to_encoded_point(false).as_bytes())
+        );
+        let runtime_directory = directory.join("runtime");
+        let version: i64 = connection.query_row("PRAGMA user_version", [], |row| row.get(0))?;
+        let runtime = if version == 17 {
+            crate::device_runtime_store::ProviderRuntimeStore::open_existing(&runtime_directory)?
+        } else {
+            let transaction =
+                connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+            let locked_version: i64 =
+                transaction.query_row("PRAGMA user_version", [], |row| row.get(0))?;
+            let runtime = match locked_version {
+                16 => {
+                    let runtime = crate::device_runtime_store::migrate_runtime(
+                        &transaction,
+                        &runtime_directory,
+                        &source_id,
+                    )?;
+                    transaction.execute_batch(
+                        "CREATE TABLE provider_runtime_cutover(singleton INTEGER PRIMARY KEY CHECK(singleton=1),source_id TEXT NOT NULL); PRAGMA user_version=17;",
+                    )?;
+                    transaction.execute(
+                        "INSERT INTO provider_runtime_cutover VALUES(1,?1)",
+                        [&source_id],
+                    )?;
+                    runtime
+                }
+                17 => crate::device_runtime_store::ProviderRuntimeStore::open_existing(
+                    &runtime_directory,
+                )?,
+                _ => return Err(DeviceProviderError::StateInvalid),
+            };
+            transaction.commit()?;
+            runtime
         };
-        Ok(Self { connection, key })
+        let cutover: String = connection.query_row(
+            "SELECT source_id FROM provider_runtime_cutover WHERE singleton=1",
+            [],
+            |row| row.get(0),
+        )?;
+        if cutover != source_id || runtime.source_id()? != source_id {
+            return Err(DeviceProviderError::StateInvalid);
+        }
+        let runtime = runtime.with_execution_source(std::sync::Arc::new(
+            crate::device_execution_source::LocalDeviceProviderSource::new(directory),
+        ));
+        Ok(Self {
+            connection,
+            key,
+            runtime,
+        })
     }
 
     pub fn snapshot(
@@ -912,7 +974,7 @@ impl DeviceProviderStore {
     }
 }
 
-fn enable_device_wal(connection: &Connection) -> Result<(), DeviceProviderError> {
+pub(crate) fn enable_device_wal(connection: &Connection) -> Result<(), DeviceProviderError> {
     let deadline = std::time::Instant::now() + Duration::from_secs(5);
     loop {
         match connection.execute_batch("PRAGMA journal_mode=WAL;") {
@@ -1088,59 +1150,20 @@ fn initialize_device_store(
         "CREATE TABLE identity (singleton INTEGER PRIMARY KEY CHECK(singleton=1), private_key BLOB NOT NULL, revision INTEGER NOT NULL CHECK(revision>=0));
          CREATE TABLE providers (provider_id TEXT PRIMARY KEY, config TEXT NOT NULL, secret BLOB NOT NULL);
          CREATE TABLE receipts (request_id TEXT PRIMARY KEY, digest TEXT NOT NULL, receipt TEXT NOT NULL);
-         CREATE TABLE exchanges (
-            exchange_id TEXT PRIMARY KEY, digest TEXT NOT NULL, chunks TEXT,
-            cancelled INTEGER NOT NULL DEFAULT 0, request_open TEXT, prepared_payload BLOB,
-            prepared_payload_digest TEXT, accounting_chunks TEXT,
-            call_status TEXT GENERATED ALWAYS AS (CASE WHEN request_open IS NULL THEN NULL WHEN chunks IS NULL THEN 'pending' WHEN NOT json_valid(chunks) THEN 'failed' WHEN json_extract(chunks,'$[#-1].error.message')='DEVICE_MODEL_CANCELLED' THEN 'cancelled' WHEN json_extract(chunks,'$[#-1].error') IS NOT NULL THEN 'failed' ELSE 'succeeded' END) VIRTUAL);
          CREATE TABLE extension_state (singleton INTEGER PRIMARY KEY CHECK(singleton=1), revision INTEGER NOT NULL CHECK(revision>=0));
-         INSERT INTO extension_state VALUES (1, 0);
          CREATE TABLE extensions (kind TEXT NOT NULL, id TEXT NOT NULL, data TEXT NOT NULL, projection TEXT NOT NULL, PRIMARY KEY(kind,id));
          CREATE TABLE extension_receipts (request_id TEXT PRIMARY KEY, digest TEXT NOT NULL, receipt TEXT NOT NULL);
          CREATE TABLE provider_headers (provider_id TEXT PRIMARY KEY, headers TEXT NOT NULL);
-         CREATE TABLE jev_context_exchanges (operation_id TEXT PRIMARY KEY, digest TEXT NOT NULL, request_json TEXT NOT NULL, result TEXT,
-            call_status TEXT NOT NULL DEFAULT 'pending' CHECK(call_status IN ('pending','succeeded','failed','cancelled')),
-            CHECK((call_status='pending' AND result IS NULL) OR (call_status!='pending' AND result IS NOT NULL)));
          CREATE TABLE jev_settings (provider_id TEXT PRIMARY KEY, settings TEXT NOT NULL);
-         CREATE TABLE jev_judge_exchanges (operation_id TEXT PRIMARY KEY, request_json TEXT NOT NULL, result TEXT,
-            call_status TEXT NOT NULL DEFAULT 'pending' CHECK(call_status IN ('pending','succeeded','failed','cancelled')),
-            CHECK((call_status='pending' AND result IS NULL) OR (call_status!='pending' AND result IS NOT NULL)));
-         CREATE TABLE accounting_closed_attempts (job_id TEXT NOT NULL,attempt INTEGER NOT NULL,lease_id TEXT NOT NULL,PRIMARY KEY(job_id,attempt));
-         CREATE TABLE model_invocation_attempts (
-            exchange_id TEXT NOT NULL, attempt_number INTEGER NOT NULL CHECK(attempt_number>0),
-            adapter_request_id TEXT NOT NULL UNIQUE, state TEXT NOT NULL,
-            request_json TEXT NOT NULL, request_payload BLOB NOT NULL,
-            failure_chunks TEXT, accounting_chunks TEXT, response_bytes BLOB, response_bytes_received INTEGER,
-            call_status TEXT GENERATED ALWAYS AS (CASE WHEN state IN ('prepared','invoking') THEN 'pending' WHEN state='completed' THEN 'succeeded' WHEN json_valid(failure_chunks) AND json_extract(failure_chunks,'$[#-1].error.message')='DEVICE_MODEL_CANCELLED' THEN 'cancelled' ELSE 'failed' END) VIRTUAL,
-            PRIMARY KEY(exchange_id,attempt_number),
-            CHECK(state IN ('prepared','invoking') OR failure_chunks IS NOT NULL OR accounting_chunks IS NOT NULL));
-         CREATE TABLE model_attempt_diagnostics (
-            exchange_id TEXT NOT NULL REFERENCES exchanges(exchange_id),
-            sequence INTEGER NOT NULL CHECK(sequence>0), policy_attempt INTEGER NOT NULL CHECK(policy_attempt BETWEEN 1 AND 4),
-            started_ms INTEGER NOT NULL, finished_ms INTEGER,
-            outcome TEXT NOT NULL CHECK(outcome IN ('in_flight','accepted','failed')),
-            failure_json TEXT, stop_reason TEXT, PRIMARY KEY(exchange_id,sequence));
-         CREATE TABLE jev_attempt_diagnostics (
-            operation_id TEXT NOT NULL, sequence INTEGER NOT NULL CHECK(sequence>0),
-            role TEXT NOT NULL CHECK(role IN ('context','judge')), recorded_ms INTEGER NOT NULL, failure_json TEXT NOT NULL,
-            PRIMARY KEY(operation_id,sequence));
-         CREATE TABLE model_retry_state (exchange_id TEXT PRIMARY KEY REFERENCES exchanges(exchange_id),
-            policy_attempt INTEGER NOT NULL CHECK(policy_attempt BETWEEN 1 AND 4),
-            connection_attempt INTEGER NOT NULL DEFAULT 0 CHECK(connection_attempt>=0),
-            wake_ms INTEGER NOT NULL, decision TEXT NOT NULL CHECK(decision IN ('retry_after','deferred_until')));
-         CREATE TABLE jev_invocation_attempts (
-            operation_id TEXT NOT NULL, sequence INTEGER NOT NULL, request_json TEXT NOT NULL,
-            status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','succeeded','failed','cancelled')),
-            result_json TEXT, PRIMARY KEY(operation_id,sequence),
-            CHECK((status='pending' AND result_json IS NULL) OR (status!='pending' AND result_json IS NOT NULL)));
+         INSERT INTO extension_state VALUES(1,0);
          PRAGMA user_version=16;",
     )?;
+    crate::device_runtime_store::create_runtime_schema(transaction)?;
     let key = new_secret_key()?;
     transaction.execute(
         "INSERT INTO identity VALUES (1, ?1, 0)",
         [key.to_bytes().as_slice()],
     )?;
-    crate::model_response_store::create_model_response_index(transaction)?;
     Ok(())
 }
 
