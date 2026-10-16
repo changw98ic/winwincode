@@ -81,14 +81,9 @@ async fn result_read_authority_expires_without_owner_clock_refresh() {
     let home =
         std::env::temp_dir().join(format!("wwc-result-read-elapsed-{}", uuid::Uuid::new_v4()));
     std::fs::create_dir_all(&home).unwrap();
-    let gate = ExecutionPortActionGate::open(
-        &home,
-        catalog(),
-        crate::model_bridge::SharedAuthoritySource::default(),
-    )
-    .unwrap();
-    let mut authority = binding();
-    authority.authority.lease.expires_at = Instant("2030-01-01T00:00:02.120Z".into());
+    let source = crate::model_bridge::SharedAuthoritySource::default();
+    let gate = ExecutionPortActionGate::open(&home, catalog(), source.clone()).unwrap();
+    let authority = binding();
     gate.install_binding(&authority, None).unwrap();
     let initial = Instant("2030-01-01T00:00:02.000Z".into());
     gate.update_now(&initial).unwrap();
@@ -97,7 +92,13 @@ async fn result_read_authority_expires_without_owner_clock_refresh() {
     gate.revalidate_result_read(request.clone(), authorization.clone())
         .await
         .unwrap();
-    tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+    source.advance_clock_for_test(std::time::Duration::from_hours(1));
+    assert!(gate.authorize_result_read(request.clone()).await.is_err());
+    assert!(
+        gate.revalidate_result_read(request.clone(), authorization.clone())
+            .await
+            .is_err()
+    );
     gate.update_now(&initial).unwrap();
     assert!(gate.authorize_result_read(request.clone()).await.is_err());
     assert!(

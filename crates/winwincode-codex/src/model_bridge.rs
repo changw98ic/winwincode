@@ -233,6 +233,11 @@ impl SharedAuthoritySource {
         self
     }
 
+    #[cfg(test)]
+    pub(crate) fn advance_clock_for_test(&self, elapsed: std::time::Duration) {
+        self.authority_clock.advance_for_test(elapsed);
+    }
+
     pub(crate) fn update_now(&self, now: &Instant) -> Result<(), BridgeError> {
         self.authority_clock
             .observe(now)
@@ -4122,14 +4127,12 @@ mod tests {
     #[test]
     fn shared_model_authority_expires_without_an_owner_clock_refresh() {
         let source = SharedAuthoritySource::default();
-        let mut lease = authority(&id("cdx", 'A'));
-        lease.lease.issued_at = Instant("2030-01-01T00:00:00.000Z".into());
-        lease.lease.expires_at = Instant("2030-01-01T00:00:00.200Z".into());
+        let lease = authority(&id("cdx", 'A'));
         source.install("quiet-owner", lease.clone()).unwrap();
         source
             .validate_current(&lease, &lease.lease.issued_at)
             .unwrap();
-        std::thread::sleep(std::time::Duration::from_millis(250));
+        source.advance_clock_for_test(std::time::Duration::from_hours(1));
         assert_eq!(
             source.validate_current(&lease, &lease.lease.issued_at),
             Err(ModelAuthorityRejection::ExpiredLease)

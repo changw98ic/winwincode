@@ -2362,11 +2362,9 @@ pub(crate) mod tests {
         ));
         std::fs::create_dir_all(&root).unwrap();
         std::fs::write(root.join("marker.txt"), "unchanged").unwrap();
-        let gate =
-            ExecutionPortActionGate::open(&root, catalog(), SharedAuthoritySource::default())
-                .unwrap();
+        let source = SharedAuthoritySource::default();
+        let gate = ExecutionPortActionGate::open(&root, catalog(), source.clone()).unwrap();
         let mut authority = binding();
-        authority.authority.lease.expires_at = Instant("2030-01-01T00:00:02.150Z".into());
         gate.install_binding(&authority, Some(&root)).unwrap();
         let initial = Instant("2030-01-01T00:00:02.000Z".into());
         gate.update_now(&initial).unwrap();
@@ -2397,7 +2395,15 @@ pub(crate) mod tests {
                 .unwrap();
             permitted.push((request, authorization));
         }
-        tokio::time::sleep(std::time::Duration::from_millis(175)).await;
+        source.advance_clock_for_test(std::time::Duration::from_hours(1));
+        for (request, authorization) in &permitted {
+            assert!(gate.authorize(request.clone()).await.is_err());
+            assert!(
+                gate.revalidate(request.clone(), authorization.clone())
+                    .await
+                    .is_err()
+            );
+        }
         gate.update_now(&initial).unwrap();
         for (request, authorization) in &permitted {
             assert!(gate.authorize(request.clone()).await.is_err());
@@ -2408,7 +2414,7 @@ pub(crate) mod tests {
             );
         }
         assert!(gate.take_messages().unwrap().is_empty());
-        authority.authority.lease.expires_at = Instant("2030-01-01T00:00:03.000Z".into());
+        authority.authority.lease.expires_at = Instant("2030-01-01T02:00:00.000Z".into());
         gate.install_binding(&authority, Some(&root)).unwrap();
         for (request, authorization) in permitted {
             gate.revalidate(request, authorization).await.unwrap();
