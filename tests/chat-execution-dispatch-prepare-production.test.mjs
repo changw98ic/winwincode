@@ -12,7 +12,7 @@ import { pauseManagedProcess } from './fixtures/managed-process-pause.mjs'
 import { runApiProductionVertical, waitForDeviceWorkerRegistered } from '../scripts/run-api-production-vertical.mjs'
 import { deterministicDeviceProvider, waitFor } from '../scripts/device-production-fixture.mjs'
 import { readDeviceExecutionReceipts } from '../scripts/export-device-candidate.mjs'
-import { assertSuccessfulRetainedCommands, readRetainedCoreCommandResults, readRetainedOutcomes,
+import { assertSuccessfulRetainedCommands, completedCommandScript, readRetainedCoreCommandResults, readRetainedOutcomes,
   readRetainedWorkerHeartbeats, readWorkerTransport } from './fixtures/chat-execution-transport-probe.mjs'
 
 function sealedBinaries() {
@@ -82,7 +82,7 @@ test('Chat reoffers its original committed dispatch receipt after a Server crash
     directory, restart: false, repeat: false, includeStrongFlow: false, ...sealedBinaries(),
     serverEnvironment: { WWC_SERVER_EXECUTION_LEASE_SECONDS: '30' },
     deviceProvider: { ...deterministicDeviceProvider(), responseGateMarkers: [marker], nativeCellScripts: {
-      'native-cell-A': 'const command=ALL_TOOLS.find(tool=>tool.name.endsWith("exec_command")); if(!command) throw new Error("command tool missing"); const result=await tools[command.name]({cmd:"git rev-parse --verify HEAD",yield_time_ms:1000}); if(result.exit_code!==0) throw new Error("original command failed"); text(result);',
+      'native-cell-A': completedCommandScript('git rev-parse --verify HEAD'),
     } },
     scenario: { async run({ api, modelRoute, devicePath, restartServer }) {
       await api.command('session.create', 0, { productSessionId,

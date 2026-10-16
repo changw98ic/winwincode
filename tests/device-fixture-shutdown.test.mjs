@@ -106,6 +106,56 @@ test('fixture shutdown escalates nested detached children after their parent exi
   }
 })
 
+test('fixture shutdown accepts EPERM only after the exact owned target has exited', async t => {
+  const { parent, pids } = await fixtureTree()
+  const originalKill = process.kill.bind(process)
+  let injected = false
+  const mocked = t.mock.method(process, 'kill', (target, signal) => {
+    if (target === -pids[1] && signal === 'SIGTERM' && !injected) {
+      injected = true
+      originalKill(target, 'SIGKILL')
+      const deadline = Date.now() + 5000
+      while (processRunning(pids[1]) && Date.now() < deadline) {}
+      assert.equal(processRunning(pids[1]), false, 'the injected permission error follows actual target exit')
+      throw Object.assign(new Error('injected exited process group EPERM'), { code: 'EPERM' })
+    }
+    return originalKill(target, signal)
+  })
+  try {
+    await stopProcessGroup(parent, { graceMillis: 100 })
+    assert.equal(injected, true)
+    assert.equal(pids.every(pid => !processRunning(pid)), true)
+    assert.notEqual(parent.exitCode ?? parent.signalCode, null)
+  } finally {
+    mocked.mock.restore()
+    await cleanup(pids)
+  }
+})
+
+test('fixture shutdown preserves EPERM while an exact owned target remains alive', async t => {
+  const { parent, pids } = await fixtureTree()
+  const originalKill = process.kill.bind(process)
+  const permission = Object.assign(new Error('injected live process group EPERM'), { code: 'EPERM' })
+  const mocked = t.mock.method(process, 'kill', (target, signal) => {
+    if (target === -pids[1] && signal === 'SIGTERM') throw permission
+    return originalKill(target, signal)
+  })
+  try {
+    await assert.rejects(stopProcessGroup(parent, { graceMillis: 100 }), error => {
+      assert.equal(error.code, 'EPERM')
+      assert.equal(error.cause, permission)
+      assert.match(error.message, /fixture process signal failed/u)
+      return true
+    })
+    assert.equal(pids.every(processRunning), true)
+  } finally {
+    mocked.mock.restore()
+    await cleanup(pids)
+    await waitFor(() => parent.exitCode !== null || parent.signalCode !== null,
+      'fixture parent reaped', 1000, 10)
+  }
+})
+
 test('fixture shutdown uses durable Worker boot identity after the Device has already exited', async () => {
   const directory = mkdtempSync(join(tmpdir(), 'wwc-fixture-stop-'))
   const { parent, pids } = await fixtureTree()
