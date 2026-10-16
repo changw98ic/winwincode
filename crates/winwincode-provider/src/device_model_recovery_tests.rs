@@ -293,7 +293,7 @@ fn interrupted_and_cancelled_attempts_close_with_honest_financial_facts() {
                 .unwrap()
                 .as_nanos()
         ));
-        let store = DeviceProviderStore::open(&root).unwrap();
+        let store = ProviderRuntimeStore::prepare(&root).unwrap();
         let fixture: serde_json::Value = serde_json::from_str(include_str!(
             "../../../tests/fixtures/contracts/execution-port.valid.json"
         ))
@@ -317,7 +317,6 @@ fn interrupted_and_cancelled_attempts_close_with_honest_financial_facts() {
         open.request.payload_digest.0 = format!("sha256:{:x}", Sha256::digest(&payload));
         let request = serde_json::to_string(&open).unwrap();
         store
-            .runtime
             .connection
             .execute(
                 "INSERT INTO exchanges(exchange_id,digest,request_open) VALUES(?1,?2,?3)",
@@ -333,9 +332,9 @@ fn interrupted_and_cancelled_attempts_close_with_honest_financial_facts() {
         } else {
             "invoking"
         };
-        store.runtime.connection.execute("INSERT INTO model_invocation_attempts(exchange_id,attempt_number,adapter_request_id,state,request_json,request_payload) VALUES(?1,1,?2,?3,?4,?5)",params![open.model_exchange_id.0,format!("device-{}:attempt:1",open.model_exchange_id.0),state,request,payload]).unwrap();
-        store.runtime.connection.execute("INSERT INTO model_attempt_diagnostics VALUES (?1,1,1,10,20,'accepted',NULL,'original_terminal')",[&open.model_exchange_id.0]).unwrap();
-        store.runtime.connection.execute("INSERT INTO model_attempt_diagnostics VALUES (?1,2,1,30,NULL,'in_flight',NULL,NULL)",[&open.model_exchange_id.0]).unwrap();
+        store.connection.execute("INSERT INTO model_invocation_attempts(exchange_id,attempt_number,adapter_request_id,state,request_json,request_payload) VALUES(?1,1,?2,?3,?4,?5)",params![open.model_exchange_id.0,format!("device-{}:attempt:1",open.model_exchange_id.0),state,request,payload]).unwrap();
+        store.connection.execute("INSERT INTO model_attempt_diagnostics VALUES (?1,1,1,10,20,'accepted',NULL,'original_terminal')",[&open.model_exchange_id.0]).unwrap();
+        store.connection.execute("INSERT INTO model_attempt_diagnostics VALUES (?1,2,1,30,NULL,'in_flight',NULL,NULL)",[&open.model_exchange_id.0]).unwrap();
         if original_state == "completed_before_outer" {
             let accounting = observed_accounting_chunk(
                 &open,
@@ -350,7 +349,6 @@ fn interrupted_and_cancelled_attempts_close_with_honest_financial_facts() {
             )
             .unwrap();
             store
-                .runtime
                 .connection
                 .execute(
                     "UPDATE model_invocation_attempts SET state='completed',accounting_chunks=?1",
@@ -375,7 +373,6 @@ fn interrupted_and_cancelled_attempts_close_with_honest_financial_facts() {
                 "a dead owner cannot strand a genuine completed paid receipt"
             );
             let runtime: Option<String> = store
-                .runtime
                 .connection
                 .query_row("SELECT chunks FROM exchanges", [], |row| row.get(0))
                 .unwrap();
@@ -408,7 +405,6 @@ fn interrupted_and_cancelled_attempts_close_with_honest_financial_facts() {
             );
         }
         let final_state: String = store
-            .runtime
             .connection
             .query_row("SELECT state FROM model_invocation_attempts", [], |row| {
                 row.get(0)
@@ -453,15 +449,15 @@ fn interrupted_and_cancelled_attempts_close_with_honest_financial_facts() {
     }
 }
 
-fn assert_interrupted_diagnostics_settled(store: &DeviceProviderStore, open: &ModelOpenMessage) {
-    let original: (i64, i64, String, Option<String>, String) = store.runtime.connection.query_row(
+fn assert_interrupted_diagnostics_settled(store: &ProviderRuntimeStore, open: &ModelOpenMessage) {
+    let original: (i64, i64, String, Option<String>, String) = store.connection.query_row(
         "SELECT started_ms,finished_ms,outcome,failure_json,stop_reason FROM model_attempt_diagnostics WHERE exchange_id=?1 AND sequence=1",
         [&open.model_exchange_id.0], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?))).unwrap();
     assert_eq!(
         original,
         (10, 20, "accepted".into(), None, "original_terminal".into())
     );
-    let interrupted: (String, i64, String, String) = store.runtime.connection.query_row(
+    let interrupted: (String, i64, String, String) = store.connection.query_row(
         "SELECT outcome,finished_ms,failure_json,stop_reason FROM model_attempt_diagnostics WHERE exchange_id=?1 AND sequence=2",
         [&open.model_exchange_id.0], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))).unwrap();
     assert_eq!(interrupted.0, "failed");
@@ -474,7 +470,7 @@ fn assert_interrupted_diagnostics_settled(store: &DeviceProviderStore, open: &Mo
     assert_eq!(failure.acceptance, winwincode_network::Acceptance::Unknown);
     assert_eq!(failure.phase, winwincode_network::Phase::Stream);
     assert_eq!(interrupted.3, "interrupted_unknown");
-    let remaining: i64 = store.runtime.connection.query_row(
+    let remaining: i64 = store.connection.query_row(
         "SELECT COUNT(*) FROM model_attempt_diagnostics WHERE exchange_id=?1 AND outcome='in_flight'",
         [&open.model_exchange_id.0], |row| row.get(0)).unwrap();
     assert_eq!(remaining, 0);
@@ -513,7 +509,7 @@ fn real_provider_attempts_recover_without_replaying_tools_or_network() {
                 .unwrap()
                 .as_nanos()
         ));
-        drop(DeviceProviderStore::open(&root).unwrap());
+        drop(ProviderRuntimeStore::prepare(&root).unwrap());
         let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
         let CertifiedKey { cert, signing_key } =
             generate_simple_self_signed(vec!["localhost".into()]).unwrap();
@@ -623,9 +619,10 @@ fn real_provider_attempts_recover_without_replaying_tools_or_network() {
 )]
 fn run_child(case: &str) {
     let root = std::path::PathBuf::from(std::env::var_os(CHILD_ROOT).unwrap());
-    let store = DeviceProviderStore::open(&root).unwrap();
+    let store = ProviderRuntimeStore::prepare(&root).unwrap();
     let config = serde_json::json!({"providerId":"recovery-provider","displayName":"fixture","endpoint":std::env::var(CHILD_ENDPOINT).unwrap(),"protocol":"openai_chat_completions","modelIds":["fixture-model"],"enabled":true});
-    store
+    DeviceProviderStore::open(&root)
+        .unwrap()
         .connection
         .execute(
             "INSERT INTO providers VALUES (?1,?2,?3)",
@@ -670,7 +667,7 @@ fn run_child(case: &str) {
         _ => None,
     };
     if let Some(fault) = fault {
-        store.runtime.connection.execute_batch(fault).unwrap();
+        store.connection.execute_batch(fault).unwrap();
     }
     let admissions = Cell::new(0);
     let releases = Cell::new(0);
@@ -682,7 +679,7 @@ fn run_child(case: &str) {
         Some(std::thread::spawn(move || {
             received.recv().unwrap();
             std::thread::sleep(Duration::from_millis(30));
-            DeviceProviderStore::open(&root)
+            ProviderRuntimeStore::prepare(&root)
                 .unwrap()
                 .cancel_model(&exchange)
                 .unwrap();
@@ -718,8 +715,8 @@ fn run_child(case: &str) {
         releases.get(),
         "every attempt releases admission before waiting"
     );
-    let attempts:Vec<DeviceAttemptRow> = store.runtime.connection.prepare("SELECT attempt_number,state,failure_chunks,response_bytes FROM model_invocation_attempts ORDER BY attempt_number").unwrap().query_map([],|row|Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?))).unwrap().collect::<Result<_,_>>().unwrap();
-    let pairs: Vec<InvocationPairRow> = store.runtime.connection.prepare("SELECT call_status,request_json,request_payload,failure_chunks,accounting_chunks FROM model_invocation_attempts ORDER BY attempt_number").unwrap()
+    let attempts:Vec<DeviceAttemptRow> = store.connection.prepare("SELECT attempt_number,state,failure_chunks,response_bytes FROM model_invocation_attempts ORDER BY attempt_number").unwrap().query_map([],|row|Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?))).unwrap().collect::<Result<_,_>>().unwrap();
+    let pairs: Vec<InvocationPairRow> = store.connection.prepare("SELECT call_status,request_json,request_payload,failure_chunks,accounting_chunks FROM model_invocation_attempts ORDER BY attempt_number").unwrap()
         .query_map([],|row|Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?,row.get(4)?))).unwrap().collect::<Result<_,_>>().unwrap();
     for (status, request, input, failure, accounting) in &pairs {
         assert_eq!(request, &serde_json::to_string(&open).unwrap());
@@ -765,7 +762,7 @@ fn run_child(case: &str) {
             "all measured physical calls remain in the lower bound"
         );
         assert_eq!(usage.cost_microunits, None);
-        let reopened = DeviceProviderStore::open(&root).unwrap();
+        let reopened = ProviderRuntimeStore::prepare(&root).unwrap();
         assert_eq!(reopened.model_primary_usage(&open).unwrap(), usage);
         assert!(
             reopened
@@ -789,7 +786,7 @@ fn run_child(case: &str) {
         statement.validate().unwrap();
         assert_eq!(statement.receipts[0].tokens, Some(5));
         drop(store);
-        let reopened = DeviceProviderStore::open(&root).unwrap();
+        let reopened = ProviderRuntimeStore::prepare(&root).unwrap();
         assert_eq!(
             reopened
                 .execute_model_recovering_authorized(
@@ -813,7 +810,6 @@ fn run_child(case: &str) {
             "missing formal accounting cannot report success"
         );
         store
-            .runtime
             .connection
             .execute_batch("DROP TRIGGER accounting_failure")
             .unwrap();
@@ -924,7 +920,7 @@ fn run_child(case: &str) {
     );
     if matches!(case, "incomplete" | "incomplete_reset") {
         assert!(attempts[0].3.is_none());
-        let received: i64 = store.runtime.connection.query_row(
+        let received: i64 = store.connection.query_row(
             "SELECT response_bytes_received FROM model_invocation_attempts WHERE exchange_id=?1 AND attempt_number=1",
             [&open.model_exchange_id.0],
             |row| row.get(0),
@@ -1004,9 +1000,8 @@ fn serve(
             StreamOwned::new(ServerConnection::new(Arc::clone(config)).unwrap(), socket);
         requests.push(read_request(&mut stream));
         if let Some(root) = concurrent_root {
-            let store = DeviceProviderStore::open(root).unwrap();
+            let store = ProviderRuntimeStore::prepare(root).unwrap();
             let (exchange, request): (String, String) = store
-                .runtime
                 .connection
                 .query_row(
                     "SELECT exchange_id,request_open FROM exchanges",
@@ -1016,7 +1011,6 @@ fn serve(
                 .unwrap();
             store.cancel_model(&exchange).unwrap();
             let state: String = store
-                .runtime
                 .connection
                 .query_row("SELECT state FROM model_invocation_attempts", [], |row| {
                     row.get(0)

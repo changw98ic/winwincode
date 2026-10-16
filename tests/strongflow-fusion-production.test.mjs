@@ -175,7 +175,10 @@ function memberExchanges(deviceData, jobId) {
           const open = JSON.parse(row.request_open)
           if (open.lease.jobId !== jobId) return []
           const request = parsed(Buffer.from(open.request.dataBase64, 'base64'))
-          if (!MEMBERS.some(member => member.provider === request.provider)) return []
+          const member = MEMBERS.find(member => member.provider === request.provider)
+          if (!member) return []
+          assert.equal(request.fusionMember, member.id)
+          assert.equal(request.request.model, member.model)
           return [{ open, request, chunks: row.chunks,
             attempts: db.prepare('SELECT * FROM model_invocation_attempts WHERE exchange_id=? ORDER BY attempt_number')
               .all(row.exchange_id) }]

@@ -420,7 +420,7 @@ fn append_jev<T: serde::Serialize>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::DeviceProviderStore;
+    use crate::ProviderRuntimeStore;
     use winwincode_execution_port::generated::EncodedPayload;
 
     #[test]
@@ -461,10 +461,9 @@ mod tests {
             payload_digest: Sha256Digest(format!("sha256:{:x}", Sha256::digest(&request))),
         };
 
-        let store = DeviceProviderStore::open(&root).unwrap();
+        let store = ProviderRuntimeStore::prepare(&root).unwrap();
         let saved = serde_json::to_string(&open).unwrap();
         store
-            .runtime
             .connection
             .execute(
                 "INSERT INTO exchanges(exchange_id,digest,request_open) VALUES(?1,?2,?3)",
@@ -497,7 +496,6 @@ mod tests {
             payload_digest: Sha256Digest(format!("sha256:{:x}", Sha256::digest(&price_only))),
         });
         store
-            .runtime
             .connection
             .execute(
                 "UPDATE exchanges SET cancelled=1,accounting_chunks=?1 WHERE exchange_id=?2",
@@ -516,7 +514,6 @@ mod tests {
             (None, Some(47))
         );
         store
-            .runtime
             .connection
             .execute(
                 "UPDATE exchanges SET cancelled=1,accounting_chunks=?1 WHERE exchange_id=?2",
@@ -543,7 +540,7 @@ mod tests {
                 .is_empty()
         );
         drop(store);
-        let store = DeviceProviderStore::open(&root).unwrap();
+        let store = ProviderRuntimeStore::prepare(&root).unwrap();
         assert_eq!(
             store.accounting_statement(&open.lease,).unwrap(),
             Some(statement)

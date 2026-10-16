@@ -389,7 +389,7 @@ Worker 的 Codex 数据目录仍有迁移和回填路径。重开旧目录可能
 
 ## Provider 账本迁移与回退
 
-`DeviceProviderStore` 将配置库版本 `16` 升到 `17`，并将执行记录复制到独立运行账本。该迁移只覆盖这次 Provider 存储拆分。其他数据库的 schema 处理仍按上一节执行。
+supervisor 在执行装配时调用 `ProviderRuntimeStore::prepare`，将配置库版本 `16` 升到 `17`，并将执行记录复制到独立运行账本。`DeviceProviderStore` 的配置读取、保存和凭据解析只打开配置库。该迁移只覆盖这次 Provider 存储拆分。其他数据库的 schema 处理仍按上一节执行。
 
 配置库默认位于 `<device-data>/providers/providers.sqlite3`。运行账本位于另一个文件 `<配置库目录>/runtime/provider-runtime.sqlite3`。旧配置库中的运行表保留为迁移留档，迁移后的执行、恢复和用量对账只写独立运行账本。
 

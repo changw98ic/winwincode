@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use super::*;
-use crate::{DeviceProviderStore, JevContextRequest, StoredJevContext};
+use crate::{JevContextRequest, ProviderRuntimeStore, StoredJevContext};
 use std::{
     io::Write as _,
     path::PathBuf,
@@ -199,7 +199,7 @@ fn legacy_jev_failure_json_remains_readable() {
 #[test]
 fn malformed_json_diagnostic_is_persisted_and_replayed_without_another_call() {
     let directory = TestDirectory::new("malformed-json");
-    let store = DeviceProviderStore::open(&directory.0).unwrap();
+    let store = ProviderRuntimeStore::prepare(&directory.0).unwrap();
     let (transport, server) = response_transport(b"{\n\"SYNTHETIC_PRIVATE_RESPONSE\":}".to_vec());
     let runtime = runtime(Arc::new(transport));
     let digest = format!("sha256:{}", "1".repeat(64));
@@ -229,7 +229,7 @@ fn malformed_json_diagnostic_is_persisted_and_replayed_without_another_call() {
     assert_eq!(encoded["network"]["diagnostic"]["line"], 2);
     assert!(encoded["network"]["diagnostic"]["column"].as_u64().unwrap() > 0);
     assert!(!encoded.to_string().contains("SYNTHETIC_PRIVATE"));
-    let journal: (String, String) = store.runtime.connection.query_row(
+    let journal: (String, String) = store.connection.query_row(
         "SELECT role,failure_json FROM jev_attempt_diagnostics WHERE operation_id=?1 AND sequence=1",
         ["jev:diagnostic-fixture:0"],
         |row| Ok((row.get(0)?, row.get(1)?)),
@@ -240,7 +240,7 @@ fn malformed_json_diagnostic_is_persisted_and_replayed_without_another_call() {
         encoded
     );
     drop(store);
-    let store = DeviceProviderStore::open(&directory.0).unwrap();
+    let store = ProviderRuntimeStore::prepare(&directory.0).unwrap();
     let replay = block_on(store.evaluate_context_once(
         "jev:diagnostic-fixture:0",
         &digest,
@@ -258,7 +258,6 @@ fn malformed_json_diagnostic_is_persisted_and_replayed_without_another_call() {
         }
     );
     let count: i64 = store
-        .runtime
         .connection
         .query_row("SELECT COUNT(*) FROM jev_attempt_diagnostics", [], |row| {
             row.get(0)
@@ -298,11 +297,11 @@ impl JevRemoteTransport for DisconnectedTransport {
 #[test]
 fn connection_wait_is_retained_before_authority_ends() {
     let directory = TestDirectory::new("connection-wait");
-    let store = DeviceProviderStore::open(&directory.0).unwrap();
+    let store = ProviderRuntimeStore::prepare(&directory.0).unwrap();
     let allowed = Arc::new(AtomicBool::new(true));
     let runtime = runtime(Arc::new(DisconnectedTransport(Arc::clone(&allowed))))
         .with_attempt_journal(
-            store.runtime.connection.path().unwrap(),
+            store.connection.path().unwrap(),
             "jev:connection-wait:0",
             "context",
         );
@@ -325,7 +324,6 @@ fn connection_wait_is_retained_before_authority_ends() {
         "connection_refused"
     );
     let persisted: String = store
-        .runtime
         .connection
         .query_row(
             "SELECT failure_json FROM jev_attempt_diagnostics WHERE sequence=1",
@@ -343,7 +341,6 @@ fn connection_wait_is_retained_before_authority_ends() {
     assert_eq!(stopped["network"]["kind"], "authority_expired");
     assert_eq!(stopped["network"]["diagnostic"]["code"], "authority_ended");
     let persisted_stop: String = store
-        .runtime
         .connection
         .query_row(
             "SELECT failure_json FROM jev_attempt_diagnostics WHERE sequence=2",
@@ -393,9 +390,8 @@ impl JevRemoteTransport for CountedFailureTransport {
 #[test]
 fn failed_attempt_journal_prevents_a_second_inference_call() {
     let directory = TestDirectory::new("journal-failure");
-    let store = DeviceProviderStore::open(&directory.0).unwrap();
+    let store = ProviderRuntimeStore::prepare(&directory.0).unwrap();
     store
-        .runtime
         .connection
         .execute("DROP TABLE jev_attempt_diagnostics", [])
         .unwrap();
@@ -411,7 +407,7 @@ fn failed_attempt_journal_prevents_a_second_inference_call() {
         },
     )
     .with_attempt_journal(
-        store.runtime.connection.path().unwrap(),
+        store.connection.path().unwrap(),
         "jev:journal-failure:0",
         "context",
     );
@@ -459,7 +455,7 @@ fn schema_diagnostics_identify_safe_fields_without_retaining_invalid_values() {
 fn stopping_before_send_is_durable_and_does_not_create_an_inference_attempt() {
     for cancelled in [false, true] {
         let directory = TestDirectory::new("stop-before-send");
-        let store = DeviceProviderStore::open(&directory.0).unwrap();
+        let store = ProviderRuntimeStore::prepare(&directory.0).unwrap();
         let calls = Arc::new(AtomicUsize::new(0));
         let cancellation = Arc::new(winwincode_network::transport::ExchangeCancellation::default());
         if cancelled {
@@ -468,7 +464,7 @@ fn stopping_before_send_is_durable_and_does_not_create_an_inference_attempt() {
         let runtime = runtime(Arc::new(CountedFailureTransport(Arc::clone(&calls))))
             .with_cancellation(Some(cancellation))
             .with_attempt_journal(
-                store.runtime.connection.path().unwrap(),
+                store.connection.path().unwrap(),
                 "jev:stop-before-send:0",
                 "context",
             );
@@ -489,7 +485,6 @@ fn stopping_before_send_is_durable_and_does_not_create_an_inference_attempt() {
         assert_eq!(encoded["network"]["acceptance"], "not_sent");
         assert_eq!(encoded["network"]["diagnostic"]["code"], "authority_ended");
         let persisted: String = store
-            .runtime
             .connection
             .query_row(
                 "SELECT failure_json FROM jev_attempt_diagnostics",
@@ -502,7 +497,6 @@ fn stopping_before_send_is_durable_and_does_not_create_an_inference_attempt() {
             encoded
         );
         let paid_rows: i64 = store
-            .runtime
             .connection
             .query_row(
                 "SELECT COUNT(*) FROM model_invocation_attempts",
@@ -532,13 +526,13 @@ impl JevRemoteTransport for PendingTransport {
 #[test]
 fn cancelling_an_active_call_retains_unknown_acceptance_without_retry() {
     let directory = TestDirectory::new("stop-active-call");
-    let store = DeviceProviderStore::open(&directory.0).unwrap();
+    let store = ProviderRuntimeStore::prepare(&directory.0).unwrap();
     let calls = Arc::new(AtomicUsize::new(0));
     let cancellation = Arc::new(winwincode_network::transport::ExchangeCancellation::default());
     let runtime = runtime(Arc::new(PendingTransport(Arc::clone(&calls))))
         .with_cancellation(Some(Arc::clone(&cancellation)))
         .with_attempt_journal(
-            store.runtime.connection.path().unwrap(),
+            store.connection.path().unwrap(),
             "jev:stop-active-call:0",
             "judge",
         );
@@ -562,7 +556,6 @@ fn cancelling_an_active_call_retains_unknown_acceptance_without_retry() {
     assert_eq!(encoded["network"]["acceptance"], "unknown");
     assert_eq!(encoded["network"]["diagnostic"]["code"], "authority_ended");
     let persisted: String = store
-        .runtime
         .connection
         .query_row(
             "SELECT failure_json FROM jev_attempt_diagnostics",
@@ -579,14 +572,14 @@ fn cancelling_an_active_call_retains_unknown_acceptance_without_retry() {
 #[test]
 fn field_failure_after_http_response_retains_status_and_safe_field() {
     let directory = TestDirectory::new("http-field");
-    let store = DeviceProviderStore::open(&directory.0).unwrap();
+    let store = ProviderRuntimeStore::prepare(&directory.0).unwrap();
     let body = serde_json::to_vec(&serde_json::json!({
         "entailment": "SYNTHETIC_PRIVATE_RESPONSE", "contradiction": 0.1, "neutral": 0.1
     }))
     .unwrap();
     let (transport, server) = response_transport(body);
     let runtime = runtime(Arc::new(transport)).with_attempt_journal(
-        store.runtime.connection.path().unwrap(),
+        store.connection.path().unwrap(),
         "jev:http-field:0",
         "judge",
     );
@@ -599,7 +592,6 @@ fn field_failure_after_http_response_retains_status_and_safe_field() {
     assert_eq!(encoded["network"]["diagnostic"]["code"], "json_schema");
     assert_eq!(encoded["network"]["diagnostic"]["field"], "entailment");
     let persisted: String = store
-        .runtime
         .connection
         .query_row(
             "SELECT failure_json FROM jev_attempt_diagnostics",

@@ -21,7 +21,7 @@ use tokio_rustls::rustls::{
 use winwincode_execution_port::generated::{
     ExecutionPortMessage, ModelChunkMessage, ModelOpenMessage,
 };
-use winwincode_provider::{DeviceModelAdmission, DeviceModelPermit, DeviceProviderStore};
+use winwincode_provider::{DeviceModelAdmission, DeviceModelPermit, ProviderRuntimeStore};
 
 const CHILD_DIRECTORY: &str = "WWC_WORKER_MODEL_RECOVERY_TEST_DIRECTORY";
 const CHILD_ENDPOINT: &str = "WWC_WORKER_MODEL_RECOVERY_TEST_ENDPOINT";
@@ -177,12 +177,12 @@ fn serve_retry(
 }
 
 fn run_worker_retry(directory: &Path, endpoint: &str) {
-    let _ = DeviceProviderStore::open(directory).unwrap();
+    let _ = ProviderRuntimeStore::prepare(directory).unwrap();
     let mut models = DeviceModels::for_test(directory);
     let database = crate::device_model::concurrency_tests::runtime_database(directory);
     configure_retry_provider(&database, endpoint);
     let open = completed_tool_history_open();
-    let store = DeviceProviderStore::open(directory).unwrap();
+    let store = ProviderRuntimeStore::prepare(directory).unwrap();
     let held = (0..2).map(|_| acquire(&store, &open)).collect::<Vec<_>>();
     assert_eq!(
         models
@@ -265,7 +265,7 @@ fn configure_retry_provider(database: &rusqlite::Connection, endpoint: &str) {
 }
 
 fn crash_after_retained_retry(directory: &Path, endpoint: &str) -> ! {
-    let _ = DeviceProviderStore::open(directory).unwrap();
+    let _ = ProviderRuntimeStore::prepare(directory).unwrap();
     let mut models = DeviceModels::for_test(directory);
     let database = crate::device_model::concurrency_tests::runtime_database(directory);
     configure_retry_provider(&database, endpoint);
@@ -295,7 +295,7 @@ fn crash_after_retained_retry(directory: &Path, endpoint: &str) -> ! {
 
 fn run_reopened_retry(directory: &Path) {
     let database = crate::device_model::concurrency_tests::runtime_database(directory);
-    let store = DeviceProviderStore::open(directory).unwrap();
+    let store = ProviderRuntimeStore::prepare(directory).unwrap();
     let open = completed_tool_history_open();
     assert!(matches!(
         store.try_model_permit(&open).unwrap(),
@@ -378,7 +378,7 @@ fn completed_tool_history_open() -> ModelOpenMessage {
     open
 }
 
-fn acquire(store: &DeviceProviderStore, open: &ModelOpenMessage) -> DeviceModelPermit {
+fn acquire(store: &ProviderRuntimeStore, open: &ModelOpenMessage) -> DeviceModelPermit {
     match store.try_model_attempt_permit(open).unwrap() {
         DeviceModelAdmission::InvokeAttempt(permit) => permit,
         DeviceModelAdmission::Deferred => panic!("expected an available actual-invocation slot"),
@@ -386,7 +386,7 @@ fn acquire(store: &DeviceProviderStore, open: &ModelOpenMessage) -> DeviceModelP
     }
 }
 
-fn assert_full(store: &DeviceProviderStore, open: &ModelOpenMessage) {
+fn assert_full(store: &ProviderRuntimeStore, open: &ModelOpenMessage) {
     assert!(matches!(
         store.try_model_attempt_permit(open).unwrap(),
         DeviceModelAdmission::Deferred

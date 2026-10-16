@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use super::*;
-use crate::DeviceProviderStore;
+use crate::ProviderRuntimeStore;
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use std::{
     io::{BufRead as _, BufReader, Read as _, Write as _},
@@ -66,7 +66,7 @@ fn model_open(provider: &str, identity: usize) -> ModelOpenMessage {
     open
 }
 
-fn permit(store: &DeviceProviderStore, open: &ModelOpenMessage) -> DeviceModelPermit {
+fn permit(store: &ProviderRuntimeStore, open: &ModelOpenMessage) -> DeviceModelPermit {
     match store.try_model_permit(open).unwrap() {
         DeviceModelAdmission::InvokeAttempt(permit) => permit,
         DeviceModelAdmission::Deferred => panic!("expected an available Provider slot"),
@@ -74,7 +74,7 @@ fn permit(store: &DeviceProviderStore, open: &ModelOpenMessage) -> DeviceModelPe
     }
 }
 
-fn assert_full(store: &DeviceProviderStore, open: &ModelOpenMessage) {
+fn assert_full(store: &ProviderRuntimeStore, open: &ModelOpenMessage) {
     assert!(matches!(
         store.try_model_permit(open).unwrap(),
         DeviceModelAdmission::Deferred
@@ -88,7 +88,7 @@ fn assert_full(store: &DeviceProviderStore, open: &ModelOpenMessage) {
 #[test]
 fn provider_slots_are_shared_across_processes_and_release_on_process_exit() {
     if let Some(directory) = std::env::var_os(CHILD_DIRECTORY) {
-        let store = DeviceProviderStore::open(Path::new(&directory)).unwrap();
+        let store = ProviderRuntimeStore::prepare(Path::new(&directory)).unwrap();
         let permits = (0..3)
             .map(|index| permit(&store, &model_open("provider-a", index)))
             .collect::<Vec<_>>();
@@ -99,7 +99,7 @@ fn provider_slots_are_shared_across_processes_and_release_on_process_exit() {
         return;
     }
     let directory = TestDirectory::new("process");
-    let store = DeviceProviderStore::open(&directory.0).unwrap();
+    let store = ProviderRuntimeStore::prepare(&directory.0).unwrap();
     let mut child = TestChild(Command::new(std::env::current_exe().unwrap())
         .args(["--exact", "device_model_concurrency::tests::provider_slots_are_shared_across_processes_and_release_on_process_exit", "--nocapture"])
         .env(CHILD_DIRECTORY, &directory.0)
@@ -136,8 +136,8 @@ fn provider_slots_are_shared_across_processes_and_release_on_process_exit() {
 #[test]
 fn shared_provider_slots_release_on_drop_without_a_device_or_model_global_limit() {
     let directory = TestDirectory::new("drop");
-    let store = DeviceProviderStore::open(&directory.0).unwrap();
-    let reopened = DeviceProviderStore::open(&directory.0.join(".")).unwrap();
+    let store = ProviderRuntimeStore::prepare(&directory.0).unwrap();
+    let reopened = ProviderRuntimeStore::prepare(&directory.0.join(".")).unwrap();
     let mut permits = (0..3)
         .map(|index| permit(&store, &model_open("provider-a", index)))
         .collect::<Vec<_>>();
@@ -160,7 +160,7 @@ fn shared_provider_slots_release_on_drop_without_a_device_or_model_global_limit(
 #[test]
 fn replay_cancellation_and_invalid_payload_do_not_wait_for_another_provider_slot() {
     let directory = TestDirectory::new("non-invocation");
-    let store = DeviceProviderStore::open(&directory.0).unwrap();
+    let store = ProviderRuntimeStore::prepare(&directory.0).unwrap();
     let retained = model_open("provider-a", 10);
     let previous = store.execute_model(&retained).unwrap();
     let permits = (0..3)
@@ -192,7 +192,7 @@ fn replay_cancellation_and_invalid_payload_do_not_wait_for_another_provider_slot
 #[test]
 fn an_actual_retry_requires_a_provider_slot_while_receipt_replay_does_not() {
     let directory = TestDirectory::new("retry-admission");
-    let store = DeviceProviderStore::open(&directory.0).unwrap();
+    let store = ProviderRuntimeStore::prepare(&directory.0).unwrap();
     let retained = model_open("provider-a", 10);
     let previous = store.execute_model(&retained).unwrap();
     let mut held = (0..3)
@@ -230,11 +230,11 @@ fn an_actual_retry_requires_a_provider_slot_while_receipt_replay_does_not() {
 #[test]
 fn unsafe_provider_slot_paths_are_hard_errors_and_never_report_a_full_queue() {
     let directory = TestDirectory::new("permissions");
-    let store = DeviceProviderStore::open(&directory.0).unwrap();
+    let store = ProviderRuntimeStore::prepare(&directory.0).unwrap();
     let open = model_open("provider-a", 0);
     drop(permit(&store, &open));
     let slots = store
-        .runtime_directory()
+        .directory()
         .join("model-provider-slots")
         .join(format!("{:x}", Sha256::digest(b"provider-a")));
     let slot = slots.join("slot-0");
@@ -249,8 +249,8 @@ fn unsafe_provider_slot_paths_are_hard_errors_and_never_report_a_full_queue() {
 #[test]
 fn exchange_owner_drop_releases_a_lock_with_a_duplicated_descriptor() {
     let directory = TestDirectory::new("exchange-owner-with-duplicate");
-    let store = DeviceProviderStore::open(&directory.0).unwrap();
-    let reopened = DeviceProviderStore::open(&directory.0.join(".")).unwrap();
+    let store = ProviderRuntimeStore::prepare(&directory.0).unwrap();
+    let reopened = ProviderRuntimeStore::prepare(&directory.0.join(".")).unwrap();
     let exchange = model_open("provider-a", 10).model_exchange_id;
     let owner = store
         .try_model_exchange_owner(&exchange.0)
@@ -289,7 +289,7 @@ fn exchange_owner_drop_releases_a_lock_with_a_duplicated_descriptor() {
 #[test]
 fn invocation_slot_drop_releases_a_lock_with_a_duplicated_descriptor() {
     let directory = TestDirectory::new("drop-with-duplicate");
-    let store = DeviceProviderStore::open(&directory.0).unwrap();
+    let store = ProviderRuntimeStore::prepare(&directory.0).unwrap();
     let retained = model_open("provider-a", 10);
     let previous = store.execute_model(&retained).unwrap();
     let mut held = (0..3)
@@ -371,7 +371,7 @@ fn provider_slot_inherited_descriptor_child() {
 #[test]
 fn invocation_slot_drop_releases_a_lock_still_inherited_by_a_live_child() {
     let directory = TestDirectory::new("drop-with-child-alias");
-    let store = DeviceProviderStore::open(&directory.0).unwrap();
+    let store = ProviderRuntimeStore::prepare(&directory.0).unwrap();
     let retained = model_open("provider-a", 10);
     let previous = store.execute_model(&retained).unwrap();
     let mut held = (0..3)

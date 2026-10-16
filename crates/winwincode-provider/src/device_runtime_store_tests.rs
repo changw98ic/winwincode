@@ -27,7 +27,7 @@ impl Fixture {
     }
 
     fn legacy(&self) -> Connection {
-        let store = DeviceProviderStore::open(&self.0).unwrap();
+        let store = ProviderRuntimeStore::prepare(&self.0).unwrap();
         drop(store);
         fs::remove_dir_all(self.0.join("runtime")).unwrap();
         let connection = Connection::open(self.0.join("providers.sqlite3")).unwrap();
@@ -179,9 +179,10 @@ fn migration_preserves_calls_frames_cancellation_and_usage_without_copying_crede
         .unwrap();
     drop(connection);
 
-    let store = DeviceProviderStore::open(&fixture.0).unwrap();
+    let store = ProviderRuntimeStore::prepare(&fixture.0).unwrap();
+    let config = DeviceProviderStore::open(&fixture.0).unwrap();
     assert_eq!(
-        store.runtime_directory(),
+        store.directory(),
         fs::canonicalize(fixture.0.join("runtime")).unwrap()
     );
     assert_eq!(
@@ -189,13 +190,12 @@ fn migration_preserves_calls_frames_cancellation_and_usage_without_copying_crede
         chunks
     );
     assert!(store.model_cancelled("cancelled-before-open").unwrap());
-    assert_eq!(store.runtime.connection.query_row("SELECT state FROM model_invocation_attempts WHERE adapter_request_id='unknown-adapter-request'",[],|row|row.get::<_,String>(0)).unwrap(),"invoking");
-    assert_eq!(store.runtime.connection.query_row("SELECT request_payload FROM model_invocation_attempts WHERE adapter_request_id='unknown-adapter-request'",[],|row|row.get::<_,Vec<u8>>(0)).unwrap(),vec![0,1,2]);
-    assert_eq!(store.runtime.connection.query_row("SELECT response_bytes,response_bytes_received FROM model_invocation_attempts WHERE adapter_request_id='retained-adapter-request'",[],|row|Ok((row.get::<_,Option<Vec<u8>>>(0)?,row.get::<_,i64>(1)?))).unwrap(),(None,77));
-    assert_eq!(store.connection.query_row("SELECT response_bytes FROM model_invocation_attempts WHERE adapter_request_id='retained-adapter-request'",[],|row|row.get::<_,Vec<u8>>(0)).unwrap(),b"historical-secret-body");
+    assert_eq!(store.connection.query_row("SELECT state FROM model_invocation_attempts WHERE adapter_request_id='unknown-adapter-request'",[],|row|row.get::<_,String>(0)).unwrap(),"invoking");
+    assert_eq!(store.connection.query_row("SELECT request_payload FROM model_invocation_attempts WHERE adapter_request_id='unknown-adapter-request'",[],|row|row.get::<_,Vec<u8>>(0)).unwrap(),vec![0,1,2]);
+    assert_eq!(store.connection.query_row("SELECT response_bytes,response_bytes_received FROM model_invocation_attempts WHERE adapter_request_id='retained-adapter-request'",[],|row|Ok((row.get::<_,Option<Vec<u8>>>(0)?,row.get::<_,i64>(1)?))).unwrap(),(None,77));
+    assert_eq!(config.connection.query_row("SELECT response_bytes FROM model_invocation_attempts WHERE adapter_request_id='retained-adapter-request'",[],|row|row.get::<_,Vec<u8>>(0)).unwrap(),b"historical-secret-body");
     assert_eq!(
         store
-            .runtime
             .connection
             .query_row(
                 "SELECT status FROM jev_invocation_attempts WHERE sequence=2",
@@ -207,7 +207,6 @@ fn migration_preserves_calls_frames_cancellation_and_usage_without_copying_crede
     );
     assert_eq!(
         store
-            .runtime
             .connection
             .query_row(
                 "SELECT count(*) FROM accounting_closed_attempts",
@@ -221,7 +220,6 @@ fn migration_preserves_calls_frames_cancellation_and_usage_without_copying_crede
     extra.model_exchange_id.0 = "mdl_00000000000000000000000099".into();
     assert!(store.execute_model(&extra).is_err());
     let table_names = store
-        .runtime
         .connection
         .prepare("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name")
         .unwrap()
@@ -241,14 +239,14 @@ fn migration_preserves_calls_frames_cancellation_and_usage_without_copying_crede
         .contains(&name.as_str())
     }));
     assert_eq!(
-        store
+        config
             .connection
             .query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
             .unwrap(),
         17
     );
     assert_eq!(
-        store
+        config
             .connection
             .query_row("SELECT private_key FROM identity", [], |row| row
                 .get::<_, Vec<u8>>(0))
@@ -256,6 +254,7 @@ fn migration_preserves_calls_frames_cancellation_and_usage_without_copying_crede
         original_key
     );
     drop(store);
+    drop(config);
     let bytes = fs::read(fixture.0.join("runtime").join(DATABASE)).unwrap();
     for secret in [
         b"provider-secret-canary".as_slice(),
@@ -299,13 +298,12 @@ fn completed_copy_before_cutover_is_reused_without_reissuing_calls() {
         16
     );
     drop(source);
-    let store = DeviceProviderStore::open(&fixture.0).unwrap();
+    let store = ProviderRuntimeStore::prepare(&fixture.0).unwrap();
     assert_eq!(
         store.replay_model(&open.model_exchange_id.0, 1).unwrap(),
         chunks
     );
     store
-        .runtime
         .connection
         .execute(
             "INSERT INTO exchanges(exchange_id,digest,cancelled) VALUES('after-cutover','',1)",
@@ -313,11 +311,10 @@ fn completed_copy_before_cutover_is_reused_without_reissuing_calls() {
         )
         .unwrap();
     drop(store);
-    let reopened = DeviceProviderStore::open(&fixture.0).unwrap();
+    let reopened = ProviderRuntimeStore::prepare(&fixture.0).unwrap();
     assert!(reopened.model_cancelled("after-cutover").unwrap());
     assert_eq!(
         reopened
-            .runtime
             .connection
             .query_row(
                 "SELECT count(*) FROM model_invocation_attempts",
@@ -338,7 +335,7 @@ fn failed_copy_rolls_back_target_and_can_resume_after_source_is_readable() {
         .execute_batch("ALTER TABLE model_attempt_diagnostics RENAME TO retained_diagnostics;")
         .unwrap();
     drop(source);
-    assert!(DeviceProviderStore::open(&fixture.0).is_err());
+    assert!(ProviderRuntimeStore::prepare(&fixture.0).is_err());
     assert!(!fixture.0.join("runtime").join(DATABASE).exists());
     let source = Connection::open(fixture.0.join("providers.sqlite3")).unwrap();
     assert_eq!(
@@ -351,7 +348,7 @@ fn failed_copy_rolls_back_target_and_can_resume_after_source_is_readable() {
         .execute_batch("ALTER TABLE retained_diagnostics RENAME TO model_attempt_diagnostics;")
         .unwrap();
     drop(source);
-    let store = DeviceProviderStore::open(&fixture.0).unwrap();
+    let store = ProviderRuntimeStore::prepare(&fixture.0).unwrap();
     assert_eq!(
         store.replay_model(&open.model_exchange_id.0, 1).unwrap(),
         chunks
@@ -363,10 +360,11 @@ fn runtime_open_never_creates_a_missing_database_or_falls_back_to_device_storage
     let fixture = Fixture::new();
     assert!(ProviderRuntimeStore::open_existing(&fixture.0).is_err());
     assert!(!fixture.0.join(DATABASE).exists());
-    let store = DeviceProviderStore::open(&fixture.0).unwrap();
+    let store = ProviderRuntimeStore::prepare(&fixture.0).unwrap();
     drop(store);
     fs::remove_dir_all(fixture.0.join("runtime")).unwrap();
-    assert!(DeviceProviderStore::open(&fixture.0).is_err());
+    assert!(DeviceProviderStore::open(&fixture.0).is_ok());
+    assert!(ProviderRuntimeStore::prepare(&fixture.0).is_err());
     assert!(!fixture.0.join("runtime").exists());
     fs::hard_link(
         fixture.0.join("providers.sqlite3"),
@@ -374,6 +372,46 @@ fn runtime_open_never_creates_a_missing_database_or_falls_back_to_device_storage
     )
     .unwrap();
     assert!(ProviderRuntimeStore::open_existing(&fixture.0).is_err());
+}
+
+#[test]
+fn configuration_access_leaves_legacy_execution_records_for_explicit_preparation() {
+    let fixture = Fixture::new();
+    let source = fixture.legacy();
+    let (open, chunks) = retain_call(&source);
+    drop(source);
+    let config = DeviceProviderStore::open(&fixture.0).unwrap();
+    assert_eq!(
+        config
+            .connection
+            .query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
+            .unwrap(),
+        16
+    );
+    assert!(!fixture.0.join("runtime").exists());
+    assert_eq!(
+        config
+            .connection
+            .query_row(
+                "SELECT response_bytes FROM model_invocation_attempts WHERE adapter_request_id='retained-adapter-request'",
+                [],
+                |row| row.get::<_, Vec<u8>>(0),
+            )
+            .unwrap(),
+        b"historical-secret-body"
+    );
+    let runtime = ProviderRuntimeStore::prepare(&fixture.0).unwrap();
+    assert_eq!(
+        runtime.replay_model(&open.model_exchange_id.0, 1).unwrap(),
+        chunks
+    );
+    assert_eq!(
+        config
+            .connection
+            .query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
+            .unwrap(),
+        17
+    );
 }
 
 #[test]
@@ -388,7 +426,7 @@ fn a_runtime_from_another_device_cannot_complete_cutover() {
         .unwrap();
     drop(runtime);
     drop(source);
-    assert!(DeviceProviderStore::open(&fixture.0).is_err());
+    assert!(ProviderRuntimeStore::prepare(&fixture.0).is_err());
     let source = Connection::open(fixture.0.join("providers.sqlite3")).unwrap();
     assert_eq!(
         source
@@ -396,6 +434,20 @@ fn a_runtime_from_another_device_cannot_complete_cutover() {
             .unwrap(),
         16
     );
+}
+
+#[test]
+fn current_runtime_identity_is_checked_during_explicit_preparation() {
+    let fixture = Fixture::new();
+    let runtime = ProviderRuntimeStore::prepare(&fixture.0).unwrap();
+    runtime
+        .connection
+        .execute("UPDATE runtime_origin SET source_id=?1", ["0".repeat(64)])
+        .unwrap();
+    drop(runtime);
+    let config = DeviceProviderStore::open(&fixture.0).unwrap();
+    assert!(config.snapshot("configuration-device").is_ok());
+    assert!(ProviderRuntimeStore::prepare(&fixture.0).is_err());
 }
 
 #[test]
@@ -436,14 +488,13 @@ fn rejected_source_commit_preserves_v16_and_reuses_the_published_copy() {
     );
     drop(runtime);
     drop(source);
-    let store = DeviceProviderStore::open(&fixture.0).unwrap();
+    let store = ProviderRuntimeStore::prepare(&fixture.0).unwrap();
     assert_eq!(
         store.replay_model(&open.model_exchange_id.0, 1).unwrap(),
         chunks
     );
     assert_eq!(
         store
-            .runtime
             .connection
             .query_row(
                 "SELECT count(*) FROM model_invocation_attempts",
@@ -461,10 +512,9 @@ fn migrated_payload_immutability_and_response_seal_triggers_still_apply() {
     let source = fixture.legacy();
     let (open, chunks) = retain_call(&source);
     drop(source);
-    let store = DeviceProviderStore::open(&fixture.0).unwrap();
+    let store = ProviderRuntimeStore::prepare(&fixture.0).unwrap();
     assert!(
         store
-            .runtime
             .connection
             .execute(
                 "UPDATE exchanges SET prepared_payload=x'00' WHERE exchange_id=?1",
@@ -477,7 +527,6 @@ fn migrated_payload_immutability_and_response_seal_triggers_still_apply() {
         chunks
     );
     store
-        .runtime
         .connection
         .execute(
             "UPDATE model_response_frame SET frame_digest='tampered' WHERE exchange_id=?1",
@@ -486,7 +535,6 @@ fn migrated_payload_immutability_and_response_seal_triggers_still_apply() {
         .unwrap();
     assert_eq!(
         store
-            .runtime
             .connection
             .query_row("SELECT count(*) FROM model_response_exchange", [], |row| {
                 row.get::<_, i64>(0)
@@ -497,7 +545,6 @@ fn migrated_payload_immutability_and_response_seal_triggers_still_apply() {
     assert!(store.replay_model(&open.model_exchange_id.0, 1).is_err());
     assert_eq!(
         store
-            .runtime
             .connection
             .query_row(
                 "SELECT chunks FROM exchanges WHERE exchange_id=?1",
@@ -680,7 +727,8 @@ fn legacy_jev_model_echoes_are_redacted_without_changing_accounting_and_cutover_
     );
     drop(source);
 
-    let store = DeviceProviderStore::open(&fixture.0).unwrap();
+    let store = ProviderRuntimeStore::prepare(&fixture.0).unwrap();
+    let config = DeviceProviderStore::open(&fixture.0).unwrap();
     assert_eq!(
         store.accounting_statement(&open.lease).unwrap(),
         Some(before.clone())
@@ -691,7 +739,6 @@ fn legacy_jev_model_echoes_are_redacted_without_changing_accounting_and_cutover_
         ("jev_invocation_attempts", "result_json"),
     ] {
         let retained = store
-            .runtime
             .connection
             .prepare(&format!(
                 "SELECT {column} FROM {table} ORDER BY operation_id"
@@ -702,7 +749,7 @@ fn legacy_jev_model_echoes_are_redacted_without_changing_accounting_and_cutover_
             .collect::<Result<Vec<_>, _>>()
             .unwrap();
         assert!(retained.iter().all(|result| !result.contains(secret)));
-        let archived = store
+        let archived = config
             .connection
             .prepare(&format!("SELECT {column} FROM {table}"))
             .unwrap()
@@ -725,7 +772,6 @@ fn legacy_jev_model_echoes_are_redacted_without_changing_accounting_and_cutover_
         ),
     ] {
         let (redacted, digest): (String, String) = store
-            .runtime
             .connection
             .query_row(
                 &format!(
@@ -772,8 +818,9 @@ fn legacy_jev_model_echoes_are_redacted_without_changing_accounting_and_cutover_
             assert_eq!(redacted["value"], original["value"]);
         }
     }
-    assert_eq!(store.runtime.connection.query_row("SELECT result,original_receipt_digest FROM jev_context_exchanges WHERE operation_id=?1",[clean_operation],|row|Ok((row.get::<_,String>(0)?,row.get::<_,Option<String>>(1)?))).unwrap(),(clean_result,None));
+    assert_eq!(store.connection.query_row("SELECT result,original_receipt_digest FROM jev_context_exchanges WHERE operation_id=?1",[clean_operation],|row|Ok((row.get::<_,String>(0)?,row.get::<_,Option<String>>(1)?))).unwrap(),(clean_result,None));
     drop(store);
+    drop(config);
     for entry in fs::read_dir(fixture.0.join("runtime")).unwrap() {
         let path = entry.unwrap().path();
         if path.is_file() {
@@ -785,7 +832,7 @@ fn legacy_jev_model_echoes_are_redacted_without_changing_accounting_and_cutover_
             );
         }
     }
-    let reopened = DeviceProviderStore::open(&fixture.0).unwrap();
+    let reopened = ProviderRuntimeStore::prepare(&fixture.0).unwrap();
     assert_eq!(
         reopened.accounting_statement(&open.lease).unwrap(),
         Some(before)

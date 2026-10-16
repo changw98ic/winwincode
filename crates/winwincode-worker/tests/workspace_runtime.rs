@@ -64,9 +64,9 @@ struct ObserverTerminalFixture {
 async fn observer_model_open_uses_its_own_device_source_and_replays_the_original_identity() {
     use std::sync::{Arc, Mutex};
     use winwincode_provider::{
-        DeviceProviderError, DeviceProviderStore, ProviderConnectionMaterial,
-        ProviderExecutionPurpose, ProviderExecutionRequest, ProviderExecutionSource,
-        ProviderJevParameters, ProviderModelParameters, ProviderRuntimeStore,
+        DeviceProviderError, ProviderConnectionMaterial, ProviderExecutionPurpose,
+        ProviderExecutionRequest, ProviderExecutionSource, ProviderJevParameters,
+        ProviderModelParameters, ProviderRuntimeStore,
     };
 
     #[derive(Debug)]
@@ -100,12 +100,10 @@ async fn observer_model_open_uses_its_own_device_source_and_replays_the_original
 
     let fixture = observer_terminal_fixture("observer-device-source").await;
     let original = serde_json::to_vec(&fixture.open).unwrap();
-    let device = DeviceProviderStore::open(&fixture.fixture.root.join("providers")).unwrap();
     let source = Arc::new(RecordingSource(Mutex::new(Vec::new())));
-    let runtime = ProviderRuntimeStore::open_existing(device.runtime_directory())
+    let runtime = ProviderRuntimeStore::prepare(&fixture.fixture.root.join("providers"))
         .unwrap()
         .with_execution_source(source.clone());
-    drop(device);
     let result = runtime.execute_model(&fixture.open).unwrap();
     assert!(result.last().unwrap().is_final);
     assert_eq!(result, runtime.execute_model(&fixture.open).unwrap());

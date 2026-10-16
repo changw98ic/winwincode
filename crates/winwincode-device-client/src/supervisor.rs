@@ -313,9 +313,9 @@ impl SessionSupervisor {
                     });
                 }
             }
-            winwincode_provider::DeviceProviderStore::open(&directory)
-                .map_err(|_| SupervisorError::invalid("Provider runtime migration failed"))?;
         }
+        winwincode_provider::ProviderRuntimeStore::prepare(&directory)
+            .map_err(|_| SupervisorError::invalid("Provider runtime preparation failed"))?;
         Ok(())
     }
 
@@ -513,10 +513,11 @@ impl SessionSupervisor {
             .parent()
             .ok_or_else(|| SupervisorError::invalid("device data directory is unavailable"))?
             .join("providers");
-        let provider_store = winwincode_provider::DeviceProviderStore::open(&provider_directory)
-            .map_err(|_| SupervisorError::invalid("Provider runtime is unavailable"))?;
-        let runtime_directory = provider_store.runtime_directory().to_path_buf();
-        drop(provider_store);
+        let provider_runtime =
+            winwincode_provider::ProviderRuntimeStore::prepare(&provider_directory)
+                .map_err(|_| SupervisorError::invalid("Provider runtime is unavailable"))?;
+        let runtime_directory = provider_runtime.directory().to_path_buf();
+        drop(provider_runtime);
         let provider_execution_profile =
             crate::worker_channel::provider_execution_profile(&provider_directory)
                 .map_err(|_| SupervisorError::invalid("Provider execution profile is invalid"))?;
@@ -2682,13 +2683,42 @@ mod tests {
     }
 
     #[test]
+    fn current_provider_runtime_is_validated_before_worker_recovery() {
+        for state in ["missing", "foreign"] {
+            let root = temp_root(&format!("current-provider-runtime-{state}"));
+            let directory = root.join("providers");
+            let runtime = winwincode_provider::ProviderRuntimeStore::prepare(&directory).unwrap();
+            let path = runtime.directory().join("provider-runtime.sqlite3");
+            drop(runtime);
+            if state == "missing" {
+                fs::remove_dir_all(directory.join("runtime")).unwrap();
+            } else {
+                rusqlite::Connection::open(path)
+                    .unwrap()
+                    .execute("UPDATE runtime_origin SET source_id=?1", ["0".repeat(64)])
+                    .unwrap();
+            }
+            assert!(winwincode_provider::DeviceProviderStore::open(&directory).is_ok());
+            let result = SessionSupervisor::new(
+                test_config(&root.join("unused-worker-binary")),
+                DeviceStore::open(&root).unwrap(),
+            );
+            assert!(
+                result.is_err(),
+                "{state} runtime must fail explicit preparation"
+            );
+            assert_eq!(directory.join("runtime").exists(), state != "missing");
+        }
+    }
+
+    #[test]
     fn consumed_historical_corrupt_config_does_not_block_current_provider_startup() {
         let root = temp_root("consumed-corrupt-config");
         let directory = root.join("history");
         fs::create_dir(&directory).unwrap();
         let path = directory.join(MANAGED_SESSION_CONFIG_FILE);
         fs::write(&path, b"{").unwrap();
-        drop(winwincode_provider::DeviceProviderStore::open(&root.join("providers")).unwrap());
+        drop(winwincode_provider::ProviderRuntimeStore::prepare(&root.join("providers")).unwrap());
         let mut store = DeviceStore::open(&root).unwrap();
         let record = WorkerProcessRecord {
             worker_session_id: "wss_HISTORY".into(),

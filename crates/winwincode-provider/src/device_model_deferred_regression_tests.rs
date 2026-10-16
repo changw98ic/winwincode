@@ -34,7 +34,7 @@ fn exercise_deferred(crash_resume: bool) {
             .unwrap()
             .as_nanos()
     ));
-    let store = DeviceProviderStore::open(&root).unwrap();
+    let store = ProviderRuntimeStore::prepare(&root).unwrap();
     let fixture: serde_json::Value = serde_json::from_str(include_str!(
         "../../../tests/fixtures/contracts/execution-port.valid.json"
     ))
@@ -71,7 +71,8 @@ fn exercise_deferred(crash_resume: bool) {
         listener.local_addr().unwrap().port()
     );
     let provider = serde_json::json!({"providerId":"deferred-fixture","displayName":"fixture","endpoint":endpoint,"protocol":"canonical","modelIds":["fixture-model"],"enabled":true});
-    store
+    DeviceProviderStore::open(&root)
+        .unwrap()
         .connection
         .execute(
             "INSERT INTO providers VALUES(?1,?2,?3)",
@@ -185,7 +186,7 @@ fn exercise_deferred(crash_resume: bool) {
         store.execute_model_using(
         &open,
         || {
-            let state: Option<(u32,u64,String)> = store.runtime.connection.query_row("SELECT policy_attempt,wake_ms,decision FROM model_retry_state WHERE exchange_id=?1",[&open.model_exchange_id.0],|row| { let wake: i64=row.get(1)?; Ok((row.get(0)?,u64::try_from(wake).map_err(|_|rusqlite::Error::IntegralValueOutOfRange(1,wake))?,row.get(2)?)) }).optional().unwrap();
+            let state: Option<(u32,u64,String)> = store.connection.query_row("SELECT policy_attempt,wake_ms,decision FROM model_retry_state WHERE exchange_id=?1",[&open.model_exchange_id.0],|row| { let wake: i64=row.get(1)?; Ok((row.get(0)?,u64::try_from(wake).map_err(|_|rusqlite::Error::IntegralValueOutOfRange(1,wake))?,row.get(2)?)) }).optional().unwrap();
             if let Some(state)=state {
                 *deferred.borrow_mut()=Some(state);
                 assert!(!crash_resume, "synthetic process loss after persistent deferred decision");
@@ -204,7 +205,6 @@ fn exercise_deferred(crash_resume: bool) {
         assert_eq!(sends.load(std::sync::atomic::Ordering::SeqCst), 1);
         assert!(store.model_start_recorded(&open).unwrap());
         let prepared: Vec<u8> = store
-            .runtime
             .connection
             .query_row(
                 "SELECT prepared_payload FROM exchanges WHERE exchange_id=?1",
@@ -213,13 +213,12 @@ fn exercise_deferred(crash_resume: bool) {
             )
             .unwrap();
         drop(store);
-        let store = DeviceProviderStore::open(&root).unwrap();
+        let store = ProviderRuntimeStore::prepare(&root).unwrap();
         assert_eq!(
             store.model_retry_state(&open).unwrap(),
             Some((next_attempt, wake_ms, 0))
         );
         store
-            .runtime
             .connection
             .execute(
                 "UPDATE model_retry_state SET wake_ms=0 WHERE exchange_id=?1",
@@ -228,7 +227,6 @@ fn exercise_deferred(crash_resume: bool) {
             .unwrap();
         let chunks = store.execute_model_using(&open, || true, factory).unwrap();
         let resumed_prepared: Vec<u8> = store
-            .runtime
             .connection
             .query_row(
                 "SELECT prepared_payload FROM exchanges WHERE exchange_id=?1",
@@ -246,12 +244,12 @@ fn exercise_deferred(crash_resume: bool) {
             chunks.iter().all(|chunk| chunk.lease == open.lease
                 && chunk.model_exchange_id == open.model_exchange_id)
         );
-        let physical:Vec<(i64,String)>=store.runtime.connection.prepare("SELECT attempt_number,state FROM model_invocation_attempts WHERE exchange_id=?1 ORDER BY attempt_number").unwrap().query_map([&open.model_exchange_id.0],|row|Ok((row.get(0)?,row.get(1)?))).unwrap().collect::<Result<Vec<_>,_>>().unwrap();
+        let physical:Vec<(i64,String)>=store.connection.prepare("SELECT attempt_number,state FROM model_invocation_attempts WHERE exchange_id=?1 ORDER BY attempt_number").unwrap().query_map([&open.model_exchange_id.0],|row|Ok((row.get(0)?,row.get(1)?))).unwrap().collect::<Result<Vec<_>,_>>().unwrap();
         assert_eq!(
             physical,
             vec![(1, "failed".into()), (2, "completed".into())]
         );
-        let policies:Vec<i64>=store.runtime.connection.prepare("SELECT policy_attempt FROM model_attempt_diagnostics WHERE exchange_id=?1 ORDER BY sequence").unwrap().query_map([&open.model_exchange_id.0],|row|row.get(0)).unwrap().collect::<Result<Vec<_>,_>>().unwrap();
+        let policies:Vec<i64>=store.connection.prepare("SELECT policy_attempt FROM model_attempt_diagnostics WHERE exchange_id=?1 ORDER BY sequence").unwrap().query_map([&open.model_exchange_id.0],|row|row.get(0)).unwrap().collect::<Result<Vec<_>,_>>().unwrap();
         assert_eq!(policies, vec![1, 2]);
         assert!(store.model_retry_state(&open).unwrap().is_none());
         assert_eq!(factory_calls.get(), 2);
@@ -276,12 +274,12 @@ fn exercise_deferred(crash_resume: bool) {
     }
     let chunks = result.unwrap().unwrap();
     server.join().unwrap();
-    let (attempt,stop,failure):(i64,Option<String>,String)=store.runtime.connection.query_row("SELECT policy_attempt,stop_reason,failure_json FROM model_attempt_diagnostics WHERE exchange_id=?1 ORDER BY sequence DESC LIMIT 1",[&open.model_exchange_id.0],|row|Ok((row.get(0)?,row.get(1)?,row.get(2)?))).unwrap();
+    let (attempt,stop,failure):(i64,Option<String>,String)=store.connection.query_row("SELECT policy_attempt,stop_reason,failure_json FROM model_attempt_diagnostics WHERE exchange_id=?1 ORDER BY sequence DESC LIMIT 1",[&open.model_exchange_id.0],|row|Ok((row.get(0)?,row.get(1)?,row.get(2)?))).unwrap();
     let network: winwincode_network::NetworkFailure = serde_json::from_str(&failure).unwrap();
     let mut retry =
         winwincode_network::RequestRetry::new(4, open.model_exchange_id.0.as_bytes()).state();
     let decision = retry.decision_after(&network);
-    let stored_failure:String=store.runtime.connection.query_row("SELECT failure_chunks FROM model_invocation_attempts WHERE exchange_id=?1 AND attempt_number=1",[&open.model_exchange_id.0],|row|row.get(0)).unwrap();
+    let stored_failure:String=store.connection.query_row("SELECT failure_chunks FROM model_invocation_attempts WHERE exchange_id=?1 AND attempt_number=1",[&open.model_exchange_id.0],|row|row.get(0)).unwrap();
     let first: Vec<ModelChunkMessage> = serde_json::from_str(&stored_failure).unwrap();
     let final_retryable = chunks
         .last()
@@ -355,7 +353,7 @@ fn review_not_sent_backoff_survives_deferred_store_reopen() {
         listener.local_addr().unwrap().port()
     );
     drop(listener);
-    let store = DeviceProviderStore::open(&root).unwrap();
+    let store = ProviderRuntimeStore::prepare(&root).unwrap();
     let fixture: serde_json::Value = serde_json::from_str(include_str!(
         "../../../tests/fixtures/contracts/execution-port.valid.json"
     ))
@@ -378,7 +376,8 @@ fn review_not_sent_backoff_survives_deferred_store_reopen() {
     open.request.payload_digest.0 = format!("sha256:{:x}", Sha256::digest(&payload));
     let provider = serde_json::json!({"providerId":"refused-fixture","displayName":"fixture",
         "endpoint":endpoint,"protocol":"canonical","modelIds":["fixture-model"],"enabled":true});
-    store
+    DeviceProviderStore::open(&root)
+        .unwrap()
         .connection
         .execute(
             "INSERT INTO providers VALUES(?1,?2,?3)",
@@ -393,7 +392,7 @@ fn review_not_sent_backoff_survives_deferred_store_reopen() {
     for (index, expected_delay) in [5000_i64, 10000].into_iter().enumerate() {
         let store = initial
             .take()
-            .unwrap_or_else(|| DeviceProviderStore::open(&root).unwrap());
+            .unwrap_or_else(|| ProviderRuntimeStore::prepare(&root).unwrap());
         let can_start = || true;
         let outcome = store
             .execute_model_recovering_step_authorized(
@@ -406,7 +405,7 @@ fn review_not_sent_backoff_survives_deferred_store_reopen() {
         let DeviceModelStepOutcome::DeferredRetry { wake_millis } = outcome else {
             panic!("a real refused TCP connection must yield a durable retry");
         };
-        let (policy_attempt, finished): (i64, i64) = store.runtime.connection.query_row(
+        let (policy_attempt, finished): (i64, i64) = store.connection.query_row(
             "SELECT policy_attempt,finished_ms FROM model_attempt_diagnostics WHERE exchange_id=?1
              ORDER BY sequence DESC LIMIT 1", [&open.model_exchange_id.0],
             |row| Ok((row.get(0)?,row.get(1)?))).unwrap();
@@ -419,7 +418,7 @@ fn review_not_sent_backoff_survives_deferred_store_reopen() {
             (expected_delay..expected_delay + 1000).contains(&delay),
             "observed delay={delay}"
         );
-        let physical: Vec<(i64, String)> = store.runtime.connection.prepare(
+        let physical: Vec<(i64, String)> = store.connection.prepare(
             "SELECT attempt_number,state FROM model_invocation_attempts ORDER BY attempt_number")
             .unwrap().query_map([], |row| Ok((row.get(0)?,row.get(1)?))).unwrap()
             .collect::<Result<_, _>>().unwrap();

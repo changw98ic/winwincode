@@ -401,6 +401,21 @@ impl ProviderRuntimeStore {
         let Some(context) = session.profile.source.settings.jev_context.as_ref() else {
             return Ok(());
         };
+        let task_text = context_task_text(job, request)?;
+        let input = request
+            .pointer_mut("/request/input")
+            .and_then(serde_json::Value::as_array_mut)
+            .ok_or(DeviceProviderError::StateInvalid)?;
+        let last_commentary = input.iter().rposition(is_assistant_commentary);
+        let candidates: Vec<_> = (0..input.len())
+            .rev()
+            .filter(|index| {
+                Some(*index) != last_commentary && is_assistant_commentary(&input[*index])
+            })
+            .collect();
+        if candidates.is_empty() {
+            return Ok(());
+        }
         let execution_request = self.jev_execution_request(
             &format!("jev:{}:0", open.model_exchange_id.0),
             &context.provider,
@@ -411,16 +426,7 @@ impl ProviderRuntimeStore {
             .jev_parameters(&execution_request)?
             .settings();
         let configuration_digest = configured_context_digest(session, &settings)?;
-        let task_text = context_task_text(job, request)?;
-        let input = request
-            .pointer_mut("/request/input")
-            .and_then(serde_json::Value::as_array_mut)
-            .ok_or(DeviceProviderError::StateInvalid)?;
-        let last_commentary = input.iter().rposition(is_assistant_commentary);
-        for index in (0..input.len()).rev() {
-            if Some(index) == last_commentary || !is_assistant_commentary(&input[index]) {
-                continue;
-            }
+        for index in candidates {
             if self.model_cancelled(&open.model_exchange_id.0)? {
                 return Err(DeviceProviderError::StateInvalid);
             }
@@ -752,7 +758,7 @@ mod tests {
     fn live_authorization_guards_each_context_operation_but_allows_exact_recovery() {
         let root = std::env::temp_dir().join(format!("wwc-context-guard-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
-        let store = DeviceProviderStore::open(&root).unwrap();
+        let store = ProviderRuntimeStore::prepare(&root).unwrap();
         let provider = Arc::new(crate::MockJevProvider::healthy("context"));
         let runtime = JevRuntime::new(
             vec![provider.clone()],
@@ -817,7 +823,7 @@ mod tests {
                     .is_err()
             );
             let rows: i64 = store
-                .runtime.connection
+                .connection
                 .query_row("SELECT count(*) FROM jev_context_exchanges", [], |row| {
                     row.get(0)
                 })
@@ -872,7 +878,7 @@ mod tests {
                 .unwrap();
             assert_eq!(provider.calls(), 2);
             store
-                .runtime.connection
+                .connection
                 .execute(
                     "UPDATE jev_context_exchanges SET result=NULL,call_status='pending' WHERE operation_id='jev:first'",
                     [],
@@ -978,7 +984,7 @@ mod tests {
         use base64::Engine as _;
         let directory =
             std::env::temp_dir().join(format!("wwc-jev-request-{}", std::process::id()));
-        let store = DeviceProviderStore::open(&directory).unwrap();
+        let config_store = DeviceProviderStore::open(&directory).unwrap();
         let fixture: serde_json::Value = serde_json::from_str(include_str!(
             "../../../tests/fixtures/contracts/execution-port.valid.json"
         ))
@@ -1009,7 +1015,8 @@ mod tests {
             "modelId":"fixture-jev-model", "timeoutMs":1000, "retries":0,
             "maxBatchSize":4, "devices":["remote"], "dtypes":["auto"]
         })).unwrap();
-        store.save_jev_settings(&settings).unwrap();
+        config_store.save_jev_settings(&settings).unwrap();
+        let store = ProviderRuntimeStore::prepare(&directory).unwrap();
         let profile: AgentProfileSettings = serde_json::from_value(serde_json::json!({
             "provider":"fixture", "model":"fixture-model", "reasoning":"max", "tools":[], "sandbox":"candidate", "instructions":null,
             "jevContext":{"provider":"fixture-jev", "policy":{"version":"fixture-policy", "minimumConfidence":0.6,
@@ -1108,7 +1115,7 @@ mod tests {
             .block_on(async {
                 let mut not_started = original.clone();
                 assert!(store.prepare_jev_model_request(&open, &mut not_started, &|| false).await.is_err());
-                let rows: i64 = store.runtime.connection.query_row("SELECT count(*) FROM jev_context_exchanges", [], |row| row.get(0)).unwrap();
+                let rows: i64 = store.connection.query_row("SELECT count(*) FROM jev_context_exchanges", [], |row| row.get(0)).unwrap();
                 assert_eq!(rows, 0, "the real preparation entry must forward the live guard");
                 let stored = store
                     .evaluate_context_once(
@@ -1143,7 +1150,7 @@ mod tests {
                     }
                 );
                 assert_eq!(run.observation.unwrap().input_tokens, 40);
-                let (saved_digest, saved_request): (String, String) = store.runtime.connection.query_row(
+                let (saved_digest, saved_request): (String, String) = store.connection.query_row(
                     "SELECT digest, request_json FROM jev_context_exchanges WHERE operation_id=?1",
                     [format!("jev:{}:1", open.model_exchange_id.0)],
                     |row| Ok((row.get(0)?, row.get(1)?)),
@@ -1181,7 +1188,7 @@ mod tests {
                 unchanged.as_object_mut().unwrap().remove("winwincodeJevTask");
                 store.prepare_jev_model_request(&open, &mut oversized, &|| true).await.unwrap();
                 assert_eq!(oversized, unchanged);
-                assert_eq!(store.runtime.connection.query_row(
+                assert_eq!(store.connection.query_row(
                     "SELECT COUNT(*) FROM jev_context_exchanges", [], |row| row.get::<_, i64>(0)
                 ).unwrap(), 1);
                 for omit in [true, false] {
@@ -1253,18 +1260,18 @@ mod tests {
                 let mut foreign_score = saved.clone();
                 foreign_score[2]["candidate"] = serde_json::json!("{\"foreign\":true}");
                 let foreign_score = serde_json::to_string(&foreign_score).unwrap();
-                store.runtime.connection.execute(
+                store.connection.execute(
                     "UPDATE jev_context_exchanges SET request_json=?1,digest=?2",
                     params![foreign_score, format!("{:x}", Sha256::digest(foreign_score.as_bytes()))],
                 ).unwrap();
                 assert!(store.model_jev_source_item(&open, &receipts[0].operation_id).is_err());
-                assert!(store.runtime.connection.execute("UPDATE jev_context_exchanges SET request_json=NULL", []).is_err());
+                assert!(store.connection.execute("UPDATE jev_context_exchanges SET request_json=NULL", []).is_err());
                 assert!(store.model_jev_source_item(&open, &receipts[0].operation_id).is_err());
-                store.runtime.connection.execute(
+                store.connection.execute(
                     "UPDATE jev_context_exchanges SET request_json=?1,digest=?2",
                     params![saved_request, saved_digest],
                 ).unwrap();
-                let reopened = DeviceProviderStore::open(&directory).unwrap();
+                let reopened = ProviderRuntimeStore::prepare(&directory).unwrap();
                 let mut replay = original.clone();
                 reopened
                     .prepare_jev_model_request(&open, &mut replay, &|| true)
@@ -1273,7 +1280,7 @@ mod tests {
                 assert_eq!(replay, expected);
                 assert_eq!(reopened.model_jev_receipts(&open).unwrap(), receipts);
                 reopened
-                    .runtime.connection
+                    .connection
                     .execute("UPDATE jev_context_exchanges SET result=NULL,call_status='pending'", [])
                     .unwrap();
                 let pending = reopened.model_jev_receipts(&open).unwrap();
@@ -1294,7 +1301,7 @@ mod tests {
                     .unwrap()
                     .remove("winwincodeJevTask");
                 assert_eq!(interrupted, retained);
-                reopened.runtime.connection.execute("UPDATE jev_context_exchanges SET request_json='tampered'", []).unwrap();
+                reopened.connection.execute("UPDATE jev_context_exchanges SET request_json='tampered'", []).unwrap();
                 assert!(reopened.model_jev_receipts(&open).is_err());
                 let mut corrupt_replay = original.clone();
                 assert!(reopened.prepare_jev_model_request(&open, &mut corrupt_replay, &|| true).await.is_err());
@@ -1311,7 +1318,6 @@ mod tests {
                 );
             });
         let count: i64 = store
-            .runtime
             .connection
             .query_row("SELECT count(*) FROM jev_context_exchanges", [], |r| {
                 r.get(0)
@@ -1319,6 +1325,7 @@ mod tests {
             .unwrap();
         assert_eq!(count, 1);
         drop(store);
+        drop(config_store);
         std::fs::remove_dir_all(directory).unwrap();
     }
 }

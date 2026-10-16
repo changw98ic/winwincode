@@ -8,14 +8,13 @@ use std::{sync::mpsc, time::Duration};
 #[test]
 fn response_publication_waits_for_a_concurrent_writer_and_preserves_original_frames() {
     let root = test_directory("model-response-writer");
-    let publisher = DeviceProviderStore::open(&root).unwrap();
-    let writer = DeviceProviderStore::open(&root).unwrap();
+    let publisher = ProviderRuntimeStore::prepare(&root).unwrap();
+    let writer = ProviderRuntimeStore::prepare(&root).unwrap();
     let open = fixture_open();
     let mut chunk = model_chunk(&open, 1);
     chunk.is_final = true;
     let original = vec![chunk];
     writer
-        .runtime
         .connection
         .execute_batch("BEGIN IMMEDIATE; UPDATE runtime_origin SET source_id=source_id;")
         .unwrap();
@@ -36,7 +35,7 @@ fn response_publication_waits_for_a_concurrent_writer_and_preserves_original_fra
         ),
         "a competing writer must leave publication waiting rather than fail its WAL upgrade"
     );
-    writer.runtime.connection.execute_batch("COMMIT").unwrap();
+    writer.connection.execute_batch("COMMIT").unwrap();
     let (result, publisher) = completion.recv_timeout(Duration::from_secs(10)).unwrap();
     result.unwrap();
     task.join().unwrap();
@@ -54,25 +53,21 @@ fn response_publication_waits_for_a_concurrent_writer_and_preserves_original_fra
 #[test]
 fn nested_response_publication_preserves_the_callers_rollback_boundary() {
     let root = test_directory("model-response-nested-rollback");
-    let store = DeviceProviderStore::open(&root).unwrap();
+    let store = ProviderRuntimeStore::prepare(&root).unwrap();
     let open = fixture_open();
     let mut chunk = model_chunk(&open, 1);
     chunk.is_final = true;
     let original = vec![chunk];
-    store
-        .runtime
-        .connection
-        .execute_batch("BEGIN IMMEDIATE")
-        .unwrap();
+    store.connection.execute_batch("BEGIN IMMEDIATE").unwrap();
     store
         .retain_stored_model_exchange_chunks(&open, &original)
         .unwrap();
-    assert!(!store.runtime.connection.is_autocommit());
+    assert!(!store.connection.is_autocommit());
     assert_eq!(
         store.replay_model(&open.model_exchange_id.0, 1).unwrap(),
         original
     );
-    store.runtime.connection.execute_batch("ROLLBACK").unwrap();
+    store.connection.execute_batch("ROLLBACK").unwrap();
     assert!(
         store
             .replay_model(&open.model_exchange_id.0, 1)
@@ -80,7 +75,7 @@ fn nested_response_publication_preserves_the_callers_rollback_boundary() {
             .is_empty()
     );
     drop(store);
-    let reopened = DeviceProviderStore::open(&root).unwrap();
+    let reopened = ProviderRuntimeStore::prepare(&root).unwrap();
     assert!(reopened.list_stored_model_exchanges().unwrap().is_empty());
     drop(reopened);
     std::fs::remove_dir_all(root).unwrap();

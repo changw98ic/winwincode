@@ -106,10 +106,9 @@ impl DeviceModels {
 
     #[cfg(test)]
     fn for_test(configuration_directory: &Path) -> Self {
-        let store =
-            winwincode_provider::DeviceProviderStore::open(configuration_directory).unwrap();
+        let store = ProviderRuntimeStore::prepare(configuration_directory).unwrap();
         Self::new(
-            store.runtime_directory(),
+            store.directory(),
             Arc::new(winwincode_provider::LocalDeviceProviderSource::new(
                 configuration_directory.to_path_buf(),
             )),
@@ -505,7 +504,6 @@ mod tests {
     use winwincode_execution_port::generated::{
         EncodedPayload, ExecutionLeaseStamp, ModelChunkMessageKind,
     };
-    use winwincode_provider::DeviceProviderStore;
 
     fn authority_session(thread: &str, worker_session_id: &str) -> SessionIdentity {
         let worker_session_id = WorkerSessionId(worker_session_id.to_owned());
@@ -627,7 +625,7 @@ mod tests {
                 base64::Engine::encode(&base64::engine::general_purpose::STANDARD, payload);
             request.request.payload_digest.0 = format!("sha256:{:x}", Sha256::digest(payload));
         }
-        let store = DeviceProviderStore::open(&root).unwrap();
+        let store = ProviderRuntimeStore::prepare(&root).unwrap();
         let ExecutionPortMessage::ModelOpenMessage(request) = &open else {
             unreachable!()
         };
@@ -709,7 +707,7 @@ mod tests {
         let wsn = format!("wsn_{}", "B".repeat(26));
         let wki = format!("wki_{}", "G".repeat(26));
         {
-            let store = DeviceProviderStore::open(&root).expect("open device provider store");
+            let store = ProviderRuntimeStore::prepare(&root).expect("open device provider store");
             let chunks = vec![
                 chunk(&exchange, 1, false, &wsn, &wki),
                 chunk(&exchange, 2, false, &wsn, &wki),
@@ -721,7 +719,7 @@ mod tests {
         }
         let mut models = DeviceModels::for_test(&root);
         models.recovery_store =
-            Some(ProviderRuntimeStore::open_existing(&root.join("runtime")).unwrap());
+            Some(ProviderRuntimeStore::open_existing(&models.directory).unwrap());
         models.owned_exchanges.insert(exchange.clone());
         models.delivered_high_water.insert(exchange.clone(), 1);
         let recovered: Vec<_> = std::iter::from_fn(|| models.next_chunk().unwrap())
@@ -749,7 +747,7 @@ mod tests {
         let foreign_wki = format!("wki_{}", "1".repeat(26));
         let owned_wki = format!("wki_{}", "2".repeat(26));
         {
-            let store = DeviceProviderStore::open(&root).expect("open device provider store");
+            let store = ProviderRuntimeStore::prepare(&root).expect("open device provider store");
             store
                 .retain_stored_model_exchange_chunks(
                     &retained_open(&foreign_exchange, &foreign_wsn, &foreign_wki),
@@ -772,7 +770,7 @@ mod tests {
         }
         let mut models = DeviceModels::for_test(&root);
         models.recovery_store =
-            Some(ProviderRuntimeStore::open_existing(&root.join("runtime")).unwrap());
+            Some(ProviderRuntimeStore::open_existing(&models.directory).unwrap());
         models.note_worker_instance_id(&owned_wki);
         models.session_ids.insert(owned_wsn.clone());
         models.owned_exchanges.insert(owned_exchange.clone());
@@ -806,7 +804,7 @@ mod tests {
         let wsn = format!("wsn_{}", "R".repeat(26));
         let wki = format!("wki_{}", "K".repeat(26));
         {
-            let store = DeviceProviderStore::open(&root).expect("open device provider store");
+            let store = ProviderRuntimeStore::prepare(&root).expect("open device provider store");
             store
                 .retain_stored_model_exchange_chunks(
                     &retained_open(&exchange, &wsn, &wki),
@@ -819,7 +817,7 @@ mod tests {
         }
         let mut models = DeviceModels::for_test(&root);
         models.recovery_store =
-            Some(ProviderRuntimeStore::open_existing(&root.join("runtime")).unwrap());
+            Some(ProviderRuntimeStore::open_existing(&models.directory).unwrap());
         models.session_ids.insert(wsn.clone());
         models.note_worker_instance_id(&wki);
         let recovered: Vec<_> = std::iter::from_fn(|| models.next_chunk().unwrap()).collect();

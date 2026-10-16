@@ -35,10 +35,9 @@ type ReceivedRequest = (String, serde_json::Value, mpsc::Sender<()>);
 type TlsStream = StreamOwned<ServerConnection, TcpStream>;
 
 fn runtime_database(directory: &Path) -> rusqlite::Connection {
-    let store = winwincode_provider::DeviceProviderStore::open(directory).unwrap();
+    let store = winwincode_provider::ProviderRuntimeStore::prepare(directory).unwrap();
     let database =
-        rusqlite::Connection::open(store.runtime_directory().join("provider-runtime.sqlite3"))
-            .unwrap();
+        rusqlite::Connection::open(store.directory().join("provider-runtime.sqlite3")).unwrap();
     database
         .execute(
             "ATTACH DATABASE ?1 AS configuration",
@@ -282,7 +281,7 @@ fn write_answer(stream: &mut TlsStream, provider: &str) {
 }
 
 fn run_device_members(directory: &Path, endpoint: &str, per_provider: usize) {
-    let _ = winwincode_provider::DeviceProviderStore::open(directory).unwrap();
+    let _ = winwincode_provider::ProviderRuntimeStore::prepare(directory).unwrap();
     let expected = per_provider * PROVIDERS.len();
     let mut models = DeviceModels::for_test(directory);
     let database = runtime_database(directory);
@@ -345,7 +344,7 @@ fn run_device_members(directory: &Path, endpoint: &str, per_provider: usize) {
                 DeviceModelSendOutcome::NotStarted
             );
             assert!(
-                !winwincode_provider::DeviceProviderStore::open(directory)
+                !winwincode_provider::ProviderRuntimeStore::prepare(directory)
                     .unwrap()
                     .model_start_recorded(&fourth)
                     .unwrap()

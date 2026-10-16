@@ -284,7 +284,7 @@ fn exercise_case(case: &str) {
         }
     );
     drop(database);
-    let store = DeviceProviderStore::open(&root).unwrap();
+    let store = ProviderRuntimeStore::prepare(&root).unwrap();
     assert_eq!(
         store.execute_model_authorized(&open, || false).unwrap(),
         chunks,
@@ -454,17 +454,16 @@ fn run_child(root: &Path) {
     let phase = std::env::var(PHASE_ENV).unwrap();
     let open: ModelOpenMessage =
         serde_json::from_slice(&fs::read(root.join("open.json")).unwrap()).unwrap();
-    let store = DeviceProviderStore::open(root).unwrap();
+    let store = ProviderRuntimeStore::prepare(root).unwrap();
     if case == "retry" && phase == "resume" {
         let original: serde_json::Value =
             serde_json::from_slice(&fs::read(root.join("retry.json")).unwrap()).unwrap();
-        assert_eq!(retry_snapshot(&store.runtime.connection, &open), original);
+        assert_eq!(retry_snapshot(&store.connection, &open), original);
         assert_eq!(original["attempt"], 2);
         assert_eq!(original["decision"], "deferred_until");
         // Advance only the fixture wake time. Preserve the real durable retry
         // decision, original exchange, prepared input and policy attempt.
         store
-            .runtime
             .connection
             .execute(
                 "UPDATE model_retry_state SET wake_ms=0 WHERE exchange_id=?1",
@@ -577,6 +576,7 @@ fn configure_exchange(root: &Path, origin: &str) -> ModelOpenMessage {
         .unwrap();
     let settings: crate::OpenJevRemoteSettings = serde_json::from_value(serde_json::json!({"providerId":"jev-recovery-paid","endpoint":format!("{origin}/jev"),"apiKey":"owned-jev-secret","modelId":"fixture-model","timeoutMs":10_000,"retries":0,"maxBatchSize":8,"devices":["remote"],"dtypes":["auto"]})).unwrap();
     store.save_jev_settings(&settings).unwrap();
+    drop(ProviderRuntimeStore::prepare(root).unwrap());
     open
 }
 

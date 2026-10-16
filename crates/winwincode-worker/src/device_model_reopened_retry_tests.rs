@@ -190,7 +190,7 @@ fn store_entries(directory: &Path, request: &ModelOpenMessage) -> Vec<String> {
     reason = "same live Worker verifies original retry identity, authority, cancellation and physical accounting"
 )]
 fn run_live_worker(directory: &Path, endpoint: &str) {
-    let _ = DeviceProviderStore::open(directory).unwrap();
+    let _ = ProviderRuntimeStore::prepare(directory).unwrap();
     let mut models = DeviceModels::for_test(directory);
     models.set_intake_log(Some(directory.join("intake.log")));
     let database = crate::device_model::concurrency_tests::runtime_database(directory);
@@ -280,7 +280,7 @@ fn run_live_worker(directory: &Path, endpoint: &str) {
         };
         assert_ne!(thread_id(&entries[0]), thread_id(&entries[1]));
     }
-    let store = DeviceProviderStore::open(directory).unwrap();
+    let store = ProviderRuntimeStore::prepare(directory).unwrap();
     assert!(matches!(
         store.try_model_attempt_permit(&retry).unwrap(),
         DeviceModelAdmission::Deferred

@@ -498,6 +498,10 @@ pub(super) async fn run() {
     let relay_boundary = Arc::clone(&boundary);
     let _relay_thread = std::thread::spawn(move || {
         use std::io::{BufRead as _, Write as _};
+        use winwincode_client_port::private_worker_channel::{
+            PrivateWorkerRequest, PrivateWorkerRequestBody, PrivateWorkerResponse,
+            PrivateWorkerResponseBody,
+        };
         use winwincode_client_port::worker_relay::{WorkerRelayRequest, WorkerRelayResponse};
         let mut input = std::io::BufReader::new(device_io.try_clone().unwrap());
         let mut output = device_io;
@@ -506,7 +510,11 @@ pub(super) async fn run() {
             if input.read_line(&mut line).unwrap() == 0 {
                 break;
             }
-            let WorkerRelayRequest::Exchange { body } = serde_json::from_str(&line).unwrap() else {
+            let envelope: PrivateWorkerRequest = serde_json::from_str(&line).unwrap();
+            let PrivateWorkerRequestBody::Relay {
+                request: WorkerRelayRequest::Exchange { body },
+            } = envelope.request
+            else {
                 unreachable!()
             };
             let body = relay_boundary
@@ -520,10 +528,15 @@ pub(super) async fn run() {
                 .unwrap();
             serde_json::to_writer(
                 &mut output,
-                &WorkerRelayResponse {
-                    failure: None,
-                    status: 200,
-                    body: String::from_utf8(body).unwrap(),
+                &PrivateWorkerResponse {
+                    request_id: envelope.request_id,
+                    response: PrivateWorkerResponseBody::Relay {
+                        response: WorkerRelayResponse {
+                            failure: None,
+                            status: 200,
+                            body: String::from_utf8(body).unwrap(),
+                        },
+                    },
                 },
             )
             .unwrap();

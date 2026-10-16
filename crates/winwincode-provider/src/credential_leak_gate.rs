@@ -13,6 +13,17 @@ const MAX_NESTING_DEPTH: usize = 64;
 const MAX_DURABLE_FINGERPRINT_BYTES: usize = 64 * 1024;
 const DURABLE_FINGERPRINT_SCHEMA: &str = "winwincode.credential-fingerprint.v1";
 
+pub(crate) fn provider_header_is_sensitive(
+    name: &str,
+    value: &str,
+    allow_responses_lite: bool,
+) -> bool {
+    !(name.eq_ignore_ascii_case("x-title")
+        || (allow_responses_lite
+            && name.eq_ignore_ascii_case("x-openai-internal-codex-responses-lite")
+            && value == "true"))
+}
+
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub enum CredentialOutputBoundary {
     Log,
@@ -196,6 +207,19 @@ impl CredentialLeakGate {
                     .cmp(&right.byte_length)
                     .then(left.sha256.cmp(&right.sha256))
             });
+        }
+    }
+
+    pub(crate) fn track_provider_header(
+        &mut self,
+        name: &str,
+        value: &str,
+        allow_responses_lite: bool,
+    ) {
+        if provider_header_is_sensitive(name, value, allow_responses_lite)
+            && let Ok(secret) = ResolvedSecret::from_bytes(value.as_bytes().to_vec())
+        {
+            self.track_secret(&secret);
         }
     }
 

@@ -99,21 +99,29 @@ struct Mutation {
 pub struct DeviceProviderStore {
     pub(crate) connection: Connection,
     key: SecretKey,
-    pub(crate) runtime: crate::device_runtime_store::ProviderRuntimeStore,
-}
-
-impl std::ops::Deref for DeviceProviderStore {
-    type Target = crate::device_runtime_store::ProviderRuntimeStore;
-
-    fn deref(&self) -> &Self::Target {
-        &self.runtime
-    }
 }
 
 impl DeviceProviderStore {
-    #[must_use]
-    pub fn runtime_directory(&self) -> &Path {
-        self.runtime.directory()
+    pub(crate) fn source_id(&self) -> String {
+        format!(
+            "{:x}",
+            Sha256::digest(self.key.public_key().to_encoded_point(false).as_bytes())
+        )
+    }
+
+    pub(crate) fn try_provider_model_permit(
+        &self,
+        provider: &str,
+    ) -> Result<crate::DeviceModelAdmission, DeviceProviderError> {
+        let directory = Path::new(
+            self.connection
+                .path()
+                .ok_or(DeviceProviderError::StateInvalid)?,
+        )
+        .parent()
+        .ok_or(DeviceProviderError::StateInvalid)?
+        .join("runtime");
+        crate::device_model_concurrency::try_provider_model_permit(&directory, provider)
     }
 
     pub(crate) fn sse_failure_log_directory(
@@ -175,59 +183,20 @@ impl DeviceProviderStore {
             return Err(DeviceProviderError::StateInvalid);
         }
         let key = load_device_key(&connection)?;
-        let source_id = format!(
-            "{:x}",
-            Sha256::digest(key.public_key().to_encoded_point(false).as_bytes())
-        );
-        let runtime_directory = directory.join("runtime");
+        let store = Self { connection, key };
+        let connection = &store.connection;
         let version: i64 = connection.query_row("PRAGMA user_version", [], |row| row.get(0))?;
-        let runtime = if version == 17 {
-            crate::device_runtime_store::ProviderRuntimeStore::open_existing(&runtime_directory)?
-        } else {
-            let transaction =
-                connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-            let locked_version: i64 =
-                transaction.query_row("PRAGMA user_version", [], |row| row.get(0))?;
-            let runtime = match locked_version {
-                16 => {
-                    let runtime = crate::device_runtime_store::migrate_runtime(
-                        &transaction,
-                        &runtime_directory,
-                        &source_id,
-                    )?;
-                    transaction.execute_batch(
-                        "CREATE TABLE provider_runtime_cutover(singleton INTEGER PRIMARY KEY CHECK(singleton=1),source_id TEXT NOT NULL); PRAGMA user_version=17;",
-                    )?;
-                    transaction.execute(
-                        "INSERT INTO provider_runtime_cutover VALUES(1,?1)",
-                        [&source_id],
-                    )?;
-                    runtime
-                }
-                17 => crate::device_runtime_store::ProviderRuntimeStore::open_existing(
-                    &runtime_directory,
-                )?,
-                _ => return Err(DeviceProviderError::StateInvalid),
-            };
-            transaction.commit()?;
-            runtime
-        };
-        let cutover: String = connection.query_row(
-            "SELECT source_id FROM provider_runtime_cutover WHERE singleton=1",
-            [],
-            |row| row.get(0),
-        )?;
-        if cutover != source_id || runtime.source_id()? != source_id {
-            return Err(DeviceProviderError::StateInvalid);
+        if version == 17 {
+            let cutover: String = connection.query_row(
+                "SELECT source_id FROM provider_runtime_cutover WHERE singleton=1",
+                [],
+                |row| row.get(0),
+            )?;
+            if cutover != store.source_id() {
+                return Err(DeviceProviderError::StateInvalid);
+            }
         }
-        let runtime = runtime.with_execution_source(std::sync::Arc::new(
-            crate::device_execution_source::LocalDeviceProviderSource::new(directory),
-        ));
-        Ok(Self {
-            connection,
-            key,
-            runtime,
-        })
+        Ok(store)
     }
 
     pub fn snapshot(

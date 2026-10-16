@@ -2,7 +2,7 @@
 
 use crate::{
     DeviceProviderStore, HttpsSseProviderAdapter, HttpsSseProviderConfig, HttpsSseProviderLimits,
-    HttpsSseProviderTimeouts,
+    HttpsSseProviderTimeouts, ProviderRuntimeStore,
 };
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use rusqlite::params;
@@ -171,10 +171,10 @@ fn failing_tls_provider() -> (String, Vec<u8>, std::thread::JoinHandle<usize>) {
 #[test]
 fn four_failed_model_calls_preserve_all_physical_diagnostics_and_paid_budget() {
     let directory = TestDirectory::new("four-attempts");
-    let store = DeviceProviderStore::open(&directory.0).unwrap();
+    let store = ProviderRuntimeStore::prepare(&directory.0).unwrap();
     let open = open_message();
     let (endpoint, certificate, server) = failing_tls_provider();
-    configure(&store, &endpoint);
+    configure(&DeviceProviderStore::open(&directory.0).unwrap(), &endpoint);
     let started = Instant::now();
     let chunks = store
         .execute_model_using(
@@ -189,7 +189,7 @@ fn four_failed_model_calls_preserve_all_physical_diagnostics_and_paid_budget() {
         4,
         "one finite paid budget permits exactly four HTTP sends"
     );
-    let mut statement = store.runtime.connection.prepare("SELECT sequence,policy_attempt,outcome,failure_json,stop_reason,finished_ms FROM model_attempt_diagnostics WHERE exchange_id=?1 ORDER BY sequence").unwrap();
+    let mut statement = store.connection.prepare("SELECT sequence,policy_attempt,outcome,failure_json,stop_reason,finished_ms FROM model_attempt_diagnostics WHERE exchange_id=?1 ORDER BY sequence").unwrap();
     let rows = statement
         .query_map([&open.model_exchange_id.0], |row| {
             Ok((
@@ -220,14 +220,8 @@ fn four_failed_model_calls_preserve_all_physical_diagnostics_and_paid_budget() {
             references.insert(reference.to_owned()),
             "each physical attempt needs its own evidence"
         );
-        let private = std::fs::read(
-            store
-                .runtime
-                .sse_failure_log_directory()
-                .unwrap()
-                .join(reference),
-        )
-        .unwrap();
+        let private =
+            std::fs::read(store.sse_failure_log_directory().unwrap().join(reference)).unwrap();
         let end = private.iter().position(|byte| *byte == b'\n').unwrap();
         assert_eq!(&private[end + 1..], b"SYNTHETIC_PRIVATE_RESPONSE");
         assert!(!row.3.contains("SYNTHETIC_PRIVATE"));
@@ -238,7 +232,7 @@ fn four_failed_model_calls_preserve_all_physical_diagnostics_and_paid_budget() {
         Some("retry_budget_exhausted")
     );
     let paid: i64 = store
-        .runtime.connection
+        .connection
         .query_row(
             "SELECT COUNT(*) FROM model_invocation_attempts WHERE exchange_id=?1 AND state != 'not_sent'",
             [&open.model_exchange_id.0],
@@ -264,11 +258,11 @@ fn four_failed_model_calls_preserve_all_physical_diagnostics_and_paid_budget() {
 #[test]
 fn connection_wait_keeps_physical_evidence_without_consuming_a_paid_attempt() {
     let directory = TestDirectory::new("connection-wait");
-    let store = DeviceProviderStore::open(&directory.0).unwrap();
+    let store = ProviderRuntimeStore::prepare(&directory.0).unwrap();
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let endpoint = format!("https://{}/v1/responses", listener.local_addr().unwrap());
     drop(listener);
-    configure(&store, &endpoint);
+    configure(&DeviceProviderStore::open(&directory.0).unwrap(), &endpoint);
     let open = open_message();
     let started = Instant::now();
     store
@@ -279,7 +273,7 @@ fn connection_wait_keeps_physical_evidence_without_consuming_a_paid_attempt() {
         )
         .unwrap();
     let paid: i64 = store
-        .runtime.connection
+        .connection
         .query_row(
             "SELECT COUNT(*) FROM model_invocation_attempts WHERE exchange_id=?1 AND state != 'not_sent'",
             [&open.model_exchange_id.0],
@@ -287,7 +281,7 @@ fn connection_wait_keeps_physical_evidence_without_consuming_a_paid_attempt() {
         )
         .unwrap();
     assert_eq!(paid, 0);
-    let (sequence,policy_attempt,failure,stop): (i64,i64,String,String) = store.runtime.connection.query_row("SELECT sequence,policy_attempt,failure_json,stop_reason FROM model_attempt_diagnostics WHERE exchange_id=?1",[&open.model_exchange_id.0],|row|Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?))).unwrap();
+    let (sequence,policy_attempt,failure,stop): (i64,i64,String,String) = store.connection.query_row("SELECT sequence,policy_attempt,failure_json,stop_reason FROM model_attempt_diagnostics WHERE exchange_id=?1",[&open.model_exchange_id.0],|row|Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?))).unwrap();
     assert_eq!((sequence, policy_attempt), (1, 1));
     let failure: serde_json::Value = serde_json::from_str(&failure).unwrap();
     assert_eq!(failure["kind"], "connection_unavailable");

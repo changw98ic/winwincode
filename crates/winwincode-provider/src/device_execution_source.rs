@@ -1,5 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 
+#[cfg(test)]
+#[path = "device_connection_snapshot_tests.rs"]
+mod tests;
+
 use std::{collections::BTreeMap, fmt, path::PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -266,6 +270,19 @@ impl ProviderExecutionSource for LocalDeviceProviderSource {
             return Err(DeviceProviderError::AuthorityEnded);
         }
         let store = DeviceProviderStore::open(&self.directory)?;
+        let material = store.execution_connection(request)?;
+        if !can_start() {
+            return Err(DeviceProviderError::AuthorityEnded);
+        }
+        Ok(material)
+    }
+}
+
+impl DeviceProviderStore {
+    fn execution_connection(
+        &self,
+        request: &ProviderExecutionRequest,
+    ) -> Result<ProviderConnectionMaterial, DeviceProviderError> {
         let material = match &request.purpose {
             ProviderExecutionPurpose::Model
             | ProviderExecutionPurpose::Observer
@@ -275,11 +292,11 @@ impl ProviderExecutionSource for LocalDeviceProviderSource {
                     .as_deref()
                     .ok_or(DeviceProviderError::StateInvalid)?;
                 let (config, secret, codex_account) =
-                    store.resolve_connection(&request.provider_id)?;
+                    self.resolve_connection(&request.provider_id)?;
                 if !config.enabled || !config.model_ids.iter().any(|selected| selected == model) {
                     return Err(DeviceProviderError::StateInvalid);
                 }
-                let transaction = store.connection.unchecked_transaction()?;
+                let transaction = self.connection.unchecked_transaction()?;
                 let (saved_config, saved_secret): (String, Vec<u8>) = transaction.query_row(
                     "SELECT config,secret FROM providers WHERE provider_id=?1",
                     [&request.provider_id],
@@ -288,7 +305,7 @@ impl ProviderExecutionSource for LocalDeviceProviderSource {
                 let saved_secret = ResolvedSecret::from_bytes(saved_secret)
                     .map_err(|_| DeviceProviderError::StateInvalid)?;
                 let latest: DeviceProviderConfig = serde_json::from_str(&saved_config)?;
-                let headers = store.custom_headers(&request.provider_id)?;
+                let headers = self.custom_headers(&request.provider_id)?;
                 transaction.commit()?;
                 let same_authorization = match &config.protocol {
                     DeviceProviderProtocol::CodexChatgpt => {
@@ -310,7 +327,14 @@ impl ProviderExecutionSource for LocalDeviceProviderSource {
                     }
                     _ => saved_secret.expose() == secret.expose(),
                 };
-                if latest != config || !same_authorization {
+                if !latest.enabled
+                    || latest.provider_id != config.provider_id
+                    || latest.endpoint != config.endpoint
+                    || latest.protocol != config.protocol
+                    || latest.responses_structured_output != config.responses_structured_output
+                    || !latest.model_ids.iter().any(|selected| selected == model)
+                    || !same_authorization
+                {
                     return Err(DeviceProviderError::StateInvalid);
                 }
                 ProviderConnectionMaterial {
@@ -327,7 +351,7 @@ impl ProviderExecutionSource for LocalDeviceProviderSource {
             }
             ProviderExecutionPurpose::JevContext { .. }
             | ProviderExecutionPurpose::JevJudge { .. } => {
-                let mut settings = store.resolve_jev_settings(&request.provider_id)?;
+                let mut settings = self.resolve_jev_settings(&request.provider_id)?;
                 let parameters = ProviderJevParameters::from(&settings);
                 let secret = settings.api_key.take().map(String::into_bytes);
                 ProviderConnectionMaterial {
@@ -338,9 +362,6 @@ impl ProviderExecutionSource for LocalDeviceProviderSource {
                 }
             }
         };
-        if !can_start() {
-            return Err(DeviceProviderError::AuthorityEnded);
-        }
         Ok(material)
     }
 }

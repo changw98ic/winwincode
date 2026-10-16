@@ -269,12 +269,13 @@ fn shutdown_recovery_closes_pending_calls_and_preserves_unknown_usage_and_retain
     let config = valid_config(root.path());
     let config_path = root.path().join("session.json");
     fs::write(&config_path, config.to_string()).unwrap();
-    drop(winwincode_provider::DeviceProviderStore::open(&root.path().join("providers")).unwrap());
-    let db = rusqlite::Connection::open(
-        root.path()
-            .join("providers/runtime/provider-runtime.sqlite3"),
-    )
-    .unwrap();
+    let runtime_directory =
+        winwincode_provider::ProviderRuntimeStore::prepare(&root.path().join("providers"))
+            .unwrap()
+            .directory()
+            .to_path_buf();
+    let db =
+        rusqlite::Connection::open(runtime_directory.join("provider-runtime.sqlite3")).unwrap();
     let fixture: serde_json::Value = serde_json::from_str(include_str!(
         "../../../tests/fixtures/contracts/execution-port.valid.json"
     ))
@@ -306,7 +307,7 @@ fn shutdown_recovery_closes_pending_calls_and_preserves_unknown_usage_and_retain
         &retained_open,
         "SYNTHETIC_RETAINED_RESPONSE",
     )];
-    winwincode_provider::DeviceProviderStore::open(&root.path().join("providers"))
+    winwincode_provider::ProviderRuntimeStore::open_existing(&runtime_directory)
         .unwrap()
         .retain_stored_model_exchange_chunks(&retained_open, &retained_chunks)
         .unwrap();

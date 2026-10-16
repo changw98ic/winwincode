@@ -964,17 +964,12 @@ impl ProviderRuntimeStore {
             let mut leak_gate = CredentialLeakGate::new();
             leak_gate.track_secret(&secret);
             for (name, value) in &material.custom_headers {
-                if config.protocol
-                    == winwincode_api::generated::DeviceProviderProtocol::OpenaiResponses
-                    && name.eq_ignore_ascii_case("x-openai-internal-codex-responses-lite")
-                    && value == "true"
-                {
-                    continue;
-                }
-                if let Ok(sensitive) = crate::ResolvedSecret::from_bytes(value.as_bytes().to_vec())
-                {
-                    leak_gate.track_secret(&sensitive);
-                }
+                leak_gate.track_provider_header(
+                    name,
+                    value,
+                    config.protocol
+                        == winwincode_api::generated::DeviceProviderProtocol::OpenaiResponses,
+                );
             }
             if let Some(account) = &material.codex_account
                 && let Ok(sensitive) =
@@ -1918,9 +1913,10 @@ mod tests {
     fn provider_adapter_setup_preserves_storage_io_encoding_failure_before_any_physical_send() {
         let root =
             std::env::temp_dir().join(format!("wwc-model-setup-source-{}", std::process::id()));
-        let store = DeviceProviderStore::open(&root).unwrap();
+        let store = ProviderRuntimeStore::prepare(&root).unwrap();
         let config = serde_json::json!({"providerId":"setup-fixture","displayName":"fixture","endpoint":"https://example.com/responses","protocol":"canonical","modelIds":["fixture-model"],"enabled":true});
-        store
+        DeviceProviderStore::open(&root)
+            .unwrap()
             .connection
             .execute(
                 "INSERT INTO providers VALUES (?1,?2,?3)",
@@ -1988,7 +1984,6 @@ mod tests {
             );
         }
         let attempts: i64 = store
-            .runtime
             .connection
             .query_row(
                 "SELECT count(*) FROM model_invocation_attempts WHERE state != 'not_sent'",
@@ -2042,10 +2037,9 @@ mod tests {
                 .unwrap()
                 .as_nanos()
         ));
-        let store = DeviceProviderStore::open(&root).unwrap();
-        let accounting = DeviceProviderStore::open(&root).unwrap();
+        let store = ProviderRuntimeStore::prepare(&root).unwrap();
+        let accounting = ProviderRuntimeStore::prepare(&root).unwrap();
         store
-            .runtime
             .connection
             .busy_timeout(Duration::from_millis(50))
             .unwrap();
@@ -2083,7 +2077,6 @@ mod tests {
         let transaction_started = Arc::new(AtomicBool::new(false));
         let observed = Arc::clone(&transaction_started);
         accounting
-            .runtime
             .connection
             .authorizer(Some(move |context: AuthContext<'_>| {
                 if matches!(
@@ -2098,7 +2091,6 @@ mod tests {
             }))
             .unwrap();
         accounting
-            .runtime
             .connection
             .create_scalar_function(
                 "json_extract",
@@ -2192,7 +2184,7 @@ mod tests {
     fn invalid_local_model_requests_retain_a_request_failure_before_provider_resolution() {
         let directory =
             std::env::temp_dir().join(format!("wwc-invalid-model-request-{}", std::process::id()));
-        let store = DeviceProviderStore::open(&directory).unwrap();
+        let store = ProviderRuntimeStore::prepare(&directory).unwrap();
         let fixture: serde_json::Value = serde_json::from_str(include_str!(
             "../../../tests/fixtures/contracts/execution-port.valid.json"
         ))
@@ -2244,7 +2236,7 @@ mod tests {
                 .unwrap()
                 .as_nanos()
         ));
-        let store = DeviceProviderStore::open(&root).unwrap();
+        let store = ProviderRuntimeStore::prepare(&root).unwrap();
         let fixture: serde_json::Value = serde_json::from_str(include_str!(
             "../../../tests/fixtures/contracts/execution-port.valid.json"
         ))
@@ -2350,7 +2342,7 @@ mod tests {
             "wwc-model-preparation-expiry-{}",
             std::process::id()
         ));
-        let store = DeviceProviderStore::open(&root).unwrap();
+        let store = ProviderRuntimeStore::prepare(&root).unwrap();
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         listener.set_nonblocking(true).unwrap();
         let port = listener.local_addr().unwrap().port();
@@ -2372,7 +2364,8 @@ mod tests {
             }
         });
         let config = serde_json::json!({"providerId":"lease-fixture","displayName":"fixture","endpoint":format!("https://127.0.0.1:{port}/v1/responses"),"protocol":"canonical","modelIds":["fixture-model"],"enabled":true});
-        store
+        DeviceProviderStore::open(&root)
+            .unwrap()
             .connection
             .execute(
                 "INSERT INTO providers VALUES (?1,?2,?3)",
@@ -2425,7 +2418,6 @@ mod tests {
             "expired first start never reaches local HTTP fixture"
         );
         let prepared: Option<Vec<u8>> = store
-            .runtime
             .connection
             .query_row(
                 "SELECT prepared_payload FROM exchanges WHERE exchange_id=?1",
@@ -2507,15 +2499,15 @@ mod tests {
                     .unwrap()
                     .as_nanos()
             ));
-            let device = DeviceProviderStore::open(&root).unwrap();
+            let device = ProviderRuntimeStore::prepare(&root).unwrap();
             let live = Arc::new(AtomicBool::new(true));
             let calls = Arc::new(AtomicUsize::new(0));
-            let store = ProviderRuntimeStore::open_existing(device.runtime.directory())
+            let store = ProviderRuntimeStore::open_existing(device.directory())
                 .unwrap()
                 .with_execution_source(Arc::new(Source {
                     live: Arc::clone(&live),
                     calls: Arc::clone(&calls),
-                    cancel_directory: cancel.then(|| device.runtime.directory().to_path_buf()),
+                    cancel_directory: cancel.then(|| device.directory().to_path_buf()),
                 }));
             let fixture: serde_json::Value = serde_json::from_str(include_str!(
                 "../../../tests/fixtures/contracts/execution-port.valid.json"
@@ -2658,7 +2650,7 @@ mod tests {
     fn prepared_payload_is_exact_single_write_and_fenced() {
         let directory =
             std::env::temp_dir().join(format!("wwc-prepared-model-{}", std::process::id()));
-        let store = DeviceProviderStore::open(&directory).unwrap();
+        let store = ProviderRuntimeStore::prepare(&directory).unwrap();
         let fixture: serde_json::Value = serde_json::from_str(include_str!(
             "../../../tests/fixtures/contracts/execution-port.valid.json"
         ))
@@ -2676,7 +2668,6 @@ mod tests {
         let original = serde_json::to_string(&open).unwrap();
         let digest = format!("{:x}", Sha256::digest(original.as_bytes()));
         store
-            .runtime
             .connection
             .execute(
                 "INSERT INTO exchanges (exchange_id, digest, request_open) VALUES (?1, ?2, ?3)",
@@ -2691,9 +2682,8 @@ mod tests {
         assert!(store.retain_prepared_payload(&open, b"overwrite").is_err());
         assert!(store.prepared_model_retry_payload(&open).unwrap().is_none());
         drop(store);
-        let store = DeviceProviderStore::open(&directory).unwrap();
+        let store = ProviderRuntimeStore::prepare(&directory).unwrap();
         let saved: Vec<u8> = store
-            .runtime
             .connection
             .query_row(
                 "SELECT prepared_payload FROM exchanges WHERE exchange_id=?1",
@@ -2703,7 +2693,7 @@ mod tests {
             .unwrap();
         assert_eq!(saved, prepared);
         assert!(store.retain_prepared_payload(&open, prepared).is_err());
-        store.runtime.connection.execute(
+        store.connection.execute(
             "INSERT INTO model_retry_state(exchange_id,policy_attempt,wake_ms,decision) VALUES(?1,2,0,'deferred_until')",
             [&open.model_exchange_id.0],
         ).unwrap();
@@ -2721,7 +2711,7 @@ mod tests {
             "UPDATE exchanges SET prepared_payload=NULL,prepared_payload_digest=NULL",
             "UPDATE exchanges SET exchange_id='mdl_rebound'",
         ] {
-            assert!(store.runtime.connection.execute_batch(mutation).is_err());
+            assert!(store.connection.execute_batch(mutation).is_err());
         }
         let mut rebound = open.clone();
         rebound.route.route = "changed-gateway".into();
@@ -2729,7 +2719,6 @@ mod tests {
         let changed_digest = format!("{:x}", Sha256::digest(changed_request.as_bytes()));
         assert!(
             store
-                .runtime
                 .connection
                 .execute(
                     "UPDATE exchanges SET request_open=?1,digest=?2",
@@ -2738,7 +2727,6 @@ mod tests {
                 .is_err()
         );
         store
-            .runtime
             .connection
             .execute_batch(
                 "SAVEPOINT corrupt_prepared_fixture; DROP TRIGGER prepared_model_payload_immutable;
@@ -2747,7 +2735,6 @@ mod tests {
             .unwrap();
         assert!(store.prepared_model_retry_payload(&open).is_err());
         store
-            .runtime
             .connection
             .execute_batch(
                 "ROLLBACK TO corrupt_prepared_fixture; RELEASE corrupt_prepared_fixture;",
@@ -2761,7 +2748,6 @@ mod tests {
             Some(prepared.as_slice())
         );
         store
-            .runtime
             .connection
             .execute(
                 "INSERT INTO accounting_closed_attempts(job_id,attempt,lease_id) VALUES(?1,?2,?3)",
@@ -2774,13 +2760,11 @@ mod tests {
             .unwrap();
         assert!(store.prepared_model_retry_payload(&open).is_err());
         store
-            .runtime
             .connection
             .execute("DELETE FROM accounting_closed_attempts", [])
             .unwrap();
         for (cancelled, chunks) in [(1, None), (0, Some("[]"))] {
             store
-                .runtime
                 .connection
                 .execute(
                     "UPDATE exchanges SET cancelled=?1, chunks=?2",
@@ -2793,7 +2777,7 @@ mod tests {
             fenced.model_exchange_id.0 = format!("mdl_{cancelled:026}");
             let request = serde_json::to_string(&fenced).unwrap();
             let digest = format!("{:x}", Sha256::digest(request.as_bytes()));
-            store.runtime.connection.execute(
+            store.connection.execute(
                 "INSERT INTO exchanges(exchange_id,digest,request_open,cancelled,chunks) VALUES(?1,?2,?3,?4,?5)",
                 params![fenced.model_exchange_id.0,digest,request,cancelled,chunks],
             ).unwrap();

@@ -3,7 +3,7 @@ use super::DeviceModels;
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use sha2::{Digest as _, Sha256};
 use winwincode_execution_port::generated::{EncodedPayload, ModelOpenMessage};
-use winwincode_provider::{DeviceProviderStore, audit_model_replay_metrics, model_failure};
+use winwincode_provider::{ProviderRuntimeStore, audit_model_replay_metrics, model_failure};
 
 #[test]
 fn mechanism_actual_empty_worker_model_queue_does_not_reload_foreign_history() {
@@ -25,7 +25,7 @@ fn mechanism_actual_empty_worker_model_queue_does_not_reload_foreign_history() {
     for raw_history_bytes in [1024 * 1024_usize, 10 * 1024 * 1024] {
         let root = tempfile::tempdir().unwrap();
         let directory = root.path().join("device");
-        let store = DeviceProviderStore::open(&directory).unwrap();
+        let store = ProviderRuntimeStore::prepare(&directory).unwrap();
         let mut models = DeviceModels::for_test(&directory);
         let mut stored_bytes = 0_u64;
         for index in 0..3 {
@@ -82,7 +82,7 @@ fn mechanism_actual_empty_worker_model_queue_does_not_reload_foreign_history() {
             "owned_exchanges":1,"foreign_exchanges":2,"physical_provider_requests":0}));
     }
     let value = serde_json::json!({"schema_version":1,"fixtureHistoricalSourceCommit":"e994faa55ac2baad964bea5c43a23d919497a9de",
-        "method":"DeviceModels::next_chunk -> recover_from_durable_store -> DeviceProviderStore::replay_model", "cases":cases});
+        "method":"DeviceModels::next_chunk -> recover_from_durable_store -> ProviderRuntimeStore::replay_model", "cases":cases});
     println!("MODEL_MECHANISM_AUDIT {value}");
     if let Some(path) = std::env::var_os("WWC_MECHANISM_AUDIT_OUTPUT") {
         let path = std::path::Path::new(&path);

@@ -27,7 +27,7 @@ use tokio_rustls::rustls::{
     pki_types::{PrivateKeyDer, PrivatePkcs8KeyDer},
 };
 use winwincode_execution_port::generated::{ExecutionPortMessage, ModelOpenMessage};
-use winwincode_provider::{DeviceModelAdmission, DeviceProviderStore};
+use winwincode_provider::{DeviceModelAdmission, ProviderRuntimeStore};
 
 const TEST: &str = "device_model::concurrency_tests::physical_attempt_tests::three_real_https_attempts_bound_restarted_retries_and_cancelled_waiters";
 const DIRECTORY: &str = "WWC_PHYSICAL_ATTEMPT_TEST_DIRECTORY";
@@ -251,7 +251,7 @@ fn serve(
 }
 
 fn seed_and_crash(directory: &Path, endpoint: &str) -> ! {
-    let _ = DeviceProviderStore::open(directory).unwrap();
+    let _ = ProviderRuntimeStore::prepare(directory).unwrap();
     let mut models = DeviceModels::for_test(directory);
     let database = crate::device_model::concurrency_tests::runtime_database(directory);
     for (provider, protocol) in [
@@ -298,7 +298,7 @@ fn seed_and_crash(directory: &Path, endpoint: &str) -> ! {
 )]
 fn recover_under_three_live_requests(directory: &Path) {
     let database = crate::device_model::concurrency_tests::runtime_database(directory);
-    let store = DeviceProviderStore::open(directory).unwrap();
+    let store = ProviderRuntimeStore::prepare(directory).unwrap();
     let mut models = DeviceModels::for_test(directory);
     for (member, index) in LIVE.into_iter().enumerate() {
         send(&mut models, &open("qwen", index, &format!("live-{member}")));
