@@ -13271,8 +13271,7 @@
             "$ref": "#/components/schemas/DeviceBindingIntent"
           },
           "pairingToken": {
-            "maxLength": 200,
-            "minLength": 8,
+            "minLength": 1,
             "type": "string"
           },
           "publicKey": {
@@ -30195,7 +30194,7 @@
     "https://schemas.winwincode.dev/winwincode/v1/domain.schema.json",
     "https://schemas.winwincode.dev/winwincode/v1/execution-port.schema.json"
   ],
-  "x-source-digest": "sha256:e5f51088a2e48fd87c1fc7c1cbf840f01f410462fbed937db69dc0d60021b312",
+  "x-source-digest": "sha256:ecc17e988fb38cacd824d14278112fb11696e1d058116dee25242ea9a088e1e0",
   "x-winwincode-client-metadata": {
     "http": {
       "authentication": {

@@ -293,7 +293,7 @@ async fn device_routes_return_exact_auth_errors_and_revocation_rejects_signed_re
     assert_eq!(revoked["revoked"], true);
     let (status, value) = bind(&server, &key, &binding).await;
     assert_error(status, &value, 403, "DEVICE_REVOKED");
-    for rejected in ["wrong", "expired"] {
+    for rejected in ["wrong", "expired", "short", "long"] {
         let (status, _, pairing) =
             request(&server, "/api/v1/devices/pairing", &valid, &owner).await;
         assert_eq!(status, 201);
@@ -308,13 +308,15 @@ async fn device_routes_return_exact_auth_errors_and_revocation_rejects_signed_re
                 .unwrap();
             pairing["pairingToken"].as_str().unwrap().to_owned()
         } else {
-            "wrong-pairing-token".to_owned()
+            match rejected {
+                "short" => "s".repeat(7),
+                "long" => "l".repeat(201),
+                _ => "wrong-pairing-token".to_owned(),
+            }
         };
         let mut rejected_request = binding.clone();
         rejected_request["requestId"] = json!(format!("rejected-pairing-{rejected}"));
         rejected_request["pairingToken"] = json!(token);
-        let (status, value) = bind(&server, &key, &rejected_request).await;
-        assert_error(status, &value, 401, "DEVICE_PAIRING_REJECTED");
         let device_directory = directory.join(format!("device-{rejected}"));
         let config = winwincode_device_client::DeviceBindConfig {
             data_directory: device_directory.clone(),
@@ -360,7 +362,9 @@ async fn device_routes_return_exact_auth_errors_and_revocation_rejects_signed_re
             tokio::task::spawn_blocking(move || winwincode_device_client::bind_device(&resumed))
                 .await
                 .unwrap()
-                .unwrap();
+                .unwrap_or_else(|error| {
+                    panic!("same-directory replacement after {rejected} token failed: {error}")
+                });
         assert_eq!(receipt.request_id.0, pending.request_id);
         let stored = winwincode_device_client::load_remote_binding(&store)
             .unwrap()
@@ -376,6 +380,8 @@ async fn device_routes_return_exact_auth_errors_and_revocation_rejects_signed_re
             )
             .unwrap();
         assert_eq!(count, 1);
+        let (status, value) = bind(&server, &key, &rejected_request).await;
+        assert_error(status, &value, 401, "DEVICE_PAIRING_REJECTED");
     }
     server.shutdown().await.unwrap();
     std::fs::remove_dir_all(directory).unwrap();

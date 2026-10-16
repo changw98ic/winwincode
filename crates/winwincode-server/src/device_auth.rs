@@ -144,9 +144,6 @@ impl DeviceAuthApplication {
         {
             return Err(DeviceAuthStoreError::InvalidRequest);
         }
-        if !(8..=200).contains(&field(request, "pairingToken")?.len()) {
-            return Err(DeviceAuthStoreError::InvalidRequest);
-        }
         let intent = &request["intent"];
         let node_id = prefixed_id("cnd_")?;
         let mut digits = [0u8; 12];

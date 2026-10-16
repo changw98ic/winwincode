@@ -66,6 +66,16 @@ test('Device public keys use unpadded standard Base64 and binding retries retain
   }
 })
 
+test('binding tokens are opaque nonempty strings and issued tokens retain their format bounds', () => {
+  for (const pairingToken of ['s'.repeat(7), 'l'.repeat(201)]) {
+    validatorsAgree('DeviceBindRequest', { schemaVersion, requestId, pairingToken, publicKey, intent }, true)
+    validatorsAgree('DevicePairingResponse', { schemaVersion, pairingToken, expiresAt: at }, false)
+  }
+  for (const pairingToken of ['', null, 7, {}]) {
+    validatorsAgree('DeviceBindRequest', { schemaVersion, requestId, pairingToken, publicKey, intent }, false)
+  }
+})
+
 test('application recovery projections preserve the exact approved target in every state', () => {
   const projection = {
     applicationId: `lar_${'0'.repeat(26)}`, approvalId: 'approval-1', baseCommit: 'a'.repeat(40),

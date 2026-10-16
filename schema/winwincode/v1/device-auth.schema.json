@@ -125,8 +125,7 @@
         },
         "pairingToken": {
           "type": "string",
-          "minLength": 8,
-          "maxLength": 200
+          "minLength": 1
         },
         "publicKey": {
           "type": "string",
