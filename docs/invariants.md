@@ -30,15 +30,18 @@
 
 约束：状态、命令回执、聚合日志记录和 outbox 事件在一个数据库事务中提交。调用方只能发送已经进入持久 outbox 的消息。发送尝试不能替代持久化。只有与原消息匹配的 ACK 才能推进或删除 outbox 项。
 
+Worker 延后发送暂时不可用的消息及依赖它的后续消息。取消 ACK 和独立执行的终态继续发送。同一运行时流、Artifact 分片和模型流保持顺序；终态等待它引用的事件和产物。重试成功后，Worker 从持久队列重新扫描先前跳过的依赖，再推进后续批次。重试沿用原消息和现有网络退避。
+
 源码依据：
 
 - `crates/winwincode-storage/src/lib.rs`：`append_state_commit` 依次写状态、日志、回执和 outbox，并由 `SqliteStorage::commit` 提交同一事务。
 - `crates/winwincode-control-plane/src/delivery_execution.rs`：`commit_and_dispatch` 先调用 `commit_delivery_and_job_intent`，再派发，最后用 `mark_job_dispatched` 标记持久 outbox 事件。
 - `crates/winwincode-codex/src/adapter.rs`：`take_execution_messages` 在返回消息前调用 `ExecutionOutbox::retain_in_transaction`。
 - `crates/winwincode-codex/src/outbox.rs`：`ExecutionOutbox::acknowledge_response`、`apply_runtime_ack`。
+- `crates/winwincode-worker/src/execution_effects.rs`：`flush_durable_outbox`、`execution_delivery_depends_on`。
 - `crates/winwincode-client-port/src/exchange/outbox.rs`：`OutboxSession::enqueue`、`acknowledge`、`compact_through`。
 
-相关测试：`crates/winwincode-control-plane/tests/delivery_atomic_transaction.rs`、`crates/winwincode-codex/src/storage_mechanism_regression.rs`、`tests/chat-execution-ack-loss-production.test.mjs`、`tests/chat-execution-transport-production.test.mjs`。
+相关测试：`crates/winwincode-control-plane/tests/delivery_atomic_transaction.rs`、`crates/winwincode-codex/src/storage_mechanism_regression.rs`、`crates/winwincode-worker/tests/support/durable_cancel_ack.rs`、`tests/chat-execution-ack-loss-production.test.mjs`、`tests/chat-execution-transport-production.test.mjs`。
 
 ## Device 绑定与身份恢复
 
@@ -46,7 +49,7 @@
 
 约束：Device 重启使用已保存的 Server URL 和身份。一次性配对令牌只用于建立绑定。每次签名使用新的单次挑战。已吊销绑定不能通过旧请求、重启或旧令牌重新激活。
 
-约束：Device 吊销必须在保存吊销事实的同一事务内收尾该 Device 的执行资源。系统按原 Worker 和 Worker instance 的组合关闭全部 running 或 cancelling slot，包括旧 attempt 的 slot。仍属于该实例的 Worker 标记为断开。系统同时收尾当前租约及其非终态 Job 和 admission reservation。原 Worker 不能再获得新任务。已有终态和其他 Device 的资源保持不变。无法确认的 tokens 和 cost 保持 unknown。reconciliation 保持 pending，并保留已知 tokens 下界和 Server 已观测的运行时。
+约束：Device 吊销必须在保存吊销事实的同一事务内收尾该 Device 的执行资源。系统按原 Worker 和 Worker instance 的组合关闭全部 running 或 cancelling slot，包括旧 attempt 的 slot。仍属于该实例的 Worker 标记为断开。系统同时收尾当前租约及其非终态 Job 和 admission reservation，并覆盖已经准备但尚未领取租约的预留。清理依据持久归属；绑定或启动授权已释放时仍须收尾原预留，其他 Device 的后继归属保持不变。确认从未派发的任务直接释放 reservation，保留金额 NULL，不生成待对账记录。已执行但无法确认的 tokens 和 cost 保持 unknown，reconciliation 保持 pending，并保留已知 tokens 下界和 Server 已观测的运行时。原 Worker 不能再获得新任务，已有终态保持不变。
 
 源码依据：`crates/winwincode-device-client/src/remote_auth.rs::bind_device`、`crates/winwincode-storage/src/device_auth.rs::bind_device_identity`、`revoke_device_identity`、`settle_revoked_executions`、`crates/winwincode-storage/src/worker_session_slots.rs::fence_device_worker_sessions_in_transaction`、`crates/winwincode-server/src/device_auth.rs::DeviceAuthApplication`。
 
@@ -133,7 +136,11 @@ Device 必须先把带 `started_at` 的应用记录写入 `candidate_application
 
 Device 重启后核对原基线到目标分支 HEAD 之间的应用尾注。找到原应用提交时补记结果。目标分支仍在原基线、工作树干净且没有残留应用工作区时，记录 `not_started`。其他无法确定的结果记录为 `outcome_unknown`。
 
-Device 启动完成日志核对后，在有效的当前占用授权下主动补报。已绑定 Device 的新实例先入队 Hello，再入队恢复的应用结果和 Worker 停止回执。已有未确认消息保留原序列与原字节。每次新的占用 offer 安装本地 mirror 后，也执行相同应用补报。journal 保存已进入持久 outbox 的 `reported_epoch`，避免同一 epoch 重复补报。旧 instance 或旧占用下的应用命令返回拒绝 ACK 并消费游标，使后续恢复授权能够到达。
+某个应用的仓库暂时无法访问时，Device 保留该应用的未完成记录和具体诊断，继续 Hello、Worker 装配及其他应用恢复。路径或权限恢复后，再次核对该应用。无法读取仓库本身不构成 `outcome_unknown` 事实。
+
+实际写入前，工作树脏、候选引用暂时不可用或访问权限不足等拒绝走 `not_started` 恢复流程。该应用不产生完成失败回执，候选保持可重试状态。前提恢复后，用户可沿原应用和审批重试。真正开始下一次应用前，Device 清除上一次未写入的标记；后续崩溃重新核对 Git 事实。
+
+Device 启动完成日志核对后，在有效的当前占用授权下主动补报。已绑定 Device 的新实例先入队 Hello，再入队恢复的应用结果和 Worker 停止回执。已有未确认消息保留原序列与原字节。每次新的占用 offer 安装本地 mirror 后，也执行相同应用补报。journal 保存已进入持久 outbox 的 `reported_epoch`，避免同一事实在同一 epoch 重复补报。持久化结果变化时，该标记失效，新事实继续补报。旧 instance 或旧占用下的应用命令返回拒绝 ACK 并消费游标，使后续恢复授权能够到达。
 
 恢复事实通过当前占用授权下的 `client.application.reconciled` 上报。Server 同时核对原审批与候选绑定。旧 epoch 的普通 `apply_result` 只写事实。候选已到终态时，补报保留真实应用事实。`not_started` 进入 `awaiting_retry`，用户再次申请后，Server 才能在当前租约下授予同一应用的 `reconciledRetry`。`outcome_unknown` 进入 blocked，后续应用请求返回 `409 WRONG_STATE`。
 

@@ -475,6 +475,20 @@ impl RemoteWorkerPort {
         )
     }
 
+    #[cfg(feature = "test-support")]
+    pub fn retry_state_for_test(
+        &self,
+        message: &ExecutionPortMessage,
+    ) -> Option<(std::time::Instant, u32)> {
+        let io = self.relay.io.lock().ok()?;
+        let retry = io
+            .retries
+            .get(&RelayRetryQueue::Exchange(Some(std::mem::discriminant(
+                message,
+            ))))?;
+        Some((retry.retry_at?, retry.retry.attempt()))
+    }
+
     pub(crate) async fn close_retained_terminal(
         &mut self,
         delivery: &winwincode_codex::DurableExecutionDelivery,

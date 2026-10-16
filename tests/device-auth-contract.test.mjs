@@ -52,6 +52,7 @@ test('Device authentication schemas and browser validators agree on wire message
     delete missingVersion.schemaVersion
     validatorsAgree(name, missingVersion, false)
   }
+  validatorsAgree('DeviceAuthErrorResponse', { schemaVersion, code: 'DEVICE_PAIRING_REJECTED' }, true)
 })
 
 test('Device public keys use unpadded standard Base64 and binding retries retain a valid identity', () => {
@@ -91,4 +92,5 @@ test('OpenAPI distinguishes Owner cookie authorization from Device request signa
   for (const status of ['400', '401', '403', '409', '503']) {
     assert.equal(bind.responses[status].content['application/json'].schema.$ref, '#/components/schemas/DeviceAuthErrorResponse')
   }
+  assert.match(bind.responses['401'].description, /DEVICE_AUTH_REQUIRED.*DEVICE_PAIRING_REJECTED/u)
 })

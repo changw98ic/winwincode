@@ -241,6 +241,7 @@ fn run_device_service_with_roots_until(
 
     loop {
         let mut store = DeviceStore::open(&config.data_directory)?;
+        crate::remote_auth::retry_remote_authentication(&store)?;
         if crate::remote_auth::load_remote_binding(&store)?
             .is_some_and(|binding| !binding.is_bound())
         {
@@ -350,23 +351,7 @@ fn run_device_service_with_roots_until(
                 Err(error) => {
                     drop(preview_tunnel.take());
                     daemon.shutdown_workers()?;
-                    let reason = if let DaemonError::Network(failure) = &error {
-                        match failure.http_status {
-                            Some(403) => "Device 绑定已吊销；服务已停止。".to_owned(),
-                            Some(401) => "Device 身份认证失败；服务已停止。".to_owned(),
-                            _ => error.to_string(),
-                        }
-                    } else {
-                        error.to_string()
-                    };
-                    if matches!(&error, DaemonError::Network(failure) if matches!(failure.http_status, Some(401 | 403)))
-                    {
-                        crate::remote_auth::record_remote_failure(
-                            &DeviceStore::open(&config.data_directory)?,
-                            &reason,
-                        )?;
-                    }
-                    append_log(&config.data_directory, &reason)?;
+                    append_log(&config.data_directory, &error.to_string())?;
                     return Err(DeviceServiceError::Daemon(error));
                 }
             };
@@ -833,6 +818,239 @@ mod tests {
                 .contains("service started")
         );
         fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)]
+    fn authentication_failure_allows_signed_service_restart_and_revocation_stays_terminal() {
+        use base64::{Engine as _, engine::general_purpose::STANDARD_NO_PAD as BASE64};
+        use ed25519_dalek::{Signature, SigningKey};
+        use std::io::Read as _;
+        use std::net::{TcpListener, TcpStream};
+        use std::sync::atomic::AtomicUsize;
+
+        let root = temporary_directory("authentication-restart");
+        let _ = fs::remove_dir_all(&root);
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server_url = format!("http://{address}");
+        let stopping = Arc::new(AtomicBool::new(false));
+        let stopped = Arc::clone(&stopping);
+        let exchanges = Arc::new(AtomicUsize::new(0));
+        let received = Arc::clone(&exchanges);
+        let response_status = Arc::new(AtomicUsize::new(401));
+        let responding_status = Arc::clone(&response_status);
+        let revoked = Arc::new(AtomicBool::new(false));
+        let responding_revoked = Arc::clone(&revoked);
+        let server = thread::spawn(move || {
+            while !stopped.load(Ordering::Acquire) {
+                let (mut socket, _) = listener.accept().unwrap();
+                if stopped.load(Ordering::Acquire) {
+                    break;
+                }
+                socket
+                    .set_read_timeout(Some(Duration::from_secs(5)))
+                    .unwrap();
+                let mut head = Vec::new();
+                let mut byte = [0_u8; 1];
+                while !head.ends_with(b"\r\n\r\n") {
+                    socket.read_exact(&mut byte).unwrap();
+                    head.push(byte[0]);
+                }
+                let head = String::from_utf8(head).unwrap();
+                let path = head
+                    .lines()
+                    .next()
+                    .unwrap()
+                    .split_whitespace()
+                    .nth(1)
+                    .unwrap();
+                let size = head
+                    .lines()
+                    .find_map(|line| {
+                        let (name, value) = line.split_once(':')?;
+                        name.eq_ignore_ascii_case("content-length")
+                            .then(|| value.trim().parse::<usize>().unwrap())
+                    })
+                    .unwrap_or(0);
+                let mut body = vec![0_u8; size];
+                socket.read_exact(&mut body).unwrap();
+                if path == "/internal/v1/device/challenge" {
+                    let body = br#"{"schemaVersion":"winwincode/v1","challengeId":"fixture","challenge":"fixture","expiresAt":"2099-01-01T00:00:00.000Z"}"#;
+                    write!(
+                        socket,
+                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                        body.len()
+                    )
+                    .unwrap();
+                    socket.write_all(body).unwrap();
+                } else if path == EXCHANGE_PATH {
+                    let headers: std::collections::BTreeMap<_, _> = head
+                        .lines()
+                        .filter_map(|line| line.split_once(':'))
+                        .map(|(name, value)| (name.to_ascii_lowercase(), value.trim()))
+                        .collect();
+                    let key = SigningKey::from_bytes(&[7; 32]).verifying_key();
+                    assert_eq!(
+                        headers["x-winwincode-device-public-key"],
+                        BASE64.encode(key.as_bytes())
+                    );
+                    let signature = Signature::from_slice(
+                        &BASE64
+                            .decode(headers["x-winwincode-device-signature"])
+                            .unwrap(),
+                    )
+                    .unwrap();
+                    key.verify_strict(
+                        &winwincode_client_port::device_auth::signing_bytes(
+                            "fixture",
+                            "fixture",
+                            "POST",
+                            EXCHANGE_PATH,
+                            &format!("cnd_{}", "A".repeat(26)),
+                            &body,
+                        ),
+                        &signature,
+                    )
+                    .unwrap();
+                    received.fetch_add(1, Ordering::AcqRel);
+                    let accepted = if responding_status.load(Ordering::Acquire) == 200 {
+                        let request: serde_json::Value = serde_json::from_slice(&body).unwrap();
+                        serde_json::to_vec(&serde_json::json!({"schemaVersion":"winwincode/v1","ackSequence":request["frames"].as_array().unwrap().last().unwrap()["sequence"],"frames":[]})).unwrap()
+                    } else {
+                        Vec::new()
+                    };
+                    let body = if !accepted.is_empty() {
+                        accepted.as_slice()
+                    } else if responding_revoked.load(Ordering::Acquire) {
+                        br#"{"schemaVersion":"winwincode/v1","code":"DEVICE_REVOKED"}"#.as_slice()
+                    } else if responding_status.load(Ordering::Acquire) == 403 {
+                        br#"{"schemaVersion":"winwincode/v1","code":"PERMISSION_DENIED"}"#
+                            .as_slice()
+                    } else {
+                        b""
+                    };
+                    write!(
+                        socket,
+                        "HTTP/1.1 {} Rejected\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                        responding_status.load(Ordering::Acquire),
+                        body.len()
+                    )
+                    .unwrap();
+                    socket.write_all(body).unwrap();
+                } else {
+                    assert_eq!(path, PREVIEW_TUNNEL_PATH);
+                    socket.write_all(b"HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").unwrap();
+                }
+            }
+        });
+        let config = DeviceServiceConfig {
+            data_directory: root.clone(),
+            server_url: server_url.clone(),
+            server_display_name: "Server".to_owned(),
+            device_display_name: "Device".to_owned(),
+        };
+        let mut store = DeviceStore::open(&root).unwrap();
+        let identity =
+            ensure_device_identity(&mut store, &device_identity_seed("Device"), &stamp()).unwrap();
+        let node = format!("cnd_{}", "A".repeat(26));
+        crate::adopt_enrollment(
+            &mut store,
+            identity.identity().device_id(),
+            &crate::IssuedEnrollment {
+                client_node_id: node.clone(),
+                public_client_id: "123456789".to_owned(),
+            },
+            &stamp(),
+        )
+        .unwrap();
+        store.connection().unwrap().execute(
+            "INSERT INTO remote_device_binding (singleton,server_url,signing_key,request_id,intent_json,ca_roots_json,client_node_id,public_client_id,owner_user_id,bound_at) VALUES(1,?1,?2,'dbr_authentication_restart','{}','[]',?3,'123456789','usr_owner',?4)",
+            rusqlite::params![server_url, [7_u8; 32].as_slice(), node, stamp()],
+        ).unwrap();
+        let mut expected_exchanges = 0;
+        for (status, attempts) in [(401, 2), (403, 1)] {
+            response_status.store(status, Ordering::Release);
+            for restart in 0..2 {
+                if restart == 1 {
+                    crate::remote_auth::record_remote_failure(
+                        &store,
+                        if status == 401 {
+                            "Device 身份认证失败；服务已停止。"
+                        } else {
+                            "Device 绑定已吊销；服务已停止。"
+                        },
+                    )
+                    .unwrap();
+                }
+                let started = Instant::now();
+                let result = run_device_service_until(&config, || {
+                    started.elapsed() > Duration::from_secs(5)
+                });
+                assert!(
+                    matches!(result, Err(DeviceServiceError::Daemon(DaemonError::Network(failure))) if failure.http_status == Some(u16::try_from(status).unwrap()))
+                );
+                expected_exchanges += attempts;
+                assert_eq!(exchanges.load(Ordering::Acquire), expected_exchanges);
+                assert!(
+                    crate::remote_auth::load_remote_binding(&store)
+                        .unwrap()
+                        .unwrap()
+                        .failure_reason
+                        .is_none()
+                );
+            }
+        }
+        let binding_material = || {
+            store.connection().unwrap().query_row("SELECT signing_key,request_id,intent_json FROM remote_device_binding WHERE singleton=1", [], |row| Ok((row.get::<_,Vec<u8>>(0)?,row.get::<_,String>(1)?,row.get::<_,String>(2)?))).unwrap()
+        };
+        let original_material = binding_material();
+        crate::remote_auth::record_remote_failure(&store, "Device 绑定已吊销；服务已停止。")
+            .unwrap();
+        response_status.store(200, Ordering::Release);
+        let expected_before_success = expected_exchanges;
+        let started = Instant::now();
+        run_device_service_until(&config, || {
+            exchanges.load(Ordering::Acquire) > expected_before_success
+                || started.elapsed() > Duration::from_secs(5)
+        })
+        .expect("an active identity recovers after an old ambiguous 403 cache");
+        expected_exchanges += 1;
+        assert_eq!(exchanges.load(Ordering::Acquire), expected_exchanges);
+        assert_eq!(binding_material(), original_material);
+        assert!(
+            crate::remote_auth::load_remote_binding(&store)
+                .unwrap()
+                .unwrap()
+                .failure_reason
+                .is_none()
+        );
+        crate::remote_auth::record_remote_failure(&store, "Device 绑定已吊销；服务已停止。")
+            .unwrap();
+        response_status.store(403, Ordering::Release);
+        revoked.store(true, Ordering::Release);
+        assert!(
+            matches!(run_device_service_until(&config, || false), Err(DeviceServiceError::Daemon(DaemonError::Network(failure))) if failure.http_status == Some(403))
+        );
+        expected_exchanges += 1;
+        assert_eq!(
+            crate::remote_auth::load_remote_binding(&store)
+                .unwrap()
+                .unwrap()
+                .failure_reason
+                .as_deref(),
+            Some(crate::remote_auth::DEVICE_REVOKED_REASON)
+        );
+        assert!(matches!(
+            run_device_service_until(&config, || false),
+            Err(DeviceServiceError::InvalidConfig(_))
+        ));
+        assert_eq!(exchanges.load(Ordering::Acquire), expected_exchanges);
+        stopping.store(true, Ordering::Release);
+        drop(TcpStream::connect(address).unwrap());
+        server.join().unwrap();
+        drop(store);
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

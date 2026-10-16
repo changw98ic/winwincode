@@ -1278,3 +1278,400 @@ fn a_committed_chat_retry_restores_missing_device_dispatch_and_keeps_live_bindin
     application.shutdown().unwrap();
     let _ = std::fs::remove_dir_all(root);
 }
+
+#[test]
+fn revoke_releases_a_prepared_quick_dispatch_without_a_lease() {
+    revoke_prepared_quick_dispatch(false, false);
+}
+
+#[test]
+fn revoke_releases_a_started_admission_after_storage_reopens_before_claim() {
+    revoke_prepared_quick_dispatch(true, false);
+}
+
+#[test]
+fn revoke_releases_a_prepared_admission_after_facts_fail_and_binding_releases() {
+    revoke_prepared_quick_dispatch(false, true);
+}
+
+#[allow(clippy::too_many_lines)]
+fn revoke_prepared_quick_dispatch(started: bool, fail_facts: bool) {
+    use winwincode_storage::{
+        ExecutionAdmissionBoundary, ExecutionReservationReleaseReason, ExecutionReservationRequest,
+        ExecutionReservationStart, ExecutionReservationState,
+    };
+    let root = temporary_root(if fail_facts {
+        "revoke-before-facts"
+    } else if started {
+        "revoke-started"
+    } else {
+        "revoke-queued"
+    });
+    let application = stage_replay_session(&root, 1_500);
+    let holder = id("usr", 1);
+    let request = chat_submit_request(1_511, 1, &holder, 1);
+    let mut storage = open_storage(&root);
+    storage.device_execution_binding_ledger().unwrap();
+    let connection = rusqlite::Connection::open(storage.database_path()).unwrap();
+    if fail_facts {
+        connection.execute_batch("CREATE TRIGGER fail_revoke_dispatch_facts BEFORE INSERT ON device_execution_reservation_facts BEGIN SELECT RAISE(ABORT, 'injected before dispatch facts'); END;").unwrap();
+        assert_eq!(
+            application
+                .command(&principal(&holder), CommandFamily::Session, request)
+                .unwrap_err()
+                .status(),
+            503
+        );
+        connection
+            .execute_batch("DROP TRIGGER fail_revoke_dispatch_facts")
+            .unwrap();
+    } else {
+        completed(
+            application
+                .command(&principal(&holder), CommandFamily::Session, request)
+                .unwrap(),
+        );
+    }
+    let job_id = queued_job_id(&mut storage);
+    let facts = DeviceExecutionBindingService::new(&mut storage)
+        .facts(&job_id.0)
+        .unwrap();
+    assert_eq!(facts.is_none(), fail_facts);
+    let grant = storage
+        .worker_launch_grant_ledger()
+        .unwrap()
+        .newest_grant_for_product_session(&id("psn", 1))
+        .unwrap()
+        .unwrap();
+    if fail_facts {
+        let binding = DeviceExecutionBindingService::new(&mut storage)
+            .snapshot(&grant.worker_session_id)
+            .unwrap()
+            .unwrap();
+        let now = instant("2027-01-15T08:00:02.000Z");
+        DeviceExecutionBindingService::new(&mut storage)
+            .release(
+                &winwincode_storage::DeviceExecutionBindingRelease::try_new(
+                    &grant.worker_session_id,
+                    id("req", 1_516),
+                    binding.revision,
+                    now.clone(),
+                )
+                .unwrap(),
+                &now,
+            )
+            .unwrap();
+    }
+    assert!(
+        storage
+            .execution_registry()
+            .unwrap()
+            .load_lease(&job_id)
+            .unwrap()
+            .is_none()
+    );
+    storage.initialize_device_auth().unwrap();
+    connection.execute(
+        "INSERT INTO device_identity_bindings VALUES(?1,'fixture-public-key',?2,?3,'fixture-intent','fixture-token','{}',?4,NULL)",
+        rusqlite::params![grant.client_node_id,holder,id("req",1_512),"2027-01-15T07:59:00.000Z"],
+    ).unwrap();
+    let original = storage
+        .execution_admission()
+        .unwrap()
+        .load_reservation_by_job(&job_id)
+        .unwrap()
+        .unwrap();
+    let boundary = ExecutionAdmissionBoundary::ProductSession {
+        organization_id: original.scope.organization_id.clone(),
+        project_id: original.scope.project_id.clone(),
+        product_session_id: original.scope.product_session_id.clone(),
+    };
+    connection
+        .execute(
+            "UPDATE execution_admission_policies SET token_budget=100,cost_budget_microunits=100",
+            [],
+        )
+        .unwrap();
+    assert!(storage.pending_accounting_leases(0).unwrap().is_empty());
+    if started {
+        storage
+            .execution_admission()
+            .unwrap()
+            .start(&ExecutionReservationStart {
+                scope: original.scope.clone(),
+                worker_pool_id: original.worker_pool_id.clone(),
+                job_id: job_id.clone(),
+                request_id: RequestId(id("req", 1_513)),
+                expected_revision: original.revision,
+                started_at: instant("2027-01-15T08:00:01.000Z"),
+            })
+            .unwrap();
+    }
+    let usage = storage
+        .execution_admission()
+        .unwrap()
+        .usage(&boundary)
+        .unwrap();
+    assert_eq!(
+        (usage.queued, usage.running),
+        if started { (0, 1) } else { (1, 0) }
+    );
+    application.shutdown().unwrap();
+    drop(application);
+    drop(storage);
+    let mut storage = open_storage(&root);
+    assert!(
+        storage
+            .execution_registry()
+            .unwrap()
+            .load_lease(&job_id)
+            .unwrap()
+            .is_none()
+    );
+    storage
+        .revoke_device_identity(&grant.client_node_id, &holder, "2027-01-15T08:00:07.000Z")
+        .unwrap();
+    let job = storage.load_execution_job_record(&job_id).unwrap().unwrap();
+    assert_eq!(job.state, ExecutionJobState::Failed);
+    assert!(job.cancellation.is_some());
+    assert!(
+        storage
+            .execution_registry()
+            .unwrap()
+            .load_lease(&job_id)
+            .unwrap()
+            .is_none()
+    );
+    let released = storage
+        .execution_admission()
+        .unwrap()
+        .load_reservation_by_job(&job_id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(released.state, ExecutionReservationState::Released);
+    assert_eq!(
+        released.release_reason,
+        Some(ExecutionReservationReleaseReason::Cancelled)
+    );
+    assert_eq!(released.actual_tokens, None);
+    assert_eq!(released.actual_cost_microunits, None);
+    let reconciliations: i64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM execution_admission_reconciliation WHERE job_id=?1",
+            [&job_id.0],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(reconciliations, 0);
+    assert!(storage.pending_accounting_leases(0).unwrap().is_empty());
+    let boundary_usage = storage
+        .execution_admission()
+        .unwrap()
+        .usage(&boundary)
+        .unwrap();
+    assert_eq!(
+        (
+            boundary_usage.queued,
+            boundary_usage.running,
+            boundary_usage.reserved_tokens,
+            boundary_usage.reserved_cost_microunits
+        ),
+        (0, 0, 0, 0)
+    );
+    assert_eq!(boundary_usage.accounting_pending, 0);
+    assert_eq!(boundary_usage.committed_cost_microunits, Some(0));
+    assert_eq!(
+        DeviceExecutionBindingService::new(&mut storage)
+            .facts(&job_id.0)
+            .unwrap(),
+        facts
+    );
+    storage
+        .revoke_device_identity(&grant.client_node_id, &holder, "2027-01-15T08:00:08.000Z")
+        .unwrap();
+    assert_eq!(
+        storage.load_execution_job_record(&job_id).unwrap().unwrap(),
+        job
+    );
+    assert_eq!(
+        storage
+            .execution_admission()
+            .unwrap()
+            .load_reservation_by_job(&job_id)
+            .unwrap()
+            .unwrap(),
+        released
+    );
+    let next_job = ExecutionJobId(id("job", 1_514));
+    let next = storage
+        .execution_admission()
+        .unwrap()
+        .reserve(&ExecutionReservationRequest {
+            scope: original.scope.clone(),
+            user_id: original.user_id,
+            worker_pool_id: original.worker_pool_id.clone(),
+            job_id: next_job.clone(),
+            request_id: RequestId(id("req", 1_514)),
+            repository_access: original.repository_access,
+            reserved_tokens: Some(1),
+            reserved_cost_microunits: Some(1),
+            runtime_limit_millis: original.runtime_limit_millis,
+            submitted_at: instant("2027-01-15T08:00:09.000Z"),
+        })
+        .unwrap();
+    storage
+        .execution_admission()
+        .unwrap()
+        .start(&ExecutionReservationStart {
+            scope: original.scope,
+            worker_pool_id: original.worker_pool_id,
+            job_id: next_job,
+            request_id: RequestId(id("req", 1_515)),
+            expected_revision: next.reservation.revision,
+            started_at: instant("2027-01-15T08:00:10.000Z"),
+        })
+        .unwrap();
+    drop(connection);
+    drop(storage);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+#[allow(clippy::too_many_lines)]
+fn revoke_preserves_a_prepared_admission_with_a_successor_device_grant() {
+    let root = temporary_root("revoke-successor-before-facts");
+    let application = stage_replay_session(&root, 1_600);
+    let holder = id("usr", 1);
+    let mut storage = open_storage(&root);
+    storage.device_execution_binding_ledger().unwrap();
+    let connection = rusqlite::Connection::open(storage.database_path()).unwrap();
+    connection.execute_batch("CREATE TRIGGER fail_successor_dispatch_facts BEFORE INSERT ON device_execution_reservation_facts BEGIN SELECT RAISE(ABORT, 'injected before dispatch facts'); END;").unwrap();
+    assert_eq!(
+        application
+            .command(
+                &principal(&holder),
+                CommandFamily::Session,
+                chat_submit_request(1_611, 1, &holder, 1)
+            )
+            .unwrap_err()
+            .status(),
+        503
+    );
+    connection
+        .execute_batch("DROP TRIGGER fail_successor_dispatch_facts")
+        .unwrap();
+    let job_id = queued_job_id(&mut storage);
+    assert!(
+        DeviceExecutionBindingService::new(&mut storage)
+            .facts(&job_id.0)
+            .unwrap()
+            .is_none()
+    );
+    let predecessor = storage
+        .worker_launch_grant_ledger()
+        .unwrap()
+        .newest_grant_for_product_session(&id("psn", 1))
+        .unwrap()
+        .unwrap();
+    let binding = DeviceExecutionBindingService::new(&mut storage)
+        .snapshot(&predecessor.worker_session_id)
+        .unwrap()
+        .unwrap();
+    let now = instant("2027-01-15T08:00:02.000Z");
+    DeviceExecutionBindingService::new(&mut storage)
+        .release(
+            &winwincode_storage::DeviceExecutionBindingRelease::try_new(
+                &predecessor.worker_session_id,
+                id("req", 1_612),
+                binding.revision,
+                now.clone(),
+            )
+            .unwrap(),
+            &now,
+        )
+        .unwrap();
+    let other = stage_node(&mut storage, 1_700);
+    stage_client_grant(&mut storage, 1_701, &other, &holder);
+    let repository_binding = stage_visible_binding(&mut storage, 1_702, &other, &holder);
+    let (occupancy, fencing) = stage_occupied_lease(&mut storage, 1_703, &other, &holder);
+    let successor = stage_anchor(
+        &mut storage,
+        1_704,
+        &other,
+        &holder,
+        &occupancy,
+        fencing,
+        &repository_binding,
+        &id("psn", 1),
+    );
+    assert_eq!(
+        storage
+            .worker_launch_grant_ledger()
+            .unwrap()
+            .newest_grant_for_product_session(&id("psn", 1))
+            .unwrap()
+            .unwrap()
+            .worker_launch_grant_id,
+        successor.worker_launch_grant_id
+    );
+    storage.initialize_device_auth().unwrap();
+    connection.execute(
+        "INSERT INTO device_identity_bindings VALUES(?1,'predecessor-public-key',?2,?3,'fixture-intent','fixture-token','{}',?4,NULL)",
+        rusqlite::params![predecessor.client_node_id,holder,id("req",1_613),"2027-01-15T07:59:00.000Z"],
+    ).unwrap();
+    let original = storage.load_execution_job_record(&job_id).unwrap().unwrap();
+    let reservation = storage
+        .execution_admission()
+        .unwrap()
+        .load_reservation_by_job(&job_id)
+        .unwrap()
+        .unwrap();
+    let successor_before = storage
+        .worker_launch_grant_ledger()
+        .unwrap()
+        .snapshot(&successor.worker_launch_grant_id)
+        .unwrap()
+        .unwrap();
+    storage
+        .revoke_device_identity(
+            &predecessor.client_node_id,
+            &holder,
+            "2027-01-15T08:00:07.000Z",
+        )
+        .unwrap();
+    assert_eq!(
+        storage.load_execution_job_record(&job_id).unwrap().unwrap(),
+        original
+    );
+    assert_eq!(
+        storage
+            .execution_admission()
+            .unwrap()
+            .load_reservation_by_job(&job_id)
+            .unwrap()
+            .unwrap(),
+        reservation
+    );
+    assert_eq!(
+        storage
+            .worker_launch_grant_ledger()
+            .unwrap()
+            .snapshot(&successor.worker_launch_grant_id)
+            .unwrap()
+            .unwrap(),
+        successor_before
+    );
+    assert!(
+        storage
+            .execution_registry()
+            .unwrap()
+            .load_lease(&job_id)
+            .unwrap()
+            .is_none()
+    );
+    assert!(storage.pending_accounting_leases(0).unwrap().is_empty());
+    application.shutdown().unwrap();
+    drop(connection);
+    drop(storage);
+    std::fs::remove_dir_all(root).unwrap();
+}

@@ -1,6 +1,6 @@
 # WinWinCode crate 清单
 
-本文记录 WinWinCode 0.2.0 在提交 `58421705` 的第一方 Rust crate。依赖关系来自 `cargo metadata --no-deps --format-version 1 --offline`。这里只列工作区内的 Cargo normal 依赖和反向依赖。开发依赖不计入。依赖列表省略统一的 `winwincode-` 前缀。
+本文记录 WinWinCode 0.2.0 当前的第一方 Rust crate。依赖关系来自 `cargo metadata --no-deps --format-version 1 --offline`。这里只列工作区内的 Cargo normal 依赖和反向依赖。开发依赖不计入。依赖列表省略统一的 `winwincode-` 前缀。
 
 架构关系见 [架构总览](overview.md)。公共术语见 [术语表](../glossary.md)。协议边界见 [契约](../contracts.md)。测试分层见 [测试策略](../testing.md)。所有 workspace crate 都是产品内部模块。发布规则见[发布边界](../operations/release.md#发布边界)。
 
@@ -20,7 +20,7 @@
 
 - 主要入口：`crates/winwincode-domain/src/lib.rs` 和 `crates/winwincode-domain/src/generated.rs`。
 - normal 依赖：无第一方 crate。
-- 反向依赖：`execution-port`、`api`、`audit`、`cli`、`delivery`、`storage`、`publication`、`provider`、`worker`、`codex`、`control-plane`、`session`、`server`、`test-assets`、`connector-github`、`integration-core`、`integration-sqlite`、`connector-slack`、`connector-jira`、`connector-linear`、`connector-teams`、`connector-webhook`、`s3-artifact-adapter`。
+- 反向依赖：`execution-port`、`api`、`audit`、`cli`、`delivery`、`storage`、`publication`、`provider`、`worker`、`codex`、`control-plane`、`session`、`server`、`test-assets`。
 - 测试：`crates/winwincode-domain/tests`，1 个 Cargo test target。
 
 ## `winwincode-api`
@@ -110,7 +110,7 @@
 
 - 主要入口：`crates/winwincode-network/src/lib.rs`；`NetworkFailure` 位于 `src/policy.rs`，可取消 I/O 位于 `src/transport.rs`。
 - normal 依赖：无第一方 crate。
-- 反向依赖：`device-client`、`provider`、`worker`、`control-plane`、`connector-github`、`integration-core`、`integration-sqlite`、`connector-slack`、`connector-jira`、`connector-linear`、`connector-teams`。
+- 反向依赖：`device-client`、`provider`、`worker`、`control-plane`。
 - 测试：`crates/winwincode-network/tests`，1 个 Cargo test target。
 
 ## `winwincode-repository-context`
@@ -128,7 +128,7 @@
 
 - 主要入口：`crates/winwincode-observability-core/src/lib.rs`。
 - normal 依赖：无第一方 crate。
-- 反向依赖：`local`、`observability-sqlite`。
+- 反向依赖：`local`。
 - 测试：`crates/winwincode-observability-core/tests`，1 个 Cargo test target。
 
 ## `winwincode-provider`
@@ -239,69 +239,21 @@
 - 反向依赖：无工作区 normal 依赖。
 - 测试：`crates/winwincode-cli/tests`，4 个 Cargo test target。
 
-## 未接入当前产品运行路径的 crate
-
-下列 crate 仍是 workspace 成员。它们当前没有接入产品运行入口。后续处理遵循[发布边界](../operations/release.md#发布边界)及其实施约束。
-
-### `winwincode-connector-github`
-
-当前未接入产品运行入口。
-
-### `winwincode-connector-jira`
-
-当前未接入产品运行入口。
-
-### `winwincode-connector-linear`
-
-当前未接入产品运行入口。
-
-### `winwincode-connector-slack`
-
-当前未接入产品运行入口。
-
-### `winwincode-connector-teams`
-
-当前未接入产品运行入口。
-
-### `winwincode-connector-webhook`
-
-当前未接入产品运行入口。
-
-### `winwincode-integration-core`
-
-当前未接入产品运行入口。
-
-### `winwincode-integration-sqlite`
-
-当前未接入产品运行入口。
-
-### `winwincode-s3-artifact-adapter`
-
-当前未接入产品运行入口。
-
-### `winwincode-data-export`
-
-当前未接入产品运行入口。
-
-### `winwincode-observability-sqlite`
-
-当前未接入产品运行入口。
-
 ## 最大的第一方 Rust 源文件
 
 下表按物理行数排序。范围只包含 `crates/**/*.rs`。它包含生成文件和测试文件。
 
 | 排名 | 路径 | 行数 |
 | ---: | --- | ---: |
-| 1 | `crates/winwincode-codex/src/adapter.rs` | 14,826 |
-| 2 | `crates/winwincode-api/src/generated.rs` | 10,616 |
-| 3 | `crates/winwincode-execution-port/src/generated.rs` | 8,511 |
-| 4 | `crates/winwincode-worker/tests/worker_lifecycle.rs` | 8,283 |
-| 5 | `crates/winwincode-worker/tests/production_vertical.rs` | 7,122 |
-| 6 | `crates/winwincode-codex/src/model_bridge.rs` | 6,329 |
-| 7 | `crates/winwincode-control-plane/tests/product_session_execution_application.rs` | 5,849 |
+| 1 | `crates/winwincode-codex/src/adapter.rs` | 13,687 |
+| 2 | `crates/winwincode-api/src/generated.rs` | 10,836 |
+| 3 | `crates/winwincode-execution-port/src/generated.rs` | 8,509 |
+| 4 | `crates/winwincode-worker/tests/worker_lifecycle.rs` | 8,297 |
+| 5 | `crates/winwincode-worker/tests/production_vertical.rs` | 7,167 |
+| 6 | `crates/winwincode-codex/src/model_bridge.rs` | 6,333 |
+| 7 | `crates/winwincode-control-plane/tests/product_session_execution_application.rs` | 5,832 |
 | 8 | `crates/winwincode-codex/src/store.rs` | 5,620 |
-| 9 | `crates/winwincode-worker/src/lib.rs` | 5,209 |
+| 9 | `crates/winwincode-worker/src/lib.rs` | 5,224 |
 | 10 | `crates/winwincode-provider/src/provider_https_sse.rs` | 5,114 |
 
 生成文件用于保持 Rust、TypeScript 和协议契约一致。大型手写实现集中在 Codex 适配、Worker 生命周期和 Provider SSE 路径。相关变更应优先依赖 [测试策略](../testing.md) 中的纵向测试和契约测试。

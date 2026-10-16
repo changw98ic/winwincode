@@ -215,16 +215,18 @@ impl ExecutionOutbox {
         .collect()
     }
 
-    pub(crate) fn retained_interaction(
+    fn delivery(
         &self,
         delivery_id: &str,
-    ) -> Result<Option<ExecutionPortMessage>, AdapterStoreError> {
+        pending_only: bool,
+    ) -> Result<Option<DurableExecutionDelivery>, AdapterStoreError> {
         let saved = self
             .store
             .lock()?
             .query_row(
-                "SELECT frame_digest, frame_json FROM execution_outbox WHERE delivery_id = ?1",
-                [delivery_id],
+                "SELECT frame_digest, frame_json FROM execution_outbox WHERE delivery_id = ?1
+             AND (?2 = 0 OR state = 'pending' OR acknowledgement_required = 1)",
+                params![delivery_id, pending_only],
                 |row| Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?)),
             )
             .optional()
@@ -235,7 +237,24 @@ impl ExecutionOutbox {
         if digest(&frame) != frame_digest {
             return Err(AdapterStoreError::Corrupt);
         }
-        let message = decode_delivery(delivery_id.to_owned(), &frame)?.message;
+        decode_delivery(delivery_id.to_owned(), &frame).map(Some)
+    }
+
+    pub(crate) fn pending_delivery(
+        &self,
+        delivery_id: &str,
+    ) -> Result<Option<DurableExecutionDelivery>, AdapterStoreError> {
+        self.delivery(delivery_id, true)
+    }
+
+    pub(crate) fn retained_interaction(
+        &self,
+        delivery_id: &str,
+    ) -> Result<Option<ExecutionPortMessage>, AdapterStoreError> {
+        let Some(delivery) = self.delivery(delivery_id, false)? else {
+            return Ok(None);
+        };
+        let message = delivery.message;
         if !matches!(
             message,
             ExecutionPortMessage::ApprovalRequestMessage(_)

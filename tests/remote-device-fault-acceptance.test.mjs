@@ -13,7 +13,7 @@ import vm from 'node:vm'
 
 import { createCertificate, waitForDeviceWorkerRegistered } from '../scripts/run-api-production-vertical.mjs'
 import { waitFor } from '../scripts/device-production-fixture.mjs'
-import { REMOTE_FAULT_SCENARIOS, RemoteApi, assertRevokedDeviceExecutionResources, deviceSnapshot, emptyRemoteFaultReport, finalizeRemoteFaultReport,
+import { REMOTE_FAULT_SCENARIOS, RemoteApi, assertRevokedDeviceExecutionResources, deviceExecutionResources, deviceSnapshot, emptyRemoteFaultReport, finalizeRemoteFaultReport,
   fixtureCommandCell, observeProcessWitnesses, readFixtureCommandEvidence, remoteOperationCommand, runCandidateScenarios, secureAcceptanceRequest, taskProcessWitnesses,
   validateRemoteFaultConfiguration } from '../scripts/run-remote-device-fault-acceptance.mjs'
 
@@ -238,6 +238,7 @@ test('revocation requires Server resources to close and keeps interrupted usage 
     value => { value.leases = [] },
     value => { value.leases[0].slotState = 'running' },
     value => { value.leases[0].admissionState = 'running' },
+    value => { value.leases[0].admissionState = null; value.leases[0].accountingStatus = null; value.leases[0].terminalUsage = null },
     value => { value.leases[0].terminalUsage.tokens = 0 },
     value => { value.workers[0].health = 'healthy' },
     value => { value.slots.push({ workerSessionId: 'old-session', leaseId: 'old-lease', attempt: 1, state: 'running' }) },
@@ -245,6 +246,11 @@ test('revocation requires Server resources to close and keeps interrupted usage 
     const changed = structuredClone(after); mutate(changed)
     assert.throws(() => assertRevokedDeviceExecutionResources(before, changed))
   }
+  const unreserved = { ...lease, admissionState: null }
+  const releasedUnreserved = { ...after.leases[0], admissionState: null, releaseReason: null,
+    accountingStatus: null, terminalUsage: null }
+  assert.doesNotThrow(() => assertRevokedDeviceExecutionResources({ ...before, leases: [unreserved] },
+    { ...after, leases: [releasedUnreserved] }))
   const completed = { ...lease, leaseId: 'completed-lease', jobId: 'completed-job', jobState: 'completed',
     leaseOutcome: 'completed', slotState: 'completed', admissionState: 'settled', actualTokens: 7,
     accountingStatus: 'pending', terminalUsage: { accountingStatus: 'known', tokens: 7, costMicrounits: null } }
@@ -260,6 +266,46 @@ test('revocation requires Server resources to close and keeps interrupted usage 
   const failed = { ...completed, jobState: 'failed', leaseOutcome: 'failed', slotState: 'failed' }
   assert.throws(() => assertRevokedDeviceExecutionResources({ ...before, leases: [failed] },
     { ...after, leases: [{ ...failed, leaseOutcome: 'cancelled' }] }))
+})
+
+test('revocation snapshots retain prepared admissions with no execution lease', t => {
+  const directory = mkdtempSync(join(tmpdir(), 'wwc-revoke-prepared-'))
+  const path = join(directory, 'control-plane.sqlite3')
+  const database = new DatabaseSync(path)
+  t.after(() => { database.close(); rmSync(directory, { recursive: true, force: true }) })
+  database.exec(`CREATE TABLE execution_leases(job_id,lease_id,worker_id,worker_instance_id,attempt,fencing_token);
+    CREATE TABLE scheduler_execution_jobs(job_id,state,product_session_id,work_run_id);
+    CREATE TABLE execution_lease_terminals(lease_id,outcome,terminal_at);
+    CREATE TABLE worker_session_slots(worker_session_id,job_id,lease_id,worker_id,worker_instance_id,attempt,fencing_token,state,terminal_at);
+    CREATE TABLE execution_admission_reservations(job_id,worker_pool_id,product_session_id,submitted_at,state,release_reason,actual_tokens,actual_cost_microunits);
+    CREATE TABLE execution_admission_reconciliation(job_id,accounting_status,terminal_usage_json);
+    CREATE TABLE worker_launch_grants(worker_launch_grant_id,client_node_id,worker_id,worker_instance_id,product_session_id,work_run_id,created_at);
+    CREATE TABLE execution_workers(worker_id,worker_instance_id,health);
+    CREATE TABLE device_execution_current_facts(job_id,client_node_id);
+    CREATE TABLE device_execution_bindings(client_node_id,worker_launch_grant_id,product_session_id,work_run_id);
+    INSERT INTO scheduler_execution_jobs VALUES('queued','queued','session-1',NULL),('started','queued','session-2',NULL),('other','queued','session-3',NULL),('before-facts','queued','session-4',NULL),('successor','queued','session-5',NULL);
+    INSERT INTO execution_admission_reservations VALUES('queued','pool','session-1','submitted','queued',NULL,NULL,NULL),('started','pool','session-2','submitted','running',NULL,NULL,NULL),('other','pool','session-3','submitted','running',NULL,NULL,NULL),('before-facts','pool','session-4','submitted','queued',NULL,NULL,NULL),('successor','pool','session-5','submitted','running',NULL,NULL,NULL);
+    INSERT INTO device_execution_current_facts VALUES('queued','device'),('started','device'),('other','other-device');
+    INSERT INTO worker_launch_grants VALUES('grant','device','worker','instance','session-4',NULL,'first'),('old-grant','device','old-worker','old-instance','session-5',NULL,'first'),('new-grant','other-device','new-worker','new-instance','session-5',NULL,'second');
+    INSERT INTO device_execution_bindings VALUES('device','grant','session-4',NULL),('device','old-grant','session-5',NULL);`)
+  const before = deviceExecutionResources(path, 'device')
+  assert.deepEqual(before.leases, [])
+  assert.deepEqual(before.admissions.map(row => [row.jobId, row.admissionState]),
+    [['before-facts', 'queued'], ['queued', 'queued'], ['started', 'running']])
+  assert.throws(() => assertRevokedDeviceExecutionResources(before, before))
+  database.exec(`UPDATE scheduler_execution_jobs SET state='failed' WHERE job_id NOT IN ('other','successor');
+    UPDATE execution_admission_reservations SET state='released',release_reason='cancelled' WHERE job_id NOT IN ('other','successor');`)
+  const after = deviceExecutionResources(path, 'device')
+  assert.doesNotThrow(() => assertRevokedDeviceExecutionResources(before, after))
+  assert.throws(() => assertRevokedDeviceExecutionResources(before, { ...after, admissions: [] }))
+  const lost = structuredClone(after)
+  lost.admissions[0].admissionState = null; lost.admissions[0].accountingStatus = null; lost.admissions[0].terminalUsage = null
+  assert.throws(() => assertRevokedDeviceExecutionResources(before, lost))
+  const unclaimable = structuredClone(after)
+  unclaimable.admissions[0].accountingStatus = 'pending'; unclaimable.admissions[0].terminalUsage = { accountingStatus: 'unknown', tokens: null, costMicrounits: null }
+  assert.throws(() => assertRevokedDeviceExecutionResources(before, unclaimable))
+  assert.equal(database.prepare("SELECT state FROM execution_admission_reservations WHERE job_id='other'").get().state, 'running')
+  assert.equal(database.prepare("SELECT state FROM execution_admission_reservations WHERE job_id='successor'").get().state, 'running')
 })
 
 test('remote acceptance configuration requires TLS, a non-loopback SSH host and isolated Device data', () => {

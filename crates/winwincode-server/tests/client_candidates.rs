@@ -1018,10 +1018,72 @@ fn drive_candidate_daemon_until(
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[allow(clippy::too_many_lines)]
 async fn restarted_device_announces_before_applied_recovery_and_repeats_it_in_a_new_epoch() {
+    use winwincode_device_client::apply_engine::{
+        ApplicationCrashPoint, CandidateApplyRequest, apply_candidate_with_crash_point,
+        report_recovered_applications,
+    };
     use winwincode_device_client::{
         DaemonConfig, DeviceDaemon, DeviceIdentitySeed, DeviceStore, HttpExchangeTransport,
         OccupancyMirrorUpdate, ensure_device_identity,
     };
+    fn git(repository: &Path, arguments: &[&str]) -> String {
+        let output = std::process::Command::new("git")
+            .arg("-C")
+            .arg(repository)
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_TERMINAL_PROMPT", "0")
+            .args(arguments)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8(output.stdout).unwrap().trim().to_owned()
+    }
+    let repository = test_directory("candidates-device-recovery-repository");
+    let integration_root = test_directory("candidates-device-recovery-integration");
+    std::fs::create_dir_all(&repository).unwrap();
+    let repository = std::fs::canonicalize(repository).unwrap();
+    git(&repository, &["init", "-q", "--initial-branch=main"]);
+    std::fs::write(repository.join("base.txt"), "base\n").unwrap();
+    git(&repository, &["add", "-A"]);
+    git(
+        &repository,
+        &[
+            "-c",
+            "user.name=Recovery Test",
+            "-c",
+            "user.email=recovery@example.test",
+            "commit",
+            "-q",
+            "-m",
+            "base",
+        ],
+    );
+    let base = git(&repository, &["rev-parse", "HEAD"]);
+    std::fs::write(repository.join("candidate.txt"), "candidate\n").unwrap();
+    git(&repository, &["add", "-A"]);
+    git(
+        &repository,
+        &[
+            "-c",
+            "user.name=Recovery Test",
+            "-c",
+            "user.email=recovery@example.test",
+            "commit",
+            "-q",
+            "-m",
+            "candidate",
+        ],
+    );
+    let commit = git(&repository, &["rev-parse", "HEAD"]);
+    git(
+        &repository,
+        &["update-ref", &candidate_ref_of(&commit), &commit],
+    );
+    git(&repository, &["reset", "-q", "--hard", &base]);
     let data_directory = test_directory("candidates-device-recovery");
     let auth_directory = test_directory("candidates-device-recovery-auth");
     let device_directory = test_directory("candidates-device-recovery-device");
@@ -1080,7 +1142,28 @@ async fn restarted_device_announces_before_applied_recovery_and_repeats_it_in_a_
             acknowledged_at: T0.into(),
         })
         .unwrap();
-    let commit = "0f9e8d7c6b5a4938271605f4e3d2c1b0a9988776";
+    daemon
+        .store_mut()
+        .put_path_mapping(&winwincode_device_client::PathMappingRecord {
+            repository_binding_id: binding.clone(),
+            canonical_path: repository.to_str().unwrap().into(),
+            git_common_directory: None,
+            last_canonicalized_at: None,
+            local_state: "ready".into(),
+        })
+        .unwrap();
+    winwincode_device_client::record_candidate_retention(
+        daemon.store_mut(),
+        &winwincode_device_client::CandidateRetention {
+            candidate_commit: commit.clone(),
+            base_commit: base.clone(),
+            repository_binding_id: binding.clone(),
+            worker_session_id: "wsn_000000000000000000000001".into(),
+            local_git_ref: candidate_ref_of(&commit),
+            retained_at: T0.into(),
+        },
+    )
+    .unwrap();
     daemon
         .enqueue(ClientToServerMessage::CandidateRetained(
             ClientCandidateRetainedPayload {
@@ -1088,11 +1171,11 @@ async fn restarted_device_announces_before_applied_recovery_and_repeats_it_in_a_
                 worker_session_id: "wsn_000000000000000000000001".into(),
                 receipt: winwincode_client_port::domain::LocalCandidateReceipt {
                     local_candidate_receipt_id: fresh_receipt_id("lcr_"),
-                    candidate_ref: candidate_ref_of(commit),
+                    candidate_ref: candidate_ref_of(&commit),
                     repository_binding_id: binding.clone(),
-                    candidate_commit: commit.into(),
-                    base_commit: FIXTURE_BASE_COMMIT.into(),
-                    local_ref_name: candidate_ref_of(commit),
+                    candidate_commit: commit.clone(),
+                    base_commit: base.clone(),
+                    local_ref_name: candidate_ref_of(&commit),
                     state: LocalCandidateState::Retained,
                     created_at: T0.into(),
                     revision: 1,
@@ -1110,33 +1193,30 @@ async fn restarted_device_announces_before_applied_recovery_and_repeats_it_in_a_
         &lease,
         epoch,
         &binding,
-        commit,
+        &commit,
         "cherry_pick",
     );
-    let receipt = winwincode_client_port::domain::LocalApplyReceipt {
-        local_apply_receipt_id: application.application_id.clone(),
-        candidate_ref: application.candidate_ref.clone(),
+    let mut request = CandidateApplyRequest {
+        application_id: application.application_id.clone(),
+        approval_id: application.approval_id.clone(),
+        candidate_digest: application.candidate_digest.clone(),
+        reconciled_retry: false,
         repository_binding_id: binding.clone(),
+        candidate_ref: application.candidate_ref.clone(),
         target_branch: "main".into(),
-        expected_head: FIXTURE_BASE_COMMIT.into(),
+        expected_head: base.clone(),
         strategy: ApplyStrategy::CherryPick,
-        result: ApplyResult::Applied,
-        resulting_commit: Some(RESULTING_COMMIT.into()),
-        conflict_artifact_ref: None,
-        created_at: T0.into(),
-        revision: 1,
+        occupancy_lease_id: lease.clone(),
+        occupancy_fencing_token: epoch,
     };
-    let database = rusqlite::Connection::open(daemon.store_mut().database_path()).unwrap();
-    database.execute(
-        "INSERT INTO candidate_applications (application_id, approval_id, repository_binding_id,
-         candidate_ref, candidate_digest, target_branch, base_commit, strategy, original_lease_id,
-         original_epoch, started_at, finished_receipt_json) VALUES (?1,?2,?3,?4,?5,'main',?6,?7,?8,?9,?10,?11)",
-        rusqlite::params![application.application_id, application.approval_id, binding,
-            application.candidate_ref, application.candidate_digest, FIXTURE_BASE_COMMIT,
-            serde_json::to_string(&ApplyStrategy::CherryPick).unwrap(), lease, i64::try_from(epoch).unwrap(), T0,
-            serde_json::to_string(&receipt).unwrap()],
-    ).unwrap();
-    drop(database);
+    apply_candidate_with_crash_point(
+        &mut daemon,
+        &request,
+        &integration_root,
+        ApplicationCrashPoint::AfterStarted,
+    )
+    .unwrap_err();
+    assert_eq!(git(&repository, &["rev-parse", "HEAD"]), base);
     daemon
         .enqueue(ClientToServerMessage::Heartbeat(
             winwincode_client_port::messages::ClientHeartbeatPayload {
@@ -1156,7 +1236,8 @@ async fn restarted_device_announces_before_applied_recovery_and_repeats_it_in_a_
         restarted.current_instance_id(),
         identity.current_instance_id()
     );
-    let mut daemon = DeviceDaemon::start(config, store, transport, &restarted).unwrap();
+    let mut daemon =
+        DeviceDaemon::start(config.clone(), store, transport.clone(), &restarted).unwrap();
     winwincode_device_client::apply_engine::recover_started_applications(&mut daemon).unwrap();
     assert_eq!(daemon.outbox_snapshot().unwrap(), retained);
     drive_candidate_daemon_until(&mut daemon, |daemon| {
@@ -1168,12 +1249,187 @@ async fn restarted_device_announces_before_applied_recovery_and_repeats_it_in_a_
                 .unwrap()
                 .outcome
                 .as_deref()
-                == Some("applied")
+                == Some("not_started")
     });
+    assert_eq!(report_recovered_applications(&mut daemon).unwrap(), 0);
+    let mut storage = SqliteStorage::open(&data_directory).unwrap();
+    storage
+        .authorize_candidate_application_retry(&application.application_id, &lease, epoch)
+        .unwrap();
+    let authorized = storage
+        .candidate_application(&application.application_id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(authorized.outcome.as_deref(), Some("retry_authorized"));
+    assert_eq!(authorized.retry_epoch, Some(epoch));
+    drop(storage);
+    request.reconciled_retry = true;
+    apply_candidate_with_crash_point(
+        &mut daemon,
+        &request,
+        &integration_root,
+        ApplicationCrashPoint::AfterRepositoryCommit,
+    )
+    .unwrap_err();
+    let applied = git(&repository, &["rev-parse", "HEAD"]);
+    assert_ne!(applied, base);
+    assert!(daemon.outbox_snapshot().unwrap().frames.is_empty());
+    daemon.into_store().close().unwrap();
+    let mut store = DeviceStore::open(&device_directory).unwrap();
+    let restarted_again = ensure_device_identity(&mut store, &seed, T0).unwrap();
+    assert_ne!(
+        restarted_again.current_instance_id(),
+        restarted.current_instance_id()
+    );
+    let mut daemon = DeviceDaemon::start(config, store, transport, &restarted_again).unwrap();
+    drive_candidate_daemon_until(&mut daemon, |daemon| {
+        daemon.status().exchanges_started > 0 && daemon.outbox_snapshot().unwrap().frames.is_empty()
+    });
+    let application_after = SqliteStorage::open(&data_directory)
+        .unwrap()
+        .candidate_application(&application.application_id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        application_after.outcome.as_deref(),
+        Some("applied"),
+        "bootstrap must deliver the changed fact before another recovery request"
+    );
+    assert_eq!(application_after.application_id, application.application_id);
+    assert_eq!(application_after.approval_id, application.approval_id);
+    assert!(application_after.result_json.is_some());
+    let listing = http_request(
+        address,
+        &cookie_get(&format!("/api/v1/clients/{public}/candidates"), &cookie),
+    )
+    .await;
+    assert_eq!(status_of(&listing), "200", "{listing}");
+    let listed = response_body(&listing);
+    assert_eq!(listed["candidates"][0]["application"]["status"], "applied");
+    assert_eq!(
+        listed["candidates"][0]["application"]["approvalId"],
+        application.approval_id
+    );
+    assert_eq!(report_recovered_applications(&mut daemon).unwrap(), 0);
+    assert!(daemon.outbox_snapshot().unwrap().frames.is_empty());
+    assert_eq!(daemon.occupancy_mirror().unwrap().fencing_token, epoch);
+    let trailer = format!("WinWinCode-Application: {}", application.application_id);
+    assert_eq!(
+        git(&repository, &["log", "--format=%B", "HEAD"])
+            .lines()
+            .filter(|line| *line == trailer)
+            .count(),
+        1
+    );
     assert_eq!(
         next_client_sequence(&data_directory, &node),
         daemon.outbox_snapshot().unwrap().highest_sequence + 1
     );
+    std::fs::write(repository.join("retry.txt"), "next candidate\n").unwrap();
+    git(&repository, &["add", "-A"]);
+    git(
+        &repository,
+        &[
+            "-c",
+            "user.name=Recovery Test",
+            "-c",
+            "user.email=recovery@example.test",
+            "commit",
+            "-q",
+            "-m",
+            "retry candidate",
+        ],
+    );
+    let retry_candidate = git(&repository, &["rev-parse", "HEAD"]);
+    let retry_ref = candidate_ref_of(&retry_candidate);
+    git(&repository, &["update-ref", &retry_ref, &retry_candidate]);
+    git(&repository, &["reset", "-q", "--hard", &applied]);
+    winwincode_device_client::record_candidate_retention(
+        daemon.store_mut(),
+        &winwincode_device_client::CandidateRetention {
+            candidate_commit: retry_candidate.clone(),
+            base_commit: applied.clone(),
+            repository_binding_id: binding.clone(),
+            worker_session_id: "wsn_000000000000000000000001".into(),
+            local_git_ref: retry_ref.clone(),
+            retained_at: T0.into(),
+        },
+    )
+    .unwrap();
+    daemon
+        .enqueue(ClientToServerMessage::CandidateRetained(
+            ClientCandidateRetainedPayload {
+                occupancy: occupancy_stamp(&lease, epoch, 1, "device-recovery-retry-retained"),
+                worker_session_id: "wsn_000000000000000000000001".into(),
+                receipt: winwincode_client_port::domain::LocalCandidateReceipt {
+                    local_candidate_receipt_id: fresh_receipt_id("lcr_"),
+                    candidate_ref: retry_ref.clone(),
+                    repository_binding_id: binding.clone(),
+                    candidate_commit: retry_candidate,
+                    base_commit: applied.clone(),
+                    local_ref_name: retry_ref.clone(),
+                    state: LocalCandidateState::Retained,
+                    created_at: T0.into(),
+                    revision: 1,
+                },
+            },
+        ))
+        .unwrap();
+    drive_candidate_daemon_until(&mut daemon, |daemon| {
+        daemon.outbox_snapshot().unwrap().frames.is_empty()
+    });
+    std::fs::write(repository.join("scratch.txt"), "user work\n").unwrap();
+    let retry_body = apply_body(&public, &retry_ref, &binding, "main", &applied);
+    let initial_post = cookie_post("/api/v1/clients/candidates/apply", &retry_body, &cookie);
+    let initial_waiter = tokio::spawn(async move { http_request(address, &initial_post).await });
+    drive_candidate_daemon_until(&mut daemon, |daemon| {
+        daemon.outbox_snapshot().unwrap().frames.is_empty()
+            && SqliteStorage::open(&data_directory)
+                .unwrap()
+                .candidate_application_for_candidate(&node, &retry_ref)
+                .unwrap()
+                .is_some_and(|application| application.outcome.as_deref() == Some("not_started"))
+    });
+    let initial_response = initial_waiter.await.unwrap();
+    assert_eq!(
+        status_of(&initial_response),
+        "409",
+        "the original waiter must receive the retryable refusal: {initial_response}"
+    );
+    let unstarted = SqliteStorage::open(&data_directory)
+        .unwrap()
+        .candidate_application_for_candidate(&node, &retry_ref)
+        .unwrap()
+        .unwrap();
+    assert!(unstarted.result_json.is_none());
+    assert_eq!(
+        candidate_state(&data_directory, &node, &retry_ref).as_deref(),
+        Some("retained")
+    );
+    std::fs::remove_file(repository.join("scratch.txt")).unwrap();
+    let retry_post = cookie_post("/api/v1/clients/candidates/apply", &retry_body, &cookie);
+    let retry_waiter = tokio::spawn(async move { http_request(address, &retry_post).await });
+    drive_candidate_daemon_until(&mut daemon, |daemon| {
+        daemon.outbox_snapshot().unwrap().frames.is_empty()
+            && SqliteStorage::open(&data_directory)
+                .unwrap()
+                .candidate_application(&unstarted.application_id)
+                .unwrap()
+                .unwrap()
+                .outcome
+                .as_deref()
+                == Some("applied")
+    });
+    let retry_response = retry_waiter.await.unwrap();
+    assert_eq!(status_of(&retry_response), "201", "{retry_response}");
+    let retried = SqliteStorage::open(&data_directory)
+        .unwrap()
+        .candidate_application(&unstarted.application_id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(retried.approval_id, unstarted.approval_id);
+    assert_eq!(apply_history_len(&data_directory, &node, &retry_ref), 1);
+    let head_after_retry = git(&repository, &["rev-parse", "HEAD"]);
     let release =
         json!({"schemaVersion":SCHEMA_VERSION,"clientId":public,"mode":"release"}).to_string();
     let response = http_request(
@@ -1203,7 +1459,7 @@ async fn restarted_device_announces_before_applied_recovery_and_repeats_it_in_a_
     let mut events = database
         .prepare(
             "SELECT epoch,payload FROM candidate_application_events WHERE application_id=?1
-         AND kind='application.reconciled' ORDER BY epoch",
+         AND kind='application.reconciled' ORDER BY rowid",
         )
         .unwrap();
     let facts: Vec<(i64, String)> = events
@@ -1217,17 +1473,37 @@ async fn restarted_device_announces_before_applied_recovery_and_repeats_it_in_a_
         facts.iter().map(|fact| fact.0).collect::<Vec<_>>(),
         [
             i64::try_from(epoch).unwrap(),
+            i64::try_from(epoch).unwrap(),
             i64::try_from(new_epoch).unwrap()
         ]
     );
-    for (_, payload) in facts {
+    for (index, (_, payload)) in facts.into_iter().enumerate() {
         let payload: ClientApplicationReconciledPayload = serde_json::from_str(&payload).unwrap();
         assert_eq!(payload.original_epoch, epoch);
         assert_eq!(payload.approval_id, application.approval_id);
-        assert_eq!(payload.result_commit.as_deref(), Some(RESULTING_COMMIT));
+        assert_eq!(
+            payload.outcome,
+            if index == 0 {
+                ApplicationReconciliationOutcome::NotStarted
+            } else {
+                ApplicationReconciliationOutcome::Applied
+            }
+        );
+        assert_eq!(
+            payload.result_commit.as_deref(),
+            (index > 0).then_some(applied.as_str())
+        );
     }
     assert_eq!(
         apply_history_len(&data_directory, &node, &application.candidate_ref),
+        1
+    );
+    assert_eq!(git(&repository, &["rev-parse", "HEAD"]), head_after_retry);
+    assert_eq!(
+        git(&repository, &["log", "--format=%B", "HEAD"])
+            .lines()
+            .filter(|line| *line == trailer)
+            .count(),
         1
     );
     daemon.into_store().close().unwrap();
@@ -1235,6 +1511,8 @@ async fn restarted_device_announces_before_applied_recovery_and_repeats_it_in_a_
     let _ = std::fs::remove_dir_all(data_directory);
     let _ = std::fs::remove_dir_all(auth_directory);
     let _ = std::fs::remove_dir_all(device_directory);
+    let _ = std::fs::remove_dir_all(repository);
+    let _ = std::fs::remove_dir_all(integration_root);
 }
 
 #[tokio::test]

@@ -1,11 +1,12 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use crate::{
-    ClientNodeRegistration, ExecutionJobState, ExecutionJobTransitionRequest,
-    ExecutionLeaseTerminalOutcome, ExecutionLeaseTerminalRequest, ExecutionReservationRelease,
-    ExecutionReservationReleaseReason, ExecutionReservationState, RepositorySchedulerScope,
-    RepositorySchedulerTerminalRequest, SqliteStorage, StorageError, execution_admission,
-    execution_queue, execution_registry, repository_scheduler, sql_error, worker_session_slots,
+    ClientNodeRegistration, ExecutionJobCancellationRequest, ExecutionJobState,
+    ExecutionJobTransitionRequest, ExecutionLeaseTerminalOutcome, ExecutionLeaseTerminalRequest,
+    ExecutionReservationRelease, ExecutionReservationReleaseReason, ExecutionReservationState,
+    RepositorySchedulerScope, RepositorySchedulerTerminalRequest, SqliteStorage, StorageError,
+    execution_admission, execution_queue, execution_registry, repository_scheduler, sql_error,
+    worker_session_slots,
 };
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 use sha2::{Digest, Sha256};
@@ -54,6 +55,7 @@ pub(crate) fn validate_schema(connection: &Connection) -> Result<(), StorageErro
 pub enum DeviceAuthStoreError {
     Unavailable,
     Authentication,
+    PairingRejected,
     InvalidRequest,
     Conflict,
     Revoked,
@@ -143,9 +145,11 @@ impl SqliteStorage {
             "DELETE FROM device_auth_challenges WHERE expires_at<=?1",
             [now],
         )?;
-        let count: i64 = tx.query_row("SELECT count(*) FROM device_auth_challenges", [], |r| {
-            r.get(0)
-        })?;
+        let count: i64 = tx.query_row(
+            "SELECT count(*) FROM device_auth_challenges WHERE substr(challenge_id,1,6)!='bound_'",
+            [],
+            |row| row.get(0),
+        )?;
         if count >= 4096 {
             return Err(DeviceAuthStoreError::Unavailable);
         }
@@ -157,6 +161,51 @@ impl SqliteStorage {
         Ok(())
     }
 
+    pub fn device_challenge_secret(
+        &mut self,
+        key: &str,
+    ) -> Result<Option<String>, DeviceAuthStoreError> {
+        self.initialize_device_auth()?;
+        self.connection()?
+            .query_row(
+                "SELECT token_digest FROM device_identity_bindings WHERE public_key=?1",
+                [key],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(Into::into)
+    }
+
+    pub fn consume_bound_device_challenge(
+        &mut self,
+        id: &str,
+        key: &str,
+        challenge: &str,
+        expiry: &str,
+        now: &str,
+    ) -> Result<(), DeviceAuthStoreError> {
+        self.initialize_device_auth()?;
+        if expiry <= now {
+            return Err(DeviceAuthStoreError::Authentication);
+        }
+        let tx = self
+            .connection_mut()?
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        tx.execute(
+            "DELETE FROM device_auth_challenges WHERE expires_at<=?1",
+            [now],
+        )?;
+        if tx.execute(
+            "INSERT OR IGNORE INTO device_auth_challenges VALUES(?1,?2,?3,?4)",
+            params![id, key, challenge, expiry],
+        )? != 1
+        {
+            return Err(DeviceAuthStoreError::Authentication);
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
     pub fn device_challenge(
         &mut self,
         id: &str,
@@ -164,7 +213,7 @@ impl SqliteStorage {
         now: &str,
     ) -> Result<String, DeviceAuthStoreError> {
         self.initialize_device_auth()?;
-        self.connection()?.query_row("SELECT challenge FROM device_auth_challenges WHERE challenge_id=?1 AND public_key=?2 AND expires_at>?3",params![id,key,now],|r|r.get(0)).optional()?.ok_or(DeviceAuthStoreError::Authentication)
+        self.connection()?.query_row("SELECT challenge FROM device_auth_challenges WHERE challenge_id=?1 AND public_key=?2 AND expires_at>?3 AND substr(challenge_id,1,6)!='bound_'",params![id,key,now],|r|r.get(0)).optional()?.ok_or(DeviceAuthStoreError::Authentication)
     }
 
     pub fn consume_device_challenge(
@@ -174,7 +223,7 @@ impl SqliteStorage {
         challenge: &str,
         now: &str,
     ) -> Result<(), DeviceAuthStoreError> {
-        if self.connection()?.execute("DELETE FROM device_auth_challenges WHERE challenge_id=?1 AND public_key=?2 AND challenge=?3 AND expires_at>?4",params![id,key,challenge,now])? !=1 { return Err(DeviceAuthStoreError::Authentication); }
+        if self.connection()?.execute("DELETE FROM device_auth_challenges WHERE challenge_id=?1 AND public_key=?2 AND challenge=?3 AND expires_at>?4 AND substr(challenge_id,1,6)!='bound_'",params![id,key,challenge,now])? !=1 { return Err(DeviceAuthStoreError::Authentication); }
         Ok(())
     }
 
@@ -213,7 +262,7 @@ impl SqliteStorage {
             }
             return Ok(response);
         }
-        let owner:String=tx.query_row("SELECT owner_user_id FROM device_pairing_tokens WHERE token_digest=?1 AND consumed_request_id IS NULL AND expires_at>?2",params![write.token_digest,write.now],|r|r.get(0)).optional()?.ok_or(DeviceAuthStoreError::Authentication)?;
+        let owner:String=tx.query_row("SELECT owner_user_id FROM device_pairing_tokens WHERE token_digest=?1 AND consumed_request_id IS NULL AND expires_at>?2",params![write.token_digest,write.now],|r|r.get(0)).optional()?.ok_or(DeviceAuthStoreError::PairingRejected)?;
         let existing: bool = tx.query_row(
             "SELECT EXISTS(SELECT 1 FROM device_identity_bindings WHERE public_key=?1)",
             [write.public_key],
@@ -273,6 +322,7 @@ impl SqliteStorage {
         }
         tx.execute("UPDATE client_nodes SET presence_state='revoked',accepting_connections=0,revision=revision+1 WHERE client_node_id=?1 AND presence_state!='revoked'",[node])?;
         tx.execute("UPDATE client_access_grants SET state='revoked',revision=revision+1 WHERE client_node_id=?1 AND state='active'",[node])?;
+        settle_revoked_executions(&tx, node, &Instant(now.to_owned()))?;
         for (table, sql) in [
             (
                 "client_occupancy_leases",
@@ -305,7 +355,6 @@ impl SqliteStorage {
                 }
             }
         }
-        settle_revoked_executions(&tx, node, &Instant(now.to_owned()))?;
         tx.execute("INSERT INTO device_auth_events(client_node_id,kind,occurred_at) VALUES(?1,'device.revoked',?2)",params![node,now])?;
         tx.commit()?;
         Ok(())
@@ -350,10 +399,40 @@ fn settle_revoked_executions(
     if !table_exists(transaction, "execution_leases")? {
         return Ok(());
     }
-    let jobs = transaction.prepare(
+    let mut jobs = transaction.prepare(
         "SELECT DISTINCT l.job_id FROM execution_leases l JOIN worker_launch_grants g ON g.worker_id=l.worker_id AND g.worker_instance_id=l.worker_instance_id WHERE g.client_node_id=?1 AND NOT EXISTS(SELECT 1 FROM execution_lease_terminals t WHERE t.lease_id=l.lease_id) ORDER BY l.job_id",
     )?.query_map([node], |row| Ok(ExecutionJobId(row.get(0)?)))?
         .collect::<Result<Vec<_>,_>>()?;
+    if table_exists(transaction, "device_execution_reservation_facts")?
+        && table_exists(transaction, "device_execution_bindings")?
+        && table_exists(transaction, "scheduler_execution_jobs")?
+    {
+        jobs.extend(
+            transaction
+                .prepare(
+                    "SELECT r.job_id FROM execution_admission_reservations r
+             JOIN scheduler_execution_jobs j USING(job_id)
+             LEFT JOIN device_execution_current_facts f USING(job_id)
+             WHERE r.state IN ('queued','running') AND j.state IN ('queued','cancelling')
+             AND NOT EXISTS(SELECT 1 FROM execution_leases l WHERE l.job_id=r.job_id)
+             AND (f.client_node_id=?1 OR (f.job_id IS NULL AND EXISTS(
+                 SELECT 1 FROM device_execution_bindings b JOIN worker_launch_grants g
+                 ON g.worker_launch_grant_id=b.worker_launch_grant_id
+                 WHERE b.client_node_id=?1 AND g.client_node_id=b.client_node_id
+                 AND g.worker_launch_grant_id=(SELECT newest.worker_launch_grant_id
+                     FROM worker_launch_grants newest
+                     WHERE (j.work_run_id IS NOT NULL AND newest.work_run_id=j.work_run_id)
+                        OR (j.work_run_id IS NULL AND newest.work_run_id IS NULL
+                            AND newest.product_session_id=j.product_session_id)
+                     ORDER BY newest.created_at DESC,newest.worker_launch_grant_id DESC LIMIT 1)
+                 AND ((j.work_run_id IS NOT NULL AND j.work_run_id=b.work_run_id)
+                      OR (j.work_run_id IS NULL AND b.work_run_id IS NULL
+                          AND j.product_session_id=b.product_session_id))))) ORDER BY r.job_id",
+                )?
+                .query_map([node], |row| Ok(ExecutionJobId(row.get(0)?)))?
+                .collect::<Result<Vec<_>, _>>()?,
+        );
+    }
     for job in jobs {
         settle_revoked_execution(transaction, node, &job, now)?;
     }
@@ -367,8 +446,7 @@ fn settle_revoked_execution(
     job_id: &ExecutionJobId,
     now: &Instant,
 ) -> Result<(), DeviceAuthStoreError> {
-    let lease = execution_registry::load_lease_in_transaction(transaction, job_id)?
-        .ok_or(DeviceAuthStoreError::Unavailable)?;
+    let lease = execution_registry::load_lease_in_transaction(transaction, job_id)?;
     let job = if table_exists(transaction, "scheduler_execution_jobs")? {
         repository_scheduler::load_execution_job_by_id(transaction, job_id)?
     } else {
@@ -386,55 +464,87 @@ fn settle_revoked_execution(
         "{:X}",
         Sha256::digest(format!(
             "winwincode.device-revocation.v1\0{node}\0{}",
-            lease.lease_id.0
+            lease.as_ref().map_or(&job_id.0, |lease| &lease.lease_id.0)
         ))
     );
     let request_id = RequestId(format!("req_{}", &digest[..26]));
-    let terminal = ExecutionLeaseTerminalRequest {
-        job_id: lease.job_id.clone(),
-        lease_id: lease.lease_id.clone(),
-        worker_id: lease.worker_id.clone(),
-        worker_instance_id: lease.worker_instance_id.clone(),
-        attempt: lease.attempt,
-        fencing_token: lease.fencing_token.clone(),
-        outcome: ExecutionLeaseTerminalOutcome::Cancelled,
-        terminal_at: now.clone(),
-        request_id: request_id.clone(),
-    };
-    if let Some(job) = job {
-        if job.attempt != lease.attempt || job.payload_digest != lease.payload_digest {
-            return Err(DeviceAuthStoreError::Conflict);
-        }
-        if job.state == ExecutionJobState::Leased {
-            execution_queue::transition_execution_job_in_transaction(
-                transaction,
-                &ExecutionJobTransitionRequest {
-                    scope: job.scope,
-                    job_id: job.job_id,
-                    request_id: request_id.clone(),
-                    expected_revision: job.revision,
-                    from: ExecutionJobState::Leased,
-                    to: ExecutionJobState::Failed,
-                    occurred_at: now.clone(),
-                },
-            )?;
-            execution_registry::finish_execution_lease_in_transaction(transaction, &terminal)?;
-        } else {
-            repository_scheduler::settle_terminal_in_transaction(
-                transaction,
-                &RepositorySchedulerTerminalRequest {
-                    scope: RepositorySchedulerScope {
-                        organization_id: job.scope.organization_id,
-                        workspace_id: job.scope.workspace_id,
-                        project_id: job.scope.project_id,
-                        repository_id: job.scope.repository_id,
+    if let Some(lease) = lease.as_ref() {
+        let terminal = ExecutionLeaseTerminalRequest {
+            job_id: lease.job_id.clone(),
+            lease_id: lease.lease_id.clone(),
+            worker_id: lease.worker_id.clone(),
+            worker_instance_id: lease.worker_instance_id.clone(),
+            attempt: lease.attempt,
+            fencing_token: lease.fencing_token.clone(),
+            outcome: ExecutionLeaseTerminalOutcome::Cancelled,
+            terminal_at: now.clone(),
+            request_id: request_id.clone(),
+        };
+        if let Some(job) = job {
+            if job.attempt != lease.attempt || job.payload_digest != lease.payload_digest {
+                return Err(DeviceAuthStoreError::Conflict);
+            }
+            if job.state == ExecutionJobState::Leased {
+                execution_queue::transition_execution_job_in_transaction(
+                    transaction,
+                    &ExecutionJobTransitionRequest {
+                        scope: job.scope,
+                        job_id: job.job_id,
+                        request_id: request_id.clone(),
+                        expected_revision: job.revision,
+                        from: ExecutionJobState::Leased,
+                        to: ExecutionJobState::Failed,
+                        occurred_at: now.clone(),
                     },
-                    terminal,
-                },
-            )?;
+                )?;
+                execution_registry::finish_execution_lease_in_transaction(transaction, &terminal)?;
+            } else {
+                repository_scheduler::settle_terminal_in_transaction(
+                    transaction,
+                    &RepositorySchedulerTerminalRequest {
+                        scope: RepositorySchedulerScope {
+                            organization_id: job.scope.organization_id,
+                            workspace_id: job.scope.workspace_id,
+                            project_id: job.scope.project_id,
+                            repository_id: job.scope.repository_id,
+                        },
+                        terminal,
+                    },
+                )?;
+            }
+        } else {
+            execution_registry::finish_execution_lease_in_transaction(transaction, &terminal)?;
         }
     } else {
-        execution_registry::finish_execution_lease_in_transaction(transaction, &terminal)?;
+        let mut job = job.ok_or(DeviceAuthStoreError::Unavailable)?;
+        if job.state == ExecutionJobState::Queued {
+            job = execution_queue::cancel_execution_job_in_transaction(
+                transaction,
+                &ExecutionJobCancellationRequest {
+                    scope: job.scope,
+                    job_id: job.job_id,
+                    request_id: RequestId(format!("req_{}", &digest[26..52])),
+                    expected_revision: job.revision,
+                    requested_at: now.clone(),
+                },
+            )?
+            .job;
+        }
+        if job.state != ExecutionJobState::Cancelling {
+            return Err(DeviceAuthStoreError::Conflict);
+        }
+        execution_queue::transition_execution_job_in_transaction(
+            transaction,
+            &ExecutionJobTransitionRequest {
+                scope: job.scope,
+                job_id: job.job_id,
+                request_id: request_id.clone(),
+                expected_revision: job.revision,
+                from: job.state,
+                to: ExecutionJobState::Failed,
+                occurred_at: now.clone(),
+            },
+        )?;
     }
     if table_exists(transaction, "execution_admission_reservations")?
         && let Some(reservation) =
@@ -445,27 +555,33 @@ fn settle_revoked_execution(
             ExecutionReservationState::Queued | ExecutionReservationState::Running
         )
     {
-        let runtime_millis = transaction.query_row(
-            "SELECT CAST(ROUND((julianday(?1)-julianday(?2))*86400000) AS INTEGER)",
-            params![
-                now.0,
-                reservation
-                    .started_at
-                    .as_ref()
-                    .unwrap_or(&lease.issued_at)
-                    .0
-            ],
-            |row| row.get(0),
-        )?;
-        let known_tokens = if table_exists(transaction, "execution_attempt_accounting_totals")? {
-            transaction.query_row("SELECT COALESCE(SUM(known_tokens),0) FROM execution_attempt_accounting_totals WHERE job_id=?1",[&job_id.0],|row| row.get(0))?
+        let usage = if let Some(lease) = lease.as_ref() {
+            let runtime_millis = transaction.query_row(
+                "SELECT CAST(ROUND((julianday(?1)-julianday(?2))*86400000) AS INTEGER)",
+                params![
+                    now.0,
+                    reservation
+                        .started_at
+                        .as_ref()
+                        .unwrap_or(&lease.issued_at)
+                        .0
+                ],
+                |row| row.get(0),
+            )?;
+            let known_tokens = if table_exists(transaction, "execution_attempt_accounting_totals")?
+            {
+                transaction.query_row("SELECT COALESCE(SUM(known_tokens),0) FROM execution_attempt_accounting_totals WHERE job_id=?1",[&job_id.0],|row| row.get(0))?
+            } else {
+                0
+            };
+            let usage = ExecutionOutcomeUsage::unknown(runtime_millis, known_tokens);
+            if !winwincode_execution_port::usage::valid_usage(&usage) {
+                return Err(DeviceAuthStoreError::InvalidRequest);
+            }
+            Some(usage)
         } else {
-            0
+            None
         };
-        let usage = ExecutionOutcomeUsage::unknown(runtime_millis, known_tokens);
-        if !winwincode_execution_port::usage::valid_usage(&usage) {
-            return Err(DeviceAuthStoreError::InvalidRequest);
-        }
         execution_admission::release_reservation_in_transaction(
             transaction,
             &ExecutionReservationRelease {
@@ -477,7 +593,7 @@ fn settle_revoked_execution(
                 reason: ExecutionReservationReleaseReason::Cancelled,
                 released_at: now.clone(),
             },
-            Some(&usage),
+            usage.as_ref(),
         )
         .map_err(|_| DeviceAuthStoreError::Unavailable)?;
     }
@@ -552,6 +668,101 @@ mod tests {
             "INSERT INTO repository_bindings(repository_binding_id,client_node_id,display_name,repository_kind,dirty_state,availability,repository_fingerprint,created_at,revision) VALUES(?1,?2,'fixture','git','clean','available',?1,?3,1)",
             params![id("rbd",seed),id("cnd",seed),at(0).0],
         ).unwrap();
+    }
+
+    #[test]
+    fn bound_challenge_consumption_preserves_capacity_and_reclaims_expired_entries() {
+        let directory =
+            std::env::temp_dir().join(format!("wwc-bound-challenge-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&directory);
+        let mut storage = SqliteStorage::open(&directory).unwrap();
+        bind_device(&mut storage, 1);
+        bind_device(&mut storage, 2);
+        let tx = storage.connection_mut().unwrap().transaction().unwrap();
+        {
+            let mut insert = tx
+                .prepare("INSERT INTO device_auth_challenges VALUES(?1,'key-1','signed',?2)")
+                .unwrap();
+            for index in 0..4096 {
+                insert
+                    .execute(params![format!("bound_consumed-{index}"), at(59).0])
+                    .unwrap();
+            }
+        }
+        tx.commit().unwrap();
+        for index in 0..16 {
+            let id = format!("bound_next-{index}");
+            assert!(
+                storage
+                    .consume_bound_device_challenge(&id, "key-1", "signed", &at(59).0, &at(58).0)
+                    .is_ok()
+            );
+            assert_eq!(
+                storage.consume_bound_device_challenge(
+                    &id,
+                    "key-1",
+                    "signed",
+                    &at(59).0,
+                    &at(58).0
+                ),
+                Err(DeviceAuthStoreError::Authentication)
+            );
+        }
+        assert!(
+            storage
+                .consume_bound_device_challenge(
+                    "bound_other",
+                    "key-2",
+                    "signed",
+                    &at(59).0,
+                    &at(58).0
+                )
+                .is_ok()
+        );
+        assert!(
+            storage
+                .publish_device_challenge("anonymous", "key-3", "random", &at(59).0, &at(58).0)
+                .is_ok()
+        );
+        assert_eq!(
+            storage.device_challenge("bound_next-0", "key-1", &at(58).0),
+            Err(DeviceAuthStoreError::Authentication)
+        );
+        assert_eq!(
+            storage.consume_device_challenge("bound_next-0", "key-1", "signed", &at(58).0),
+            Err(DeviceAuthStoreError::Authentication)
+        );
+        assert_eq!(
+            storage.consume_bound_device_challenge(
+                "bound_expired",
+                "key-1",
+                "signed",
+                &at(59).0,
+                &at(59).0
+            ),
+            Err(DeviceAuthStoreError::Authentication)
+        );
+        assert!(
+            storage
+                .consume_bound_device_challenge(
+                    "bound_new",
+                    "key-1",
+                    "signed",
+                    "2026-01-01T00:01:00.000Z",
+                    &at(59).0
+                )
+                .is_ok()
+        );
+        let retained: i64 = storage
+            .connection()
+            .unwrap()
+            .query_row("SELECT count(*) FROM device_auth_challenges", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(retained, 1);
+        drop(storage);
+        std::fs::remove_dir_all(directory).unwrap();
     }
 
     #[allow(clippy::too_many_lines)]

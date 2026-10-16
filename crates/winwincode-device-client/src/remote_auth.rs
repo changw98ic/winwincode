@@ -14,13 +14,19 @@ use winwincode_api::generated::{
     DeviceBindRequest, DeviceBindingIntent, DeviceChallengeRequest, DeviceChallengeResponse,
 };
 
-use crate::daemon::ExchangeTransportError;
+use crate::daemon::{DeviceAuthRejection, ExchangeTransportError};
 use crate::identity::{DeviceIdentitySeed, generate_prefixed_id};
 use crate::store::{DeviceStore, DeviceStoreError, sql_error};
 use crate::{ensure_device_identity, load_device_identity};
 
 const CHALLENGE_PATH: &str = "/internal/v1/device/challenge";
 const BIND_PATH: &str = "/internal/v1/device/bind";
+pub(crate) const DEVICE_REVOKED_REASON: &str = "DEVICE_REVOKED";
+
+enum BindingRequestError {
+    PairingRejected,
+    Transport(ExchangeTransportError),
+}
 
 #[derive(Clone)]
 pub struct DeviceRemoteAuth {
@@ -126,6 +132,34 @@ impl DeviceRemoteAuth {
             } else {
                 return result;
             }
+        }
+    }
+
+    fn post_binding(&self, body: &[u8]) -> Result<Vec<u8>, BindingRequestError> {
+        let timeout = Duration::from_secs(10);
+        let mut refreshed = false;
+        loop {
+            let headers = self
+                .authorization_headers("POST", BIND_PATH, body, timeout, &|| true)
+                .map_err(BindingRequestError::Transport)?;
+            let result = crate::http::post_json_with_options(
+                &format!("{}{BIND_PATH}", self.server_url),
+                body,
+                timeout,
+                &|| true,
+                &self.ca_roots,
+                &headers,
+            );
+            if let Err(error) = &result {
+                if error.device_auth_rejection() == Some(DeviceAuthRejection::PairingRejected) {
+                    return Err(BindingRequestError::PairingRejected);
+                }
+                if error.network_failure().http_status == Some(401) && !refreshed {
+                    refreshed = true;
+                    continue;
+                }
+            }
+            return result.map_err(BindingRequestError::Transport);
         }
     }
 
@@ -260,14 +294,18 @@ pub fn record_remote_failure(store: &DeviceStore, reason: &str) -> Result<(), De
     Ok(())
 }
 
+pub(crate) fn retry_remote_authentication(store: &DeviceStore) -> Result<(), DeviceStoreError> {
+    store.connection()?.execute(
+        "UPDATE remote_device_binding SET failure_reason=NULL WHERE singleton=1 AND failure_reason IN (?1,?2)",
+        ["Device 身份认证失败；服务已停止。", "Device 绑定已吊销；服务已停止。"],
+    ).map_err(sql_error)?;
+    Ok(())
+}
+
 fn remote_request_error(store: &DeviceStore, error: &ExchangeTransportError) -> DeviceStoreError {
-    let reason = match error.network_failure().http_status {
-        Some(403) => Some("Device 绑定已吊销；服务已停止。"),
-        Some(401) => Some("Device 身份认证失败；服务已停止。"),
-        _ => None,
-    };
-    if let Some(reason) = reason {
-        if let Err(storage_error) = record_remote_failure(store, reason) {
+    if error.device_auth_rejection() == Some(DeviceAuthRejection::Revoked) {
+        let reason = "Device 绑定已吊销；服务已停止。";
+        if let Err(storage_error) = record_remote_failure(store, DEVICE_REVOKED_REASON) {
             return storage_error;
         }
         DeviceStoreError::conflict(reason)
@@ -279,6 +317,7 @@ fn remote_request_error(store: &DeviceStore, error: &ExchangeTransportError) -> 
 #[allow(clippy::too_many_lines)]
 pub fn bind_device(config: &DeviceBindConfig) -> Result<DeviceBindOutcome, DeviceStoreError> {
     let mut store = DeviceStore::open(&config.data_directory)?;
+    retry_remote_authentication(&store)?;
     if load_device_identity(&store)?.is_none() {
         ensure_device_identity(
             &mut store,
@@ -344,18 +383,38 @@ pub fn bind_device(config: &DeviceBindConfig) -> Result<DeviceBindOutcome, Devic
     }
     let intent: serde_json::Value = serde_json::from_str(&binding.intent_json)
         .map_err(|_| DeviceStoreError::adapter("stored binding intent is invalid"))?;
-    let request: DeviceBindRequest = serde_json::from_value(serde_json::json!({ "schemaVersion": "winwincode/v1", "requestId": binding.request_id, "pairingToken": binding.pairing_token, "publicKey": BASE64.encode(binding.auth.signing_key.verifying_key().as_bytes()), "intent": intent })).map_err(|_| DeviceStoreError::adapter("binding request encoding failed"))?;
-    let body = serde_json::to_vec(&request)
-        .map_err(|_| DeviceStoreError::adapter("binding request encoding failed"))?;
-    let response = binding
-        .auth
-        .post_json(
-            &format!("{}{BIND_PATH}", binding.server_url),
-            &body,
-            Duration::from_secs(10),
-            &|| true,
-        )
-        .map_err(|error| remote_request_error(&store, &error))?;
+    let mut request: DeviceBindRequest = serde_json::from_value(serde_json::json!({ "schemaVersion": "winwincode/v1", "requestId": binding.request_id, "pairingToken": binding.pairing_token, "publicKey": BASE64.encode(binding.auth.signing_key.verifying_key().as_bytes()), "intent": intent })).map_err(|_| DeviceStoreError::adapter("binding request encoding failed"))?;
+    let mut replacement = config
+        .pairing_token
+        .as_deref()
+        .filter(|token| !token.is_empty() && *token != request.pairing_token);
+    let response = loop {
+        let body = serde_json::to_vec(&request)
+            .map_err(|_| DeviceStoreError::adapter("binding request encoding failed"))?;
+        match binding.auth.post_binding(&body) {
+            Ok(response) => break response,
+            Err(BindingRequestError::PairingRejected) => {
+                let token = replacement.take().ok_or_else(|| {
+                    DeviceStoreError::conflict(
+                        "配对令牌无效或已过期；请取得新令牌后在同一数据目录重试。",
+                    )
+                })?;
+                let updated = store.connection()?.execute(
+                    "UPDATE remote_device_binding SET pairing_token=?1 WHERE singleton=1 AND request_id=?2 AND pairing_token=?3 AND client_node_id IS NULL AND failure_reason IS NULL",
+                    params![token, binding.request_id, request.pairing_token],
+                ).map_err(sql_error)?;
+                if updated != 1 {
+                    return Err(DeviceStoreError::conflict(
+                        "Device binding changed before pairing token replacement",
+                    ));
+                }
+                request.pairing_token = token.to_owned();
+            }
+            Err(BindingRequestError::Transport(error)) => {
+                return Err(remote_request_error(&store, &error));
+            }
+        }
+    };
     let receipt: DeviceBindOutcome = serde_json::from_slice(&response)
         .map_err(|_| DeviceStoreError::adapter("Server binding response is invalid"))?;
     crate::identity::validate_issued_enrollment(&crate::IssuedEnrollment {
@@ -785,7 +844,7 @@ mod tests {
         assert!(!pending.is_bound());
         let resumed = DeviceBindConfig {
             server_url: None,
-            pairing_token: None,
+            pairing_token: Some("replacement-token-must-not-hide-committed-binding".to_owned()),
             ..config
         };
         let receipt = bind_device(&resumed).expect("recover original binding");
@@ -819,6 +878,8 @@ mod tests {
             identity.identity().client_node_id(),
             receipt.client_node_id.0
         );
+        record_remote_failure(&store, "Device 身份认证失败；服务已停止。")
+            .expect("persist a previous authentication failure");
         assert_eq!(
             bind_device(&resumed)
                 .expect("already bound does not contact Server")
@@ -826,13 +887,20 @@ mod tests {
                 .0,
             receipt.request_id.0
         );
-        record_remote_failure(&store, "Device 绑定已吊销；服务已停止。")
+        assert!(
+            load_remote_binding(&store)
+                .unwrap()
+                .unwrap()
+                .failure_reason
+                .is_none()
+        );
+        record_remote_failure(&store, DEVICE_REVOKED_REASON)
             .expect("persist authorization failure");
         let status = crate::service::device_service_status(&root);
         assert_eq!(status.server_url.as_deref(), Some(server_url.as_str()));
         assert_eq!(
             status.authorization_failure.as_deref(),
-            Some("Device 绑定已吊销；服务已停止。")
+            Some(DEVICE_REVOKED_REASON)
         );
         assert!(
             bind_device(&resumed).is_err(),
@@ -860,5 +928,221 @@ mod tests {
         }
         drop(store);
         std::fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[cfg(feature = "test-support")]
+    #[test]
+    #[allow(clippy::too_many_lines)]
+    fn receipt_save_crash_recovers_original_binding_with_a_replacement_token() {
+        let seed = DeviceIdentitySeed {
+            display_name: "Crash fixture Device".to_owned(),
+            platform: "aarch64-apple-darwin".to_owned(),
+            architecture: "aarch64".to_owned(),
+            client_version: "0.2.0".to_owned(),
+        };
+        if let Some(root) = std::env::var_os("WWC_DEVICE_BIND_TEST_DIRECTORY") {
+            bind_device(&DeviceBindConfig {
+                data_directory: PathBuf::from(root),
+                server_url: Some(std::env::var("WWC_DEVICE_BIND_TEST_SERVER").expect("Server")),
+                pairing_token: Some(std::env::var("WWC_DEVICE_BIND_TEST_TOKEN").expect("token")),
+                ca_file: None,
+                seed,
+            })
+            .expect("recover binding in child process");
+            return;
+        }
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind HTTP fixture");
+        let server_url = format!("http://{}", listener.local_addr().expect("address"));
+        let bodies = Arc::new(Mutex::new(Vec::new()));
+        let received = Arc::clone(&bodies);
+        let server = std::thread::spawn(move || {
+            for index in 0..2 {
+                let (mut socket, _) = listener.accept().expect("accept challenge");
+                assert_eq!(read_request(&mut socket).0, CHALLENGE_PATH);
+                respond(
+                    &mut socket,
+                    &serde_json::json!({"schemaVersion":"winwincode/v1", "challengeId":format!("challenge-{index}"), "challenge":"fixture", "expiresAt":"2099-01-01T00:00:00.000Z"}),
+                );
+                let (mut socket, _) = listener.accept().expect("accept bind");
+                let (path, _, body) = read_request(&mut socket);
+                assert_eq!(path, BIND_PATH);
+                let request: serde_json::Value = serde_json::from_slice(&body).expect("request");
+                received.lock().expect("requests").push(request.clone());
+                respond(
+                    &mut socket,
+                    &serde_json::json!({"schemaVersion":"winwincode/v1", "requestId":request["requestId"], "clientNodeId":"cnd_00000000000000000000000000", "publicClientId":"123456789", "ownerUserId":"usr_owner", "boundAt":"2026-10-15T00:00:00.000Z"}),
+                );
+            }
+        });
+        let root = std::env::temp_dir().join(format!(
+            "wwc-binding-receipt-crash-{}-{}",
+            std::process::id(),
+            time::OffsetDateTime::now_utc().unix_timestamp_nanos()
+        ));
+        let child = |token: &str, crash: bool| {
+            let mut command =
+                std::process::Command::new(std::env::current_exe().expect("test binary"));
+            command
+                .args([
+                    "--exact",
+                    "remote_auth::tests::receipt_save_crash_recovers_original_binding_with_a_replacement_token",
+                    "--nocapture",
+                ])
+                .env("WWC_DEVICE_BIND_TEST_DIRECTORY", &root)
+                .env("WWC_DEVICE_BIND_TEST_SERVER", &server_url)
+                .env("WWC_DEVICE_BIND_TEST_TOKEN", token);
+            if crash {
+                command.env("WWC_DEVICE_TEST_EXIT_BEFORE_BIND_RECEIPT_SAVE", "1");
+            } else {
+                command.env_remove("WWC_DEVICE_TEST_EXIT_BEFORE_BIND_RECEIPT_SAVE");
+            }
+            command.output().expect("child process")
+        };
+        assert_eq!(
+            child("original-pairing-token", true).status.code(),
+            Some(86)
+        );
+        let store = DeviceStore::open(&root).expect("store");
+        let pending = load_remote_binding(&store)
+            .expect("binding")
+            .expect("pending");
+        assert!(!pending.is_bound());
+        let recovered = child("replacement-pairing-token", false);
+        assert!(
+            recovered.status.success(),
+            "{}",
+            String::from_utf8_lossy(&recovered.stdout)
+        );
+        server.join().expect("HTTP fixture");
+        let requests = bodies.lock().expect("requests");
+        assert_eq!(requests.len(), 2);
+        assert_eq!(requests[0], requests[1]);
+        let stored = load_remote_binding(&store)
+            .expect("binding")
+            .expect("bound");
+        assert!(stored.is_bound());
+        assert_eq!(stored.request_id, pending.request_id);
+        assert_eq!(
+            stored.auth.signing_key.to_bytes(),
+            pending.auth.signing_key.to_bytes()
+        );
+        assert_eq!(
+            stored.receipt.expect("receipt").client_node_id.0,
+            "cnd_00000000000000000000000000"
+        );
+        drop(store);
+        std::fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)]
+    fn unconfirmed_binding_keeps_original_token_after_authentication_failure_or_revocation() {
+        for (status, revoked) in [(401, false), (403, false), (403, true)] {
+            let listener = TcpListener::bind("127.0.0.1:0").expect("bind HTTP fixture");
+            let server_url = format!("http://{}", listener.local_addr().expect("address"));
+            let requests = Arc::new(Mutex::new(Vec::new()));
+            let received = Arc::clone(&requests);
+            let server = std::thread::spawn(move || {
+                let attempts = if status == 401 {
+                    4
+                } else if revoked {
+                    1
+                } else {
+                    2
+                };
+                for index in 0..attempts {
+                    let (mut socket, _) = listener.accept().expect("accept challenge");
+                    assert_eq!(read_request(&mut socket).0, CHALLENGE_PATH);
+                    respond(
+                        &mut socket,
+                        &serde_json::json!({"schemaVersion":"winwincode/v1", "challengeId":format!("challenge-{index}"), "challenge":"fixture", "expiresAt":"2099-01-01T00:00:00.000Z"}),
+                    );
+                    let (mut socket, _) = listener.accept().expect("accept bind");
+                    let (path, _, body) = read_request(&mut socket);
+                    assert_eq!(path, BIND_PATH);
+                    received.lock().expect("requests").push(body);
+                    let body = if revoked {
+                        br#"{"schemaVersion":"winwincode/v1","code":"DEVICE_REVOKED"}"#.as_slice()
+                    } else {
+                        b""
+                    };
+                    write!(socket, "HTTP/1.1 {status} Rejected\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", body.len()).expect("rejection");
+                    socket.write_all(body).expect("rejection body");
+                }
+            });
+            let root = std::env::temp_dir().join(format!(
+                "wwc-binding-auth-failure-{}-{status}-{revoked}-{}",
+                std::process::id(),
+                time::OffsetDateTime::now_utc().unix_timestamp_nanos()
+            ));
+            let config = DeviceBindConfig {
+                data_directory: root.clone(),
+                server_url: Some(server_url),
+                pairing_token: Some("original-pairing-token".to_owned()),
+                ca_file: None,
+                seed: DeviceIdentitySeed {
+                    display_name: "Fixture Device".to_owned(),
+                    platform: "aarch64-apple-darwin".to_owned(),
+                    architecture: "aarch64".to_owned(),
+                    client_version: "0.2.0".to_owned(),
+                },
+            };
+            let first_error = bind_device(&config).expect_err("authentication is rejected");
+            assert_eq!(
+                requests.lock().expect("requests").len(),
+                if status == 401 { 2 } else { 1 },
+                "the bind request must reach HTTP before it fails: {first_error}"
+            );
+            let store = DeviceStore::open(&root).expect("store");
+            let pending = load_remote_binding(&store)
+                .expect("binding")
+                .expect("pending");
+            assert!(!pending.is_bound());
+            assert_eq!(pending.failure_reason.is_some(), revoked);
+            if revoked {
+                assert_eq!(
+                    pending.failure_reason.as_deref(),
+                    Some(DEVICE_REVOKED_REASON)
+                );
+            }
+            if status == 401 {
+                record_remote_failure(&store, "Device 身份认证失败；服务已停止。")
+                    .expect("persist a previous authentication failure");
+            } else if !revoked {
+                record_remote_failure(&store, "Device 绑定已吊销；服务已停止。")
+                    .expect("persist a previous ambiguous 403 failure");
+            }
+            let resumed = DeviceBindConfig {
+                pairing_token: Some("replacement-pairing-token".to_owned()),
+                ..config
+            };
+            assert!(bind_device(&resumed).is_err());
+            assert_eq!(
+                requests.lock().expect("requests").len(),
+                if status == 401 {
+                    4
+                } else if revoked {
+                    1
+                } else {
+                    2
+                }
+            );
+            server.join().expect("HTTP fixture");
+            let requests = requests.lock().expect("requests");
+            assert!(requests.iter().all(|request| request == &requests[0]));
+            let stored = load_remote_binding(&store)
+                .expect("binding")
+                .expect("pending");
+            assert_eq!(stored.failure_reason.is_some(), revoked);
+            assert_eq!(stored.request_id, pending.request_id);
+            assert_eq!(stored.pairing_token, pending.pairing_token);
+            assert_eq!(stored.intent_json, pending.intent_json);
+            assert_eq!(
+                stored.auth.signing_key.to_bytes(),
+                pending.auth.signing_key.to_bytes()
+            );
+            drop(store);
+            std::fs::remove_dir_all(root).expect("cleanup");
+        }
     }
 }

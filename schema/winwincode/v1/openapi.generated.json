@@ -30045,7 +30045,7 @@
                 }
               }
             },
-            "description": "Device or Owner authentication required."
+            "description": "DEVICE_AUTH_REQUIRED for signature authentication failure; DEVICE_PAIRING_REJECTED for an invalid, expired or consumed pairing token after successful authentication."
           },
           "403": {
             "content": {
@@ -30195,7 +30195,7 @@
     "https://schemas.winwincode.dev/winwincode/v1/domain.schema.json",
     "https://schemas.winwincode.dev/winwincode/v1/execution-port.schema.json"
   ],
-  "x-source-digest": "sha256:18f3081be1acb2a118cd32578636feb4620105c8ac17539dec66b80e9b6f69be",
+  "x-source-digest": "sha256:e5f51088a2e48fd87c1fc7c1cbf840f01f410462fbed937db69dc0d60021b312",
   "x-winwincode-client-metadata": {
     "http": {
       "authentication": {

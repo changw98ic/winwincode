@@ -98,6 +98,7 @@ def valid_record(record, root, profile, key):
 
 
 def cleanup(root, now=None):
+    root = root.resolve()
     base = cache_root(root)
     now = time.time() if now is None else now
     for profile in ("debug", "release"):

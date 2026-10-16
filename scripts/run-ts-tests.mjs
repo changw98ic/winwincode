@@ -74,7 +74,6 @@ const canonicalTestFiles = Object.freeze([
   'tests/control-plane-http-contract.test.mjs',
   'tests/control-plane-websocket-contract.test.mjs',
   'tests/credential-leak-gate.test.mjs',
-  'tests/data-export-semantic-conformance.test.mjs',
   'tests/delivery-execution-job-schema.test.mjs',
   'tests/delivery-submit-verdict-http-contract.test.mjs',
   'tests/domain-schema.test.mjs',

@@ -220,6 +220,7 @@ impl SettledAttempt {
 
 enum AttemptStop {
     Fencing(FencingRejection),
+    NotStarted(SettledAttempt),
     Settled(SettledAttempt),
 }
 
@@ -273,7 +274,11 @@ fn apply_candidate(
         if let Some(receipt) = existing.finished_receipt {
             return replay_finished_application(daemon, request, &ticket, receipt);
         }
-        let observed = inspect_started_application(daemon.store_mut(), &existing.request)?;
+        let observed = if existing.recovery_outcome.as_deref() == Some("not_started") {
+            ApplicationRecovery::NotStarted
+        } else {
+            inspect_started_application(daemon.store_mut(), &existing.request)?
+        };
         let observed = if existing.recovery_outcome.as_deref() == Some("outcome_unknown")
             && !matches!(observed, ApplicationRecovery::Applied(_))
         {
@@ -364,6 +369,10 @@ fn apply_candidate(
         start_application(daemon.store_mut(), request, &started_at)?;
         started_at
     };
+    crate::application_journal::begin_application_attempt(
+        daemon.store_mut(),
+        &request.application_id,
+    )?;
     #[cfg(feature = "test-support")]
     maybe_test_application_crash(daemon.store_mut(), request, "after_started", None)?;
     if crash_point == Some(ApplicationCrashPoint::AfterStarted) {
@@ -382,6 +391,33 @@ fn apply_candidate(
     );
     let settled = match stop {
         AttemptStop::Fencing(rejection) => return Err(CandidateApplyError::fencing(rejection)),
+        AttemptStop::NotStarted(settled) => {
+            eprintln!(
+                "candidate application {} did not start: {}",
+                request.application_id, settled.detail
+            );
+            let receipt = application_receipt(request, settled, &started_at);
+            crate::application_journal::note_recovery_outcome(
+                daemon.store_mut(),
+                &request.application_id,
+                "not_started",
+            )?;
+            let frame_sequence = enqueue_application_reconciled(
+                daemon,
+                &ticket,
+                request,
+                &ApplicationRecovery::NotStarted,
+            )?;
+            crate::application_journal::mark_reported(
+                daemon.store_mut(),
+                &request.application_id,
+                ticket.occupancy_fencing_token,
+            )?;
+            return Ok(CandidateApplyOutcome {
+                receipt,
+                frame_sequence,
+            });
+        }
         AttemptStop::Settled(settled) => settled,
     };
     #[cfg(feature = "test-support")]
@@ -560,6 +596,8 @@ pub enum ApplicationRecovery {
     OutcomeUnknown,
 }
 
+pub type ApplicationRecoveryResult = (String, Result<ApplicationRecovery, CandidateApplyError>);
+
 fn inspect_started_application(
     store: &DeviceStore,
     request: &CandidateApplyRequest,
@@ -608,7 +646,9 @@ fn inspect_started_application(
             return Ok(ApplicationRecovery::Applied(commit));
         }
     }
-    if target != request.expected_head || !working_tree_dirty(&repository).is_ok_and(|dirty| !dirty)
+    if target != request.expected_head
+        || working_tree_dirty(&repository)
+            .map_err(|failure| CandidateApplyError::store(failure.detail))?
     {
         return Ok(ApplicationRecovery::OutcomeUnknown);
     }
@@ -627,11 +667,26 @@ fn inspect_started_application(
 
 pub fn recover_started_applications(
     daemon: &mut DeviceDaemon,
-) -> Result<Vec<(String, ApplicationRecovery)>, CandidateApplyError> {
+) -> Result<Vec<ApplicationRecoveryResult>, CandidateApplyError> {
     let records = crate::application_journal::unfinished_applications(daemon.store_mut())?;
     let mut recovered = Vec::with_capacity(records.len());
     for record in records {
-        let observed = inspect_started_application(daemon.store_mut(), &record.request)?;
+        let observed = if record.recovery_outcome.as_deref() == Some("not_started") {
+            Ok(ApplicationRecovery::NotStarted)
+        } else {
+            inspect_started_application(daemon.store_mut(), &record.request)
+        };
+        let observed = match observed {
+            Ok(observed) => observed,
+            Err(error) => {
+                eprintln!(
+                    "candidate application {} recovery deferred: {error}",
+                    record.request.application_id
+                );
+                recovered.push((record.request.application_id, Err(error)));
+                continue;
+            }
+        };
         let outcome = if record.recovery_outcome.as_deref() == Some("outcome_unknown")
             && !matches!(observed, ApplicationRecovery::Applied(_))
         {
@@ -662,7 +717,7 @@ pub fn recover_started_applications(
                 },
             )?;
         }
-        recovered.push((record.request.application_id, outcome));
+        recovered.push((record.request.application_id, Ok(outcome)));
     }
     Ok(recovered)
 }
@@ -670,7 +725,10 @@ pub fn recover_started_applications(
 pub fn report_recovered_applications(
     daemon: &mut DeviceDaemon,
 ) -> Result<usize, CandidateApplyError> {
-    recover_started_applications(daemon)?;
+    let deferred = recover_started_applications(daemon)?
+        .into_iter()
+        .filter_map(|(id, outcome)| outcome.err().map(|_| id))
+        .collect::<HashSet<_>>();
     let Some(mirror) = daemon.occupancy_mirror().cloned() else {
         return Ok(0);
     };
@@ -685,6 +743,9 @@ pub fn report_recovered_applications(
     let records = crate::application_journal::all_applications(daemon.store_mut())?;
     let mut reported = 0;
     for record in records {
+        if deferred.contains(&record.request.application_id) {
+            continue;
+        }
         if record.reported_epoch == Some(ticket.occupancy_fencing_token) {
             continue;
         }
@@ -697,8 +758,19 @@ pub fn report_recovered_applications(
             ApplicationRecovery::Applied(commit.clone())
         } else if record.recovery_outcome.as_deref() == Some("outcome_unknown") {
             ApplicationRecovery::OutcomeUnknown
+        } else if record.recovery_outcome.as_deref() == Some("not_started") {
+            ApplicationRecovery::NotStarted
         } else {
-            inspect_started_application(daemon.store_mut(), &record.request)?
+            match inspect_started_application(daemon.store_mut(), &record.request) {
+                Ok(recovery) => recovery,
+                Err(error) => {
+                    eprintln!(
+                        "candidate application {} recovery deferred: {error}",
+                        record.request.application_id
+                    );
+                    continue;
+                }
+            }
         };
         enqueue_application_reconciled(daemon, &ticket, &record.request, &recovery)?;
         crate::application_journal::mark_reported(
@@ -1176,25 +1248,25 @@ fn run_attempt(
     }
     let repository = match resolve_binding_checkout(store, &request.repository_binding_id) {
         Ok(repository) => repository,
-        Err(settled) => return AttemptStop::Settled(settled),
+        Err(settled) => return AttemptStop::NotStarted(settled),
     };
 
     match read_git_ref(&repository, &request.candidate_ref) {
         Ok(None) => {
-            return AttemptStop::Settled(SettledAttempt::refused(
+            return AttemptStop::NotStarted(SettledAttempt::refused(
                 ApplyResult::CandidateMissing,
                 "the candidate ref no longer resolves in the bound checkout",
             ));
         }
         Ok(Some(commit)) if commit != record.candidate_commit => {
-            return AttemptStop::Settled(SettledAttempt::refused(
+            return AttemptStop::NotStarted(SettledAttempt::refused(
                 ApplyResult::CandidateMissing,
                 "the candidate ref drifted away from the frozen candidate commit",
             ));
         }
         Ok(Some(_)) => {}
         Err(failure) => {
-            return AttemptStop::Settled(failure.settled("the candidate ref read"));
+            return AttemptStop::NotStarted(failure.settled("the candidate ref read"));
         }
     }
     match git_command(&repository)
@@ -1214,7 +1286,7 @@ fn run_attempt(
             ));
         }
         Err(error) => {
-            return AttemptStop::Settled(io_failure_settled(
+            return AttemptStop::NotStarted(io_failure_settled(
                 &error,
                 "the candidate source ancestry check",
             ));
@@ -1231,7 +1303,7 @@ fn run_attempt(
         }
         Ok(Some(head)) => head,
         Err(failure) => {
-            return AttemptStop::Settled(failure.settled("the target branch read"));
+            return AttemptStop::NotStarted(failure.settled("the target branch read"));
         }
     };
     if current_head != request.expected_head {
@@ -1247,33 +1319,33 @@ fn run_attempt(
     match working_tree_dirty(&repository) {
         Ok(false) => {}
         Ok(true) => {
-            return AttemptStop::Settled(SettledAttempt::refused(
+            return AttemptStop::NotStarted(SettledAttempt::refused(
                 ApplyResult::WorkingTreeDirty,
                 "the bound working tree is dirty; the dirty policy refuses the apply",
             ));
         }
         Err(failure) => {
-            return AttemptStop::Settled(failure.settled("the working-tree status read"));
+            return AttemptStop::NotStarted(failure.settled("the working-tree status read"));
         }
     }
 
     match worktrees_holding(&repository, &target_ref) {
         Ok(count) if count > 0 && !(count == 1 && is_current_branch(&repository, &target_ref)) => {
-            return AttemptStop::Settled(SettledAttempt::refused(
+            return AttemptStop::NotStarted(SettledAttempt::refused(
                 ApplyResult::Failed,
                 format!("the target branch is checked out in {count} other worktree(s)"),
             ));
         }
         Ok(_) => {}
         Err(failure) => {
-            return AttemptStop::Settled(failure.settled("the worktree listing"));
+            return AttemptStop::NotStarted(failure.settled("the worktree listing"));
         }
     }
 
     let guard = match FencingGuard::from_store(store) {
         Ok(guard) => guard,
         Err(error) => {
-            return AttemptStop::Settled(SettledAttempt::refused(
+            return AttemptStop::NotStarted(SettledAttempt::refused(
                 ApplyResult::Failed,
                 format!("the fencing re-check could not read the mirror: {error}"),
             ));
@@ -1339,7 +1411,7 @@ fn execute_in_integration_worktree(
         .join(receipt_id);
     let worktree = attempt_directory.join(WORKTREE_DIRECTORY);
     if let Err(error) = fs::create_dir_all(&attempt_directory) {
-        return AttemptStop::Settled(io_failure_settled(
+        return AttemptStop::NotStarted(io_failure_settled(
             &error,
             "the integration attempt directory",
         ));
@@ -1359,7 +1431,7 @@ fn execute_in_integration_worktree(
         Ok(output) => output,
         Err(error) => {
             cleanup_attempt(repository, &attempt_directory, &worktree);
-            return AttemptStop::Settled(SettledAttempt::refused(
+            return AttemptStop::NotStarted(SettledAttempt::refused(
                 ApplyResult::Failed,
                 format!("git cannot be run for the integration worktree: {error}"),
             ));
@@ -1368,7 +1440,7 @@ fn execute_in_integration_worktree(
     if !attach_output.status.success() {
         let stderr = String::from_utf8_lossy(&attach_output.stderr);
         cleanup_attempt(repository, &attempt_directory, &worktree);
-        return AttemptStop::Settled(git_failure_settled(
+        return AttemptStop::NotStarted(git_failure_settled(
             &stderr,
             "the integration worktree creation",
         ));

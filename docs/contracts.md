@@ -203,6 +203,8 @@ Worker 的 managed config 由 Device supervisor 写入。它包含会话身份�
 
 `intent` 固定设备名称、平台、架构和版本。Device 在请求前持久化私钥、Server URL、稳定的 `requestId`、配对令牌和意图。Server 在一个事务内消费令牌、建立绑定和管理授权，并保存绑定回执。同一请求、原公钥、原令牌和原意图的重试返回原回执。每次恢复仍须用原私钥回答新挑战。绑定回执随 Server 数据保存，当前实现没有自动回收期限。
 
+`401 DEVICE_PAIRING_REJECTED` 表示签名认证已通过，但配对令牌错误、过期或已被其他请求消费。该拒绝不使未绑定目录进入永久失败。用户在同一目录提供新令牌时，Device 先重放原绑定请求。只有原请求明确收到该拒绝后，Device 才持久化新令牌并再次请求。私钥、`requestId` 和意图保持不变。网络失败、普通认证失败和无效响应保留原 pending 请求。原请求已有回执时，Server 先返回原回执；吊销检查先于令牌替换。
+
 公钥和签名使用不带 padding 的标准 Base64。签名头是 `x-winwincode-device-public-key`、`x-winwincode-device-challenge-id` 和 `x-winwincode-device-signature`。绑定后的请求还携带 `x-winwincode-client-node-id`。签名输入是以下紧凑 UTF-8 JSON 数组：
 
 ```text
@@ -211,7 +213,7 @@ Worker 的 managed config 由 Device supervisor 写入。它包含会话身份�
 
 `sha256hex` 使用小写十六进制。Device 控制交换、Worker 中继和 preview WebSocket upgrade 都使用此签名。WebSocket upgrade 使用 `GET` 和空请求正文。绑定请求的 Client Node 为空。实现见 `crates/winwincode-client-port/src/device_auth.rs::signing_bytes`。
 
-`401 DEVICE_AUTH_REQUIRED` 触发一次新挑战重试。第二次认证失败使 Device 停止服务与 Worker。`403 DEVICE_REVOKED` 进入永久失败路径，并停止服务与 Worker。已吊销绑定的旧请求不能恢复授权。
+`401 DEVICE_AUTH_REQUIRED` 触发一次新挑战重试。再次认证失败或未明确吊销的 `403` 会结束当前 Device 服务并停止 Worker。后续正常启动可以重新签名认证。未绑定请求保留恢复状态。只有 `403 DEVICE_REVOKED` 进入永久失败路径。已吊销绑定的旧请求不能恢复授权。
 
 ## 候选应用与恢复
 

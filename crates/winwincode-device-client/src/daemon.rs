@@ -84,6 +84,13 @@ const WAKE_SLICE: Duration = Duration::from_millis(20);
 pub struct ExchangeTransportError {
     message: String,
     failure: winwincode_network::NetworkFailure,
+    device_auth_rejection: Option<DeviceAuthRejection>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum DeviceAuthRejection {
+    PairingRejected,
+    Revoked,
 }
 
 impl ExchangeTransportError {
@@ -96,6 +103,7 @@ impl ExchangeTransportError {
                 winwincode_network::Acceptance::Unknown,
                 winwincode_network::Phase::ResponseHeaders,
             ),
+            device_auth_rejection: None,
         }
     }
 
@@ -104,7 +112,17 @@ impl ExchangeTransportError {
         Self {
             message: failure.to_string(),
             failure,
+            device_auth_rejection: None,
         }
+    }
+
+    pub(crate) fn with_device_auth_rejection(mut self, rejection: DeviceAuthRejection) -> Self {
+        self.device_auth_rejection = Some(rejection);
+        self
+    }
+
+    pub(crate) const fn device_auth_rejection(&self) -> Option<DeviceAuthRejection> {
+        self.device_auth_rejection
     }
 
     #[must_use]
@@ -378,6 +396,9 @@ impl DeviceDaemon {
                 .with_file_name("network-requests.sqlite3"),
         )
         .map_err(DaemonError::Network)?;
+        network_journal
+            .resume_control_authentication()
+            .map_err(DaemonError::Network)?;
         let mut daemon = Self {
             config,
             store,
@@ -919,6 +940,12 @@ impl DeviceDaemon {
         network_now: u64,
     ) -> Result<TickOutcome, DaemonError> {
         let reason = format!("exchange transport failed: {}", error.message());
+        if error.device_auth_rejection() == Some(DeviceAuthRejection::Revoked) {
+            crate::remote_auth::record_remote_failure(
+                &self.store,
+                crate::remote_auth::DEVICE_REVOKED_REASON,
+            )?;
+        }
         self.network_journal
             .finish_with_delay_cap(
                 operation.as_bytes(),

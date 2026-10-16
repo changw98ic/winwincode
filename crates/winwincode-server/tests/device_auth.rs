@@ -293,6 +293,90 @@ async fn device_routes_return_exact_auth_errors_and_revocation_rejects_signed_re
     assert_eq!(revoked["revoked"], true);
     let (status, value) = bind(&server, &key, &binding).await;
     assert_error(status, &value, 403, "DEVICE_REVOKED");
+    for rejected in ["wrong", "expired"] {
+        let (status, _, pairing) =
+            request(&server, "/api/v1/devices/pairing", &valid, &owner).await;
+        assert_eq!(status, 201);
+        let token = if rejected == "expired" {
+            let storage = winwincode_storage::SqliteStorage::open(&directory).unwrap();
+            rusqlite::Connection::open(storage.database_path())
+                .unwrap()
+                .execute(
+                    "UPDATE device_pairing_tokens SET expires_at='2000-01-01T00:00:00.000Z' WHERE consumed_request_id IS NULL",
+                    [],
+                )
+                .unwrap();
+            pairing["pairingToken"].as_str().unwrap().to_owned()
+        } else {
+            "wrong-pairing-token".to_owned()
+        };
+        let mut rejected_request = binding.clone();
+        rejected_request["requestId"] = json!(format!("rejected-pairing-{rejected}"));
+        rejected_request["pairingToken"] = json!(token);
+        let (status, value) = bind(&server, &key, &rejected_request).await;
+        assert_error(status, &value, 401, "DEVICE_PAIRING_REJECTED");
+        let device_directory = directory.join(format!("device-{rejected}"));
+        let config = winwincode_device_client::DeviceBindConfig {
+            data_directory: device_directory.clone(),
+            server_url: Some(format!("http://{}", server.local_address())),
+            pairing_token: Some(token),
+            ca_file: None,
+            seed: winwincode_device_client::DeviceIdentitySeed {
+                display_name: "Rejected pairing fixture".to_owned(),
+                platform: "aarch64-apple-darwin".to_owned(),
+                architecture: "aarch64".to_owned(),
+                client_version: "0.2.0".to_owned(),
+            },
+        };
+        let first = config.clone();
+        assert!(
+            tokio::task::spawn_blocking(move || winwincode_device_client::bind_device(&first))
+                .await
+                .unwrap()
+                .is_err()
+        );
+        let store = winwincode_device_client::DeviceStore::open(&device_directory).unwrap();
+        let pending = winwincode_device_client::load_remote_binding(&store)
+            .unwrap()
+            .unwrap();
+        assert!(!pending.is_bound());
+        assert!(pending.failure_reason.is_none());
+        rusqlite::Connection::open(store.database_path())
+            .unwrap()
+            .execute(
+                "UPDATE remote_device_binding SET failure_reason='Device 身份认证失败；服务已停止。' WHERE singleton=1",
+                [],
+            )
+            .unwrap();
+        let (status, _, pairing) =
+            request(&server, "/api/v1/devices/pairing", &valid, &owner).await;
+        assert_eq!(status, 201);
+        let resumed = winwincode_device_client::DeviceBindConfig {
+            server_url: None,
+            pairing_token: Some(pairing["pairingToken"].as_str().unwrap().to_owned()),
+            ..config
+        };
+        let receipt =
+            tokio::task::spawn_blocking(move || winwincode_device_client::bind_device(&resumed))
+                .await
+                .unwrap()
+                .unwrap();
+        assert_eq!(receipt.request_id.0, pending.request_id);
+        let stored = winwincode_device_client::load_remote_binding(&store)
+            .unwrap()
+            .unwrap();
+        assert!(stored.is_bound());
+        let storage = winwincode_storage::SqliteStorage::open(&directory).unwrap();
+        let database = rusqlite::Connection::open(storage.database_path()).unwrap();
+        let count: i64 = database
+            .query_row(
+                "SELECT count(*) FROM device_identity_bindings WHERE request_id=?1",
+                [&pending.request_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 1);
+    }
     server.shutdown().await.unwrap();
     std::fs::remove_dir_all(directory).unwrap();
 }

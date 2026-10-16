@@ -6,7 +6,7 @@ import { pathToFileURL } from 'node:url'
 
 const root = resolve(import.meta.dirname, '..')
 const inventory = JSON.parse(readFileSync(new URL('./network-entrypoints.json', import.meta.url)))
-const excluded = new Set(['crates/winwincode-publication/src/github.rs', 'crates/winwincode-s3-artifact-adapter/src/lib.rs'])
+const excluded = new Set(['crates/winwincode-publication/src/github.rs'])
 const native = /(?:ureq::Agent::(?:config_builder|with_parts)|reqwest::Client::(?:builder|new)|TcpStream::connect|connect_async_tls_with_config\s*\(|httpsRequest\s*\(|\bfetch\s*\(|new\s+WebSocket\s*\()/gu
 
 function files(directory) {

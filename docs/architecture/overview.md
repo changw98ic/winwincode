@@ -142,7 +142,7 @@ Device 的持久队列负责远程控制交换重试。单次 HTTP 执行器保�
 
 ## 第一方 crate 依赖
 
-下图只显示工作区内当前产品 crate 的 Cargo normal 依赖。箭头表示左侧 crate 依赖右侧 crate。可选 normal 依赖也包含在图中。第三方依赖和未接入当前产品运行路径的 crate 不在图中。
+下图只显示工作区内当前产品 crate 的 Cargo normal 依赖。箭头表示左侧 crate 依赖右侧 crate。可选 normal 依赖也包含在图中。第三方依赖不在图中。
 
 ```mermaid
 flowchart LR

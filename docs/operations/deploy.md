@@ -220,6 +220,8 @@ unset WWC_DEVICE_PAIRING_TOKEN
 
 `device bind` 成功时输出 `requestId`、`clientNodeId`、`publicClientId`、`ownerUserId` 和 `boundAt`。Device 在发出请求前保存密钥、Server URL 和稳定绑定请求。若成功响应丢失，重跑 `device bind --data-dir /private/winwincode/device-client --json`。Device 会复用原密钥、令牌和绑定意图，恢复原绑定。
 
+若命令提示配对令牌无效或过期，从 Owner 界面取得新令牌，再设置 `WWC_DEVICE_PAIRING_TOKEN` 并使用同一数据目录重跑 `device bind`。Device 先尝试恢复原绑定。Server 明确拒绝原令牌后，Device 才保存并使用新令牌。原密钥、请求 ID 和绑定意图保持不变。
+
 已绑定 Device 的 `serve` 使用保存的 Server URL、身份和 CA。重启时无需重新配对。`--ca-file` 或 `WWC_DEVICE_CA_FILE` 可以显式配置 CA。Device 在起点解析证书，并验证主机名。Worker 的私有管道仍由 Device 创建和监管。
 
 后续仓库和 Provider 配置沿用 [接入 Device Client](#接入-device-client) 的流程。使用自定义数据目录时，各管理命令都传相同的 `--data-dir`。

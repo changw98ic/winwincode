@@ -623,6 +623,9 @@ fn device_auth_error(error: DeviceAuthStoreError, origin: Option<&HeaderValue>) 
     let (status, code) = match error {
         DeviceAuthStoreError::Revoked => (StatusCode::FORBIDDEN, "DEVICE_REVOKED"),
         DeviceAuthStoreError::Authentication => (StatusCode::UNAUTHORIZED, "DEVICE_AUTH_REQUIRED"),
+        DeviceAuthStoreError::PairingRejected => {
+            (StatusCode::UNAUTHORIZED, "DEVICE_PAIRING_REJECTED")
+        }
         DeviceAuthStoreError::Conflict => (StatusCode::CONFLICT, "IDEMPOTENCY_CONFLICT"),
         DeviceAuthStoreError::InvalidRequest => (StatusCode::BAD_REQUEST, "INVALID_REQUEST"),
         DeviceAuthStoreError::NotFound => (StatusCode::NOT_FOUND, "RESOURCE_NOT_FOUND"),

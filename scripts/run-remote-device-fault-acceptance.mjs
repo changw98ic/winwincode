@@ -180,6 +180,28 @@ export function deviceExecutionResources(database, clientNodeId) {
         AND g.worker_id=l.worker_id AND g.worker_instance_id=l.worker_instance_id)
       ORDER BY l.lease_id`).all(clientNodeId).map(({ terminalUsageJson, ...row }) => ({ ...row,
       terminalUsage: terminalUsageJson === null ? null : JSON.parse(terminalUsageJson) })),
+    admissions: connection.prepare(`SELECT r.job_id AS jobId,j.state AS jobState,
+      r.worker_pool_id AS workerPoolId,r.product_session_id AS productSessionId,
+      r.submitted_at AS submittedAt,r.state AS admissionState,r.release_reason AS releaseReason,
+      r.actual_tokens AS actualTokens,r.actual_cost_microunits AS actualCostMicrounits,
+      a.accounting_status AS accountingStatus,a.terminal_usage_json AS terminalUsageJson
+      FROM execution_admission_reservations r JOIN scheduler_execution_jobs j USING(job_id)
+      LEFT JOIN device_execution_current_facts f USING(job_id)
+      LEFT JOIN execution_admission_reconciliation a USING(job_id)
+      WHERE NOT EXISTS(SELECT 1 FROM execution_leases l WHERE l.job_id=r.job_id)
+      AND (f.client_node_id=? OR (f.job_id IS NULL AND EXISTS(
+        SELECT 1 FROM device_execution_bindings b JOIN worker_launch_grants g
+          ON g.worker_launch_grant_id=b.worker_launch_grant_id
+        WHERE b.client_node_id=? AND g.client_node_id=b.client_node_id
+          AND g.worker_launch_grant_id=(SELECT newest.worker_launch_grant_id FROM worker_launch_grants newest
+            WHERE (j.work_run_id IS NOT NULL AND newest.work_run_id=j.work_run_id)
+              OR (j.work_run_id IS NULL AND newest.work_run_id IS NULL AND newest.product_session_id=j.product_session_id)
+            ORDER BY newest.created_at DESC,newest.worker_launch_grant_id DESC LIMIT 1)
+          AND ((j.work_run_id IS NOT NULL AND j.work_run_id=b.work_run_id)
+            OR (j.work_run_id IS NULL AND b.work_run_id IS NULL
+              AND j.product_session_id=b.product_session_id)))))
+      ORDER BY r.job_id`).all(clientNodeId, clientNodeId).map(({ terminalUsageJson, ...row }) => ({ ...row,
+      terminalUsage: terminalUsageJson === null ? null : JSON.parse(terminalUsageJson) })),
     workers: connection.prepare(`SELECT worker_id AS workerId,worker_instance_id AS workerInstanceId,health
       FROM execution_workers w WHERE EXISTS(SELECT 1 FROM worker_launch_grants g
         WHERE g.client_node_id=? AND g.worker_id=w.worker_id AND g.worker_instance_id=w.worker_instance_id)
@@ -193,7 +215,7 @@ export function deviceExecutionResources(database, clientNodeId) {
 }
 
 export function assertRevokedDeviceExecutionResources(before, after) {
-  assert.ok(before.leases.length > 0 && before.workers.length > 0, 'revocation evidence requires actual Device execution')
+  assert.ok(before.leases.length + (before.admissions?.length ?? 0) > 0, 'revocation evidence requires actual Device execution')
   for (const original of before.leases) {
     const current = after.leases.find(row => row.leaseId === original.leaseId)
     assert.ok(current, 'revocation must retain each original execution lease')
@@ -216,17 +238,19 @@ export function assertRevokedDeviceExecutionResources(before, after) {
       'revocation must release the execution slot')
     assert.ok(row.admissionState === null || ['settled', 'released'].includes(row.admissionState),
       'revocation must release admission capacity')
-    if (row.leaseOutcome === 'cancelled' && row.admissionState === 'released'
-      && before.leases.some(original => original.leaseId === row.leaseId && original.leaseOutcome === null
-        && ['queued', 'running'].includes(original.admissionState))) {
-      assert.equal(row.releaseReason, 'cancelled')
-      assert.equal(row.actualTokens, null)
-      assert.equal(row.actualCostMicrounits, null)
-      assert.equal(row.accountingStatus, 'pending')
-      assert.equal(row.terminalUsage?.accountingStatus, 'unknown')
-      assert.equal(row.terminalUsage?.tokens, null)
-      assert.equal(row.terminalUsage?.costMicrounits, null)
-    }
+    const original = before.leases.find(item => item.leaseId === row.leaseId)
+    if (original) assertRevokedAdmission(original, row)
+  }
+  for (const original of before.admissions ?? []) {
+    const current = after.admissions?.find(row => row.jobId === original.jobId)
+    assert.ok(current, 'revocation must retain each original admission reservation')
+    for (const key of ['workerPoolId', 'productSessionId', 'submittedAt']) assert.equal(current[key], original[key])
+    assertRevokedAdmission(original, current, false)
+    if (['completed', 'failed'].includes(original.jobState)) assert.equal(current.jobState, original.jobState)
+  }
+  for (const row of after.admissions ?? []) {
+    assert.ok(['completed', 'failed'].includes(row.jobState), 'revocation must close the execution job')
+    assert.ok(['settled', 'released'].includes(row.admissionState), 'revocation must release admission capacity')
   }
   for (const original of before.workers) assert.ok(after.workers.some(row => row.workerId === original.workerId
     && row.workerInstanceId === original.workerInstanceId), 'revocation must retain each original Worker identity')
@@ -241,6 +265,32 @@ export function assertRevokedDeviceExecutionResources(before, after) {
   }
   for (const slot of after.slots) assert.ok(['completed', 'failed', 'cancelled', 'recovery_failed'].includes(slot.state),
     'revocation must close execution slots from every attempt')
+}
+
+function assertRevokedAdmission(original, current, hasLease = true) {
+  assert.ok((original.admissionState === null && current.admissionState === null)
+    || ['settled', 'released'].includes(current.admissionState), 'revocation must retain and release original admission capacity')
+  if (['queued', 'running'].includes(original.admissionState)) {
+    assert.equal(current.admissionState, 'released')
+    assert.equal(current.releaseReason, 'cancelled')
+    assert.equal(current.actualTokens, null)
+    assert.equal(current.actualCostMicrounits, null)
+    if (!hasLease) {
+      assert.equal(current.accountingStatus, null)
+      assert.equal(current.terminalUsage, null)
+      return
+    }
+    assert.equal(current.accountingStatus, 'pending')
+    assert.equal(current.terminalUsage?.accountingStatus, 'unknown')
+    assert.equal(current.terminalUsage?.tokens, null)
+    assert.equal(current.terminalUsage?.costMicrounits, null)
+  } else if (original.admissionState !== null) {
+    for (const key of ['admissionState', 'releaseReason', 'actualTokens', 'actualCostMicrounits']) assert.equal(current[key], original[key])
+    assert.deepEqual(current.terminalUsage, original.terminalUsage)
+    assert.ok(current.accountingStatus === original.accountingStatus
+      || (original.accountingStatus === 'pending' && current.accountingStatus === 'settled'),
+    'revocation must retain original terminal accounting facts')
+  }
 }
 
 function command(command_, arguments_, { input, env = process.env, timeoutMillis = 120_000, diagnosticPath } = {}) {
@@ -1093,7 +1143,7 @@ export async function runRemoteDeviceFaultAcceptance(configuration, output) {
         return value.binding.failureReason && observed.alive.length === 0
           && value.workers.every(item => item.state !== 'running') ? value : false
       }, 'revoked Device permanently fails and closes every owned process', 60_000)
-      assert.equal(after.binding.failureReason, 'Device 绑定已吊销；服务已停止。')
+      assert.equal(after.binding.failureReason, 'DEVICE_REVOKED')
       const resourcesAfter = deviceExecutionResources(configuration.server.database, binding.clientNodeId)
       assertRevokedDeviceExecutionResources(resourcesBefore, resourcesAfter)
       return { clientNodeId: binding.clientNodeId, revoked: true, before: before.processes,
@@ -1195,7 +1245,7 @@ async function runOfflineScenarios({ configuration, api, caPem, attempt, result,
         return value.binding.failureReason && processes.alive.length === 0
           && value.workers.every(item => item.state !== 'running') ? value : false
       }, 'offline revoked Device reconnects, fails explicitly and closes owned processes', 60_000)
-      assert.equal(after.binding.failureReason, 'Device 绑定已吊销；服务已停止。')
+      assert.equal(after.binding.failureReason, 'DEVICE_REVOKED')
       const retry = await deviceCall('bind')
       assert.notEqual(retry.exitCode, 0, 'revoked original binding cannot be recovered into an authorized identity')
       const resourcesAfter = deviceExecutionResources(configuration.server.database, binding.clientNodeId)

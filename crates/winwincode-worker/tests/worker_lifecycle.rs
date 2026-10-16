@@ -63,6 +63,8 @@ const NOW: &str = "2027-01-15T08:00:02.000Z";
 mod control_driver_regressions;
 #[path = "support/mechanism_worker_fairness.rs"]
 mod mechanism_worker_fairness;
+#[path = "support/validation_fixture.rs"]
+mod validation_fixture;
 const OBSERVER_VALIDATION_CONFIG: &str = r#"schemaVersion = 1
 
 [[commands]]

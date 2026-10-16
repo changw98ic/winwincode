@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use base64::{Engine as _, engine::general_purpose::STANDARD_NO_PAD as BASE64};
-use ed25519_dalek::{Signature, VerifyingKey};
+use ed25519_dalek::{Signature, Signer as _, SigningKey, VerifyingKey};
 use http::HeaderMap;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -50,17 +50,19 @@ impl DeviceAuthApplication {
             .map_err(|_| DeviceAuthStoreError::InvalidRequest)?;
         let key = field(request, "publicKey")?;
         verifying_key(key).map_err(|_| DeviceAuthStoreError::InvalidRequest)?;
-        let id = random(24)?;
-        let challenge = random(32)?;
         let now = OffsetDateTime::now_utc();
         let expiry = timestamp(now + time::Duration::seconds(60))?;
-        self.storage()?.publish_device_challenge(
-            &id,
-            key,
-            &challenge,
-            &expiry,
-            &timestamp(now)?,
-        )?;
+        let mut storage = self.storage()?;
+        let (id, challenge) = if let Some(secret) = storage.device_challenge_secret(key)? {
+            let id = format!("bound_{expiry}_{}", random(24)?);
+            let challenge = bound_challenge(&id, key, &secret);
+            (id, challenge)
+        } else {
+            let id = random(24)?;
+            let challenge = random(32)?;
+            storage.publish_device_challenge(&id, key, &challenge, &expiry, &timestamp(now)?)?;
+            (id, challenge)
+        };
         serde_json::to_value(DeviceChallengeResponse {
             schema_version: SchemaVersion::WinwincodeV1,
             challenge_id: id,
@@ -91,8 +93,20 @@ impl DeviceAuthApplication {
             return Err(DeviceAuthStoreError::Authentication);
         }
         let mut storage = self.storage()?;
-        let now = timestamp(OffsetDateTime::now_utc())?;
-        let challenge = storage.device_challenge(challenge_id, key, &now)?;
+        let now = OffsetDateTime::now_utc();
+        let expiry = challenge_id
+            .starts_with("bound_")
+            .then(|| bound_challenge_expiry(challenge_id, now))
+            .transpose()?;
+        let now = timestamp(now)?;
+        let challenge = if expiry.is_some() {
+            let secret = storage
+                .device_challenge_secret(key)?
+                .ok_or(DeviceAuthStoreError::Authentication)?;
+            bound_challenge(challenge_id, key, &secret)
+        } else {
+            storage.device_challenge(challenge_id, key, &now)?
+        };
         let signature = BASE64
             .decode(signature)
             .ok()
@@ -104,7 +118,11 @@ impl DeviceAuthApplication {
                 &signature,
             )
             .map_err(|_| DeviceAuthStoreError::Authentication)?;
-        storage.consume_device_challenge(challenge_id, key, &challenge, &now)?;
+        if let Some(expiry) = expiry {
+            storage.consume_bound_device_challenge(challenge_id, key, &challenge, &expiry, &now)?;
+        } else {
+            storage.consume_device_challenge(challenge_id, key, &challenge, &now)?;
+        }
         if !node.is_empty() {
             storage.authenticate_device_binding(node, key)?;
         }
@@ -181,6 +199,39 @@ impl DeviceAuthApplication {
     }
 }
 
+fn bound_challenge(id: &str, key: &str, secret: &str) -> String {
+    let mut digest = Sha256::new();
+    digest.update(b"winwincode/bound-device-challenge-key/v1\0");
+    digest.update(secret.as_bytes());
+    let seed: [u8; 32] = digest.finalize().into();
+    let bytes = format!("winwincode/bound-device-challenge/v1\n{key}\n{id}");
+    BASE64.encode(
+        SigningKey::from_bytes(&seed)
+            .sign(bytes.as_bytes())
+            .to_bytes(),
+    )
+}
+
+fn bound_challenge_expiry(id: &str, now: OffsetDateTime) -> Result<String, DeviceAuthStoreError> {
+    let (expiry, nonce) = id
+        .strip_prefix("bound_")
+        .and_then(|value| value.split_once('_'))
+        .ok_or(DeviceAuthStoreError::Authentication)?;
+    let expires = OffsetDateTime::parse(expiry, &time::format_description::well_known::Rfc3339)
+        .map_err(|_| DeviceAuthStoreError::Authentication)?;
+    if timestamp(expires)? != expiry
+        || expires <= now
+        || expires > now + time::Duration::seconds(60)
+        || BASE64
+            .decode(nonce)
+            .ok()
+            .is_none_or(|value| value.len() != 24)
+    {
+        return Err(DeviceAuthStoreError::Authentication);
+    }
+    Ok(expiry.to_owned())
+}
+
 fn field<'a>(value: &'a Value, name: &str) -> Result<&'a str, DeviceAuthStoreError> {
     value[name]
         .as_str()
@@ -228,7 +279,7 @@ fn timestamp(value: OffsetDateTime) -> Result<String, DeviceAuthStoreError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ed25519_dalek::{Signer as _, SigningKey};
+    use ed25519_dalek::SigningKey;
     use serde_json::json;
     use std::sync::atomic::{AtomicU64, Ordering};
     static NEXT: AtomicU64 = AtomicU64::new(1);
@@ -336,6 +387,281 @@ mod tests {
     }
 
     #[test]
+    fn anonymous_challenge_capacity_preserves_bound_device_authentication() {
+        for multiple_keys in [false, true] {
+            let f = Fixture::new();
+            let pairing = f.app.pairing("usr_00000000000000000000000001").unwrap();
+            let binding = f
+                .bind(&f.binding_request(pairing["pairingToken"].as_str().unwrap()))
+                .unwrap();
+            let node = binding["clientNodeId"].as_str().unwrap();
+            let storage = f.app.storage().unwrap();
+            let mut database = rusqlite::Connection::open(storage.database_path()).unwrap();
+            let tx = database.transaction().unwrap();
+            let expiry =
+                timestamp(OffsetDateTime::now_utc() + time::Duration::seconds(60)).unwrap();
+            {
+                let mut insert = tx
+                    .prepare("INSERT INTO device_auth_challenges VALUES(?1,?2,'anonymous',?3)")
+                    .unwrap();
+                for index in 0..4096 {
+                    let mut seed = [8; 32];
+                    if multiple_keys {
+                        seed[..4].copy_from_slice(&u32::try_from(index).unwrap().to_le_bytes());
+                    }
+                    let key =
+                        BASE64.encode(SigningKey::from_bytes(&seed).verifying_key().as_bytes());
+                    insert
+                        .execute(rusqlite::params![format!("pending-{index}"), key, expiry])
+                        .unwrap();
+                }
+            }
+            tx.commit().unwrap();
+            let anonymous_key =
+                BASE64.encode(SigningKey::from_bytes(&[8; 32]).verifying_key().as_bytes());
+            assert_eq!(
+                f.app
+                    .challenge(&json!({"schemaVersion":"winwincode/v1","publicKey":anonymous_key})),
+                Err(DeviceAuthStoreError::Unavailable)
+            );
+            let headers = f.headers("POST", "/internal/v1/client/exchange", node, b"request");
+            assert!(
+                f.app
+                    .authenticate(
+                        &headers,
+                        "POST",
+                        "/internal/v1/client/exchange",
+                        node,
+                        b"request"
+                    )
+                    .is_ok()
+            );
+            assert_eq!(
+                f.app.authenticate(
+                    &headers,
+                    "POST",
+                    "/internal/v1/client/exchange",
+                    node,
+                    b"request"
+                ),
+                Err(DeviceAuthStoreError::Authentication)
+            );
+        }
+    }
+
+    #[test]
+    fn public_key_impostor_challenges_preserve_concurrent_bound_requests() {
+        let f = Fixture::new();
+        let pairing = f.app.pairing("usr_00000000000000000000000001").unwrap();
+        let binding = f
+            .bind(&f.binding_request(pairing["pairingToken"].as_str().unwrap()))
+            .unwrap();
+        let node = binding["clientNodeId"].as_str().unwrap();
+        let requests: Vec<_> = (0..8)
+            .map(|_| f.headers("POST", "/internal/v1/client/exchange", node, b"request"))
+            .collect();
+        let key = BASE64.encode(f.key.verifying_key().as_bytes());
+        for _ in 0..128 {
+            f.app
+                .challenge(&json!({"schemaVersion":"winwincode/v1","publicKey":key}))
+                .unwrap();
+        }
+        let storage = f.app.storage().unwrap();
+        let database = rusqlite::Connection::open(storage.database_path()).unwrap();
+        let pending: i64 = database
+            .query_row(
+                "SELECT count(*) FROM device_auth_challenges WHERE public_key=?1",
+                [&key],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(pending, 0);
+        std::thread::scope(|scope| {
+            for headers in &requests {
+                let app = &f.app;
+                scope.spawn(move || {
+                    assert!(
+                        app.authenticate(
+                            headers,
+                            "POST",
+                            "/internal/v1/client/exchange",
+                            node,
+                            b"request"
+                        )
+                        .is_ok()
+                    );
+                    assert_eq!(
+                        app.authenticate(
+                            headers,
+                            "POST",
+                            "/internal/v1/client/exchange",
+                            node,
+                            b"request"
+                        ),
+                        Err(DeviceAuthStoreError::Authentication)
+                    );
+                });
+            }
+        });
+        let headers = f.headers("POST", "/internal/v1/client/exchange", node, b"request");
+        let barrier = std::sync::Barrier::new(8);
+        let succeeded = AtomicU64::new(0);
+        std::thread::scope(|scope| {
+            for _ in 0..8 {
+                let app = &f.app;
+                let headers = &headers;
+                let barrier = &barrier;
+                let succeeded = &succeeded;
+                scope.spawn(move || {
+                    barrier.wait();
+                    match app.authenticate(
+                        headers,
+                        "POST",
+                        "/internal/v1/client/exchange",
+                        node,
+                        b"request",
+                    ) {
+                        Ok(_) => {
+                            succeeded.fetch_add(1, Ordering::Relaxed);
+                        }
+                        Err(error) => assert_eq!(error, DeviceAuthStoreError::Authentication),
+                    }
+                });
+            }
+        });
+        assert_eq!(succeeded.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn bound_authentication_continues_after_many_recent_consumptions() {
+        let f = Fixture::new();
+        let pairing = f.app.pairing("usr_00000000000000000000000001").unwrap();
+        let binding = f
+            .bind(&f.binding_request(pairing["pairingToken"].as_str().unwrap()))
+            .unwrap();
+        let node = binding["clientNodeId"].as_str().unwrap();
+        let key = BASE64.encode(f.key.verifying_key().as_bytes());
+        let storage = f.app.storage().unwrap();
+        let mut database = rusqlite::Connection::open(storage.database_path()).unwrap();
+        let tx = database.transaction().unwrap();
+        let expiry = timestamp(OffsetDateTime::now_utc() + time::Duration::seconds(60)).unwrap();
+        {
+            let mut insert = tx
+                .prepare("INSERT INTO device_auth_challenges VALUES(?1,?2,'signed',?3)")
+                .unwrap();
+            for index in 0u32..4096 {
+                let mut nonce = [0; 24];
+                nonce[..4].copy_from_slice(&index.to_le_bytes());
+                let id = format!("bound_{expiry}_{}", BASE64.encode(nonce));
+                insert.execute(rusqlite::params![id, key, expiry]).unwrap();
+            }
+        }
+        tx.commit().unwrap();
+        for _ in 0..16 {
+            let headers = f.headers("POST", "/internal/v1/client/exchange", node, b"request");
+            assert!(
+                f.app
+                    .authenticate(
+                        &headers,
+                        "POST",
+                        "/internal/v1/client/exchange",
+                        node,
+                        b"request"
+                    )
+                    .is_ok()
+            );
+            assert_eq!(
+                f.app.authenticate(
+                    &headers,
+                    "POST",
+                    "/internal/v1/client/exchange",
+                    node,
+                    b"request"
+                ),
+                Err(DeviceAuthStoreError::Authentication)
+            );
+        }
+        let consumed: i64 = database
+            .query_row(
+                "SELECT count(*) FROM device_auth_challenges WHERE public_key=?1",
+                [&key],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(consumed, 4112);
+    }
+
+    #[test]
+    fn bound_challenges_reject_expired_future_and_malformed_ids() {
+        let now = OffsetDateTime::parse(
+            "2026-01-01T00:00:00.000Z",
+            &time::format_description::well_known::Rfc3339,
+        )
+        .unwrap();
+        let nonce = random(24).unwrap();
+        for expiry in [
+            now - time::Duration::seconds(1),
+            now + time::Duration::seconds(61),
+        ] {
+            let id = format!("bound_{}_{nonce}", timestamp(expiry).unwrap());
+            assert_eq!(
+                bound_challenge_expiry(&id, now),
+                Err(DeviceAuthStoreError::Authentication)
+            );
+        }
+        let expiry = timestamp(now + time::Duration::seconds(60)).unwrap();
+        for id in [
+            "bound_invalid".to_owned(),
+            format!("bound_{expiry}_invalid"),
+            format!("bound_{}_{nonce}", expiry.replace(".000Z", "Z")),
+        ] {
+            assert_eq!(
+                bound_challenge_expiry(&id, now),
+                Err(DeviceAuthStoreError::Authentication)
+            );
+        }
+        assert_eq!(
+            bound_challenge_expiry(&format!("bound_{expiry}_{nonce}"), now).unwrap(),
+            expiry
+        );
+    }
+
+    #[test]
+    fn anonymous_challenges_reclaim_expired_entries() {
+        let f = Fixture::new();
+        let key = BASE64.encode(f.key.verifying_key().as_bytes());
+        let request = json!({"schemaVersion":"winwincode/v1","publicKey":key});
+        let first = f.app.challenge(&request).unwrap();
+        for _ in 1..128 {
+            f.app.challenge(&request).unwrap();
+        }
+        let storage = f.app.storage().unwrap();
+        let database = rusqlite::Connection::open(storage.database_path()).unwrap();
+        database
+            .execute(
+                "UPDATE device_auth_challenges SET expires_at='2000-01-01T00:00:00.000Z'",
+                [],
+            )
+            .unwrap();
+        let mut storage = f.app.storage().unwrap();
+        assert_eq!(
+            storage.device_challenge(
+                first["challengeId"].as_str().unwrap(),
+                &key,
+                &timestamp(OffsetDateTime::now_utc()).unwrap()
+            ),
+            Err(DeviceAuthStoreError::Authentication)
+        );
+        assert!(f.app.challenge(&request).is_ok());
+        let pending: i64 = database
+            .query_row("SELECT count(*) FROM device_auth_challenges", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(pending, 1);
+    }
+
+    #[test]
     fn lost_binding_response_recovers_original_identity_and_revocation_is_permanent() {
         let mut f = Fixture::new();
         let pairing = f.app.pairing("usr_00000000000000000000000001").unwrap();
@@ -350,7 +676,7 @@ mod tests {
         assert_eq!(f.bind(&changed), Err(DeviceAuthStoreError::Conflict));
         let mut changed = request.clone();
         changed["requestId"] = json!("req_00000000000000000000000002");
-        assert_eq!(f.bind(&changed), Err(DeviceAuthStoreError::Authentication));
+        assert_eq!(f.bind(&changed), Err(DeviceAuthStoreError::PairingRejected));
         let node = first["clientNodeId"].as_str().unwrap();
         let original = f.key.clone();
         f.key = SigningKey::from_bytes(&[8; 32]);

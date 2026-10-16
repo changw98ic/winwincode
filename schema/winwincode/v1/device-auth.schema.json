@@ -245,8 +245,9 @@
     ],
     "signatureSerialization": "compact UTF-8 JSON array",
     "challenge": "single use, sixty-second lifetime, bound to publicKey",
-    "bindingRetry": "same requestId, publicKey and intent with a fresh signed challenge returns the stored binding; revoked bindings remain revoked",
-    "workerTransport": "Device-owned private stdio; no remote Worker authentication credential"
+    "bindingRetry": "same requestId, publicKey, pairingToken and intent with a fresh signed challenge returns the stored binding; revoked bindings remain revoked",
+    "workerTransport": "Device-owned private stdio; no remote Worker authentication credential",
+    "pairingRejection": "401 DEVICE_PAIRING_REJECTED follows successful signature authentication and confirms no binding receipt exists for the request; only then may an unbound Device replace its persisted pairing token while retaining requestId, publicKey and intent"
   },
   "x-winwincode-openapi": {
     "securitySchemes": {
@@ -482,7 +483,7 @@
               }
             },
             "401": {
-              "description": "Device or Owner authentication required.",
+              "description": "DEVICE_AUTH_REQUIRED for signature authentication failure; DEVICE_PAIRING_REJECTED for an invalid, expired or consumed pairing token after successful authentication.",
               "content": {
                 "application/json": {
                   "schema": {

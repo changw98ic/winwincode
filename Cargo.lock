@@ -13003,108 +13003,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "winwincode-connector-github"
-version = "0.2.0"
-dependencies = [
- "hmac 0.12.1",
- "jsonwebtoken",
- "rcgen",
- "rustls",
- "serde",
- "serde_json",
- "sha2 0.10.9",
- "time",
- "ureq",
- "winwincode-api",
- "winwincode-domain",
- "winwincode-integration-core",
- "winwincode-integration-sqlite",
- "winwincode-network",
- "winwincode-publication",
- "winwincode-storage",
-]
-
-[[package]]
-name = "winwincode-connector-jira"
-version = "0.2.0"
-dependencies = [
- "hmac 0.12.1",
- "rcgen",
- "rustls",
- "serde",
- "serde_json",
- "sha2 0.10.9",
- "ureq",
- "winwincode-domain",
- "winwincode-integration-core",
- "winwincode-integration-sqlite",
- "winwincode-network",
-]
-
-[[package]]
-name = "winwincode-connector-linear"
-version = "0.2.0"
-dependencies = [
- "hmac 0.12.1",
- "rcgen",
- "rustls",
- "serde",
- "serde_json",
- "sha2 0.10.9",
- "ureq",
- "winwincode-domain",
- "winwincode-integration-core",
- "winwincode-integration-sqlite",
- "winwincode-network",
-]
-
-[[package]]
-name = "winwincode-connector-slack"
-version = "0.2.0"
-dependencies = [
- "hmac 0.12.1",
- "rcgen",
- "rustls",
- "serde",
- "serde_json",
- "sha2 0.10.9",
- "ureq",
- "winwincode-domain",
- "winwincode-integration-core",
- "winwincode-integration-sqlite",
- "winwincode-network",
-]
-
-[[package]]
-name = "winwincode-connector-teams"
-version = "0.2.0"
-dependencies = [
- "rcgen",
- "rustls",
- "serde",
- "serde_json",
- "sha2 0.10.9",
- "ureq",
- "winwincode-domain",
- "winwincode-integration-core",
- "winwincode-integration-sqlite",
- "winwincode-network",
-]
-
-[[package]]
-name = "winwincode-connector-webhook"
-version = "0.2.0"
-dependencies = [
- "hmac 0.12.1",
- "serde_json",
- "sha2 0.10.9",
- "ureq",
- "winwincode-domain",
- "winwincode-integration-core",
- "winwincode-integration-sqlite",
-]
-
-[[package]]
 name = "winwincode-control-plane"
 version = "0.2.0"
 dependencies = [
@@ -13135,15 +13033,6 @@ dependencies = [
  "winwincode-repository-context",
  "winwincode-session",
  "winwincode-storage",
-]
-
-[[package]]
-name = "winwincode-data-export"
-version = "0.2.0"
-dependencies = [
- "serde",
- "serde_json",
- "sha2 0.10.9",
 ]
 
 [[package]]
@@ -13230,31 +13119,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "winwincode-integration-core"
-version = "0.2.0"
-dependencies = [
- "serde",
- "serde_json",
- "sha2 0.10.9",
- "winwincode-domain",
- "winwincode-network",
-]
-
-[[package]]
-name = "winwincode-integration-sqlite"
-version = "0.2.0"
-dependencies = [
- "rcgen",
- "rusqlite",
- "rustls",
- "serde_json",
- "winwincode-connector-slack",
- "winwincode-domain",
- "winwincode-integration-core",
- "winwincode-network",
-]
-
-[[package]]
 name = "winwincode-kernel"
 version = "0.2.0"
 dependencies = [
@@ -13323,16 +13187,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "winwincode-observability-sqlite"
-version = "0.2.0"
-dependencies = [
- "rusqlite",
- "serde_json",
- "sha2 0.10.9",
- "winwincode-observability-core",
-]
-
-[[package]]
 name = "winwincode-provider"
 version = "0.2.0"
 dependencies = [
@@ -13386,19 +13240,6 @@ version = "0.2.0"
 dependencies = [
  "serde",
  "serde_json",
-]
-
-[[package]]
-name = "winwincode-s3-artifact-adapter"
-version = "0.2.0"
-dependencies = [
- "rcgen",
- "rustls",
- "serde",
- "serde_json",
- "sha2 0.10.9",
- "ureq",
- "winwincode-domain",
 ]
 
 [[package]]

@@ -131,6 +131,7 @@ async fn validation_case_control_with_store_fault(
             &format!("import os, time; from pathlib import Path; Path(os.environ['WWC_OUTPUT_DIR']).joinpath('validation-started').write_text(str(os.getpid())); time.sleep({seconds}); raise SystemExit(0)"),
             1,
         );
+    let config = validation_fixture::with_python_executable(&config);
     std::fs::write(repository.join(".winwincode/validation.toml"), config).unwrap();
     run_git(&repository, &["add", ".winwincode/validation.toml"]);
     run_git(

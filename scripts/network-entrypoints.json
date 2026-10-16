@@ -135,67 +135,6 @@
       "owner": "tunnel supervisor or one forwarded logical HTTP request"
     },
     {
-      "file": "crates/winwincode-connector-github/src/lib.rs",
-      "operations": [
-        "fn request("
-      ],
-      "policyMarkers": [
-        "execute_http_once"
-      ],
-      "owner": "integration SQLite delivery queue with unknown-write fence"
-    },
-    {
-      "file": "crates/winwincode-connector-jira/src/lib.rs",
-      "operations": [
-        "fn request("
-      ],
-      "policyMarkers": [
-        "execute_http_once"
-      ],
-      "owner": "integration SQLite delivery queue with unknown-write fence"
-    },
-    {
-      "file": "crates/winwincode-connector-linear/src/lib.rs",
-      "operations": [
-        "fn graphql("
-      ],
-      "policyMarkers": [
-        "execute_http_once"
-      ],
-      "owner": "integration SQLite delivery queue with unknown-write fence"
-    },
-    {
-      "file": "crates/winwincode-connector-slack/src/lib.rs",
-      "operations": [
-        "fn request("
-      ],
-      "policyMarkers": [
-        "execute_http_once"
-      ],
-      "owner": "integration SQLite delivery queue with unknown-write fence"
-    },
-    {
-      "file": "crates/winwincode-connector-teams/src/lib.rs",
-      "operations": [
-        "fn request("
-      ],
-      "policyMarkers": [
-        "execute_http_once"
-      ],
-      "owner": "integration SQLite delivery queue with unknown-write fence"
-    },
-    {
-      "file": "crates/winwincode-integration-sqlite/src/lib.rs",
-      "operations": [
-        "outbound_retry_at",
-        "network_attempt_counts"
-      ],
-      "policyMarkers": [
-        "winwincode_network::decide"
-      ],
-      "owner": "one durable delivery retry owner; leaf HTTP does not loop"
-    },
-    {
       "file": "scripts/generate-contracts.mjs",
       "operations": [
         "createControlPlaneWebSocketClient",
@@ -316,7 +255,6 @@
   ],
   "excluded": [
     "GitHub publication writes",
-    "S3 publication writes",
     "inbound listeners",
     "network test fixtures",
     "vendored SDK routes outside the product host model/MCP transport",

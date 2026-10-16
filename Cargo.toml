@@ -10,24 +10,13 @@ members = [
   "crates/winwincode-device-client",
   "crates/winwincode-control-plane",
   "crates/winwincode-codex",
-  "crates/winwincode-data-export",
   "crates/winwincode-domain",
   "crates/winwincode-execution-port",
   "crates/winwincode-evidence-export",
   "crates/winwincode-fusion",
-  "crates/winwincode-connector-github",
-  "crates/winwincode-connector-jira",
-  "crates/winwincode-connector-linear",
-  "crates/winwincode-connector-slack",
-  "crates/winwincode-connector-teams",
-  "crates/winwincode-connector-webhook",
-  "crates/winwincode-integration-core",
-  "crates/winwincode-integration-sqlite",
   "crates/winwincode-local",
   "crates/winwincode-network",
   "crates/winwincode-observability-core",
-  "crates/winwincode-observability-sqlite",
-  "crates/winwincode-s3-artifact-adapter",
   "crates/winwincode-provider",
   "crates/winwincode-publication",
   "crates/winwincode-repository-context",
@@ -84,19 +73,10 @@ uuid = { version = "=1.20.0", features = ["v7"] }
 winwincode-api = { path = "crates/winwincode-api" }
 winwincode-client-port = { path = "crates/winwincode-client-port" }
 winwincode-audit = { path = "crates/winwincode-audit" }
-winwincode-data-export = { path = "crates/winwincode-data-export" }
 winwincode-delivery = { version = "=0.2.0", path = "crates/winwincode-delivery" }
 winwincode-domain = { version = "=0.2.0", path = "crates/winwincode-domain" }
 winwincode-execution-port = { path = "crates/winwincode-execution-port" }
 winwincode-fusion = { path = "crates/winwincode-fusion" }
-winwincode-integration-core = { version = "=0.2.0", path = "crates/winwincode-integration-core" }
-winwincode-integration-sqlite = { path = "crates/winwincode-integration-sqlite" }
-winwincode-connector-github = { path = "crates/winwincode-connector-github" }
-winwincode-connector-jira = { path = "crates/winwincode-connector-jira" }
-winwincode-connector-linear = { path = "crates/winwincode-connector-linear" }
-winwincode-connector-slack = { path = "crates/winwincode-connector-slack" }
-winwincode-connector-teams = { path = "crates/winwincode-connector-teams" }
-winwincode-connector-webhook = { path = "crates/winwincode-connector-webhook" }
 winwincode-provider = { path = "crates/winwincode-provider" }
 winwincode-network = { path = "crates/winwincode-network" }
 winwincode-publication = { path = "crates/winwincode-publication" }

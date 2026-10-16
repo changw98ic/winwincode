@@ -210,7 +210,9 @@ cargo test --all-features --locked -p winwincode-storage --lib device_auth::test
 cargo test --all-features --locked -p winwincode-device-client --test apply_engine
 ```
 
-Device 的绑定测试使用本机 HTTP fixture 丢弃成功响应。重开数据目录后，它核对原请求、原私钥、原意图和原 Server URL。TLS 测试运行真实 TLS listener，分别检查显式 CA 成功、未知 CA 拒绝和主机名不匹配拒绝。Server 和 Storage 测试核对挑战单次消费、绑定事务原子性、幂等回执和永久吊销。这些检查使用 fixture，不能代替真实两机证据。
+Device 的绑定测试使用本机 HTTP fixture 丢弃成功响应。重开数据目录后，它核对原请求、原私钥、原意图和原 Server URL。TLS 测试运行真实 TLS listener，分别检查显式 CA 成功、未知 CA 拒绝和主机名不匹配拒绝。Server 和 Storage 测试核对挑战单次消费、绑定事务原子性、幂等回执和永久吊销。挑战容量 fixture 覆盖匿名单公钥和多公钥占满、冒用已绑定公钥不落库、并发请求独立消费、同一挑战并发重放拒绝、大量已有消费记录下持续认证，以及过期回收。这些检查使用 fixture，不能代替真实两机证据。
+
+配对拒绝回归使用真实 Server HTTP 路由，分别验证错误令牌和过期令牌失败后，可在同一 Device 目录提供新令牌完成绑定。Device 测试验证普通认证失败保留原 pending 请求，普通 `401` 和非吊销 `403` 后重启仍会签名请求。明确吊销会永久拒绝。成功响应丢失和保存回执前子进程崩溃时，即使提供新令牌也恢复原绑定。
 
 仅启用 `test-support` 时，`WWC_DEVICE_TEST_EXIT_BEFORE_BIND_RECEIPT_SAVE=1` 会让 `device bind` 在成功响应校验完成、保存本地回执之前以状态 `86` 退出。随后移除该变量，使用相同数据目录重跑绑定。进程级验收须核对 Server 已有一个绑定、本地仍保存原 pending 请求、恢复后返回原回执。这验证客户端收成功响应后崩溃的恢复。
 

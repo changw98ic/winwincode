@@ -5,7 +5,7 @@ use std::str::FromStr;
 use std::sync::Mutex;
 use std::time::Duration;
 
-use crate::daemon::{ExchangeTransport, ExchangeTransportError};
+use crate::daemon::{DeviceAuthRejection, ExchangeTransport, ExchangeTransportError};
 use crate::remote_auth::DeviceRemoteAuth;
 
 const MAX_RESPONSE_BYTES: usize = 32 * 1024 * 1024;
@@ -168,9 +168,23 @@ pub(crate) fn post_json_with_options(
             .get("retry-after")
             .and_then(|value| value.to_str().ok())
             .and_then(|value| winwincode_network::retry_after(value, std::time::SystemTime::now()));
-        return Err(ExchangeTransportError::from_network(
+        let mut error = ExchangeTransportError::from_network(
             winwincode_network::NetworkFailure::http(response.status().as_u16(), delay),
-        ));
+        );
+        if let Ok(response_error) = serde_json::from_slice::<
+            winwincode_api::generated::DeviceAuthErrorResponse,
+        >(response.body())
+        {
+            let rejection = match (response.status().as_u16(), response_error.code.as_str()) {
+                (401, "DEVICE_PAIRING_REJECTED") => Some(DeviceAuthRejection::PairingRejected),
+                (403, "DEVICE_REVOKED") => Some(DeviceAuthRejection::Revoked),
+                _ => None,
+            };
+            if let Some(rejection) = rejection {
+                error = error.with_device_auth_rejection(rejection);
+            }
+        }
+        return Err(error);
     }
     Ok(response.into_body())
 }

@@ -824,6 +824,8 @@ fn the_expected_head_drift_during_execution_is_refused_by_the_cas() {
 
 #[test]
 fn a_dirty_working_tree_is_refused_before_any_git_write() {
+    use winwincode_client_port::messages::ApplicationReconciliationOutcome;
+    use winwincode_device_client::apply_engine::report_recovered_applications;
     let (repo, base) = init_repository("dirty");
     let integration_root = temporary_directory("dirty-root");
     let candidate = candidate_commit_on_main(&repo, "dirty", "1");
@@ -835,12 +837,9 @@ fn a_dirty_working_tree_is_refused_before_any_git_write() {
     retain_candidate(daemon.store_mut(), &candidate, &base);
     write_candidate_ref(&repo, &candidate);
 
-    let settled = apply_candidate_to_branch(
-        &mut daemon,
-        &apply_request(&candidate, "main", &base, ApplyStrategy::FastForward),
-        &integration_root,
-    )
-    .expect("the dirty policy settles a result");
+    let mut request = apply_request(&candidate, "main", &base, ApplyStrategy::FastForward);
+    let settled = apply_candidate_to_branch(&mut daemon, &request, &integration_root)
+        .expect("the dirty policy settles a result");
     assert_eq!(settled.receipt.result, ApplyResult::WorkingTreeDirty);
     assert_eq!(
         git(&repo, &["rev-parse", "main"]),
@@ -854,7 +853,7 @@ fn a_dirty_working_tree_is_refused_before_any_git_write() {
     );
     assert_eq!(
         registry_state(daemon.store_mut(), &candidate),
-        LocalCandidateState::Failed
+        LocalCandidateState::Retained
     );
     assert!(
         !integration_root
@@ -864,10 +863,32 @@ fn a_dirty_working_tree_is_refused_before_any_git_write() {
         "the refusal happened before any integration worktree was created"
     );
 
-    let mut store = daemon.into_store();
-    let frames = apply_result_frames(&mut store);
-    assert_eq!(frames.len(), 1, "the settled attempt is still audited");
-    assert_eq!(frames[0].2.receipt.result, ApplyResult::WorkingTreeDirty);
+    assert!(apply_result_frames(daemon.store_mut()).is_empty());
+    assert_eq!(report_recovered_applications(&mut daemon).unwrap(), 0);
+    let pending = daemon.outbox_snapshot().unwrap();
+    assert!(pending.frames.iter().any(|frame| {
+        let envelope: ClientToServerEnvelope = serde_json::from_slice(&frame.frame).unwrap();
+        matches!(envelope.message, ClientToServerMessage::ApplicationReconciled(payload)
+            if payload.application_id == request.application_id
+                && payload.outcome == ApplicationReconciliationOutcome::NotStarted)
+    }));
+    fs::remove_file(repo.join("scratch.txt")).unwrap();
+    request.reconciled_retry = true;
+    let retried = apply_candidate_to_branch(&mut daemon, &request, &integration_root).unwrap();
+    assert_eq!(retried.receipt.result, ApplyResult::Applied);
+    assert_eq!(
+        retried.receipt.local_apply_receipt_id,
+        request.application_id
+    );
+    let trailer = format!("WinWinCode-Application: {}", request.application_id);
+    assert_eq!(
+        git(&repo, &["log", "--format=%B", "main"])
+            .lines()
+            .filter(|line| *line == trailer)
+            .count(),
+        1
+    );
+    let store = daemon.into_store();
     store.close().expect("store should close");
     cleanup(&root);
     cleanup(&integration_root);
@@ -933,12 +954,9 @@ fn a_missing_or_drifted_candidate_ref_settles_candidate_missing() {
     let mut daemon = started_daemon("candidate-missing", &root);
     bind(daemon.store_mut(), &repo);
     retain_candidate(daemon.store_mut(), &candidate, &base);
-    let missing = apply_candidate_to_branch(
-        &mut daemon,
-        &apply_request(&candidate, "main", &base, ApplyStrategy::FastForward),
-        &integration_root,
-    )
-    .expect("the missing ref settles a result");
+    let mut request = apply_request(&candidate, "main", &base, ApplyStrategy::FastForward);
+    let missing = apply_candidate_to_branch(&mut daemon, &request, &integration_root)
+        .expect("the missing ref settles a result");
     assert_eq!(missing.receipt.result, ApplyResult::CandidateMissing);
 
     let other = git(&repo, &["rev-parse", "workspace"]);
@@ -951,12 +969,9 @@ fn a_missing_or_drifted_candidate_ref_settles_candidate_missing() {
             &other,
         ],
     );
-    let drifted = apply_candidate_to_branch(
-        &mut daemon,
-        &apply_request(&candidate, "main", &base, ApplyStrategy::FastForward),
-        &integration_root,
-    )
-    .expect("the drifted ref settles a result");
+    request.reconciled_retry = true;
+    let drifted = apply_candidate_to_branch(&mut daemon, &request, &integration_root)
+        .expect("the drifted ref settles a result");
     assert_eq!(drifted.receipt.result, ApplyResult::CandidateMissing);
     assert_eq!(
         git(&repo, &["rev-parse", "main"]),
@@ -965,12 +980,15 @@ fn a_missing_or_drifted_candidate_ref_settles_candidate_missing() {
     );
     user_tree_is_untouched(&repo, &workspace_head, &workspace_content);
 
-    let mut store = daemon.into_store();
-    let frames = apply_result_frames(&mut store);
-    assert_eq!(frames.len(), 2);
-    for (_, _, payload) in &frames {
-        assert_eq!(payload.receipt.result, ApplyResult::CandidateMissing);
-    }
+    assert!(apply_result_frames(daemon.store_mut()).is_empty());
+    write_candidate_ref(&repo, &candidate);
+    let restored = apply_candidate_to_branch(&mut daemon, &request, &integration_root).unwrap();
+    assert_eq!(restored.receipt.result, ApplyResult::Applied);
+    assert_eq!(
+        restored.receipt.local_apply_receipt_id,
+        request.application_id
+    );
+    let store = daemon.into_store();
     store.close().expect("store should close");
     cleanup(&root);
     cleanup(&integration_root);
@@ -1047,7 +1065,7 @@ fn applies_to_the_bound_checkout_and_protects_other_worktrees() {
     );
 
     let mut store = daemon.into_store();
-    assert_eq!(apply_result_frames(&mut store).len(), 2);
+    assert_eq!(apply_result_frames(&mut store).len(), 1);
     store.close().expect("store should close");
     cleanup(&root);
     cleanup(&integration_root);
@@ -1246,12 +1264,9 @@ fn an_unusable_integration_root_settles_permission_denied() {
     retain_candidate(daemon.store_mut(), &candidate, &base);
     write_candidate_ref(&repo, &candidate);
 
-    let settled = apply_candidate_to_branch(
-        &mut daemon,
-        &apply_request(&candidate, "main", &base, ApplyStrategy::Merge),
-        &integration_root,
-    )
-    .expect("the permission refusal settles a result");
+    let mut request = apply_request(&candidate, "main", &base, ApplyStrategy::Merge);
+    let settled = apply_candidate_to_branch(&mut daemon, &request, &integration_root)
+        .expect("the permission refusal settles a result");
     assert_eq!(settled.receipt.result, ApplyResult::PermissionDenied);
     assert_eq!(
         git(&repo, &["rev-parse", "main"]),
@@ -1262,6 +1277,13 @@ fn an_unusable_integration_root_settles_permission_denied() {
 
     fs::set_permissions(&integration_root, fs::Permissions::from_mode(0o755))
         .expect("the integration root should be writable again for cleanup");
+    request.reconciled_retry = true;
+    let retried = apply_candidate_to_branch(&mut daemon, &request, &integration_root).unwrap();
+    assert_eq!(retried.receipt.result, ApplyResult::Applied);
+    assert_eq!(
+        retried.receipt.local_apply_receipt_id,
+        request.application_id
+    );
     let mut store = daemon.into_store();
     assert_eq!(apply_result_frames(&mut store).len(), 1);
     store.close().expect("store should close");
@@ -1386,6 +1408,136 @@ fn daemon_applies_the_complete_reworked_candidate_from_its_downlink() {
     daemon.into_store().close().unwrap();
     cleanup(&root);
     cleanup(&repo);
+}
+
+#[test]
+#[cfg(feature = "test-support")]
+#[allow(clippy::too_many_lines)]
+fn an_unavailable_application_checkout_does_not_block_other_recovery_or_hello() {
+    use winwincode_client_port::messages::ApplicationReconciliationOutcome;
+    use winwincode_device_client::apply_engine::{
+        ApplicationCrashPoint, apply_candidate_with_crash_point, recover_started_applications,
+        report_recovered_applications,
+    };
+    let (unavailable, unavailable_base) = init_repository("recover-unavailable");
+    let (healthy, base) = init_repository("recover-healthy");
+    let integration_root = temporary_directory("recover-unavailable-integration");
+    let root = temporary_directory("recover-unavailable-store");
+    let unavailable_candidate = candidate_commit_on_main(&unavailable, "recover-unavailable", "1");
+    let candidate = candidate_commit_on_main(&healthy, "recover-healthy", "1");
+    let mut daemon = started_daemon("recover-unavailable", &root);
+    bind(daemon.store_mut(), &unavailable);
+    retain_candidate(
+        daemon.store_mut(),
+        &unavailable_candidate,
+        &unavailable_base,
+    );
+    write_candidate_ref(&unavailable, &unavailable_candidate);
+    let unavailable_request = apply_request(
+        &unavailable_candidate,
+        "workspace",
+        &unavailable_base,
+        ApplyStrategy::Merge,
+    );
+    apply_candidate_with_crash_point(
+        &mut daemon,
+        &unavailable_request,
+        &integration_root,
+        ApplicationCrashPoint::AfterStarted,
+    )
+    .unwrap_err();
+    let healthy_binding = format!("rbd_{}", "C".repeat(26));
+    daemon
+        .store_mut()
+        .put_path_mapping(&PathMappingRecord {
+            repository_binding_id: healthy_binding.clone(),
+            canonical_path: healthy.to_str().unwrap().into(),
+            git_common_directory: None,
+            last_canonicalized_at: None,
+            local_state: "ready".into(),
+        })
+        .unwrap();
+    record_candidate_retention(
+        daemon.store_mut(),
+        &CandidateRetention {
+            candidate_commit: candidate.clone(),
+            base_commit: base.clone(),
+            repository_binding_id: healthy_binding.clone(),
+            worker_session_id: WORKER_SESSION.into(),
+            local_git_ref: format!("refs/winwincode/candidates/{candidate}"),
+            retained_at: STAMP.into(),
+        },
+    )
+    .unwrap();
+    write_candidate_ref(&healthy, &candidate);
+    let mut request = apply_request(&candidate, "workspace", &base, ApplyStrategy::Merge);
+    request.repository_binding_id = healthy_binding.clone();
+    request.candidate_digest = candidate_application_digest(&healthy_binding, &base, &candidate);
+    apply_candidate_with_crash_point(
+        &mut daemon,
+        &request,
+        &integration_root,
+        ApplicationCrashPoint::AfterRepositoryCommit,
+    )
+    .unwrap_err();
+    let applied = git(&healthy, &["rev-parse", "HEAD"]);
+    let moved = unavailable.with_extension("moved");
+    fs::rename(&unavailable, &moved).unwrap();
+    daemon.into_store().close().unwrap();
+    let mut store = DeviceStore::open(&root).unwrap();
+    let identity = ensure_device_identity(&mut store, &seed(), STAMP).unwrap();
+    let mut daemon = DeviceDaemon::start(
+        daemon_config("recover-unavailable"),
+        store,
+        Arc::new(NeverTransport),
+        &identity,
+    )
+    .unwrap();
+    let recovered = recover_started_applications(&mut daemon).unwrap();
+    assert_eq!(recovered.len(), 2);
+    assert!(format!("{recovered:?}").contains("the bound checkout no longer exists"));
+    daemon.tick(std::time::Instant::now()).unwrap();
+    let queued = daemon.outbox_snapshot().unwrap();
+    let envelopes = queued
+        .frames
+        .iter()
+        .map(|frame| serde_json::from_slice::<ClientToServerEnvelope>(&frame.frame).unwrap())
+        .collect::<Vec<_>>();
+    assert!(matches!(
+        envelopes[0].message,
+        ClientToServerMessage::Hello(_)
+    ));
+    assert!(!envelopes.iter().any(|envelope| matches!(&envelope.message,
+        ClientToServerMessage::ApplicationReconciled(payload)
+            if payload.application_id == unavailable_request.application_id)));
+    assert!(envelopes.iter().any(|envelope| matches!(&envelope.message,
+        ClientToServerMessage::ApplicationReconciled(payload)
+            if payload.application_id == request.application_id
+                && payload.result_commit.as_deref() == Some(applied.as_str()))));
+    assert_eq!(
+        registry_state(daemon.store_mut(), &candidate),
+        LocalCandidateState::Applied
+    );
+    assert_eq!(git(&healthy, &["rev-parse", "HEAD"]), applied);
+    fs::rename(&moved, &unavailable).unwrap();
+    assert_eq!(report_recovered_applications(&mut daemon).unwrap(), 1);
+    let repaired = daemon.outbox_snapshot().unwrap();
+    assert!(repaired.frames.iter().any(|frame| {
+        let envelope: ClientToServerEnvelope = serde_json::from_slice(&frame.frame).unwrap();
+        matches!(envelope.message, ClientToServerMessage::ApplicationReconciled(payload)
+            if payload.application_id == unavailable_request.application_id
+                && payload.outcome == ApplicationReconciliationOutcome::NotStarted)
+    }));
+    let mut retry = unavailable_request;
+    retry.reconciled_retry = true;
+    let resumed = apply_candidate_to_branch(&mut daemon, &retry, &integration_root).unwrap();
+    assert_eq!(resumed.receipt.result, ApplyResult::Applied);
+    assert_eq!(resumed.receipt.local_apply_receipt_id, retry.application_id);
+    daemon.into_store().close().unwrap();
+    cleanup(&root);
+    cleanup(&integration_root);
+    cleanup(&unavailable);
+    cleanup(&healthy);
 }
 
 #[test]
@@ -1542,6 +1694,228 @@ fn committed_application_is_recovered_after_a_crash_without_a_second_commit() {
     let repeated = apply_candidate_to_branch(&mut daemon, &request, &integration_root).unwrap();
     assert_eq!(repeated.receipt, outcome.receipt);
     assert_eq!(apply_result_frames(daemon.store_mut()).len(), 1);
+    daemon.into_store().close().unwrap();
+    cleanup(&root);
+    cleanup(&integration_root);
+    cleanup(&repo);
+}
+
+#[test]
+#[cfg(feature = "test-support")]
+#[allow(clippy::too_many_lines)]
+fn a_same_epoch_retry_reports_the_commit_after_a_second_crash() {
+    use winwincode_client_port::exchange::OutboxSession;
+    use winwincode_client_port::messages::ApplicationReconciliationOutcome;
+    use winwincode_device_client::apply_engine::{
+        ApplicationCrashPoint, apply_candidate_with_crash_point, report_recovered_applications,
+    };
+    let (repo, base) = init_repository("recover-same-epoch");
+    let integration_root = temporary_directory("recover-same-epoch-integration");
+    let root = temporary_directory("recover-same-epoch-store");
+    let candidate = candidate_commit_on_main(&repo, "recover-same-epoch", "1");
+    let mut daemon = started_daemon("recover-same-epoch", &root);
+    bind(daemon.store_mut(), &repo);
+    retain_candidate(daemon.store_mut(), &candidate, &base);
+    write_candidate_ref(&repo, &candidate);
+    let mut request = apply_request(&candidate, "workspace", &base, ApplyStrategy::Merge);
+    apply_candidate_with_crash_point(
+        &mut daemon,
+        &request,
+        &integration_root,
+        ApplicationCrashPoint::AfterStarted,
+    )
+    .unwrap_err();
+    daemon.into_store().close().unwrap();
+    let mut store = DeviceStore::open(&root).unwrap();
+    let identity = ensure_device_identity(&mut store, &seed(), STAMP).unwrap();
+    let mut daemon = DeviceDaemon::start(
+        daemon_config("recover-same-epoch"),
+        store,
+        Arc::new(NeverTransport),
+        &identity,
+    )
+    .unwrap();
+    daemon.tick(std::time::Instant::now()).unwrap();
+    let before_retry = daemon.outbox_snapshot().unwrap();
+    assert!(before_retry.frames.iter().any(|frame| {
+        let envelope: ClientToServerEnvelope = serde_json::from_slice(&frame.frame).unwrap();
+        matches!(envelope.message, ClientToServerMessage::ApplicationReconciled(payload)
+            if payload.application_id == request.application_id
+                && payload.outcome == ApplicationReconciliationOutcome::NotStarted
+                && payload.occupancy.occupancy_fencing_token == TOKEN)
+    }));
+    OutboxSession::new()
+        .acknowledge(daemon.store_mut(), before_retry.highest_sequence)
+        .unwrap();
+    assert!(daemon.outbox_snapshot().unwrap().frames.is_empty());
+    assert_eq!(report_recovered_applications(&mut daemon).unwrap(), 0);
+    request.reconciled_retry = true;
+    apply_candidate_with_crash_point(
+        &mut daemon,
+        &request,
+        &integration_root,
+        ApplicationCrashPoint::AfterRepositoryCommit,
+    )
+    .unwrap_err();
+    let applied = git(&repo, &["rev-parse", "HEAD"]);
+    assert_ne!(applied, base);
+    assert!(daemon.outbox_snapshot().unwrap().frames.is_empty());
+    daemon.into_store().close().unwrap();
+    let mut store = DeviceStore::open(&root).unwrap();
+    let identity = ensure_device_identity(&mut store, &seed(), STAMP).unwrap();
+    let mut daemon = DeviceDaemon::start(
+        daemon_config("recover-same-epoch"),
+        store,
+        Arc::new(NeverTransport),
+        &identity,
+    )
+    .unwrap();
+    daemon.tick(std::time::Instant::now()).unwrap();
+    let recovered = daemon.outbox_snapshot().unwrap();
+    let reports = recovered
+        .frames
+        .iter()
+        .filter_map(|frame| {
+            let envelope: ClientToServerEnvelope = serde_json::from_slice(&frame.frame).unwrap();
+            match envelope.message {
+                ClientToServerMessage::ApplicationReconciled(payload) => Some(payload),
+                _ => None,
+            }
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        reports.len(),
+        1,
+        "the changed fact must be reported in the same epoch"
+    );
+    assert_eq!(reports[0].application_id, request.application_id);
+    assert_eq!(reports[0].approval_id, request.approval_id);
+    assert_eq!(
+        reports[0].outcome,
+        ApplicationReconciliationOutcome::Applied
+    );
+    assert_eq!(reports[0].result_commit.as_deref(), Some(applied.as_str()));
+    assert_eq!(reports[0].original_epoch, TOKEN);
+    assert_eq!(reports[0].occupancy.occupancy_fencing_token, TOKEN);
+    assert_eq!(
+        registry_state(daemon.store_mut(), &candidate),
+        LocalCandidateState::Applied
+    );
+    assert_eq!(report_recovered_applications(&mut daemon).unwrap(), 0);
+    assert_eq!(daemon.outbox_snapshot().unwrap(), recovered);
+    daemon.into_store().close().unwrap();
+    let mut store = DeviceStore::open(&root).unwrap();
+    let identity = ensure_device_identity(&mut store, &seed(), STAMP).unwrap();
+    let mut daemon = DeviceDaemon::start(
+        daemon_config("recover-same-epoch"),
+        store,
+        Arc::new(NeverTransport),
+        &identity,
+    )
+    .unwrap();
+    assert_eq!(daemon.outbox_snapshot().unwrap(), recovered);
+    daemon.tick(std::time::Instant::now()).unwrap();
+    let replay = daemon.outbox_snapshot().unwrap();
+    assert_eq!(&replay.frames[..recovered.frames.len()], &recovered.frames);
+    assert!(replay.frames[recovered.frames.len()..].iter().all(|frame| {
+        let envelope: ClientToServerEnvelope = serde_json::from_slice(&frame.frame).unwrap();
+        !matches!(
+            envelope.message,
+            ClientToServerMessage::ApplicationReconciled(_)
+        )
+    }));
+    OutboxSession::new()
+        .acknowledge(daemon.store_mut(), replay.highest_sequence)
+        .unwrap();
+    assert_eq!(report_recovered_applications(&mut daemon).unwrap(), 0);
+    assert!(daemon.outbox_snapshot().unwrap().frames.is_empty());
+    let trailer = format!("WinWinCode-Application: {}", request.application_id);
+    assert_eq!(
+        git(&repo, &["log", "--format=%B", "HEAD"])
+            .lines()
+            .filter(|line| *line == trailer)
+            .count(),
+        1
+    );
+    assert_eq!(git(&repo, &["rev-parse", "HEAD"]), applied);
+    daemon.into_store().close().unwrap();
+    cleanup(&root);
+    cleanup(&integration_root);
+    cleanup(&repo);
+}
+
+#[test]
+#[cfg(feature = "test-support")]
+fn a_changed_recovery_outcome_is_reported_once_in_the_same_epoch() {
+    use winwincode_client_port::exchange::OutboxSession;
+    use winwincode_client_port::messages::ApplicationReconciliationOutcome;
+    use winwincode_device_client::apply_engine::{
+        ApplicationCrashPoint, apply_candidate_with_crash_point, report_recovered_applications,
+    };
+    let (repo, base) = init_repository("recover-changed-outcome");
+    let integration_root = temporary_directory("recover-changed-outcome-integration");
+    let root = temporary_directory("recover-changed-outcome-store");
+    let candidate = candidate_commit_on_main(&repo, "recover-changed-outcome", "1");
+    let mut daemon = started_daemon("recover-changed-outcome", &root);
+    bind(daemon.store_mut(), &repo);
+    retain_candidate(daemon.store_mut(), &candidate, &base);
+    write_candidate_ref(&repo, &candidate);
+    let request = apply_request(&candidate, "workspace", &base, ApplyStrategy::Merge);
+    apply_candidate_with_crash_point(
+        &mut daemon,
+        &request,
+        &integration_root,
+        ApplicationCrashPoint::AfterStarted,
+    )
+    .unwrap_err();
+    assert_eq!(report_recovered_applications(&mut daemon).unwrap(), 1);
+    let not_started = daemon.outbox_snapshot().unwrap();
+    OutboxSession::new()
+        .acknowledge(daemon.store_mut(), not_started.highest_sequence)
+        .unwrap();
+    assert_eq!(report_recovered_applications(&mut daemon).unwrap(), 0);
+    let mut retry = request.clone();
+    retry.reconciled_retry = true;
+    apply_candidate_with_crash_point(
+        &mut daemon,
+        &retry,
+        &integration_root,
+        ApplicationCrashPoint::AfterStarted,
+    )
+    .unwrap_err();
+    fs::write(repo.join("partial.txt"), "partial application").unwrap();
+    assert_eq!(report_recovered_applications(&mut daemon).unwrap(), 1);
+    let unknown = daemon.outbox_snapshot().unwrap();
+    assert_eq!(unknown.frames.len(), 1);
+    let envelope: ClientToServerEnvelope =
+        serde_json::from_slice(&unknown.frames[0].frame).unwrap();
+    let ClientToServerMessage::ApplicationReconciled(payload) = envelope.message else {
+        panic!("the changed recovery fact must be reported");
+    };
+    assert_eq!(payload.application_id, request.application_id);
+    assert_eq!(
+        payload.outcome,
+        ApplicationReconciliationOutcome::OutcomeUnknown
+    );
+    assert_eq!(payload.occupancy.occupancy_fencing_token, TOKEN);
+    assert_eq!(report_recovered_applications(&mut daemon).unwrap(), 0);
+    assert_eq!(daemon.outbox_snapshot().unwrap(), unknown);
+    OutboxSession::new()
+        .acknowledge(daemon.store_mut(), unknown.highest_sequence)
+        .unwrap();
+    fs::remove_file(repo.join("partial.txt")).unwrap();
+    daemon.into_store().close().unwrap();
+    let (store, identity) = open_resumed(&root);
+    let mut daemon = DeviceDaemon::start(
+        daemon_config("recover-changed-outcome"),
+        store,
+        Arc::new(NeverTransport),
+        &identity,
+    )
+    .unwrap();
+    assert_eq!(report_recovered_applications(&mut daemon).unwrap(), 0);
+    assert!(daemon.outbox_snapshot().unwrap().frames.is_empty());
+    assert_eq!(git(&repo, &["rev-parse", "HEAD"]), base);
     daemon.into_store().close().unwrap();
     cleanup(&root);
     cleanup(&integration_root);

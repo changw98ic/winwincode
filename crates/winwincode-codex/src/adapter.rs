@@ -5450,6 +5450,15 @@ impl CodexCoreAdapter for ProductionCodexAdapter {
             .map_err(map_store_error)
     }
 
+    fn pending_execution_delivery(
+        &mut self,
+        delivery_id: &str,
+    ) -> Result<Option<DurableExecutionDelivery>, Self::Error> {
+        self.outbox
+            .pending_delivery(delivery_id)
+            .map_err(map_store_error)
+    }
+
     fn recovered_message_sequence(&mut self) -> Result<u64, Self::Error> {
         self.outbox
             .highest_numeric_message_sequence()

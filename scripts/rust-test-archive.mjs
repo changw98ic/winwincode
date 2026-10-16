@@ -50,7 +50,7 @@ export function testIds(list, excludeHelper = false) {
 
 function identity(root, env) {
   const nextest = run('cargo-nextest', ['--version'], root, env, true).split('\n')[0]
-  assert.match(nextest, new RegExp(`^cargo-nextest ${nextestVersion.replaceAll('.', '\\.')} `))
+  assert.match(nextest, new RegExp(`^cargo-nextest ${nextestVersion.replaceAll('.', '\\.')}(?: |$)`))
   return {
     commit: run('git', ['rev-parse', 'HEAD'], root, env, true).trim(),
     run: env.GITHUB_RUN_ID ?? null,

@@ -8,6 +8,9 @@ mod production_code_mode;
 #[path = "support/z7xn_failure_diagnostics.rs"]
 mod z7xn_failure_diagnostics;
 
+#[path = "support/durable_cancel_ack.rs"]
+mod durable_cancel_ack;
+
 #[cfg(unix)]
 #[path = "support/native_mcp_progress.rs"]
 mod native_mcp_progress;
@@ -3178,11 +3181,8 @@ fn delegated_repair_kernel_recovery_failure_is_retryable_without_an_extra_provid
     });
 }
 
-async fn register(
-    worker: &mut winwincode_worker::WorkerMain<
-        RecordedPort,
-        winwincode_codex::ProductionCodexAdapter,
-    >,
+async fn register<Port: winwincode_codex::WorkerExecutionPort>(
+    worker: &mut winwincode_worker::WorkerMain<Port, winwincode_codex::ProductionCodexAdapter>,
     port: &RecordedPort,
 ) {
     worker

@@ -146,7 +146,9 @@ pub(crate) fn finish_application(
     let json = serde_json::to_string(receipt)
         .map_err(|error| CandidateApplyError::store(error.to_string()))?;
     let updated = store.connection_mut()?.execute(
-        "UPDATE candidate_applications SET finished_receipt_json = ?2 \
+        "UPDATE candidate_applications SET \
+         reported_epoch = CASE WHEN finished_receipt_json IS NULL THEN NULL ELSE reported_epoch END, \
+         finished_receipt_json = ?2 \
          WHERE application_id = ?1 AND (finished_receipt_json IS NULL OR finished_receipt_json = ?2)",
         params![receipt.local_apply_receipt_id, json],
     ).map_err(crate::store::sql_error)?;
@@ -155,6 +157,21 @@ pub(crate) fn finish_application(
             "application result conflicts with its durable journal",
         ));
     }
+    Ok(())
+}
+
+pub(crate) fn begin_application_attempt(
+    store: &mut DeviceStore,
+    application_id: &str,
+) -> Result<(), CandidateApplyError> {
+    store
+        .connection_mut()?
+        .execute(
+            "UPDATE candidate_applications SET recovery_outcome = NULL \
+         WHERE application_id = ?1 AND finished_receipt_json IS NULL",
+            [application_id],
+        )
+        .map_err(crate::store::sql_error)?;
     Ok(())
 }
 
@@ -216,9 +233,14 @@ pub(crate) fn note_recovery_outcome(
     application_id: &str,
     outcome: &str,
 ) -> Result<(), CandidateApplyError> {
-    store.connection_mut()?.execute(
-        "UPDATE candidate_applications SET recovery_outcome = ?2 WHERE application_id = ?1 AND finished_receipt_json IS NULL",
-        params![application_id, outcome],
-    ).map_err(crate::store::sql_error)?;
+    store
+        .connection_mut()?
+        .execute(
+            "UPDATE candidate_applications SET \
+         reported_epoch = CASE WHEN recovery_outcome = ?2 THEN reported_epoch ELSE NULL END, \
+         recovery_outcome = ?2 WHERE application_id = ?1 AND finished_receipt_json IS NULL",
+            params![application_id, outcome],
+        )
+        .map_err(crate::store::sql_error)?;
     Ok(())
 }

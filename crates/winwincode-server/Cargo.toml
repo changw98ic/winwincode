@@ -53,7 +53,7 @@ winwincode-codex = { path = "../winwincode-codex", features = ["test-support"] }
 winwincode-delivery = { workspace = true, features = ["test-support"] }
 tokio = { workspace = true, features = ["io-util", "macros", "net", "signal"] }
 tokio-tungstenite = { git = "https://github.com/openai-oss-forks/tokio-tungstenite", rev = "0e5b2d73aa18dd9f0a50ee9ff199d5aef7594186" }
-winwincode-device-client = { path = "../winwincode-device-client" }
+winwincode-device-client = { path = "../winwincode-device-client", features = ["test-support"] }
 winwincode-session.workspace = true
 
 [[bin]]

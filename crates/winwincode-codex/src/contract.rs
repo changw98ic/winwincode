@@ -475,6 +475,16 @@ pub trait CodexCoreAdapter {
         Ok(deliveries.into_iter().skip(start).take(limit).collect())
     }
 
+    fn pending_execution_delivery(
+        &mut self,
+        delivery_id: &str,
+    ) -> Result<Option<DurableExecutionDelivery>, Self::Error> {
+        Ok(self
+            .pending_execution_deliveries()?
+            .into_iter()
+            .find(|delivery| delivery.delivery_id == delivery_id))
+    }
+
     fn recovered_message_sequence(&mut self) -> Result<u64, Self::Error> {
         Ok(0)
     }

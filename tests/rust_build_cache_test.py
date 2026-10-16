@@ -21,7 +21,7 @@ class CacheTests(unittest.TestCase):
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory(prefix='wwc-cache-test-')
         self.addCleanup(self.temporary.cleanup)
-        self.root = Path(self.temporary.name)
+        self.root = Path(self.temporary.name).resolve()
         tools = self.root / 'tools'
         tools.mkdir()
         for name in ('cargo', 'rustc'):
@@ -56,6 +56,15 @@ class CacheTests(unittest.TestCase):
         self.assertTrue(entry.exists())
         os.utime(entry, (now, now))
         cache.cleanup(self.root, now)
+        self.assertFalse(entry.exists())
+
+    def test_cleanup_resolves_project_root_like_build(self):
+        self.run_build()
+        entry = self.entries()[0]
+        now = self.expire(entry)
+        alias = self.root / 'project-alias'
+        alias.symlink_to(self.root.resolve(), target_is_directory=True)
+        cache.cleanup(alias, now)
         self.assertFalse(entry.exists())
 
     def test_hit_refreshes_use_before_expiration_cleanup(self):
