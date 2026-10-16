@@ -114,17 +114,20 @@ test('deployable Client files contain only browser assets and runtime serverUrl 
   assert.equal(packed.every(path => !/(?:^|\/)(?:node_modules|target|prebuild)(?:\/|$)/u.test(path)), true)
   assert.equal(packed.every(path => !/\.(?:node|dylib|so|exe)$/u.test(path)), true)
   assert.deepEqual(
-    JSON.parse(readFileSync(join(clientRoot, 'package.json'), 'utf8')).dependencies,
+    Object.fromEntries(Object.entries(
+      JSON.parse(readFileSync(join(clientRoot, 'package.json'), 'utf8')).dependencies,
+    ).filter(([name]) => name.startsWith('@winwincode/'))),
     {
       '@winwincode/browser-core': workspaceVersion,
       '@winwincode/browser-ui': workspaceVersion,
       '@winwincode/control-plane-client': workspaceVersion,
+      '@winwincode/network-request': workspaceVersion,
     },
   )
 
   const runtimeConfig = readFileSync(join(publicRoot, 'runtime-config.js'), 'utf8')
   assert.match(runtimeConfig, /serverUrl/u)
-  assert.doesNotMatch(runtimeConfig, /https?:\/\/|wss?:\/\//u)
+  assert.match(runtimeConfig, /serverUrl: 'http:\/\/127\.0\.0\.1:8443'/u)
   const browserBundle = readFileSync(join(publicRoot, 'assets', 'client.js'), 'utf8')
   assert.doesNotMatch(browserBundle, /node:|@deepseek-ai\/cordis|process\.env/u)
 

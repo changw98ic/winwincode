@@ -5,7 +5,9 @@ use std::{
     sync::atomic::{AtomicU64, Ordering},
 };
 
-use winwincode_control_plane::DurableWorkerExecutionLifecycle;
+use winwincode_control_plane::{
+    DurableWorkerExecutionLifecycle, WorkerExecutionLifecycleErrorKind,
+};
 use winwincode_domain::{
     ExecutionJobId, ExecutionMessageId, ExecutionSequence, FencingToken, Instant, LeaseId,
     OrganizationId, ProductSessionId, ProjectId, RepositoryId, RequestId, Sha256Digest, UserId,
@@ -32,7 +34,7 @@ fn at(second: u64) -> Instant {
 
 #[test]
 #[allow(clippy::too_many_lines)]
-fn authenticated_claim_replays_after_restart() {
+fn device_worker_claim_requires_pool_placement_and_replays_after_restart() {
     let root = std::env::temp_dir().join(format!(
         "winwincode-worker-claim-{}-{}",
         std::process::id(),
@@ -51,10 +53,8 @@ fn authenticated_claim_replays_after_restart() {
     let worker_instance_id = WorkerInstanceId(id("wki", 8));
     let worker_pool_id = WorkerPoolId(id("wpl", 9));
     let payload_digest = Sha256Digest(format!("sha256:{}", "a".repeat(64)));
-    let identity = WorkerAuthenticationIdentity::TransportPrincipal {
-        issuer: "local-worker-identity".to_owned(),
-        subject: "remote-worker-07".to_owned(),
-        credential_fingerprint: Sha256Digest(format!("sha256:{}", "b".repeat(64))),
+    let identity = WorkerAuthenticationIdentity::LocalEmbedded {
+        control_plane_principal: "remote-worker-07".to_owned(),
     };
     let management_scope = WorkerRegistryScope::Repository {
         organization_id: scope.organization_id.clone(),
@@ -138,6 +138,19 @@ fn authenticated_claim_replays_after_restart() {
             started_at: at(3),
         })
         .expect("start admission");
+    let claim = ExecutionLeaseClaim {
+        expires_at: at(50),
+        fencing_token: FencingToken("1".to_owned()),
+        issued_at: at(5),
+        job_id,
+        lease_id: LeaseId(id("lse", 17)),
+        message_id: ExecutionMessageId(id("xmsg", 18)),
+        payload_digest,
+        request_id: RequestId(id("req", 19)),
+        worker_id: worker_id.clone(),
+        worker_instance_id: worker_instance_id.clone(),
+        attempt: 1,
+    };
     let registration_request_id = RequestId(id("req", 14));
     let mut registry = storage.execution_registry().expect("registry");
     registry
@@ -160,6 +173,22 @@ fn authenticated_claim_replays_after_restart() {
             &management_scope,
         )
         .expect("register worker");
+    let error = DurableWorkerExecutionLifecycle::open(&root)
+        .expect("open lifecycle before placement")
+        .claim(&claim)
+        .expect_err("Device Worker requires durable pool placement");
+    assert_eq!(error.kind(), WorkerExecutionLifecycleErrorKind::Authority);
+    assert!(
+        registry
+            .load_lease(&claim.job_id)
+            .expect("lease read")
+            .is_none()
+    );
+    assert!(
+        !registry
+            .has_request("claim", &claim.job_id, &claim.request_id)
+            .expect("claim receipt read")
+    );
     registry
         .record_authenticated_worker_placement(&AuthenticatedWorkerPlacement {
             worker_id: worker_id.clone(),
@@ -187,19 +216,6 @@ fn authenticated_claim_replays_after_restart() {
         .expect("record heartbeat");
     drop(storage);
 
-    let claim = ExecutionLeaseClaim {
-        expires_at: at(50),
-        fencing_token: FencingToken("1".to_owned()),
-        issued_at: at(5),
-        job_id,
-        lease_id: LeaseId(id("lse", 17)),
-        message_id: ExecutionMessageId(id("xmsg", 18)),
-        payload_digest,
-        request_id: RequestId(id("req", 19)),
-        worker_id,
-        worker_instance_id,
-        attempt: 1,
-    };
     let first = DurableWorkerExecutionLifecycle::open(&root)
         .expect("open lifecycle")
         .claim(&claim)
@@ -210,5 +226,6 @@ fn authenticated_claim_replays_after_restart() {
         .claim(&claim)
         .expect("replay claim");
     assert_eq!(replay.status, LeaseWriteStatus::Duplicate);
+    assert_eq!(replay.lease, first.lease);
     fs::remove_dir_all(root).expect("remove fixture");
 }

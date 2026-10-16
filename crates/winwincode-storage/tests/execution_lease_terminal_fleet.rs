@@ -68,10 +68,8 @@ fn scope(seed: u64) -> WorkerRegistryScope {
 }
 
 fn authentication(seed: u64) -> WorkerAuthenticationIdentity {
-    WorkerAuthenticationIdentity::TransportPrincipal {
-        issuer: "terminal-fleet-fixture".to_owned(),
-        subject: format!("remote-worker-{seed}"),
-        credential_fingerprint: Sha256Digest(format!("sha256:{seed:064x}")),
+    WorkerAuthenticationIdentity::LocalEmbedded {
+        control_plane_principal: format!("remote-worker-{seed}"),
     }
 }
 

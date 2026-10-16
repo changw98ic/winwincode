@@ -279,6 +279,253 @@ fn process_exists(pid: i32) -> anyhow::Result<bool> {
 }
 
 #[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn lifeline_crash_owner_fixture() -> anyhow::Result<()> {
+    let Some(marker) = std::env::var_os("CODEX_TEST_LIFELINE_MARKER") else {
+        return Ok(());
+    };
+    if std::env::var_os("CODEX_TEST_LIFELINE_CLOSE_STDIO").is_some() {
+        for fd in 0..3 {
+            unsafe { libc::close(fd) };
+        }
+    }
+    let args = vec![
+        "-c".to_string(),
+        "trap '' HUP TERM; sleep 60 & printf '%s %s' \"$$\" \"$!\" > \"$1\"; wait".to_string(),
+        "lifeline-fixture".to_string(),
+        marker.to_string_lossy().into_owned(),
+    ];
+    let env = std::env::vars().collect();
+    let spawned = if std::env::var_os("CODEX_TEST_LIFELINE_PTY").is_some() {
+        spawn_pty_process(
+            "/bin/sh",
+            &args,
+            Path::new("."),
+            &env,
+            &None,
+            TerminalSize::default(),
+            &[],
+        )
+        .await?
+    } else {
+        spawn_pipe_process("/bin/sh", &args, Path::new("."), &env, &None, &[]).await?
+    };
+    std::hint::black_box(&spawned);
+    tokio::time::sleep(tokio::time::Duration::from_secs(60)).await;
+    anyhow::bail!("owner fixture was not killed")
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn guardian_descriptor_fixture() -> anyhow::Result<()> {
+    use std::fs::File;
+    use std::io::Read;
+    use std::os::fd::FromRawFd;
+    use std::time::{Duration, Instant};
+
+    let Ok(case) = std::env::var("CODEX_TEST_GUARDIAN_DESCRIPTORS") else {
+        return Ok(());
+    };
+    let mut limit = libc::rlimit {
+        rlim_cur: 0,
+        rlim_max: 0,
+    };
+    anyhow::ensure!(unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &raw mut limit) } == 0);
+    let mut set_limit = |desired: libc::rlim_t| -> anyhow::Result<()> {
+        limit.rlim_cur = desired.min(limit.rlim_max);
+        anyhow::ensure!(unsafe { libc::setrlimit(libc::RLIMIT_NOFILE, &raw const limit) } == 0);
+        Ok(())
+    };
+    if case == "cost" {
+        let spawn = || -> anyhow::Result<Duration> {
+            let mut command = std::process::Command::new("/usr/bin/true");
+            let lifeline =
+                crate::process_group::ProcessGroupLifeline::configure_command(&mut command)?;
+            let started = Instant::now();
+            let mut child = command.spawn()?;
+            let elapsed = started.elapsed();
+            anyhow::ensure!(child.wait()?.success());
+            drop(lifeline);
+            Ok(elapsed)
+        };
+        set_limit(1024)?;
+        let low = spawn()?;
+        set_limit(16_777_216)?;
+        let high = spawn()?;
+        println!("guardian spawn low={low:?} high={high:?}");
+        anyhow::ensure!(
+            high < low + Duration::from_secs(1),
+            "empty FD range increased startup by {:?}",
+            high.saturating_sub(low)
+        );
+        return Ok(());
+    }
+    anyhow::ensure!(case == "late-pipes");
+    set_limit(8192)?;
+    let mut command = std::process::Command::new("/bin/sleep");
+    command.arg("60");
+    let lifeline = crate::process_group::ProcessGroupLifeline::configure_command(&mut command)?;
+    let mut readers = Vec::new();
+    let mut writers = Vec::new();
+    for _ in 0..1200 {
+        let mut fds = [-1; 2];
+        anyhow::ensure!(unsafe { libc::pipe(fds.as_mut_ptr()) } == 0);
+        for fd in fds {
+            anyhow::ensure!(unsafe { libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC) } == 0);
+        }
+        anyhow::ensure!(unsafe { libc::fcntl(fds[0], libc::F_SETFL, libc::O_NONBLOCK) } == 0);
+        readers.push(unsafe { File::from_raw_fd(fds[0]) });
+        writers.push(unsafe { File::from_raw_fd(fds[1]) });
+    }
+    struct Child(std::process::Child);
+    impl Drop for Child {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+    let mut child = Child(command.spawn()?);
+    drop(writers);
+    let mut byte = [0];
+    let deadline = Instant::now() + Duration::from_secs(1);
+    for reader in &mut readers {
+        loop {
+            match reader.read(&mut byte) {
+                Ok(0) => break,
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    anyhow::ensure!(
+                        Instant::now() < deadline,
+                        "guardian retained a late CLOEXEC writer"
+                    );
+                    std::thread::sleep(Duration::from_millis(1));
+                }
+                result => anyhow::bail!("unexpected pipe result: {result:?}"),
+            }
+        }
+    }
+    anyhow::ensure!(
+        child.0.try_wait()?.is_none(),
+        "guarded child must remain alive during EOF checks"
+    );
+    drop(child);
+    drop(lifeline);
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn run_guardian_descriptor_fixture(case: &str) -> anyhow::Result<()> {
+    let output = std::process::Command::new(std::env::current_exe()?)
+        .args([
+            "--exact",
+            "tests::guardian_descriptor_fixture",
+            "--nocapture",
+            "--test-threads=1",
+        ])
+        .env("CODEX_TEST_GUARDIAN_DESCRIPTORS", case)
+        .output()?;
+    anyhow::ensure!(
+        output.status.success(),
+        "fixture failed: {}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    eprint!("{}", String::from_utf8_lossy(&output.stdout));
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn guarded_spawn_does_not_scan_empty_descriptor_ranges() -> anyhow::Result<()> {
+    run_guardian_descriptor_fixture("cost")
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn guarded_spawn_closes_late_cloexec_descriptors_across_batches() -> anyhow::Result<()> {
+    run_guardian_descriptor_fixture("late-pipes")
+}
+
+#[cfg(unix)]
+#[test]
+fn owner_sigkill_stops_pipe_and_pty_tool_groups() -> anyhow::Result<()> {
+    struct Owner(std::process::Child, Vec<i32>);
+    impl Drop for Owner {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+            for pid in &self.1 {
+                unsafe { libc::kill(*pid, libc::SIGKILL) };
+            }
+        }
+    }
+    for (pty, closed_stdio) in [(false, false), (true, false), (false, true), (true, true)] {
+        let marker = std::env::temp_dir().join(format!(
+            "codex-lifeline-{}-{pty}-{closed_stdio}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&marker);
+        let mut command = std::process::Command::new(std::env::current_exe()?);
+        command
+            .args([
+                "--exact",
+                "tests::lifeline_crash_owner_fixture",
+                "--nocapture",
+            ])
+            .env("CODEX_TEST_LIFELINE_MARKER", &marker)
+            .stdout(std::process::Stdio::null());
+        if pty {
+            command.env("CODEX_TEST_LIFELINE_PTY", "1");
+        } else {
+            command.env_remove("CODEX_TEST_LIFELINE_PTY");
+        }
+        if closed_stdio {
+            command.env("CODEX_TEST_LIFELINE_CLOSE_STDIO", "1");
+        } else {
+            command.env_remove("CODEX_TEST_LIFELINE_CLOSE_STDIO");
+        }
+        let mut owner = Owner(command.spawn()?, Vec::new());
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            if let Ok(contents) = std::fs::read_to_string(&marker) {
+                owner.1 = contents
+                    .split_whitespace()
+                    .map(str::parse)
+                    .collect::<Result<_, _>>()?;
+                if owner.1.len() == 2 {
+                    break;
+                }
+            }
+            anyhow::ensure!(
+                owner.0.try_wait()?.is_none(),
+                "tool owner exited before starting the tool"
+            );
+            anyhow::ensure!(std::time::Instant::now() < deadline, "tool did not start");
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert_eq!(unsafe { libc::getpgid(owner.1[0]) }, owner.1[0]);
+        assert_eq!(unsafe { libc::getpgid(owner.1[1]) }, owner.1[0]);
+        assert!(owner.1.iter().all(|pid| process_exists(*pid).unwrap()));
+        owner.0.kill()?;
+        owner.0.wait()?;
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            if owner.1.iter().all(|pid| !process_exists(*pid).unwrap()) {
+                break;
+            }
+            anyhow::ensure!(
+                std::time::Instant::now() < deadline,
+                "tool group survived owner SIGKILL: {:?}",
+                owner.1
+            );
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        std::fs::remove_file(marker)?;
+        owner.1.clear();
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
 async fn wait_for_marker_pid(
     output_rx: &mut tokio::sync::broadcast::Receiver<Vec<u8>>,
     marker: &str,

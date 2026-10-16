@@ -1,6 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
 
-// Production acceptance replays original Worker bytes through real HTTPS.
 import assert from 'node:assert/strict'
 import { globSync, mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -108,10 +107,8 @@ for (const variant of ['completed-replay', 'genuine-gap']) {
             'the original physical model request is held before it returns genuine tool calls', 60_000)
           const authority = database.prepare('SELECT * FROM execution_dispatch_authorities WHERE job_id=?').get(job.job_id)
           probe = readWorkerTransport(devicePath.deviceData, authority)
-          const ca = readFileSync(join(directory, 'fixture-cert.pem'))
+
           const outcomeStream = `execution-outcome:${job.job_id}:1`
-          // Hold the actual terminal commit until the original process is stopped.
-          // This preserves a live credential for the duplicate/conflict cutpoint.
           database.exec(`CREATE TRIGGER pause_chat_outcome_insert BEFORE INSERT ON product_state
             WHEN NEW.stream_id='${outcomeStream}' BEGIN SELECT RAISE(ABORT,'pause original terminal commit'); END`)
           database.exec(`CREATE TRIGGER pause_chat_outcome_update BEFORE UPDATE ON product_state
@@ -119,7 +116,6 @@ for (const variant of ['completed-replay', 'genuine-gap']) {
           let gap = null
           if (variant === 'genuine-gap') {
             const stream = `product-session:${productSessionId}`
-            // Refuse a real commit. Do not insert events, receipts, heads or ACKs.
             database.exec(`CREATE TRIGGER pause_chat_runtime_insert BEFORE INSERT ON product_state
               WHEN NEW.stream_id='${stream}' BEGIN SELECT RAISE(ABORT,'pause genuine runtime commit'); END`)
             database.exec(`CREATE TRIGGER pause_chat_runtime_update BEFORE UPDATE ON product_state
@@ -130,19 +126,11 @@ for (const variant of ['completed-replay', 'genuine-gap']) {
                 .filter(row => row.sequence > row.ack_sequence)
               return rows.length >= 2 ? rows : false
             }, 'at least two original Core runtime frames are retained without business ACK', 60_000)
-            // Freeze the actual Worker, including its embedded Core, so its
-            // automatic retry cannot race the deliberate transport order.
-            const stopped = await pauseManagedProcess(probe.pid, () => {
-              const journal = new DatabaseSync(probe.networkJournalPath, { readOnly: true })
-              let inFlight
-              try {
-                journal.exec('PRAGMA busy_timeout=5000')
-                inFlight = journal.prepare('SELECT state_json FROM network_queue_state').all()
-                  .some(row => JSON.parse(row.state_json).in_flight)
-              } finally { journal.close() }
-              return inFlight ? false : { ledger: runtimeLedgerSnapshot(database, productSessionId) }
-            }, { timeoutMillis: 30_000 })
+            const stopped = await pauseManagedProcess(probe.pid, () => ({
+              ledger: runtimeLedgerSnapshot(database, productSessionId),
+            }), { timeoutMillis: 30_000 })
             paused = probe.pid
+            await new Promise(resolve => setTimeout(resolve, 10_100))
             const before = stopped.ledger
             const expected = before ? JSON.parse(before.bytes.toString('utf8')).highestSequence + 1 : 1
             const first = pending.find(row => row.message.event.sequence === expected)
@@ -150,7 +138,7 @@ for (const variant of ['completed-replay', 'genuine-gap']) {
             assert.ok(first && later, 'the gap uses two real consecutive frames, never invented sequence values')
             database.exec('DROP TRIGGER pause_chat_runtime_insert')
             database.exec('DROP TRIGGER pause_chat_runtime_update')
-            const rejected = await probe.postRetainedMessage(later.bytes, { ca })
+            const rejected = await probe.postRetainedMessage(later.bytes)
             assert.equal(rejected.status, 200, 'the genuine gap reaches the authenticated shared Core')
             assert.equal(rejected.acknowledgement?.status, 'gap')
             assert.equal(rejected.acknowledgement.replayFromSequence, expected)
@@ -158,7 +146,7 @@ for (const variant of ['completed-replay', 'genuine-gap']) {
             assert.deepEqual(runtimeLedgerSnapshot(database, productSessionId), before,
               'an out-of-order frame does not advance the accepted business ledger')
             for (const row of [first, later]) {
-              const accepted = await probe.postRetainedMessage(row.bytes, { ca })
+              const accepted = await probe.postRetainedMessage(row.bytes)
               assert.equal(accepted.status, 200)
               assert.equal(accepted.acknowledgement?.status, 'accepted')
               assert.equal(accepted.acknowledgement.ackSequence, row.message.event.sequence)
@@ -173,40 +161,34 @@ for (const variant of ['completed-replay', 'genuine-gap']) {
           const pausedReady = await pauseManagedProcess(probe.pid, () => {
             const rows = readRetainedRuntime(devicePath.deviceData, job.job_id)
             if (!(rows.length > 0 && rows.every(row => row.sequence <= row.ack_sequence))) return false
-            const journal = new DatabaseSync(probe.networkJournalPath, { readOnly: true })
-            let idle
-            try {
-              journal.exec('PRAGMA busy_timeout=5000')
-              idle = !journal.prepare('SELECT state_json FROM network_queue_state').all()
-                .some(row => JSON.parse(row.state_json).in_flight)
-            } finally { journal.close() }
-            return idle ? { runtime: rows } : false
+            return { runtime: rows }
           }, { timeoutMillis: 60_000 })
           paused = probe.pid
+          await new Promise(resolve => setTimeout(resolve, 10_100))
           assert.equal(database.prepare('SELECT count(*) AS count FROM worker_launch_grant_exits WHERE worker_instance_id=?')
             .get(probe.workerInstanceId).count, 0, 'the original instance remains live at the replay cutpoint')
           const beforeRuntimeReplay = { terminal: terminalSnapshot(database, job.job_id),
             runtime: runtimeLedgerSnapshot(database, productSessionId), core: coreSnapshot(devicePath.deviceData, job.job_id) }
           const runtime = pausedReady.runtime
           const count = devicePath.modelServer.requests.length
-          const duplicate = await probe.postRetainedMessage(runtime[0].bytes, { ca })
+          const duplicate = await probe.postRetainedMessage(runtime[0].bytes)
           assert.equal(duplicate.status, 200)
           assert.equal(duplicate.acknowledgement?.status, 'duplicate')
           const changed = structuredClone(runtime[0].message)
           changed.event.summary = 'changed payload under the original accepted identity'
-          const conflict = await probe.postRetainedMessage(Buffer.from(JSON.stringify(changed)), { ca })
+          const conflict = await probe.postRetainedMessage(Buffer.from(JSON.stringify(changed)))
           assert.equal(conflict.status, 200, 'a content conflict reaches the authenticated shared Core')
           assert.equal(conflict.acknowledgement?.status, 'rejected_conflict')
           assert.deepEqual({ terminal: terminalSnapshot(database, job.job_id),
             runtime: runtimeLedgerSnapshot(database, productSessionId), core: coreSnapshot(devicePath.deviceData, job.job_id) }, beforeRuntimeReplay)
           database.exec('DROP TRIGGER pause_chat_outcome_insert')
           database.exec('DROP TRIGGER pause_chat_outcome_update')
-          const terminalAccepted = await probe.postRetainedMessage(outcome.bytes, { ca })
+          const terminalAccepted = await probe.postRetainedMessage(outcome.bytes)
           assert.equal(terminalAccepted.status, 200)
           assert.equal(terminalAccepted.acknowledgement?.status, 'accepted')
           const before = { terminal: terminalSnapshot(database, job.job_id),
             runtime: runtimeLedgerSnapshot(database, productSessionId), core: coreSnapshot(devicePath.deviceData, job.job_id) }
-          const terminalReplay = await probe.postRetainedMessage(outcome.bytes, { ca })
+          const terminalReplay = await probe.postRetainedMessage(outcome.bytes)
           assert.equal(terminalReplay.status, 200)
           assert.equal(terminalReplay.acknowledgement?.status, 'duplicate')
           assert.deepEqual({ terminal: terminalSnapshot(database, job.job_id),
@@ -237,10 +219,10 @@ for (const variant of ['completed-replay', 'genuine-gap']) {
             runtime: runtimeLedgerSnapshot(database, productSessionId), core: coreSnapshot(devicePath.deviceData, job.job_id) }, before)
           assert.equal(devicePath.modelServer.requests.length, count)
           for (const bytes of [runtime[0].bytes, outcome.bytes]) {
-            const rejected = await probe.postRetainedMessage(bytes, { ca })
-            assert.equal(rejected.status, 401, 'the trusted exit revokes the original credential')
-            assert.equal(rejected.acknowledgement, null, 'a dead Worker receives no business ACK')
-            assert.equal(rejected.rejectionBoundary, 'http-authentication')
+            const duplicate = await probe.postRetainedMessage(bytes)
+            assert.equal(duplicate.status, 200, 'the Device relay can recover the original durable receipt after Worker exit')
+            assert.equal(duplicate.acknowledgement?.status, 'duplicate')
+            assert.equal(duplicate.rejectionBoundary, null)
           }
           assert.deepEqual({ terminal: terminalSnapshot(database, job.job_id),
             runtime: runtimeLedgerSnapshot(database, productSessionId), core: coreSnapshot(devicePath.deviceData, job.job_id) }, before)
@@ -248,7 +230,7 @@ for (const variant of ['completed-replay', 'genuine-gap']) {
           return { jobId: job.job_id, workerInstanceId: probe.workerInstanceId, gap,
             runtimeDuplicate: 'duplicate', changedPayload: 'rejected_conflict', terminalDuplicate: 'duplicate',
             businessStateUnchanged: true, originalCoreHistoryUnchanged: true, realCommands: 16,
-            workerPostProbe, exitedCredentialStatus: 401, exitedBusinessAck: false, extraHttp: 0 }
+            workerPostProbe, exitedRouteStatus: 200, exitedBusinessAck: 'duplicate', extraHttp: 0 }
         } finally {
           database.exec('DROP TRIGGER IF EXISTS pause_chat_runtime_insert')
           database.exec('DROP TRIGGER IF EXISTS pause_chat_runtime_update')

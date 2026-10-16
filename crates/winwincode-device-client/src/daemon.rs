@@ -67,7 +67,6 @@ pub struct WorkerLaunchDirectories {
 }
 
 pub trait WorkerLaunchMaterialSource: Send + Sync {
-    fn worker_credential(&self, credential_digest: &str) -> Option<String>;
     fn launch_directories(
         &self,
         worker_session_id: &str,
@@ -85,6 +84,13 @@ const WAKE_SLICE: Duration = Duration::from_millis(20);
 pub struct ExchangeTransportError {
     message: String,
     failure: winwincode_network::NetworkFailure,
+    device_auth_rejection: Option<DeviceAuthRejection>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum DeviceAuthRejection {
+    PairingRejected,
+    Revoked,
 }
 
 impl ExchangeTransportError {
@@ -97,6 +103,7 @@ impl ExchangeTransportError {
                 winwincode_network::Acceptance::Unknown,
                 winwincode_network::Phase::ResponseHeaders,
             ),
+            device_auth_rejection: None,
         }
     }
 
@@ -105,7 +112,17 @@ impl ExchangeTransportError {
         Self {
             message: failure.to_string(),
             failure,
+            device_auth_rejection: None,
         }
+    }
+
+    pub(crate) fn with_device_auth_rejection(mut self, rejection: DeviceAuthRejection) -> Self {
+        self.device_auth_rejection = Some(rejection);
+        self
+    }
+
+    pub(crate) const fn device_auth_rejection(&self) -> Option<DeviceAuthRejection> {
+        self.device_auth_rejection
     }
 
     #[must_use]
@@ -128,14 +145,18 @@ impl fmt::Display for ExchangeTransportError {
 impl std::error::Error for ExchangeTransportError {}
 
 pub trait ExchangeTransport: Send + Sync {
-    fn exchange(
-        &self,
-        credential: Option<&str>,
-        request_bytes: &[u8],
-    ) -> Result<Vec<u8>, ExchangeTransportError>;
+    fn exchange(&self, request_bytes: &[u8]) -> Result<Vec<u8>, ExchangeTransportError>;
+    fn worker_exchange(&self, _request_bytes: &[u8]) -> Result<Vec<u8>, ExchangeTransportError> {
+        Err(ExchangeTransportError::from_network(
+            winwincode_network::NetworkFailure::new(
+                winwincode_network::ErrorKind::RequestInvalid,
+                winwincode_network::Acceptance::NotSent,
+                winwincode_network::Phase::Connect,
+            ),
+        ))
+    }
     fn exchange_authorized(
         &self,
-        credential: Option<&str>,
         request_bytes: &[u8],
         can_start: &(dyn Fn() -> bool + Sync),
     ) -> Result<Vec<u8>, ExchangeTransportError> {
@@ -148,12 +169,14 @@ pub trait ExchangeTransport: Send + Sync {
                 ),
             ));
         }
-        self.exchange(credential, request_bytes)
+        self.exchange(request_bytes)
     }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ExchangeRequest {
+    #[serde(rename = "clientNodeId")]
+    pub client_node_id: String,
     #[serde(rename = "schemaVersion")]
     pub schema_version: String,
     pub frames: Vec<serde_json::Value>,
@@ -167,38 +190,10 @@ pub struct EnrollmentIssuance {
     pub client_node_id: String,
     #[serde(rename = "publicClientId")]
     pub public_client_id: String,
-    #[serde(rename = "deviceCredential")]
-    pub device_credential: String,
-    #[serde(rename = "deviceCredentialDigest")]
-    pub device_credential_digest: String,
     #[serde(rename = "heartbeatIntervalMs")]
     pub heartbeat_interval_ms: u32,
     #[serde(rename = "serverTime")]
     pub server_time: String,
-}
-
-#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct WorkerCredentialIssuance {
-    #[serde(rename = "workerLaunchGrantId")]
-    pub worker_launch_grant_id: String,
-    #[serde(rename = "workerSessionId")]
-    pub worker_session_id: String,
-    #[serde(rename = "credentialDigest")]
-    pub credential_digest: String,
-    #[serde(rename = "workerCredential")]
-    pub worker_credential: String,
-}
-
-impl fmt::Debug for WorkerCredentialIssuance {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter
-            .debug_struct("WorkerCredentialIssuance")
-            .field("worker_launch_grant_id", &self.worker_launch_grant_id)
-            .field("worker_session_id", &self.worker_session_id)
-            .field("credential_digest", &self.credential_digest)
-            .field("worker_credential", &"[redacted]")
-            .finish()
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -213,8 +208,6 @@ pub struct ExchangeResponse {
     pub frames: Vec<serde_json::Value>,
     #[serde(default)]
     pub enrollment: Option<EnrollmentIssuance>,
-    #[serde(rename = "workerCredentials", default)]
-    pub worker_credentials: Vec<WorkerCredentialIssuance>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -349,7 +342,6 @@ pub struct DeviceDaemon {
     node_id: String,
     instance_id: String,
     enroll_idempotency_key: String,
-    credential: Option<String>,
     enrolled: bool,
     enroll_frame_pending: bool,
     hello_announced: bool,
@@ -369,8 +361,6 @@ pub struct DeviceDaemon {
     worker_launch_material: Option<Arc<dyn WorkerLaunchMaterialSource>>,
     managed_app_supervisor: Option<crate::managed_app::ManagedAppSupervisor>,
     managed_app_repository: Option<Arc<dyn ManagedAppRepositorySource>>,
-    launch_credential_sessions: std::collections::HashMap<String, String>,
-    pending_worker_credentials: std::collections::HashMap<String, String>,
     status: DaemonStatus,
 }
 
@@ -395,11 +385,6 @@ impl DeviceDaemon {
         store
             .bind_outbox_stream(&node_id, &instance_id)
             .map_err(DaemonError::Store)?;
-        let credential = if enrolled {
-            Some(identity.credential().material_hex())
-        } else {
-            None
-        };
         let enroll_idempotency_key = format!("enroll-{device_id}-{instance_id}");
         let heartbeat_interval = config.heartbeat_interval;
         let connection_policy =
@@ -411,6 +396,9 @@ impl DeviceDaemon {
                 .with_file_name("network-requests.sqlite3"),
         )
         .map_err(DaemonError::Network)?;
+        network_journal
+            .resume_control_authentication()
+            .map_err(DaemonError::Network)?;
         let mut daemon = Self {
             config,
             store,
@@ -423,7 +411,6 @@ impl DeviceDaemon {
             node_id,
             instance_id,
             enroll_idempotency_key,
-            credential,
             enrolled,
             enroll_frame_pending: false,
             hello_announced: false,
@@ -443,8 +430,6 @@ impl DeviceDaemon {
             worker_launch_material: None,
             managed_app_supervisor: None,
             managed_app_repository: None,
-            launch_credential_sessions: std::collections::HashMap::new(),
-            pending_worker_credentials: std::collections::HashMap::new(),
             status: DaemonStatus {
                 enrolled,
                 ..DaemonStatus::default()
@@ -502,6 +487,64 @@ impl DeviceDaemon {
     #[must_use]
     pub const fn is_enrolled(&self) -> bool {
         self.enrolled
+    }
+
+    pub fn shutdown_workers(&self) -> Result<(), DaemonError> {
+        if let Some(supervisor) = &self.worker_supervisor {
+            supervisor
+                .shutdown()
+                .map_err(|error| DaemonError::Protocol(error.to_string()))?;
+        }
+        Ok(())
+    }
+
+    fn stop_occupancy_workers(&self, occupancy_lease_id: &str) -> Result<u64, DaemonError> {
+        if let Some(supervisor) = &self.worker_supervisor {
+            let outcomes = supervisor
+                .stop_lease_workers(occupancy_lease_id)
+                .map_err(|error| DaemonError::Protocol(error.to_string()))?;
+            if let Some(error) = outcomes.iter().find_map(|outcome| outcome.error.as_ref()) {
+                return Err(DaemonError::Protocol(error.clone()));
+            }
+            return Ok(outcomes.iter().filter(|outcome| outcome.stopped).count() as u64);
+        }
+        Ok(self
+            .lease_worker_controller
+            .as_ref()
+            .map_or(0, |controller| {
+                controller.stop_lease_workers(occupancy_lease_id) as u64
+            }))
+    }
+
+    fn stop_fenced_workers(&self, occupancy_lease_id: &str, token: u64) -> Result<(), DaemonError> {
+        let Some(supervisor) = &self.worker_supervisor else {
+            return Ok(());
+        };
+        for worker in supervisor
+            .worker_processes()
+            .map_err(|error| DaemonError::Protocol(error.to_string()))?
+        {
+            if worker.state != crate::supervisor::WORKER_STATE_RUNNING {
+                continue;
+            }
+            let current = self
+                .process_closure_for_record(&worker)
+                .is_some_and(|closure| {
+                    worker.occupancy_lease_id == occupancy_lease_id
+                        && closure.occupancy_fencing_token == token
+                });
+            if !current {
+                supervisor
+                    .stop_recovered(
+                        &worker.worker_session_id,
+                        &worker.worker_id,
+                        &worker.occupancy_lease_id,
+                        true,
+                    )
+                    .map_err(|error| DaemonError::Protocol(error.to_string()))?;
+            }
+        }
+        Ok(())
     }
 
     #[must_use]
@@ -752,7 +795,7 @@ impl DeviceDaemon {
                 } => ready_in,
                 TickOutcome::Exchanged { .. } => Duration::ZERO,
             };
-            Self::sleep_interruptibly(ready_in, shutdown);
+            Self::sleep_interruptibly(ready_in.min(Duration::from_millis(25)), shutdown);
         }
         Ok(self.status.clone())
     }
@@ -762,6 +805,23 @@ impl DeviceDaemon {
     }
 
     fn tick_authorized(
+        &mut self,
+        now: Instant,
+        can_start: &(dyn Fn() -> bool + Sync),
+    ) -> Result<TickOutcome, DaemonError> {
+        if let Some(supervisor) = &self.worker_supervisor {
+            supervisor
+                .reap()
+                .map_err(|error| DaemonError::Protocol(error.to_string()))?;
+        }
+        let result = self.exchange_tick(now, can_start);
+        if matches!(&result, Err(DaemonError::Network(_))) {
+            self.shutdown_workers()?;
+        }
+        result
+    }
+
+    fn exchange_tick(
         &mut self,
         now: Instant,
         can_start: &(dyn Fn() -> bool + Sync),
@@ -836,11 +896,10 @@ impl DeviceDaemon {
             }
         };
         self.status.exchanges_started += 1;
-        let response_bytes = match self.transport.exchange_authorized(
-            self.credential.as_deref(),
-            &request_bytes,
-            can_start,
-        ) {
+        let response_bytes = match self
+            .transport
+            .exchange_authorized(&request_bytes, can_start)
+        {
             Ok(bytes) => bytes,
             Err(error) => {
                 return self.record_exchange_failure(
@@ -881,6 +940,12 @@ impl DeviceDaemon {
         network_now: u64,
     ) -> Result<TickOutcome, DaemonError> {
         let reason = format!("exchange transport failed: {}", error.message());
+        if error.device_auth_rejection() == Some(DeviceAuthRejection::Revoked) {
+            crate::remote_auth::record_remote_failure(
+                &self.store,
+                crate::remote_auth::DEVICE_REVOKED_REASON,
+            )?;
+        }
         self.network_journal
             .finish_with_delay_cap(
                 operation.as_bytes(),
@@ -893,21 +958,12 @@ impl DeviceDaemon {
         self.consecutive_failures = self.consecutive_failures.saturating_add(1);
         self.status.consecutive_failures = self.consecutive_failures;
         self.status.last_error = Some(reason);
-        if let winwincode_network::journal::QueuePermit::Waiting(delay, _) = self
+        let delay = self
             .network_journal
-            .prepare(
-                operation.as_bytes(),
-                winwincode_network::Replay::ReplayExact,
-                winwincode_network::defaults().max_attempts,
-                network_now,
-            )
-            .map_err(DaemonError::Network)?
-        {
-            self.next_attempt_at = now + delay;
-            self.status.current_backoff = delay;
-        } else {
-            return Err(DaemonError::Network(error.network_failure()));
-        }
+            .retry_delay(operation.as_bytes(), network_now)
+            .map_err(DaemonError::Network)?;
+        self.next_attempt_at = now + delay;
+        self.status.current_backoff = delay;
         Ok(self.retry_outcome())
     }
 
@@ -988,8 +1044,11 @@ impl DeviceDaemon {
             }))?;
             self.publish_provider_state(None)?;
             self.publish_extension_state(None)?;
+            self.recover_worker_stop_intents()?;
             self.publish_worker_exits()?;
             self.publish_worker_reconciliation()?;
+            crate::apply_engine::report_recovered_applications(self)
+                .map_err(|error| DaemonError::Protocol(error.to_string()))?;
             self.hello_announced = true;
             self.next_heartbeat_at = now + self.heartbeat_interval;
             return Ok(());
@@ -1153,6 +1212,7 @@ impl DeviceDaemon {
             values.push(value);
         }
         Ok(ExchangeRequest {
+            client_node_id: self.node_id.clone(),
             schema_version: CLIENT_CONTROL_PORT_SCHEMA_VERSION.to_owned(),
             frames: values,
             ack_sequence: self.downlink.ack_sequence(),
@@ -1190,15 +1250,14 @@ impl DeviceDaemon {
         if let Some(issuance) = &response.enrollment {
             self.accept_enrollment(issuance)?;
         }
-        let downlink_frames =
-            match self.ingest_downlink(&response.frames, &response.worker_credentials) {
-                Ok(count) => count,
-                Err(DownlinkFailure::Retriable(reason)) => {
-                    self.register_failure(now, reason);
-                    return Ok(self.retry_outcome());
-                }
-                Err(DownlinkFailure::Fatal(error)) => return Err(error),
-            };
+        let downlink_frames = match self.ingest_downlink(&response.frames) {
+            Ok(count) => count,
+            Err(DownlinkFailure::Retriable(reason)) => {
+                self.register_failure(now, reason);
+                return Ok(self.retry_outcome());
+            }
+            Err(DownlinkFailure::Fatal(error)) => return Err(error),
+        };
         Ok(TickOutcome::Exchanged {
             frames_sent: batch.frames.len(),
             acked_through: ack,
@@ -1231,15 +1290,14 @@ impl DeviceDaemon {
         self.status.replays += 1;
         self.status.exchanges_succeeded += 1;
         self.reset_backoff();
-        let downlink_frames =
-            match self.ingest_downlink(&response.frames, &response.worker_credentials) {
-                Ok(count) => count,
-                Err(DownlinkFailure::Retriable(reason)) => {
-                    self.register_failure(now, reason);
-                    return Ok(self.retry_outcome());
-                }
-                Err(DownlinkFailure::Fatal(error)) => return Err(error),
-            };
+        let downlink_frames = match self.ingest_downlink(&response.frames) {
+            Ok(count) => count,
+            Err(DownlinkFailure::Retriable(reason)) => {
+                self.register_failure(now, reason);
+                return Ok(self.retry_outcome());
+            }
+            Err(DownlinkFailure::Fatal(error)) => return Err(error),
+        };
         Ok(TickOutcome::Exchanged {
             frames_sent: 0,
             acked_through: response.ack_sequence,
@@ -1248,12 +1306,7 @@ impl DeviceDaemon {
     }
 
     #[allow(clippy::too_many_lines)]
-    fn ingest_downlink(
-        &mut self,
-        frames: &[serde_json::Value],
-        worker_credentials: &[WorkerCredentialIssuance],
-    ) -> Result<usize, DownlinkFailure> {
-        self.ingest_worker_credentials(worker_credentials)?;
+    fn ingest_downlink(&mut self, frames: &[serde_json::Value]) -> Result<usize, DownlinkFailure> {
         let started = Instant::now();
         let mut accepted = 0_usize;
         for (visited, value) in frames.iter().enumerate() {
@@ -1267,12 +1320,46 @@ impl DeviceDaemon {
                 SequenceVerdict::Accept
             ) && let ServerToClientMessage::CandidateApply(payload) = &envelope.message
             {
-                if envelope.client_node_id != self.node_id
-                    || envelope.client_instance_id != self.instance_id
-                {
+                if envelope.client_node_id != self.node_id {
                     return Err(DownlinkFailure::Retriable(
-                        "candidate command belongs to another device instance".into(),
+                        "candidate command belongs to another device".into(),
                     ));
+                }
+                let current = self.occupancy_mirror.as_ref();
+                let stamp = &payload.occupancy;
+                let current_authority = current.is_some_and(|mirror| {
+                    mirror.holder_user_id.as_deref() == Some(payload.requester_user_id.as_str())
+                        && mirror.mirror_revision == stamp.command.expected_revision
+                }) && matches!(
+                    self.fencing_guard().authorize_command(
+                        FencedCommandKind::CandidateApply,
+                        &stamp.occupancy_lease_id,
+                        stamp.occupancy_fencing_token
+                    ),
+                    FencingVerdict::Authorized(_)
+                );
+                if envelope.client_instance_id != self.instance_id || !current_authority {
+                    let current_revision = current.map(|mirror| mirror.mirror_revision);
+                    self.enqueue(command_ack_message(
+                        ClientControlMessageKind::CandidateApply,
+                        &envelope.message_id,
+                        CommandAckStatus::RejectedStaleFencingToken,
+                        current_revision,
+                        Some(ClientControlError {
+                            code: if envelope.client_instance_id == self.instance_id {
+                                ClientControlErrorCode::StaleFencingToken
+                            } else {
+                                ClientControlErrorCode::DeviceInstanceChanged
+                            },
+                            message: "the candidate command has obsolete execution authority"
+                                .into(),
+                            retryable: false,
+                        }),
+                    ))
+                    .map_err(DownlinkFailure::Fatal)?;
+                    self.advance_downlink_cursor(&envelope)?;
+                    accepted += 1;
+                    continue;
                 }
                 self.apply_candidate_command(payload)
                     .map_err(DownlinkFailure::Fatal)?;
@@ -1537,6 +1624,10 @@ impl DeviceDaemon {
             crate::apply_engine::apply_candidate_to_branch(
                 self,
                 &crate::apply_engine::CandidateApplyRequest {
+                    application_id: payload.application_id.clone(),
+                    approval_id: payload.approval_id.clone(),
+                    candidate_digest: payload.candidate_digest.clone(),
+                    reconciled_retry: payload.reconciled_retry,
                     repository_binding_id: payload.repository_binding_id.clone(),
                     candidate_ref: payload.candidate_ref.clone(),
                     target_branch: payload.target_branch.clone(),
@@ -1547,30 +1638,19 @@ impl DeviceDaemon {
                 },
                 &root,
             )
+            .map(|_| ())
+            .or_else(|error| {
+                if matches!(
+                    error.kind(),
+                    crate::apply_engine::CandidateApplyErrorKind::ReconciliationRequired
+                        | crate::apply_engine::CandidateApplyErrorKind::OutcomeUnknown
+                ) {
+                    Ok(())
+                } else {
+                    Err(error)
+                }
+            })
             .map_err(|error| DaemonError::Protocol(error.to_string()))?;
-        }
-        Ok(())
-    }
-
-    fn ingest_worker_credentials(
-        &mut self,
-        issuances: &[WorkerCredentialIssuance],
-    ) -> Result<(), DownlinkFailure> {
-        for issuance in issuances {
-            let secret =
-                decode_worker_credential(&issuance.worker_credential).ok_or_else(|| {
-                    DownlinkFailure::Retriable("worker credential material is invalid".to_owned())
-                })?;
-            let digest = format!("sha256:{:x}", Sha256::digest(secret));
-            if digest != issuance.credential_digest {
-                return Err(DownlinkFailure::Retriable(
-                    "worker credential digest does not match its material".to_owned(),
-                ));
-            }
-            self.pending_worker_credentials.insert(
-                issuance.credential_digest.clone(),
-                issuance.worker_credential.clone(),
-            );
         }
         Ok(())
     }
@@ -1606,8 +1686,6 @@ impl DeviceDaemon {
             &IssuedEnrollment {
                 client_node_id: issuance.client_node_id.clone(),
                 public_client_id: issuance.public_client_id.clone(),
-                credential_material: issuance.device_credential.clone(),
-                credential_digest: issuance.device_credential_digest.clone(),
             },
             &stamp,
         )
@@ -1621,7 +1699,6 @@ impl DeviceDaemon {
             .adopt_enrolled_stream(&placeholder_node_id, &issuance.client_node_id)
             .map_err(DaemonError::Store)?;
         self.node_id.clone_from(&issuance.client_node_id);
-        self.credential = Some(issuance.device_credential.clone());
         if issuance.heartbeat_interval_ms > 0 {
             self.heartbeat_interval =
                 Duration::from_millis(u64::from(issuance.heartbeat_interval_ms));
@@ -1719,6 +1796,8 @@ impl DeviceDaemon {
     fn ack_occupancy_mirror(&mut self, record: &OccupancyMirrorRecord) -> Result<(), DaemonError> {
         self.occupancy_mirror = Some(record.clone());
         self.enqueue(occupancy_ack_message(record))?;
+        crate::apply_engine::report_recovered_applications(self)
+            .map_err(|error| DaemonError::Protocol(error.to_string()))?;
         self.status.occupancy_offers_acked += 1;
         Ok(())
     }
@@ -1823,16 +1902,15 @@ impl DeviceDaemon {
         let status = match outcome {
             OccupancyReleaseIntentOutcome::Recorded(_) => {
                 self.status.occupancy_release_intents_recorded += 1;
-                if payload.mode == ClientOccupancyReleaseMode::CancelTasksAndRelease
-                    && let Some(controller) = self.lease_worker_controller.as_ref()
-                {
-                    stopped = u64::try_from(controller.stop_lease_workers(&mirror_lease))
-                        .unwrap_or(u64::MAX);
-                }
                 CommandAckStatus::Accepted
             }
             OccupancyReleaseIntentOutcome::Duplicate(_) => CommandAckStatus::Duplicate,
         };
+        if payload.mode == ClientOccupancyReleaseMode::CancelTasksAndRelease
+            && (status == CommandAckStatus::Accepted || self.worker_supervisor.is_some())
+        {
+            stopped = self.stop_occupancy_workers(&mirror_lease)?;
+        }
         self.status.workers_stopped_on_release += stopped;
         ack(self, status, None, mirror_revision)
     }
@@ -1866,6 +1944,7 @@ impl DeviceDaemon {
                 .occupancy_mirror
                 .as_ref()
                 .map_or(0, |mirror| mirror.mirror_revision);
+            self.stop_fenced_workers(&stamp.occupancy_lease_id, stamp.occupancy_fencing_token)?;
             return ack(self, CommandAckStatus::Duplicate, None, revision);
         }
         let current_revision = self
@@ -1903,6 +1982,7 @@ impl DeviceDaemon {
             Ok(OccupancyMirrorAdvance::Advanced(record)) => {
                 self.occupancy_mirror = Some(record.clone());
                 self.status.occupancy_force_fences_applied += 1;
+                self.stop_fenced_workers(&stamp.occupancy_lease_id, stamp.occupancy_fencing_token)?;
                 ack(
                     self,
                     CommandAckStatus::Accepted,
@@ -2192,21 +2272,12 @@ impl DeviceDaemon {
                 false,
             );
         };
-        let credential = self
-            .pending_worker_credentials
-            .get(&grant.credential_digest)
-            .cloned()
-            .or_else(|| material.worker_credential(&grant.credential_digest))
-            .ok_or_else(|| {
-                DaemonError::Protocol("Worker launch credential has not arrived".into())
-            })?;
         let spawn_request = SpawnRequest {
             worker_session_id: &grant.worker_session_id,
             worker_id: &grant.worker_id,
             worker_instance_id: &grant.worker_instance_id,
             occupancy_lease_id: &stamp.occupancy_lease_id,
             occupancy_fencing_token: stamp.occupancy_fencing_token,
-            worker_credential_token: &credential,
             repository_binding_id: &grant.repository_binding_id,
             launch_grant_id: &grant.worker_launch_grant_id,
             product_session_id: non_empty(&grant.product_session_id),
@@ -2218,10 +2289,6 @@ impl DeviceDaemon {
         let outcome = supervisor.spawn(spawn_request);
         match outcome {
             Ok(spawn_outcome) => {
-                self.launch_credential_sessions.insert(
-                    grant.credential_digest.clone(),
-                    grant.worker_session_id.clone(),
-                );
                 let (status, worker_id, worker_instance_id) = match spawn_outcome {
                     SpawnOutcome::Started(handle) => (
                         WorkerLaunchAckStatus::Accepted,
@@ -2467,25 +2534,6 @@ impl DeviceDaemon {
                 "worker stop must retry",
             )),
         }
-    }
-
-    pub fn receive_worker_credential(
-        &mut self,
-        credential_digest: &str,
-        material: &str,
-    ) -> Result<bool, DaemonError> {
-        let Some(worker_session_id) = self.launch_credential_sessions.get(credential_digest) else {
-            return Ok(false);
-        };
-        let Some(supervisor) = self.worker_supervisor.as_ref() else {
-            return Ok(false);
-        };
-        supervisor
-            .write_worker_credential(worker_session_id, material)
-            .map_err(|error| {
-                DaemonError::Protocol(format!("deferred credential delivery failed: {error}"))
-            })?;
-        Ok(true)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -2922,17 +2970,6 @@ fn launch_spawn_rejection(
 
 fn non_empty(value: &str) -> Option<&str> {
     (!value.is_empty()).then_some(value)
-}
-
-fn decode_worker_credential(material: &str) -> Option<[u8; 32]> {
-    if material.len() != 64 || !material.bytes().all(|byte| byte.is_ascii_hexdigit()) {
-        return None;
-    }
-    let mut secret = [0_u8; 32];
-    for (index, slot) in secret.iter_mut().enumerate() {
-        *slot = u8::from_str_radix(&material[index * 2..index * 2 + 2], 16).ok()?;
-    }
-    Some(secret)
 }
 
 enum ConfigurationReceipt {

@@ -25,8 +25,6 @@ CREATE TABLE IF NOT EXISTS worker_launch_grants (
     worker_session_id TEXT NOT NULL,
     worker_id TEXT NOT NULL,
     worker_instance_id TEXT NOT NULL,
-    credential_digest TEXT NOT NULL
-        CHECK (length(credential_digest) = 71 AND credential_digest LIKE 'sha256:%'),
     product_session_id TEXT,
     work_run_id TEXT,
     expires_at TEXT NOT NULL,
@@ -158,7 +156,6 @@ pub struct LaunchGrantIssuance {
     worker_session_id: String,
     worker_id: String,
     worker_instance_id: String,
-    credential_digest: String,
     product_session_id: Option<String>,
     work_run_id: Option<WorkRunId>,
     expires_at: Instant,
@@ -177,7 +174,6 @@ impl LaunchGrantIssuance {
         worker_session_id: impl Into<String>,
         worker_id: impl Into<String>,
         worker_instance_id: impl Into<String>,
-        credential_digest: impl Into<String>,
         product_session_id: Option<String>,
         work_run_id: Option<WorkRunId>,
         expires_at: Instant,
@@ -193,7 +189,6 @@ impl LaunchGrantIssuance {
             worker_session_id: worker_session_id.into(),
             worker_id: worker_id.into(),
             worker_instance_id: worker_instance_id.into(),
-            credential_digest: credential_digest.into(),
             product_session_id,
             work_run_id,
             expires_at,
@@ -208,7 +203,6 @@ impl LaunchGrantIssuance {
         validate_worker_session_id(&issuance.worker_session_id)?;
         validate_worker_id(&issuance.worker_id)?;
         validate_worker_instance_id(&issuance.worker_instance_id)?;
-        validate_credential_digest(&issuance.credential_digest)?;
         if let Some(product) = &issuance.product_session_id {
             validate_product_session_id(product)?;
         }
@@ -343,7 +337,6 @@ pub struct WorkerLaunchGrantRecord {
     pub worker_session_id: String,
     pub worker_id: String,
     pub worker_instance_id: String,
-    pub credential_digest: String,
     pub product_session_id: Option<String>,
     pub work_run_id: Option<WorkRunId>,
     pub expires_at: Instant,
@@ -732,6 +725,63 @@ impl<'storage> WorkerLaunchGrantLedger<'storage> {
                 "worker session holds more than one non-terminal launch grant",
             )),
         }
+    }
+
+    pub fn active_grant_for_worker(
+        &self,
+        worker_id: &str,
+        worker_instance_id: &str,
+    ) -> Result<Option<WorkerLaunchGrantRecord>, WorkerLaunchGrantStoreError> {
+        validate_worker_id(worker_id)?;
+        validate_worker_instance_id(worker_instance_id)?;
+        let connection = self.connection()?;
+        let mut statement = connection
+            .prepare(
+                "SELECT worker_launch_grant_id FROM worker_launch_grants
+             WHERE worker_id=?1 AND worker_instance_id=?2 AND state IN ('issued','consumed')",
+            )
+            .map_err(|sql| sql_error(&sql))?;
+        let ids = statement
+            .query_map(params![worker_id, worker_instance_id], |row| {
+                row.get::<_, String>(0)
+            })
+            .map_err(|sql| sql_error(&sql))?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|sql| sql_error(&sql))?;
+        match ids.as_slice() {
+            [] => Ok(None),
+            [id] => load_launch_grant(connection, id),
+            _ => Err(error(
+                WorkerLaunchGrantStoreErrorKind::CorruptState,
+                "Worker holds more than one non-terminal launch grant",
+            )),
+        }
+    }
+
+    pub fn client_node_for_worker(
+        &self,
+        worker_id: &str,
+        worker_instance_id: &str,
+    ) -> Result<Option<String>, WorkerLaunchGrantStoreError> {
+        validate_worker_id(worker_id)?;
+        validate_worker_instance_id(worker_instance_id)?;
+        let mut query = self.connection()?.prepare(
+            "SELECT DISTINCT client_node_id FROM worker_launch_grants WHERE worker_id=?1 AND worker_instance_id=?2 LIMIT 2",
+        ).map_err(|sql| sql_error(&sql))?;
+        let nodes = query
+            .query_map(params![worker_id, worker_instance_id], |row| {
+                row.get::<_, String>(0)
+            })
+            .map_err(|sql| sql_error(&sql))?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|sql| sql_error(&sql))?;
+        if nodes.len() > 1 {
+            return Err(error(
+                WorkerLaunchGrantStoreErrorKind::CorruptState,
+                "Worker belongs to multiple devices",
+            ));
+        }
+        Ok(nodes.into_iter().next())
     }
 
     pub fn newest_grant_for_product_session(
@@ -1203,7 +1253,7 @@ pub(crate) fn load_launch_grant(
             "SELECT worker_launch_grant_id, client_node_id, client_instance_id,
                     holder_user_id, occupancy_lease_id, occupancy_fencing_token,
                     repository_binding_id, worker_session_id, worker_id,
-                    worker_instance_id, credential_digest, product_session_id,
+                    worker_instance_id, product_session_id,
                     work_run_id, expires_at, state, consumed_at, ended_at,
                     created_at, revision
              FROM worker_launch_grants WHERE worker_launch_grant_id = ?1",
@@ -1220,15 +1270,14 @@ pub(crate) fn load_launch_grant(
                     row.get::<_, String>(7)?,
                     row.get::<_, String>(8)?,
                     row.get::<_, String>(9)?,
-                    row.get::<_, String>(10)?,
+                    row.get::<_, Option<String>>(10)?,
                     row.get::<_, Option<String>>(11)?,
-                    row.get::<_, Option<String>>(12)?,
+                    row.get::<_, String>(12)?,
                     row.get::<_, String>(13)?,
-                    row.get::<_, String>(14)?,
+                    row.get::<_, Option<String>>(14)?,
                     row.get::<_, Option<String>>(15)?,
-                    row.get::<_, Option<String>>(16)?,
-                    row.get::<_, String>(17)?,
-                    row.get::<_, i64>(18)?,
+                    row.get::<_, String>(16)?,
+                    row.get::<_, i64>(17)?,
                 ))
             },
         )
@@ -1247,7 +1296,6 @@ fn launch_grant_record_from_row(
         String,
         String,
         i64,
-        String,
         String,
         String,
         String,
@@ -1273,7 +1321,6 @@ fn launch_grant_record_from_row(
         worker_session_id,
         worker_id,
         worker_instance_id,
-        credential_digest,
         product_session_id,
         work_run_id,
         expires_at,
@@ -1304,7 +1351,6 @@ fn launch_grant_record_from_row(
         worker_session_id,
         worker_id,
         worker_instance_id,
-        credential_digest,
         product_session_id,
         work_run_id: work_run_id.map(WorkRunId),
         expires_at: parse_stored_instant(&expires_at, "grant expiry")?,
@@ -1331,7 +1377,6 @@ fn validate_schema(connection: &rusqlite::Connection) -> Result<(), WorkerLaunch
             "worker_session_id",
             "worker_id",
             "worker_instance_id",
-            "credential_digest",
             "product_session_id",
             "work_run_id",
             "expires_at",
@@ -1460,27 +1505,6 @@ fn validate_product_session_id(value: &str) -> Result<(), WorkerLaunchGrantStore
 
 fn validate_work_run_id(value: &WorkRunId) -> Result<(), WorkerLaunchGrantStoreError> {
     validate_crockford_id(&value.0, "wrn_", "WorkRun id")
-}
-
-fn validate_credential_digest(value: &str) -> Result<(), WorkerLaunchGrantStoreError> {
-    let Some(digest) = value.strip_prefix("sha256:") else {
-        return Err(error(
-            WorkerLaunchGrantStoreErrorKind::InvalidInput,
-            "credential digest is not a sha256 digest",
-        ));
-    };
-    if digest.len() == 64
-        && digest
-            .bytes()
-            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
-    {
-        Ok(())
-    } else {
-        Err(error(
-            WorkerLaunchGrantStoreErrorKind::InvalidInput,
-            "credential digest is not a lowercase sha256 digest",
-        ))
-    }
 }
 
 fn validate_instant(value: &Instant, label: &str) -> Result<(), WorkerLaunchGrantStoreError> {
@@ -1719,8 +1743,6 @@ mod tests {
         format!("usr_{}", crockford(seed))
     }
 
-    const DIGEST: &str = "sha256:00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff";
-
     fn seed_online_node(storage: &mut SqliteStorage, seed: u64) -> String {
         let client_node_id = format!("cnd_{}", crockford(seed));
         let registration = crate::ClientNodeRegistration::try_new(
@@ -1730,7 +1752,6 @@ mod tests {
             "aarch64-apple-darwin",
             "aarch64",
             "1.2.3",
-            None,
             Some(format!("cix_{}", crockford(seed + 1))),
             4,
         )
@@ -1871,7 +1892,6 @@ mod tests {
             session_id(session_seed),
             format!("wrk_{}", crockford(session_seed + 1)),
             format!("wki_{}", crockford(session_seed + 2)),
-            DIGEST,
             Some(format!("ps_{}", crockford(session_seed + 3))),
             Some(WorkRunId(format!("wrn_{}", crockford(session_seed + 4)))),
             unit_instant("2026-01-01T01:00:00.000Z"),
@@ -1915,7 +1935,6 @@ mod tests {
     fn issuance_command(
         grant: &str,
         fencing_token: u64,
-        credential_digest: &str,
     ) -> Result<LaunchGrantIssuance, WorkerLaunchGrantStoreError> {
         LaunchGrantIssuance::try_new(
             grant,
@@ -1928,7 +1947,6 @@ mod tests {
             session_id(6),
             format!("wrk_{}", crockford(7)),
             format!("wki_{}", crockford(8)),
-            credential_digest,
             None,
             None,
             unit_instant("2026-01-01T01:00:00.000Z"),
@@ -1952,8 +1970,79 @@ mod tests {
     }
 
     #[test]
+    fn remote_queue_authority_retains_offline_instance_until_trusted_exit() {
+        let directory = temporary_directory("remote-queue-authority");
+        let mut storage = SqliteStorage::open(&directory).unwrap();
+        let holder = user_id(3);
+        let (node, lease, binding, token) = seed_happy_path(&mut storage, 101, &holder);
+        let command = issuance(
+            111,
+            &node,
+            &format!("cix_{}", crockford(102)),
+            &holder,
+            &lease,
+            token,
+            &binding,
+            120,
+        );
+        storage
+            .worker_launch_grant_ledger()
+            .unwrap()
+            .issue(&command, &unit_instant("2026-01-01T00:02:00.000Z"))
+            .unwrap();
+        storage
+            .worker_launch_grant_ledger()
+            .unwrap()
+            .settle_launch_ack(
+                &settlement(111, &lease, token, 120, true, None),
+                &unit_instant("2026-01-01T00:02:01.000Z"),
+            )
+            .unwrap();
+        let current = storage
+            .client_node_registry()
+            .unwrap()
+            .snapshot(&node)
+            .unwrap()
+            .unwrap();
+        storage
+            .client_node_registry()
+            .unwrap()
+            .update_presence(&node, crate::ClientPresenceState::Offline, current.revision)
+            .unwrap();
+        let active = storage
+            .active_remote_worker_instances("2026-01-01T02:00:00.000Z")
+            .unwrap();
+        assert_eq!(
+            active,
+            vec![(
+                command.worker_id.clone(),
+                command.worker_instance_id.clone()
+            )]
+        );
+        storage
+            .worker_launch_grant_ledger()
+            .unwrap()
+            .observe_trusted_exit(
+                &node,
+                command.worker_session_id(),
+                &command.worker_instance_id,
+                &lease,
+                &unit_instant("2026-01-01T02:00:01.000Z"),
+            )
+            .unwrap();
+        assert!(
+            storage
+                .active_remote_worker_instances("2026-01-01T02:00:02.000Z")
+                .unwrap()
+                .is_empty()
+        );
+        drop(storage);
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
     fn issuance_validates_canonical_identities_and_bounds() {
-        assert!(issuance_command(&grant_id(1), 1, DIGEST).is_ok());
+        assert!(issuance_command(&grant_id(1), 1).is_ok());
         let good = issuance(
             1,
             &format!("cnd_{}", crockford(1)),
@@ -1971,13 +2060,9 @@ mod tests {
             format!("cnd_{}", crockford(3)).to_uppercase(),
         ];
         for bad in bad_ids {
-            assert!(
-                issuance_command(&bad, 1, DIGEST).is_err(),
-                "{bad} must be refused"
-            );
+            assert!(issuance_command(&bad, 1).is_err(), "{bad} must be refused");
         }
-        assert!(issuance_command(&grant_id(1), 0, DIGEST).is_err());
-        assert!(issuance_command(&grant_id(1), 1, "plain").is_err());
+        assert!(issuance_command(&grant_id(1), 0).is_err());
     }
 
     #[test]
@@ -2014,7 +2099,6 @@ mod tests {
         assert_eq!(record.holder_user_id, holder);
         assert_eq!(record.occupancy_lease_id, lease_id);
         assert_eq!(record.occupancy_fencing_token, token);
-        assert_eq!(record.credential_digest, DIGEST);
         assert_eq!(record.revision, 1);
         let ledger = storage.worker_launch_grant_ledger().expect("ledger");
         let trail = ledger
@@ -2028,6 +2112,18 @@ mod tests {
                 .active_grant_for_session(&record.worker_session_id)
                 .expect("session lookup")
                 .is_some()
+        );
+        assert_eq!(
+            ledger
+                .active_grant_for_worker(&record.worker_id, &record.worker_instance_id)
+                .expect("Worker lookup"),
+            Some(record.clone()),
+        );
+        assert!(
+            ledger
+                .active_grant_for_worker(&record.worker_id, &format!("wki_{}", crockford(999)))
+                .expect("other Worker instance lookup")
+                .is_none()
         );
         storage
             .worker_launch_grant_ledger()
@@ -2341,7 +2437,6 @@ mod tests {
             first.worker_session_id.clone(),
             format!("wrk_{}", crockford(99)),
             format!("wki_{}", crockford(98)),
-            DIGEST,
             None,
             None,
             unit_instant("2026-01-01T01:00:00.000Z"),
@@ -2722,13 +2817,13 @@ mod tests {
                 "INSERT INTO worker_launch_grants
                  (worker_launch_grant_id,client_node_id,client_instance_id,holder_user_id,
                   occupancy_lease_id,occupancy_fencing_token,repository_binding_id,worker_session_id,
-                  worker_id,worker_instance_id,credential_digest,product_session_id,stage_run_id,
+                  worker_id,worker_instance_id,product_session_id,stage_run_id,
                   expires_at,state,created_at,revision)
                  VALUES ('wlg_00000000000000000000000001','cln_00000000000000000000000001',
                          'cli_00000000000000000000000001','usr_00000000000000000000000001',
                          'ols_00000000000000000000000001',1,'rbd_00000000000000000000000001',
                          'wsn_00000000000000000000000001','wrk_00000000000000000000000001',
-                         'wki_00000000000000000000000001','sha256:'||printf('%064d',0),
+                         'wki_00000000000000000000000001',
                          NULL,'run_00000000000000000000000001','2027-01-15T08:05:00.000Z',
                          'issued','2027-01-15T08:00:00.000Z',1)",
                 [],
@@ -2828,7 +2923,6 @@ mod tests {
             session_id(61),
             &grant.worker_id,
             format!("wki_{}", crockford(63)),
-            DIGEST,
             grant.product_session_id.clone(),
             grant.work_run_id.clone(),
             unit_instant("2026-01-01T01:00:00.000Z"),
@@ -2864,18 +2958,6 @@ mod tests {
             WorkerLaunchGrantState::Consumed
         );
     }
-    fn reuse_credential(command: &LaunchGrantIssuance) -> crate::CredentialIssuance {
-        crate::CredentialIssuance::try_new(
-            format!("wcred_{}", &command.worker_launch_grant_id[4..]),
-            &command.worker_session_id,
-            &command.worker_id,
-            &command.worker_instance_id,
-            &command.worker_launch_grant_id,
-            &command.credential_digest,
-            unit_instant("2026-01-01T02:00:00.000Z"),
-        )
-        .expect("credential")
-    }
 
     fn reuse_bundle_fixture() -> (PathBuf, SqliteStorage, LaunchGrantIssuance) {
         let directory = temporary_directory("bundle-reuse");
@@ -2893,7 +2975,7 @@ mod tests {
             50020,
         );
         command.expires_at = unit_instant("2026-01-01T00:05:00.000Z");
-        crate::issue_worker_launch_bundle(&mut storage, &command, None, &reuse_credential(&command),
+        crate::issue_worker_launch_bundle(&mut storage, &command, None,
             |sequence| {
                 let message = format!("msg_{}", crockford(50010));
                 let frame = serde_json::json!({"kind":"client.worker.launch","messageId":message,
@@ -2906,7 +2988,7 @@ mod tests {
                     "repositoryBindingId":command.repository_binding_id,"productSessionId":command.product_session_id,
                     "workRunId":command.work_run_id.as_ref().map(|id|&id.0),"workerSessionId":command.worker_session_id,
                     "workerId":command.worker_id,"workerInstanceId":command.worker_instance_id,
-                    "credentialDigest":command.credential_digest,"expiresAt":command.expires_at.0,
+                    "expiresAt":command.expires_at.0,
                     "state":"issued","revision":1}}});
                 crate::ClientDownlinkAppend::try_new(&command.client_node_id, message, sequence, frame.to_string())
                     .map_err(|_| StorageError::invalid_input("fixture frame"))
@@ -2925,17 +3007,16 @@ mod tests {
         command
     }
 
-    fn reuse_public_counts(storage: &SqliteStorage) -> (i64, i64, i64, i64) {
+    fn reuse_public_counts(storage: &SqliteStorage) -> (i64, i64, i64) {
         storage
             .connection()
             .expect("connection")
             .query_row(
                 "SELECT (SELECT count(*) FROM worker_launch_grants),
-             (SELECT count(*) FROM worker_session_credentials),
              (SELECT count(*) FROM worker_launch_publications),
              (SELECT COALESCE(MAX(sequence),0) FROM client_downlink_frames)",
                 [],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
             )
             .expect("public counts")
     }
@@ -2958,7 +3039,6 @@ mod tests {
             &mut storage,
             &request,
             None,
-            &reuse_credential(&request),
             |_| panic!("reuse must not allocate a frame"),
             &unit_instant("2026-01-01T00:03:00.000Z"),
         )
@@ -2968,7 +3048,7 @@ mod tests {
             original.worker_launch_grant_id
         );
         assert_eq!(result.worker_session_id, original.worker_session_id);
-        assert_eq!(reuse_public_counts(&storage), (1, 1, 1, 1));
+        assert_eq!(reuse_public_counts(&storage), (1, 1, 1));
         drop(storage);
         std::fs::remove_dir_all(directory).unwrap();
     }
@@ -2997,7 +3077,6 @@ mod tests {
             &mut storage,
             &request,
             None,
-            &reuse_credential(&request),
             |_| panic!("consumed reuse must not publish"),
             &unit_instant("2026-01-01T00:10:00.000Z"),
         )
@@ -3007,7 +3086,7 @@ mod tests {
             original.worker_launch_grant_id
         );
         assert_eq!(result.state, WorkerLaunchGrantState::Consumed);
-        assert_eq!(reuse_public_counts(&storage), (1, 1, 1, 1));
+        assert_eq!(reuse_public_counts(&storage), (1, 1, 1));
         drop(storage);
         std::fs::remove_dir_all(directory).unwrap();
     }
@@ -3028,7 +3107,6 @@ mod tests {
                 6 => changed.product_session_id = Some(format!("ps_{}", crockford(60000))),
                 _ => changed.work_run_id = Some(WorkRunId(format!("wrn_{}", crockford(60000)))),
             }
-            let credential = reuse_credential(&changed);
             let tx = storage
                 .connection_mut()
                 .unwrap()
@@ -3038,7 +3116,6 @@ mod tests {
                 &tx,
                 &changed,
                 None,
-                &credential,
                 &unit_instant("2026-01-01T00:03:00.000Z"),
             );
             assert!(
@@ -3046,7 +3123,7 @@ mod tests {
                 "foreign field {field} must not reuse"
             );
             tx.rollback().unwrap();
-            assert_eq!(reuse_public_counts(&storage), (1, 1, 1, 1));
+            assert_eq!(reuse_public_counts(&storage), (1, 1, 1));
         }
         let tx = storage
             .connection_mut()
@@ -3057,7 +3134,6 @@ mod tests {
             &tx,
             &request,
             Some(&grant_id(60000)),
-            &reuse_credential(&request),
             &unit_instant("2026-01-01T00:03:00.000Z"),
         );
         assert!(
@@ -3065,13 +3141,13 @@ mod tests {
             "unrelated predecessor must refuse rather than start another Worker"
         );
         tx.rollback().unwrap();
-        assert_eq!(reuse_public_counts(&storage), (1, 1, 1, 1));
+        assert_eq!(reuse_public_counts(&storage), (1, 1, 1));
         drop(storage);
         std::fs::remove_dir_all(directory).unwrap();
     }
 
     #[test]
-    fn bundle_reuse_refuses_changed_current_authority_credentials_and_publication() {
+    fn bundle_reuse_refuses_changed_current_authority_and_publication() {
         let (directory, mut storage, original) = reuse_bundle_fixture();
         let request = reuse_request(&original);
         for mutation in [
@@ -3081,9 +3157,6 @@ mod tests {
             "UPDATE client_occupancy_leases SET fencing_token=fencing_token+1",
             "UPDATE client_access_grants SET state='revoked'",
             "UPDATE repository_access_grants SET state='revoked'",
-            "UPDATE worker_session_credentials SET state='revoked'",
-            "UPDATE worker_session_credentials SET expires_at='2026-01-01T00:02:30.000Z'",
-            "UPDATE worker_session_credentials SET credential_digest='sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff'",
             "UPDATE worker_launch_grants SET expires_at='2026-01-01T00:02:30.000Z'",
             "INSERT INTO worker_launch_grant_exits (worker_launch_grant_id,worker_session_id,worker_instance_id,client_node_id,client_instance_id,occupancy_lease_id,occupancy_fencing_token,observed_at) SELECT worker_launch_grant_id,worker_session_id,worker_instance_id,client_node_id,client_instance_id,occupancy_lease_id,occupancy_fencing_token,'2026-01-01T00:02:30.000Z' FROM worker_launch_grants",
             "INSERT INTO device_execution_bindings (device_execution_binding_id,worker_session_id,client_node_id,client_instance_id,holder_user_id,repository_binding_id,occupancy_lease_id,occupancy_fencing_token,worker_launch_grant_id,product_session_id,work_run_id,state,bound_at,released_at,revision) SELECT 'deb_00000000000000000000000001',worker_session_id,client_node_id,client_instance_id,holder_user_id,repository_binding_id,occupancy_lease_id,occupancy_fencing_token,worker_launch_grant_id,product_session_id,work_run_id,'released','2026-01-01T00:02:00.000Z','2026-01-01T00:02:30.000Z',1 FROM worker_launch_grants",
@@ -3100,7 +3173,6 @@ mod tests {
                 &tx,
                 &request,
                 None,
-                &reuse_credential(&request),
                 &unit_instant("2026-01-01T00:03:00.000Z"),
             );
             assert!(
@@ -3108,7 +3180,7 @@ mod tests {
                 "changed authority must not reuse: {mutation}"
             );
             tx.rollback().unwrap();
-            assert_eq!(reuse_public_counts(&storage), (1, 1, 1, 1));
+            assert_eq!(reuse_public_counts(&storage), (1, 1, 1));
         }
         let mut extra = request.clone();
         extra.worker_launch_grant_id = grant_id(50012);
@@ -3126,7 +3198,6 @@ mod tests {
             &tx,
             &request,
             None,
-            &reuse_credential(&request),
             &unit_instant("2026-01-01T00:03:00.000Z"),
         );
         assert_eq!(
@@ -3134,7 +3205,7 @@ mod tests {
             WorkerLaunchGrantStoreErrorKind::CorruptState
         );
         tx.rollback().unwrap();
-        assert_eq!(reuse_public_counts(&storage), (2, 1, 1, 1));
+        assert_eq!(reuse_public_counts(&storage), (2, 1, 1));
         drop(storage);
         std::fs::remove_dir_all(directory).unwrap();
     }
@@ -3173,7 +3244,7 @@ mod tests {
         let mut successor = reuse_request(&predecessor);
         successor.worker_id.clone_from(&predecessor.worker_id);
         let published = crate::issue_worker_launch_bundle(&mut storage, &successor,
-            Some(&predecessor.worker_launch_grant_id), &reuse_credential(&successor),
+            Some(&predecessor.worker_launch_grant_id),
             |sequence| {
                 let message = format!("msg_{}", crockford(50011));
                 let frame = serde_json::json!({"kind":"client.worker.launch","messageId":message,
@@ -3186,14 +3257,14 @@ mod tests {
                     "repositoryBindingId":successor.repository_binding_id,"productSessionId":successor.product_session_id,
                     "workRunId":successor.work_run_id.as_ref().map(|id|&id.0),"workerSessionId":successor.worker_session_id,
                     "workerId":successor.worker_id,"workerInstanceId":successor.worker_instance_id,
-                    "credentialDigest":successor.credential_digest,"expiresAt":successor.expires_at.0,
+                    "expiresAt":successor.expires_at.0,
                     "state":"issued","revision":1}}});
                 crate::ClientDownlinkAppend::try_new(&successor.client_node_id, message, sequence, frame.to_string())
                     .map_err(|_| StorageError::invalid_input("recovery fixture frame"))
             }, &unit_instant("2026-01-01T00:03:00.000Z"),
         ).expect("publish the real successor through the atomic bundle");
         assert_ne!(published.worker_instance_id, predecessor.worker_instance_id);
-        assert_eq!(reuse_public_counts(&storage), (2, 2, 2, 2));
+        assert_eq!(reuse_public_counts(&storage), (2, 2, 2));
         let mut retry = successor.clone();
         retry.worker_launch_grant_id = grant_id(50012);
         retry.worker_session_id = session_id(50040);
@@ -3202,13 +3273,12 @@ mod tests {
             &mut storage,
             &retry,
             Some(&predecessor.worker_launch_grant_id),
-            &reuse_credential(&retry),
             |_| panic!("valid recovery reuse must not republish"),
             &unit_instant("2026-01-01T00:03:30.000Z"),
         )
         .expect("positive control retains the exact existing successor");
         assert_eq!(retained, published);
-        assert_eq!(reuse_public_counts(&storage), (2, 2, 2, 2));
+        assert_eq!(reuse_public_counts(&storage), (2, 2, 2));
         retry
             .worker_instance_id
             .clone_from(&predecessor.worker_instance_id);
@@ -3216,7 +3286,6 @@ mod tests {
             &mut storage,
             &retry,
             Some(&predecessor.worker_launch_grant_id),
-            &reuse_credential(&retry),
             |_| panic!("invalid recovery reuse must not allocate a frame"),
             &unit_instant("2026-01-01T00:03:30.000Z"),
         )
@@ -3225,7 +3294,7 @@ mod tests {
             panic!("the original recovery identity guard must reject the request");
         };
         assert_eq!(error.kind(), WorkerLaunchGrantStoreErrorKind::InvalidInput);
-        assert_eq!(reuse_public_counts(&storage), (2, 2, 2, 2));
+        assert_eq!(reuse_public_counts(&storage), (2, 2, 2));
         drop(storage);
         std::fs::remove_dir_all(directory).unwrap();
     }
@@ -3236,7 +3305,6 @@ pub(crate) fn reusable_launch_in_transaction(
     transaction: &Transaction<'_>,
     issuance: &LaunchGrantIssuance,
     predecessor: Option<&str>,
-    credential: &crate::CredentialIssuance,
     now: &Instant,
 ) -> Result<Option<WorkerLaunchGrantRecord>, WorkerLaunchGrantStoreError> {
     validate_instant(now, "reuse time")?;
@@ -3299,12 +3367,6 @@ pub(crate) fn reusable_launch_in_transaction(
         || grant.occupancy_fencing_token != issuance.occupancy_fencing_token
         || grant.product_session_id != issuance.product_session_id
         || grant.work_run_id != issuance.work_run_id
-        || credential.worker_session_id != issuance.worker_session_id
-        || credential.worker_id != issuance.worker_id
-        || credential.worker_instance_id != issuance.worker_instance_id
-        || credential.worker_launch_grant_id != issuance.worker_launch_grant_id
-        || credential.credential_digest != issuance.credential_digest
-        || credential.expires_at.0 <= now.0
         || issuance.expires_at.0 <= now.0
     {
         return Err(error(
@@ -3357,11 +3419,8 @@ pub(crate) fn reusable_launch_in_transaction(
         }
     }
     let live: bool = transaction.query_row(
-        "SELECT EXISTS(SELECT 1 FROM worker_session_credentials c
-           JOIN worker_launch_publications p ON p.grant_id=c.worker_launch_grant_id
-           WHERE c.worker_launch_grant_id=?1 AND c.worker_session_id=?2
-             AND c.worker_id=?3 AND c.worker_instance_id=?4 AND c.credential_digest=?5
-             AND c.state='active' AND c.expires_at>?6 AND p.client_node_id=?7)
+        "SELECT EXISTS(SELECT 1 FROM worker_launch_publications p
+           WHERE p.grant_id=?1 AND p.client_node_id=?3)
          AND NOT EXISTS(SELECT 1 FROM worker_launch_grant_exits WHERE worker_launch_grant_id=?1)
          AND NOT EXISTS(SELECT 1 FROM device_execution_bindings WHERE worker_launch_grant_id=?1 AND state='released')
          AND NOT EXISTS(SELECT 1 FROM worker_session_slots WHERE worker_session_id=?2
@@ -3376,8 +3435,7 @@ pub(crate) fn reusable_launch_in_transaction(
                  OR b.occupancy_fencing_token!=g.occupancy_fencing_token
                  OR b.product_session_id IS NOT g.product_session_id
                  OR b.work_run_id IS NOT g.work_run_id))",
-        params![grant.worker_launch_grant_id, grant.worker_session_id, grant.worker_id,
-            grant.worker_instance_id, grant.credential_digest, now.0, grant.client_node_id],
+        params![grant.worker_launch_grant_id, grant.worker_session_id, grant.client_node_id],
         |row| row.get(0),
     ).map_err(|sql| sql_error(&sql))?;
     if !live {
@@ -3444,11 +3502,11 @@ pub(crate) fn issue_launch_in_transaction(
                  (worker_launch_grant_id, client_node_id, client_instance_id,
                   holder_user_id, occupancy_lease_id, occupancy_fencing_token,
                   repository_binding_id, worker_session_id, worker_id,
-                  worker_instance_id, credential_digest, product_session_id,
+                  worker_instance_id, product_session_id,
                   work_run_id, expires_at, state, consumed_at, ended_at,
                   created_at, revision)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13,
-                         ?14, 'issued', NULL, NULL, ?15, 1)",
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12,
+                         ?13, 'issued', NULL, NULL, ?14, 1)",
             params![
                 issuance.worker_launch_grant_id,
                 issuance.client_node_id,
@@ -3460,7 +3518,6 @@ pub(crate) fn issue_launch_in_transaction(
                 issuance.worker_session_id,
                 issuance.worker_id,
                 issuance.worker_instance_id,
-                issuance.credential_digest,
                 issuance.product_session_id,
                 issuance.work_run_id.as_ref().map(|value| value.0.as_str()),
                 issuance.expires_at.0,

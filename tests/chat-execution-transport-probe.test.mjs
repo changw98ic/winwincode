@@ -1,11 +1,35 @@
 // SPDX-License-Identifier: Apache-2.0
 import assert from 'node:assert/strict'
-import { mkdtempSync, rmSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { createServer } from 'node:http'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import test from 'node:test'
-import { assertSuccessfulRetainedCommands, readRetainedCoreCommandResults } from './fixtures/chat-execution-transport-probe.mjs'
+import { assertSuccessfulRetainedCommands, loseCommittedCommandResponse, readRetainedCoreCommandResults, readWorkerTransport } from './fixtures/chat-execution-transport-probe.mjs'
+
+test('committed command response loss closes the actual local HTTP response after its headers', async t => {
+  let committed = null
+  const server = createServer(async (incoming, outgoing) => {
+    const parts = []
+    for await (const part of incoming) parts.push(part)
+    committed = { path: incoming.url, origin: incoming.headers.origin,
+      cookie: incoming.headers.cookie, command: JSON.parse(Buffer.concat(parts).toString('utf8')) }
+    outgoing.writeHead(202, { 'Content-Type': 'application/json' })
+    outgoing.write('{"outcome":')
+  })
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve))
+  t.after(() => new Promise(resolve => server.close(resolve)))
+  const api = { baseUrl: `http://127.0.0.1:${server.address().port}`,
+    origin: 'http://control.localhost', actor: { kind: 'user', id: 'fixture-owner' },
+    scope: { kind: 'repository', repositoryId: 'fixture-repository' }, cookie: 'wwc_session=fixture' }
+  const payload = { productSessionId: 'fixture-session', message: 'same original command' }
+  const lost = await loseCommittedCommandResponse(api, 'chat.submit', 1, payload, 'fixture-request')
+  assert.deepEqual(lost, { status: 202, bodyComplete: false, destroyed: true })
+  assert.deepEqual(committed, { path: '/api/v1/commands', origin: api.origin, cookie: api.cookie,
+    command: { schemaVersion: 'winwincode/v1', requestId: 'fixture-request', actor: api.actor,
+      scope: api.scope, command: 'chat.submit', expectedRevision: 1, payload } })
+})
 
 function receipt(result, input = {}) {
   const bytes = JSON.stringify({ code_mode_result: result,
@@ -69,4 +93,76 @@ test('retained command evidence preserves a rejected error beside a successful c
   assert.deepEqual(rows[0].polls, [])
   assert.throws(() => assertSuccessfulRetainedCommands([rows[0]], 1))
   assertSuccessfulRetainedCommands([rows[1]], 1)
+})
+
+test('retained Worker bytes use the Device relay envelope and its inner response status', async t => {
+  const directory = mkdtempSync(join(tmpdir(), 'wwc-worker-relay-probe-'))
+  t.after(() => rmSync(directory, { recursive: true, force: true }))
+  const fixture = JSON.parse(readFileSync(new URL('./fixtures/contracts/execution-port.valid.json', import.meta.url), 'utf8'))
+  const message = fixture.messages.find(value => value.kind === 'runtime.event')
+  const bytes = Buffer.from(JSON.stringify(message))
+  const workerId = message.lease.workerId
+  const workerInstanceId = message.lease.workerInstanceId
+  const workerSessionId = 'wss_00000000000000000000000001'
+  const clientNodeId = 'cnd_00000000000000000000000001'
+  const received = []
+  const server = createServer(async (incoming, outgoing) => {
+    const parts = []
+    for await (const part of incoming) parts.push(part)
+    received.push({ path: incoming.url, headers: incoming.headers,
+      body: JSON.parse(Buffer.concat(parts).toString('utf8')) })
+    outgoing.writeHead(200, { 'Content-Type': 'application/json' })
+    outgoing.end(JSON.stringify(received.length === 1
+      ? { status: 200, body: JSON.stringify({ schemaVersion: 'execution-port.remote-exchange.v2',
+        serverTime: '2026-10-15T00:00:00.000Z', frameAccepted: true, deliveries: [] }) }
+      : { status: 400, body: received.length === 3
+          ? 'remote Worker frame rejected' : 'Worker route does not match its Device session' }))
+  })
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve))
+  t.after(() => new Promise(resolve => server.close(resolve)))
+  const dataDirectory = join(directory, 'worker')
+  mkdirSync(dataDirectory)
+  writeFileSync(join(dataDirectory, 'managed-session.json'), JSON.stringify({
+    clientNodeId, workerSessionId, workerId, workerInstanceId,
+  }))
+  const store = new DatabaseSync(join(directory, 'device-client.sqlite3'))
+  try {
+    store.exec(`CREATE TABLE worker_process_registry(worker_session_id TEXT,worker_id TEXT,
+      worker_instance_id TEXT,pid INTEGER,data_directory TEXT);
+      CREATE TABLE server_profile(base_url TEXT);`)
+    store.prepare('INSERT INTO worker_process_registry VALUES(?,?,?,?,?)')
+      .run(workerSessionId, workerId, workerInstanceId, process.pid, dataDirectory)
+    store.prepare('INSERT INTO server_profile VALUES(?)')
+      .run(`http://127.0.0.1:${server.address().port}/internal/v1/client/exchange`)
+  } finally { store.close() }
+  const probe = readWorkerTransport(directory, { worker_id: workerId,
+    worker_instance_id: workerInstanceId, worker_session_id: message.workerSessionId })
+  const accepted = await probe.postRetainedMessage(bytes)
+  assert.equal(accepted.status, 200)
+  assert.equal(accepted.frameAccepted, true)
+  const rejected = await probe.postRetainedMessage(bytes)
+  assert.equal(rejected.status, 400)
+  assert.equal(rejected.rejectionBoundary, 'device-worker-route')
+  const replaced = await probe.postRetainedMessage(bytes)
+  assert.equal(replaced.status, 400)
+  assert.equal(replaced.rejectionBoundary, 'control-plane-worker-instance')
+  assert.equal(replaced.acknowledgement, null)
+  const lost = await probe.postRetainedMessage(bytes, { loseResponseAfterHeaders: true })
+  assert.equal(lost.httpStatus, 200)
+  assert.equal(lost.status, null)
+  assert.equal(lost.responseLostAfterHeaders, true)
+  for (const request of received) {
+    assert.equal(request.path, '/internal/v1/client/worker-exchange')
+    assert.equal(request.headers.authorization, undefined)
+    assert.equal(request.body.clientNodeId, clientNodeId)
+    assert.equal(request.body.workerId, workerId)
+    assert.equal(request.body.workerInstanceId, workerInstanceId)
+    assert.equal(request.body.request.kind, 'exchange')
+    const exchange = JSON.parse(request.body.request.body)
+    assert.equal(exchange.workerId, workerId)
+    assert.equal(exchange.workerInstanceId, workerInstanceId)
+    const frame = Buffer.from(exchange.frame)
+    const prefix = Buffer.from('{"frameType":"message","direction":"worker-to-control-plane","message":')
+    assert.deepEqual(frame.subarray(prefix.length, -1), bytes)
+  }
 })

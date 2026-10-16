@@ -268,8 +268,9 @@ fn write_answer(stream: &mut TlsStream, provider: &str) {
 }
 
 fn run_device_members(directory: &Path, endpoint: &str, per_provider: usize) {
+    let _ = winwincode_provider::DeviceProviderStore::open(directory).unwrap();
     let expected = per_provider * PROVIDERS.len();
-    let mut models = DeviceModels::open(directory).unwrap();
+    let mut models = DeviceModels::new(directory);
     let database = rusqlite::Connection::open(directory.join("providers.sqlite3")).unwrap();
     for provider in PROVIDERS {
         let protocol = if provider == "qwen" {

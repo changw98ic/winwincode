@@ -26,6 +26,7 @@ const T0 = '2026-09-01T09:30:15.000Z'
 const T1 = '2026-09-01T09:41:18.000Z'
 const DIGEST = `sha256:${'a'.repeat(64)}`
 const COMMIT = 'b'.repeat(40)
+const BASE_COMMIT = 'c'.repeat(40)
 const CANDIDATE_REF = 'refs/winwincode/candidates/demo-1'
 
 function crockfordId(prefix, serial = 1) {
@@ -76,6 +77,7 @@ function localCandidateReceipt() {
     candidateRef: CANDIDATE_REF,
     repositoryBindingId: crockfordId('rbd'),
     candidateCommit: COMMIT,
+    baseCommit: BASE_COMMIT,
     localRefName: 'refs/heads/winwincode/candidates/demo-1',
     state: 'retained',
     createdAt: T0,
@@ -112,7 +114,6 @@ function workerLaunchGrant() {
     workerSessionId: crockfordId('wsn'),
     workerId: crockfordId('wrk'),
     workerInstanceId: crockfordId('wki'),
-    credentialDigest: DIGEST,
     expiresAt: T1,
     state: 'issued',
     revision: 1,
@@ -187,6 +188,18 @@ const KIND_EXTRA_FIELDS = Object.freeze({
     receipt: localCandidateReceipt(),
   }),
   'client.candidate.apply_result': () => ({ receipt: localApplyReceipt() }),
+  'client.application.reconciled': () => ({
+    applicationId: crockfordId('lar'),
+    approvalId: 'idem-application-approval',
+    originalEpoch: '2',
+    repositoryBindingId: crockfordId('rbd'),
+    candidateRef: CANDIDATE_REF,
+    candidateDigest: DIGEST,
+    baseCommit: BASE_COMMIT,
+    targetBranch: 'main',
+    outcome: 'applied',
+    resultCommit: COMMIT,
+  }),
   'client.command_ack': () => ({
     commandMessageId: crockfordId('cmsg', 999),
     commandKind: 'client.enroll',
@@ -214,6 +227,10 @@ const KIND_EXTRA_FIELDS = Object.freeze({
     reason: 'occupant_requested',
   }),
   'client.candidate.apply': () => ({
+    applicationId: crockfordId('lar'),
+    approvalId: 'idem-application-approval',
+    candidateDigest: DIGEST,
+    reconciledRetry: false,
     repositoryBindingId: crockfordId('rbd'),
     candidateRef: CANDIDATE_REF,
     targetBranch: 'main',
@@ -306,10 +323,45 @@ test('schemaVersion is the string constant winwincode/v1', () => {
   assert.equal(typeof CLIENT_CONTROL_SCHEMA_VERSION, 'string')
 })
 
-test('kind registries share command_ack in both directions: 18 + 12 - 1 = 29', () => {
-  assert.equal(CLIENT_TO_SERVER_MESSAGE_KINDS.length, 18)
+test('candidate retention requires the original repository base', () => {
+  const message = validMessage('client.candidate.retained')
+  assert.equal(parseClientToServerMessage(message).receipt.baseCommit, BASE_COMMIT)
+  delete message.receipt.baseCommit
+  assert.equal(errorCodeOf(() => parseClientToServerMessage(message)), 'INVALID_SHAPE')
+})
+
+test('application recovery preserves the original epoch and the current occupancy independently', () => {
+  const message = validMessage('client.application.reconciled', {
+    originalEpoch: '18446744073709551614',
+    occupancyFencingToken: '18446744073709551615',
+    outcome: 'outcome_unknown',
+    resultCommit: null,
+  })
+  const parsed = parseClientToServerMessage(message)
+  assert.equal(parsed.originalEpoch, message.originalEpoch)
+  assert.equal(parsed.occupancyFencingToken, message.occupancyFencingToken)
+  assert.equal(parsed.outcome, 'outcome_unknown')
+  assert.equal(parsed.resultCommit, null)
+  assert.equal(errorCodeOf(() => parseClientToServerMessage({ ...message, originalEpoch: 3 })), 'INVALID_IDENTIFIER')
+})
+
+test('application commands require a stable application identity and an explicit retry decision', () => {
+  for (const field of ['applicationId', 'approvalId', 'candidateDigest', 'reconciledRetry']) {
+    const message = validMessage('client.candidate.apply')
+    delete message[field]
+    assert.equal(errorCodeOf(() => parseServerToClientMessage(message)), 'INVALID_SHAPE', field)
+  }
+  for (const candidateDigest of ['a'.repeat(64), `sha256:${'A'.repeat(64)}`, 'sha256:abc']) {
+    assert.equal(errorCodeOf(() => parseServerToClientMessage(validMessage('client.candidate.apply', {
+      candidateDigest,
+    }))), 'INVALID_IDENTIFIER')
+  }
+})
+
+test('kind registries share command_ack in both directions: 19 + 12 - 1 = 30', () => {
+  assert.equal(CLIENT_TO_SERVER_MESSAGE_KINDS.length, 19)
   assert.equal(SERVER_TO_CLIENT_MESSAGE_KINDS.length, 12)
-  assert.equal(CLIENT_CONTROL_MESSAGE_KINDS.length, 29)
+  assert.equal(CLIENT_CONTROL_MESSAGE_KINDS.length, 30)
   assert.equal(Object.isFrozen(CLIENT_TO_SERVER_MESSAGE_KINDS), true)
   assert.equal(Object.isFrozen(SERVER_TO_CLIENT_MESSAGE_KINDS), true)
   assert.equal(Object.isFrozen(CLIENT_CONTROL_COMMAND_MESSAGE_KINDS), true)
@@ -320,9 +372,9 @@ test('kind registries share command_ack in both directions: 18 + 12 - 1 = 29', (
   assert.deepEqual(overlap, ['client.command_ack'])
 })
 
-test('exactly 20 command kinds and 11 fenced kinds per the schema', () => {
-  assert.equal(CLIENT_CONTROL_COMMAND_MESSAGE_KINDS.length, 20)
-  assert.equal(CLIENT_CONTROL_OCCUPANCY_FENCED_MESSAGE_KINDS.length, 11)
+test('exactly 21 command kinds and 12 fenced kinds per the schema', () => {
+  assert.equal(CLIENT_CONTROL_COMMAND_MESSAGE_KINDS.length, 21)
+  assert.equal(CLIENT_CONTROL_OCCUPANCY_FENCED_MESSAGE_KINDS.length, 12)
   assert.deepEqual(
     [...CLIENT_CONTROL_OCCUPANCY_FENCED_MESSAGE_KINDS],
     [
@@ -331,6 +383,7 @@ test('exactly 20 command kinds and 11 fenced kinds per the schema', () => {
       'client.worker.launch_ack',
       'client.candidate.retained',
       'client.candidate.apply_result',
+      'client.application.reconciled',
       'client.occupancy.offer',
       'client.occupancy.release',
       'client.occupancy.force_fence',

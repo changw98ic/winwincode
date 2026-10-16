@@ -1,6 +1,6 @@
 # 发布 WinWinCode
 
-本文说明 WinWinCode 0.2.0 的产品发布流程。目标读者是有 GitHub Release 权限的维护者。
+本文说明当前源码的产品发布流程。目标读者是有 GitHub Release 权限的维护者。
 
 `v0.2.0` 已于 2026-10-14 发布。以下版本号用于说明现有流程。准备新发布时，替换为实际确定且未使用的版本号。
 
@@ -12,22 +12,13 @@
 
 当前配置尚未收敛。部分 Rust crate 已设置 `publish = false`，其他 crate 尚未统一设置。根 npm 包是私有包，但部分 npm workspace 包仍保留公开 `publishConfig`。这些配置不改变完整产品这一发布边界。
 
-后续删除未接入产品的模块前，必须核对产品二进制的正常依赖图，并检查测试、schema、脚本和 workspace 清单。后续清理独立 core 发布流程或消费锁时，必须同步处理对应命令、测试和 schema。清理后仍须保留完整产品的来源、版本、签名、摘要和验收机制。
+后续删除未接入产品的模块前，必须核对产品二进制的正常依赖图，并检查测试、schema、脚本和 workspace 清单。后续清理独立 core 发布流程或消费锁时，必须同步处理对应命令、测试和 schema。清理后仍须保留完整产品的来源、版本、摘要和验收机制。
 
 发布配置的目标是第一方 crate 不可发布、内部 npm 包私有，并统一产品版本。模块删除和配置清理由对应任务实施。
 
 ## 发布前提
 
 正式发布使用 `.github/workflows/release.yml`。工作流只接受位于 `origin/main` 历史中的 tag commit。tag 必须严格等于 `v<package.json version>`。正式版本必须是三个数字组成的 SemVer，例如 `0.2.0`。该工作流不接受 prerelease 版本字符串。
-
-发布仓库需要以下 GitHub 配置：
-
-| 名称 | 类型 | 要求 |
-| --- | --- | --- |
-| `WINWINCODE_HELPER_RELEASE_PRIVATE_KEY_HEX` | Actions secret | Ed25519 私钥种子的 32 字节小写十六进制表示。 |
-| `WINWINCODE_HELPER_RELEASE_PUBLIC_KEY_HEX` | Actions variable | 对应公钥的 32 字节小写十六进制表示。 |
-
-私钥和公钥必须匹配。发布构建会把公钥编译进校验边界。私钥只用于生成内核辅助进程签名清单。不要在日志、制品或 issue 中记录私钥。
 
 四个平台的 runner 必须可用：
 
@@ -108,7 +99,6 @@ push `v*` tag 会自动触发 Product release 工作流。工作流会检查：
 - commit 位于 `origin/main` 历史中。
 - `package.json` 版本是正式三段版本。
 - tag 精确等于 `v<version>`。
-- helper release 公钥格式正确。
 
 工作流也支持手动触发。`workflow_dispatch` 有两个输入：
 
@@ -131,14 +121,13 @@ push `v*` tag 会自动触发 Product release 工作流。工作流会检查：
 6. 构建 Client。
 7. 用 `cargo build --locked --release --target <target>` 构建 Server、Worker、内核辅助进程和 `wwc`。
 8. 把四个程序设为 `0755`。macOS 对每个程序执行 ad-hoc `codesign --sign -`。
-9. 用 Ed25519 私钥签署内核辅助进程清单。
-10. 生成 API production source seal。它绑定 tag 源码身份、Server、Worker、`wwc`、内核辅助进程和签名清单的摘要。
-11. 运行真实发布二进制的 production API 验证，模型响应使用确定性 Device Provider fixture。
-12. 保存短期候选制品。
-13. 使用工作流自身 commit 上的发布工具进行 staging。
-14. 检查原生程序的架构和动态库依赖。
-15. 执行凭据内容扫描，并应用与精确二进制绑定的人工复核记录。
-16. 生成文件清单、SBOM、包内摘要并归档。
+9. 生成 API production source seal。它绑定 tag 源码身份、Server、Worker、`wwc` 和内核辅助进程的摘要。
+10. 运行真实发布二进制的 production API 验证，模型响应使用确定性 Device Provider fixture。
+11. 保存短期候选制品。
+12. 使用工作流自身 commit 上的发布工具进行 staging。
+13. 检查原生程序的架构和动态库依赖。
+14. 执行凭据内容扫描，并应用与精确二进制绑定的人工复核记录。
+15. 生成文件清单、SBOM、包内摘要并归档。
 
 API production 验证在 fixture 场景中要求以下事实成立：
 
@@ -150,10 +139,18 @@ API production 验证在 fixture 场景中要求以下事实成立：
 - StrongFlow 完成且 verdict 为 `pass`。
 - 重复执行内容一致。
 - Server 重启前后的消息和交付字节稳定。
+- Device 登记初始 Worker 的真实退出，并启动不同进程和 Worker Session。
+- 新 Worker 完成任务。另一条活跃 Worker 在 Server 重启后保留同一进程身份，再完成独立任务。
 
-这些事实证明发布二进制、Device/Worker 链路和恢复行为。它们不构成真实 Provider 编程质量结论。真实编程任务仍须通过正式 Client 和真实 Provider 另行执行，并记录模型调用、工具结果、候选和独立验证证据。
+API 报告的 `artifacts.sourceSeal` 必须与候选 source seal 的七个字段逐项一致：`gitHead`、`helperBinarySha256`、`cliBinarySha256`、`workerBinarySha256`、`serverBinarySha256`、`sourceSha256` 和 `trackedDiffSha256`。报告还须提供相同的 Worker 二进制摘要。staging 与本地制品门禁共用 `scripts/release-artifact-contract.mjs::assertReleaseApiReport` 校验这些字段。
 
-候选包名为 `candidate-<target>`，保留一天。它包含已验收的四个 `bin` 程序、helper 签名清单、source seal 和 API 报告。
+`deviceWorkerLifecycle` 保存 `initial`、`restarted`、`stopped`、`terminalAfterWorkerRestart`、`workerRestartCompletion`、`serverRestartWorker`、`survivedServerRestart`、`terminalAfterServerRestart` 和 `serverRestartCompletion`。每个进程身份包含启动进程的 WorkerSession、Worker、Worker instance、PID 和 `processStartIdentity`。重启后的 PID 与启动 WorkerSession 必须改变。`survivedServerRestart` 必须与 `serverRestartWorker` 的完整进程身份一致。
+
+受管 Worker 完成任务后正常退出。验收脚本分别启动两条任务：第一条由 Worker 被终止后的新进程完成；第二条在 Provider fixture 的响应等待点保持活跃，跨 Server 重启后继续完成。两份完成记录分别保存原始 dispatch authority 的 canonical 执行 WorkerSession、Worker、Worker instance、ProductSession、执行任务和租约身份。两次完成的执行任务与 ProductSession 必须不同。脚本通过同一 Worker 和 Worker instance 关联进程身份与执行身份，并核对 Server 的持久化任务已完成。
+
+这些事实证明确定性 Provider fixture 下的发布二进制、Device/Worker 链路和恢复行为。远程两机部署与真实 Provider 编程质量各自需要独立验收。真实编程任务仍须通过正式 Client 和真实 Provider 另行执行，并记录模型调用、工具结果、候选和独立验证证据。
+
+候选包名为 `candidate-<target>`，保留一天。它包含已验收的四个 `bin` 程序、source seal 和 API 报告。
 
 ### 复用候选制品
 
@@ -211,7 +208,6 @@ winwincode-<version>-<target>/
 │   ├── winwincode-server
 │   ├── winwincode-worker
 │   ├── winwincode-kernel-helper
-│   ├── winwincode-kernel-helper.release.json
 │   └── wwc
 ├── client/
 ├── legal/
@@ -219,7 +215,7 @@ winwincode-<version>-<target>/
 └── verification/
 ```
 
-`product-release-manifest.json` 记录来源 commit、版本、target、helper 公钥、构建和验收 run、人工复核 finding、检查集合和全部文件摘要。检查集合包括原生程序身份检查。包内 `SHA256SUMS` 是完整文件清单。它覆盖包内 manifest 及其余文件。`verification/api-production.json` 是精简的 API 验证结果。`verification/source-seal.json` 是来源封印副本。
+`product-release-manifest.json` 记录来源 commit、版本、target、构建和验收 run、人工复核 finding、检查集合和全部文件摘要。检查集合包括原生程序身份检查。包内 `SHA256SUMS` 是完整文件清单。它覆盖包内 manifest 及其余文件。`verification/api-production.json` 是精简的 API 验证结果。`verification/source-seal.json` 是来源封印副本。
 
 publish job 下载四个平台的归档，并校验每个外层 `.tar.gz.sha256`。随后它把四条外层摘要合并为 Release 根目录的 `SHA256SUMS`。这个外层清单只校验四个归档。部署端下载一个平台归档时，应从外层清单精确选择该归档的唯一记录。操作步骤见[部署来源](deploy.md#选择部署来源)。
 
@@ -256,14 +252,11 @@ sha256sum -c SHA256SUMS
 
 ## 本地制品门禁
 
-`release:artifact` 是逐平台的本地证据门禁。它要求干净 checkout、精确 commit 时间、匹配的 helper 私钥和公钥，并对同一平台执行两次隔离构建。它比较 Rust、Client 和 helper 清单摘要，然后运行 production API 验证。
+`release:artifact` 是逐平台的本地证据门禁。它要求干净 checkout 和精确 commit 时间，并对同一平台执行两次隔离构建。它比较 Rust 与 Client 摘要，然后运行 production API 验证。
 
 示例：
 
 ```sh
-export WINWINCODE_HELPER_RELEASE_PRIVATE_KEY_HEX='<64-lowercase-hex-characters>'
-export WINWINCODE_HELPER_RELEASE_PUBLIC_KEY_HEX='<64-lowercase-hex-characters>'
-
 commit=$(git rev-parse HEAD)
 epoch=$(git show -s --format=%ct HEAD)
 
@@ -290,18 +283,17 @@ node scripts/verify-release-artifact-security.mjs \
   --output release-security-report.json
 ```
 
-安全报告检查凭据泄漏、平台和架构、动态库、解释器、rpath、文件模式、helper 签名和公钥绑定。需要检查额外秘密时，可以重复传入 `--sensitive-input <path>`。单平台调查可以传 `--target <target>`。
+安全报告检查凭据泄漏、平台和架构、动态库、解释器、rpath 和文件模式。需要检查额外秘密时，可以重复传入 `--sensitive-input <path>`。单平台调查可以传 `--target <target>`。
 
 本地 `verify-release-artifact-security.mjs` 不读取正式 staging 的扫描复核文件。它会保留原始 finding，并在 finding 存在时返回失败。人工复核只在 `stage-product-release.mjs` 的精确二进制绑定流程中生效。
 
-当前本地 `release:artifact` 证据布局与 GitHub Release 最终布局不同。它的 `RUST_RELEASE_ARTIFACTS` 只列 Server、Worker 和内核辅助进程，不包含 `wwc`。GitHub workflow 会显式构建并封印 `wwc`，也会增加 service、verification、SBOM 和最终产品 manifest。正式发布以 `.github/workflows/release.yml` 为准。不要把本地 evidence 目录直接上传为产品 Release。
+当前本地 `release:artifact` 证据布局与 GitHub Release 最终布局不同。它的 `RUST_RELEASE_ARTIFACTS` 包含 Server、Worker、内核辅助进程和 `wwc`。GitHub workflow 还会增加 service、verification、SBOM 和最终产品 manifest。正式发布以 `.github/workflows/release.yml` 为准。不要把本地 evidence 目录直接上传为产品 Release。
 
 ## 失败处理和回滚
 
 - 某个平台构建失败：修复源码或 runner 后重新发布。不要用其他架构制品替代。
 - API 验证失败：不能进入 staging。保留日志，但不要发布候选。
 - packaging 失败：源码和候选未变化时，可以使用 `candidate_run`。
-- helper 签名失败：检查 secret 和 variable 是否匹配。不要绕过签名检查。
 - Release notes 缺失：在 tag 对应 commit 增加正确文件，重新走版本和 tag 流程。
 - 已发布版本有缺陷：发布修复版本。部署端回滚时，恢复旧程序和与旧 schema 匹配的数据备份。
 

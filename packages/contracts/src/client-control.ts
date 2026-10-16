@@ -587,6 +587,7 @@ export const LOCAL_APPLY_RESULTS = Object.freeze([
   'permission_denied',
   'discarded',
   'failed',
+  'outcome_unknown',
 ] as const)
 export type LocalApplyResult = typeof LOCAL_APPLY_RESULTS[number]
 
@@ -677,7 +678,6 @@ export interface ClientNode {
   readonly platform: ClientPlatformTarget
   readonly architecture: ClientArchitecture
   readonly clientVersion: ClientVersion
-  readonly deviceCredentialDigest: Sha256Digest
   readonly currentInstanceId: ClientInstanceId
   readonly presenceState: ClientNodePresenceState
   readonly acceptingConnections: boolean
@@ -785,7 +785,6 @@ export interface WorkerLaunchGrant {
   readonly workerSessionId: WorkerSessionId
   readonly workerId: WorkerId
   readonly workerInstanceId: WorkerInstanceId
-  readonly credentialDigest: Sha256Digest
   readonly expiresAt: Instant
   readonly state: WorkerLaunchGrantState
   readonly revision: Revision
@@ -796,6 +795,7 @@ export interface LocalCandidateReceipt {
   readonly candidateRef: CandidateRef
   readonly repositoryBindingId: RepositoryBindingId
   readonly candidateCommit: GitCommitSha
+  readonly baseCommit: GitCommitSha
   readonly localRefName: GitRefName
   readonly state: LocalCandidateReceiptState
   readonly createdAt: Instant
@@ -938,7 +938,6 @@ export function parseClientNode(value: unknown, path = 'clientNode'): ClientNode
     'platform',
     'architecture',
     'clientVersion',
-    'deviceCredentialDigest',
     'currentInstanceId',
     'presenceState',
     'acceptingConnections',
@@ -956,10 +955,6 @@ export function parseClientNode(value: unknown, path = 'clientNode'): ClientNode
     platform: enumValue(input.platform, CLIENT_PLATFORM_TARGETS, `${path}.platform`),
     architecture: enumValue(input.architecture, CLIENT_ARCHITECTURES, `${path}.architecture`),
     clientVersion: clientVersion(input.clientVersion, `${path}.clientVersion`),
-    deviceCredentialDigest: SHA256_DIGEST(
-      input.deviceCredentialDigest,
-      `${path}.deviceCredentialDigest`,
-    ),
     currentInstanceId: CLIENT_INSTANCE_ID(
       input.currentInstanceId,
       `${path}.currentInstanceId`,
@@ -1226,7 +1221,6 @@ export function parseWorkerLaunchGrant(value: unknown, path = 'workerLaunchGrant
     'workerSessionId',
     'workerId',
     'workerInstanceId',
-    'credentialDigest',
     'expiresAt',
     'state',
     'revision',
@@ -1258,7 +1252,6 @@ export function parseWorkerLaunchGrant(value: unknown, path = 'workerLaunchGrant
     workerSessionId: WORKER_SESSION_ID(input.workerSessionId, `${path}.workerSessionId`),
     workerId: WORKER_ID(input.workerId, `${path}.workerId`),
     workerInstanceId: WORKER_INSTANCE_ID(input.workerInstanceId, `${path}.workerInstanceId`),
-    credentialDigest: SHA256_DIGEST(input.credentialDigest, `${path}.credentialDigest`),
     expiresAt: instant(input.expiresAt, `${path}.expiresAt`),
     state: enumValue(input.state, WORKER_LAUNCH_GRANT_STATES, `${path}.state`),
     revision: revision(input.revision, `${path}.revision`),
@@ -1275,6 +1268,7 @@ export function parseLocalCandidateReceipt(
     'candidateRef',
     'repositoryBindingId',
     'candidateCommit',
+    'baseCommit',
     'localRefName',
     'state',
     'createdAt',
@@ -1291,6 +1285,7 @@ export function parseLocalCandidateReceipt(
       `${path}.repositoryBindingId`,
     ),
     candidateCommit: GIT_COMMIT_SHA(input.candidateCommit, `${path}.candidateCommit`),
+    baseCommit: GIT_COMMIT_SHA(input.baseCommit, `${path}.baseCommit`),
     localRefName: GIT_REF_NAME(input.localRefName, `${path}.localRefName`),
     state: enumValue(input.state, LOCAL_CANDIDATE_RECEIPT_STATES, `${path}.state`),
     createdAt: instant(input.createdAt, `${path}.createdAt`),
@@ -1516,6 +1511,23 @@ export interface ClientCandidateApplyResultMessage extends ClientControlMessageE
   readonly receipt: LocalApplyReceipt
 }
 
+export const APPLICATION_RECONCILIATION_OUTCOMES = Object.freeze(['applied', 'not_started', 'outcome_unknown'] as const)
+export type ApplicationReconciliationOutcome = typeof APPLICATION_RECONCILIATION_OUTCOMES[number]
+
+export interface ClientApplicationReconciledMessage extends ClientControlMessageEnvelopeFields, ClientControlFencedCommandFields {
+  readonly kind: 'client.application.reconciled'
+  readonly applicationId: LocalApplyReceiptId
+  readonly approvalId: IdempotencyKey
+  readonly originalEpoch: OccupancyFencingToken
+  readonly repositoryBindingId: RepositoryBindingId
+  readonly candidateRef: CandidateRef
+  readonly candidateDigest: Sha256Digest
+  readonly baseCommit: GitCommitSha
+  readonly targetBranch: GitRefName
+  readonly outcome: ApplicationReconciliationOutcome
+  readonly resultCommit: GitCommitSha | null
+}
+
 export interface ClientCommandAckMessage extends ClientControlMessageEnvelopeFields {
   readonly kind: 'client.command_ack'
   readonly commandMessageId: ClientControlMessageId
@@ -1564,6 +1576,10 @@ export interface ClientWorkerStopMessage extends ClientControlMessageEnvelopeFie
 
 export interface ClientCandidateApplyMessage extends ClientControlMessageEnvelopeFields, ClientControlFencedCommandFields {
   readonly kind: 'client.candidate.apply'
+  readonly applicationId: LocalApplyReceiptId
+  readonly approvalId: IdempotencyKey
+  readonly candidateDigest: Sha256Digest
+  readonly reconciledRetry: boolean
   readonly repositoryBindingId: RepositoryBindingId
   readonly candidateRef: CandidateRef
   readonly targetBranch: GitRefName
@@ -1621,6 +1637,7 @@ export interface ClientToServerMessageByKind {
   'client.worker.reconcile': ClientWorkerReconcileMessage
   'client.candidate.retained': ClientCandidateRetainedMessage
   'client.candidate.apply_result': ClientCandidateApplyResultMessage
+  'client.application.reconciled': ClientApplicationReconciledMessage
   'client.command_ack': ClientCommandAckMessage
 }
 
@@ -1662,6 +1679,7 @@ export const CLIENT_TO_SERVER_MESSAGE_KINDS = Object.freeze([
   'client.worker.reconcile',
   'client.candidate.retained',
   'client.candidate.apply_result',
+  'client.application.reconciled',
   'client.command_ack',
   'client.provider.report',
   'client.extension.report',
@@ -1697,6 +1715,7 @@ export const CLIENT_CONTROL_COMMAND_MESSAGE_KINDS = Object.freeze([
   'client.worker.launch_ack',
   'client.candidate.retained',
   'client.candidate.apply_result',
+  'client.application.reconciled',
   'client.occupancy.offer',
   'client.occupancy.release',
   'client.occupancy.force_fence',
@@ -1716,6 +1735,7 @@ export const CLIENT_TO_SERVER_OCCUPANCY_FENCED_MESSAGE_KINDS = Object.freeze([
   'client.worker.launch_ack',
   'client.candidate.retained',
   'client.candidate.apply_result',
+  'client.application.reconciled',
 ] as const)
 
 export const SERVER_TO_CLIENT_OCCUPANCY_FENCED_MESSAGE_KINDS = Object.freeze([
@@ -2272,6 +2292,33 @@ function parseClientCandidateApplyResultMessage(
   })
 }
 
+function parseClientApplicationReconciledMessage(
+  input: Readonly<Record<string, unknown>>,
+  path: string,
+): ClientApplicationReconciledMessage {
+  exactKeys(input, [
+    'kind', 'schemaVersion', 'messageId', 'clientNodeId', 'clientInstanceId', 'sequence', 'occurredAt',
+    'occupancyLeaseId', 'occupancyFencingToken', 'expectedRevision', 'idempotencyKey',
+    'applicationId', 'approvalId', 'originalEpoch', 'repositoryBindingId', 'candidateRef',
+    'candidateDigest', 'baseCommit', 'targetBranch', 'outcome', 'resultCommit',
+  ], path)
+  return Object.freeze({
+    ...parseEnvelopeBase(input, path),
+    ...parseFencedCommandFields(input, path),
+    kind: 'client.application.reconciled',
+    applicationId: LOCAL_APPLY_RECEIPT_ID(input.applicationId, `${path}.applicationId`),
+    approvalId: IDEMPOTENCY_KEY(input.approvalId, `${path}.approvalId`),
+    originalEpoch: OCCUPANCY_FENCING_TOKEN(input.originalEpoch, `${path}.originalEpoch`),
+    repositoryBindingId: REPOSITORY_BINDING_ID(input.repositoryBindingId, `${path}.repositoryBindingId`),
+    candidateRef: CANDIDATE_REF(input.candidateRef, `${path}.candidateRef`),
+    candidateDigest: SHA256_DIGEST(input.candidateDigest, `${path}.candidateDigest`),
+    baseCommit: GIT_COMMIT_SHA(input.baseCommit, `${path}.baseCommit`),
+    targetBranch: GIT_REF_NAME(input.targetBranch, `${path}.targetBranch`),
+    outcome: enumValue(input.outcome, APPLICATION_RECONCILIATION_OUTCOMES, `${path}.outcome`),
+    resultCommit: nullable(input.resultCommit, `${path}.resultCommit`, GIT_COMMIT_SHA),
+  })
+}
+
 function parseClientCommandAckMessage(
   input: Readonly<Record<string, unknown>>,
   path: string,
@@ -2523,11 +2570,19 @@ function parseClientCandidateApplyMessage(
     'requesterUserId',
     'expectedRevision',
     'idempotencyKey',
+    'applicationId',
+    'approvalId',
+    'candidateDigest',
+    'reconciledRetry',
   ], path)
   return Object.freeze({
     ...parseEnvelopeBase(input, path),
     ...parseFencedCommandFields(input, path),
     kind: 'client.candidate.apply',
+    applicationId: LOCAL_APPLY_RECEIPT_ID(input.applicationId, `${path}.applicationId`),
+    approvalId: IDEMPOTENCY_KEY(input.approvalId, `${path}.approvalId`),
+    candidateDigest: SHA256_DIGEST(input.candidateDigest, `${path}.candidateDigest`),
+    reconciledRetry: booleanValue(input.reconciledRetry, `${path}.reconciledRetry`),
     repositoryBindingId: REPOSITORY_BINDING_ID(
       input.repositoryBindingId,
       `${path}.repositoryBindingId`,
@@ -2599,6 +2654,8 @@ function parseClientToServerByKind(
       return parseClientCandidateRetainedMessage(input, path)
     case 'client.candidate.apply_result':
       return parseClientCandidateApplyResultMessage(input, path)
+    case 'client.application.reconciled':
+      return parseClientApplicationReconciledMessage(input, path)
     case 'client.command_ack':
       return parseClientCommandAckMessage(input, path)
     case 'client.repository.registered': {

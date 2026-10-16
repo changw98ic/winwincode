@@ -8,7 +8,6 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use serde_json::Value;
-use sha2::{Digest, Sha256};
 use winwincode_client_port::domain::{
     ApplyResult, ApplyStrategy, ClientArchitecture, ClientCapacityReport, ClientPlatformTarget,
     LocalCandidateState,
@@ -53,27 +52,12 @@ fn seed() -> DeviceIdentitySeed {
 
 const ASSIGNED_NODE: &str = "cnd_B2B2B2B2B2B2B2B2B2B2B2B2B2";
 const ASSIGNED_PUBLIC_CLIENT_ID: &str = "0123456789";
-const ISSUED_SECRET: [u8; 32] = [0x5d; 32];
 const STAMP: &str = "2026-09-04T00:00:00.000Z";
 const LATER_STAMP: &str = "2026-09-04T12:00:00.000Z";
 const LEASE: &str = "ocl_BRANCHENGINE00000000000000000000";
 const BINDING: &str = "rbd_BRANCHENGINEBINDING00000000000";
 const SESSION: &str = "wks_BRANCHENGINESESSION00000000000";
 const SLUG: &str = "fix-login";
-
-fn issued_credential_material() -> String {
-    const HEX: &[u8; 16] = b"0123456789abcdef";
-    let mut encoded = String::with_capacity(ISSUED_SECRET.len() * 2);
-    for byte in ISSUED_SECRET {
-        encoded.push(HEX[usize::from(byte >> 4)] as char);
-        encoded.push(HEX[usize::from(byte & 0x0f)] as char);
-    }
-    encoded
-}
-
-fn issued_credential_digest() -> String {
-    format!("sha256:{:x}", Sha256::digest(ISSUED_SECRET))
-}
 
 fn open_enrolled(root: &Path) -> (DeviceStore, IdentityRecord) {
     let mut store = DeviceStore::open(root).expect("device store should open");
@@ -90,8 +74,6 @@ fn open_enrolled(root: &Path) -> (DeviceStore, IdentityRecord) {
         &IssuedEnrollment {
             client_node_id: ASSIGNED_NODE.to_owned(),
             public_client_id: ASSIGNED_PUBLIC_CLIENT_ID.to_owned(),
-            credential_material: issued_credential_material(),
-            credential_digest: issued_credential_digest(),
         },
         STAMP,
     )
@@ -113,11 +95,7 @@ fn open_resumed(root: &Path) -> (DeviceStore, IdentityRecord) {
 struct NeverTransport;
 
 impl ExchangeTransport for NeverTransport {
-    fn exchange(
-        &self,
-        _credential: Option<&str>,
-        _request_bytes: &[u8],
-    ) -> Result<Vec<u8>, ExchangeTransportError> {
+    fn exchange(&self, _request_bytes: &[u8]) -> Result<Vec<u8>, ExchangeTransportError> {
         Err(ExchangeTransportError::new(
             "the branch engine must not exchange on its own",
         ))
@@ -234,9 +212,10 @@ fn write_candidate_ref(repository: &Path, commit: &str) {
     );
 }
 
-fn retention(commit: &str, binding: &str) -> CandidateRetention {
+fn retention(commit: &str, base_commit: &str, binding: &str) -> CandidateRetention {
     CandidateRetention {
         candidate_commit: commit.to_owned(),
+        base_commit: base_commit.to_owned(),
         repository_binding_id: binding.to_owned(),
         worker_session_id: SESSION.to_owned(),
         local_git_ref: format!("refs/winwincode/candidates/{commit}"),
@@ -244,7 +223,13 @@ fn retention(commit: &str, binding: &str) -> CandidateRetention {
     }
 }
 
-fn seed_retained(store: &mut DeviceStore, repository: &Path, commit: &str, binding: &str) {
+fn seed_retained(
+    store: &mut DeviceStore,
+    repository: &Path,
+    commit: &str,
+    base_commit: &str,
+    binding: &str,
+) {
     store
         .put_path_mapping(&PathMappingRecord {
             repository_binding_id: binding.to_owned(),
@@ -257,7 +242,7 @@ fn seed_retained(store: &mut DeviceStore, repository: &Path, commit: &str, bindi
             local_state: "ready".to_owned(),
         })
         .expect("the binding should map");
-    record_candidate_retention(store, &retention(commit, binding))
+    record_candidate_retention(store, &retention(commit, base_commit, binding))
         .expect("the retention should record");
 }
 
@@ -301,6 +286,7 @@ fn seed_scenario_store(state: &Scenario, with_mirror: bool) -> (DeviceStore, Ide
         &mut store,
         &state.repository,
         &state.candidate_commit,
+        &state.base_commit,
         BINDING,
     );
     if with_mirror {
@@ -861,8 +847,11 @@ fn a_missing_candidate_fails_closed_as_candidate_missing() {
 
     let state = scenario("unmapped-binding");
     let mut store = DeviceStore::open(&state.root).expect("store should open");
-    record_candidate_retention(&mut store, &retention(&state.candidate_commit, BINDING))
-        .expect("the retention should record");
+    record_candidate_retention(
+        &mut store,
+        &retention(&state.candidate_commit, &state.base_commit, BINDING),
+    )
+    .expect("the retention should record");
     mirror_the_lease(&mut store);
     store.close().expect("store should close");
     let (store, identity) = open_enrolled(&state.root);
@@ -947,6 +936,7 @@ fn terminal_candidates_refuse_branch_creation() {
             &mut store,
             &state.repository,
             &state.candidate_commit,
+            &state.base_commit,
             BINDING,
         );
         mirror_the_lease(&mut store);
@@ -1124,6 +1114,7 @@ fn the_creation_survives_a_restart_and_a_failed_retry_can_succeed() {
         &mut store,
         &state.repository,
         &state.candidate_commit,
+        &state.base_commit,
         BINDING,
     );
     mirror_the_lease(&mut store);
@@ -1269,6 +1260,7 @@ fn the_registry_lifecycle_transition_table_stays_fail_closed() {
         &mut store,
         &state.repository,
         &state.candidate_commit,
+        &state.base_commit,
         BINDING,
     );
 

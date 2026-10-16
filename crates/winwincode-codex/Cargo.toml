@@ -16,7 +16,6 @@ base64.workspace = true
 codex-apply-patch = { path = "../../third_party/codex/codex-rs/apply-patch" }
 codex-protocol.workspace = true
 codex-shell-command.workspace = true
-ed25519-dalek.workspace = true
 futures.workspace = true
 rusqlite.workspace = true
 serde.workspace = true
@@ -30,9 +29,6 @@ winwincode-provider.workspace = true
 winwincode-fusion.workspace = true
 winwincode-execution-port.workspace = true
 winwincode-kernel = { path = "../kernel" }
-
-[build-dependencies]
-sha2.workspace = true
 
 [dev-dependencies]
 rusqlite = { workspace = true, features = ["hooks"] }

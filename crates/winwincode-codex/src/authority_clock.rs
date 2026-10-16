@@ -22,6 +22,11 @@ pub(crate) enum AuthorityClockError {
 }
 
 impl AuthorityClock {
+    #[cfg(test)]
+    pub(crate) fn advance_for_test(&self, elapsed: std::time::Duration) {
+        self.anchor.lock().unwrap().as_mut().unwrap().observed_at -= elapsed;
+    }
+
     pub(crate) fn observe(&self, now: &Instant) -> Result<(), AuthorityClockError> {
         let observed = parse_timestamp(now).ok_or(AuthorityClockError::InvalidTime)?;
         let mut anchor = self

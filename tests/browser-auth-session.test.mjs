@@ -2,24 +2,18 @@ import assert from 'node:assert/strict'
 import { spawn, spawnSync } from 'node:child_process'
 import { randomBytes } from 'node:crypto'
 import {
-  chmodSync,
-  copyFileSync,
   existsSync,
   mkdtempSync,
   readFileSync,
   rmSync,
-  writeFileSync,
 } from 'node:fs'
-import { createServer } from 'node:https'
+import { createServer } from 'node:http'
 import { createServer as createNetServer } from 'node:net'
 import { join, normalize, resolve } from 'node:path'
 import { tmpdir } from 'node:os'
 import test from 'node:test'
 
-import {
-  serverTargetDirectory,
-  writeHelperReleaseManifest,
-} from '../scripts/run-api-production-vertical.mjs'
+import { serverTargetDirectory } from '../scripts/run-api-production-vertical.mjs'
 
 const root = resolve(import.meta.dirname, '..')
 
@@ -40,29 +34,6 @@ function command(name, args) {
   assert.equal(result.status, 0, `${name} failed:\n${result.stdout}${result.stderr}`)
 }
 
-function certificate(directory) {
-  const configuration = join(directory, 'openssl.cnf')
-  const key = join(directory, 'fixture-key.pem')
-  const cert = join(directory, 'fixture-cert.pem')
-  writeFileSync(configuration, `[req]
-distinguished_name = dn
-x509_extensions = extensions
-prompt = no
-[dn]
-CN = control.localhost
-[extensions]
-subjectAltName = @names
-[names]
-DNS.1 = control.localhost
-DNS.2 = client.localhost
-`)
-  command('openssl', [
-    'req', '-x509', '-newkey', 'rsa:2048', '-nodes', '-sha256', '-days', '1',
-    '-config', configuration, '-keyout', key, '-out', cert,
-  ])
-  return { key, cert }
-}
-
 async function listen(server, port = 0) {
   await new Promise((resolvePromise, reject) => {
     server.once('error', reject)
@@ -71,7 +42,7 @@ async function listen(server, port = 0) {
   return server.address().port
 }
 
-function staticClientServer(cert, controlConfiguration) {
+function staticClientServer(controlConfiguration) {
   const moduleRoot = resolve(root, 'apps/client/dist/module')
   const browserCoreRoot = resolve(root, 'packages/browser-core/dist')
   const browserUiRoot = resolve(root, 'packages/browser-ui/dist')
@@ -85,8 +56,8 @@ function staticClientServer(cert, controlConfiguration) {
       /<script type="module" src="\.\/assets\/client\.js"><\/script>/u,
       '<script type="module" src="/fixture/browser-auth-client.mjs"></script>',
     )
-  return createServer({ key: readFileSync(cert.key), cert: readFileSync(cert.cert) }, (request, response) => {
-    const path = new URL(request.url, 'https://client.localhost').pathname
+  return createServer((request, response) => {
+    const path = new URL(request.url, 'http://127.0.0.1').pathname
     if (path === '/') {
       response.writeHead(200, {
         'Content-Type': 'text/html; charset=utf-8',
@@ -156,7 +127,7 @@ async function waitForServer(controlUrl, child, errors) {
     assert.equal(child.exitCode, null, `standalone Server exited:\n${errors.join('')}`)
     const response = spawnSync(
       'curl',
-      ['-ksS', '--noproxy', '*', `https://127.0.0.1:${port}/health`],
+      ['-sS', '--noproxy', '*', `http://127.0.0.1:${port}/health`],
       { encoding: 'utf8' },
     )
     if (response.status === 0) {
@@ -173,31 +144,16 @@ async function waitForServer(controlUrl, child, errors) {
   )
 }
 
-async function expectStartupFailure(child, errors, expectedMessage) {
-  const deadline = Date.now() + 30_000
-  while (child.exitCode === null && child.signalCode === null && Date.now() < deadline) {
-    await new Promise(resolvePromise => setTimeout(resolvePromise, 100))
-  }
-  const exited = child.exitCode !== null || child.signalCode !== null
-  if (!exited) await stopChild(child, 'SIGKILL')
-  assert.equal(exited, true, 'standalone Server accepted an incomplete production configuration')
-  assert.equal(child.exitCode, 1)
-  assert.match(errors.join(''), expectedMessage)
-}
-
 function startStandaloneServer({
-  cert,
   checkoutRevision,
   clientOrigin,
   controlPort,
   directory,
   proof,
   errors,
-  helperExecutable,
-  helperReleaseManifest,
   serverBinary,
 }) {
-  const controlUrl = `https://control.localhost:${String(controlPort)}`
+  const controlUrl = `http://127.0.0.1:${String(controlPort)}`
   const child = spawn(serverBinary, [], {
     cwd: root,
     env: {
@@ -209,8 +165,6 @@ function startStandaloneServer({
       WWC_SERVER_BOOTSTRAP_PROOF: proof,
       WWC_SERVER_REPOSITORY_ROOT: root,
       WWC_SERVER_CHECKOUT_REVISION: checkoutRevision,
-      WWC_SERVER_HELPER_EXECUTABLE: helperExecutable,
-      WWC_SERVER_HELPER_RELEASE_MANIFEST: helperReleaseManifest,
       WWC_SERVER_ORGANIZATION_ID: 'org_01J00000000000000000000000',
       WWC_SERVER_WORKSPACE_ID: 'wsp_01J00000000000000000000000',
       WWC_SERVER_PROJECT_ID: 'prj_01J00000000000000000000000',
@@ -222,8 +176,6 @@ function startStandaloneServer({
       PUBLICATION_REQUESTERS: 'usr_01J00000000000000000000000',
       PUBLICATION_APPROVERS: 'usr_01J00000000000000000000000',
       PUBLICATION_APPROVAL_MAX_AGE_MILLIS: '86400000',
-      WWC_SERVER_TLS_CERTIFICATE: cert.cert,
-      WWC_SERVER_TLS_PRIVATE_KEY: cert.key,
     },
     stdio: ['ignore', 'pipe', 'pipe'],
   })
@@ -337,7 +289,7 @@ async function waitForFixture(devtools, sessionId) {
   throw new Error('browser fixture module did not load')
 }
 
-test('static Client and standalone TLS Server run real cross-origin workflows and restart independently', async t => {
+test('static Client and standalone HTTP Server run real cross-origin workflows and restart independently', async t => {
   const chromePath = chromeBinary()
   if (chromePath === null) {
     t.skip('Chrome or Chromium is required for the real-browser auth gate')
@@ -345,29 +297,21 @@ test('static Client and standalone TLS Server run real cross-origin workflows an
   }
   command('corepack', ['pnpm', '--filter', '@winwincode/client', 'build'])
   command('cargo', ['build', '-p', 'winwincode-server', '--bin', 'winwincode-server', '--locked', '--offline'])
-  command('cargo', ['build', '--release', '-p', 'winwincode-kernel-helper', '--locked', '--offline'])
   const targetDirectory = serverTargetDirectory(root)
   const serverBinary = resolve(targetDirectory, 'debug/winwincode-server')
-  const helperExecutable = resolve(targetDirectory, 'debug/winwincode-kernel-helper')
-  const releaseHelper = resolve(targetDirectory, 'release/winwincode-kernel-helper')
   assert.equal(existsSync(serverBinary), true, `Server binary is missing: ${serverBinary}`)
-  assert.equal(existsSync(releaseHelper), true, `release helper is missing: ${releaseHelper}`)
-  copyFileSync(releaseHelper, helperExecutable)
-  chmodSync(helperExecutable, 0o755)
-  const helperReleaseManifest = writeHelperReleaseManifest(root, helperExecutable)
   const directory = mkdtempSync(join(tmpdir(), 'winwincode-browser-auth-'))
-  const cert = certificate(directory)
   let controlUrl = ''
   const baselineResult = spawnSync('git', ['rev-parse', 'HEAD'], { cwd: root, encoding: 'utf8' })
   assert.equal(baselineResult.status, 0, baselineResult.stderr)
   const repositoryBaseline = baselineResult.stdout.trim()
   assert.match(repositoryBaseline, /^[0-9a-f]{40}$/u)
-  let clientServer = staticClientServer(cert, () => ({
+  let clientServer = staticClientServer(() => ({
     repositoryBaseline,
     serverUrl: controlUrl,
   }))
   const clientPort = await listen(clientServer)
-  const clientOrigin = `https://client.localhost:${String(clientPort)}`
+  const clientOrigin = `http://127.0.0.1:${String(clientPort)}`
   const controlPort = await freePort()
   const proof = randomBytes(32).toString('base64url')
   const errors = []
@@ -383,34 +327,25 @@ test('static Client and standalone TLS Server run real cross-origin workflows an
     ])
     rmSync(directory, { recursive: true, force: true })
   })
-  const missingRevisionErrors = []
-  const missingRevision = startStandaloneServer({
-    cert,
+  ;({ child: standalone, controlUrl } = startStandaloneServer({
     checkoutRevision: undefined,
     clientOrigin,
     controlPort,
     directory,
     proof,
-    errors: missingRevisionErrors,
-    helperExecutable,
-    helperReleaseManifest,
+    errors,
     serverBinary,
-  }).child
-  await expectStartupFailure(
-    missingRevision,
-    missingRevisionErrors,
-    /WWC_SERVER_CHECKOUT_REVISION is required/u,
-  )
+  }))
+  await waitForServer(controlUrl, standalone, errors)
+  await stopChild(standalone, 'SIGINT')
+  standalone = null
   ;({ child: standalone, controlUrl } = startStandaloneServer({
-    cert,
     checkoutRevision: repositoryBaseline,
     clientOrigin,
     controlPort,
     directory,
     proof,
     errors,
-    helperExecutable,
-    helperReleaseManifest,
     serverBinary,
   }))
   const firstHealth = await waitForServer(controlUrl, standalone, errors)
@@ -418,7 +353,6 @@ test('static Client and standalone TLS Server run real cross-origin workflows an
   chrome = spawn(chromePath, [
     '--headless=new',
     '--disable-gpu',
-    '--ignore-certificate-errors',
     '--no-first-run',
     '--no-default-browser-check',
     `--remote-debugging-port=${String(debugPort)}`,
@@ -503,15 +437,12 @@ test('static Client and standalone TLS Server run real cross-origin workflows an
 
   await stopChild(standalone, 'SIGINT')
   ;({ child: standalone, controlUrl } = startStandaloneServer({
-    cert,
     checkoutRevision: repositoryBaseline,
     clientOrigin,
     controlPort,
     directory,
     proof,
     errors,
-    helperExecutable,
-    helperReleaseManifest,
     serverBinary,
   }))
   const restartedHealth = await waitForServer(controlUrl, standalone, errors)
@@ -537,7 +468,7 @@ test('static Client and standalone TLS Server run real cross-origin workflows an
     await evaluate(devtools, sessionId, 'globalThis.runWhileClientServerStoppedFixture()'),
     { concurrency: 2, revision: 1 },
   )
-  clientServer = staticClientServer(cert, () => ({
+  clientServer = staticClientServer(() => ({
     repositoryBaseline,
     serverUrl: controlUrl,
   }))

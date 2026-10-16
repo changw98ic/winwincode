@@ -79,10 +79,8 @@ fn actor() -> PublicEventActor {
 
 fn registration(worker: u64, request: u64) -> WorkerRegistrationRequest {
     WorkerRegistrationRequest {
-        authentication_identity: WorkerAuthenticationIdentity::TransportPrincipal {
-            issuer: "fixture-issuer".into(),
-            subject: format!("worker-{worker}"),
-            credential_fingerprint: Sha256Digest(format!("sha256:{}", "f".repeat(64))),
+        authentication_identity: WorkerAuthenticationIdentity::LocalEmbedded {
+            control_plane_principal: format!("worker-{worker}"),
         },
         protocol_version: EXECUTION_PROTOCOL_VERSION.into(),
         platform: WorkerPlatform::X86_64UnknownLinuxGnu,

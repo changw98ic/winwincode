@@ -49,6 +49,9 @@ struct Fixture {
     workspaces: PathBuf,
 }
 
+#[path = "support/validation_fixture.rs"]
+mod validation_fixture;
+
 struct ObserverTerminalFixture {
     _fixture: Fixture,
     runtime: JobWorkspaceRuntime,
@@ -2955,10 +2958,10 @@ async fn owned_validation_restart_preserves_unconfirmed_cleanup_barrier() {
 }
 
 fn validation_start_configuration() -> String {
-    VALIDATION_CONFIG.replace(
+    validation_fixture::with_python_executable(&VALIDATION_CONFIG.replace(
         "from pathlib import Path; assert Path(\"delegated.txt\").read_text() == \"formatted\\n\"",
         "import os; from pathlib import Path; Path(os.environ[\"WWC_OUTPUT_DIR\"]).joinpath(\"validation-started\").write_text(\"started\")",
-    )
+    ))
 }
 
 #[cfg(feature = "test-support")]

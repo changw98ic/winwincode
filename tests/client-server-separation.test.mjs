@@ -9,7 +9,7 @@ function source(path) {
   return readFileSync(join(root, path), 'utf8')
 }
 
-test('static Client permits only secure remote Control Plane connections', () => {
+test('static Client defaults to the local Control Plane', () => {
   const index = source('apps/client/public/index.html')
   const contentSecurityPolicy = index.match(
     /http-equiv="Content-Security-Policy" content="([^"]+)"/u,
@@ -28,7 +28,8 @@ test('static Client permits only secure remote Control Plane connections', () =>
 
   const runtimeConfig = source('apps/client/public/runtime-config.js')
   assert.match(runtimeConfig, /serverUrl/u)
-  assert.doesNotMatch(runtimeConfig, /token|authorization|cookie|https?:\/\/|wss?:\/\//iu)
+  assert.match(runtimeConfig, /serverUrl: 'http:\/\/127\.0\.0\.1:8443'/u)
+  assert.doesNotMatch(runtimeConfig, /token|authorization|cookie/iu)
 })
 
 test('Client and Server expose independent version and rollback coordinates', () => {

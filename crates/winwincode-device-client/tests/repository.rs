@@ -6,7 +6,6 @@ use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread;
 
-use sha2::Digest as _;
 use time::OffsetDateTime;
 use winwincode_client_port::domain::{
     RepositoryAvailability, RepositoryBindingProjection, RepositoryDirtyState,
@@ -28,7 +27,6 @@ static NEXT_TEMP_DIRECTORY: AtomicU64 = AtomicU64::new(1);
 
 const ASSIGNED_NODE: &str = "cnd_C1C1C1C1C1C1C1C1C1C1C1C1C1";
 const ASSIGNED_PUBLIC_CLIENT_ID: &str = "1029384756";
-const ISSUED_SECRET: [u8; 32] = [0x5c; 32];
 const STAMP: &str = "2026-09-04T00:00:00.000Z";
 
 fn temporary_directory(name: &str) -> PathBuf {
@@ -132,20 +130,12 @@ impl TestDevice {
             .identity()
             .device_id()
             .to_owned();
-        let mut material_hex = String::with_capacity(ISSUED_SECRET.len() * 2);
-        for byte in ISSUED_SECRET {
-            use std::fmt::Write as _;
-            let _ = write!(material_hex, "{byte:02x}");
-        }
-        let digest = format!("sha256:{:x}", sha2::Sha256::digest(ISSUED_SECRET));
         winwincode_device_client::adopt_enrollment(
             &mut store,
             &device_id,
             &IssuedEnrollment {
                 client_node_id: ASSIGNED_NODE.to_owned(),
                 public_client_id: ASSIGNED_PUBLIC_CLIENT_ID.to_owned(),
-                credential_material: material_hex,
-                credential_digest: digest,
             },
             STAMP,
         )

@@ -10,6 +10,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::str::FromStr;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -36,7 +37,6 @@ const LOG_LIMIT_BYTES: u64 = 1024 * 1024;
 const CONTROL_POLL_INTERVAL: Duration = Duration::from_millis(200);
 const EXCHANGE_PATH: &str = "/internal/v1/client/exchange";
 const PREVIEW_TUNNEL_PATH: &str = "/internal/v1/preview/tunnel";
-const TLS_ROOT_DER_ENVIRONMENT: &str = "WWC_DEVICE_TLS_ROOT_DER_FILE";
 const MANAGED_APP_EXECUTABLE_ALLOWLIST_ENVIRONMENT: &str =
     "WWC_DEVICE_MANAGED_APP_EXECUTABLE_ALLOWLIST";
 
@@ -54,6 +54,10 @@ pub struct DeviceServiceStatus {
     pub running: bool,
     pub pid: Option<u32>,
     pub restart_pending: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub server_url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub authorization_failure: Option<String>,
 }
 
 #[derive(Debug)]
@@ -130,10 +134,6 @@ struct ServiceWorkerLaunchMaterial {
 }
 
 impl WorkerLaunchMaterialSource for ServiceWorkerLaunchMaterial {
-    fn worker_credential(&self, _credential_digest: &str) -> Option<String> {
-        None
-    }
-
     fn launch_directories(
         &self,
         worker_session_id: &str,
@@ -170,16 +170,66 @@ impl ManagedAppRepositorySource for ServiceWorkerLaunchMaterial {
 }
 
 pub fn run_device_service(config: &DeviceServiceConfig) -> Result<(), DeviceServiceError> {
-    run_device_service_until(config, || false)
+    run_device_service_with_ca(config, None)
+}
+
+pub fn run_device_service_with_ca(
+    config: &DeviceServiceConfig,
+    ca_file: Option<&Path>,
+) -> Result<(), DeviceServiceError> {
+    let ca_roots = crate::remote_auth::load_ca_roots(ca_file)?;
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?;
+    let stop = Arc::new(AtomicBool::new(false));
+    let service_stop = Arc::clone(&stop);
+    let config = config.clone();
+    runtime.block_on(async move {
+        #[cfg(unix)]
+        let mut terminate =
+            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
+        let shutdown = async {
+            #[cfg(unix)]
+            {
+                tokio::select! {
+                    result = tokio::signal::ctrl_c() => result,
+                    _ = terminate.recv() => Ok(()),
+                }
+            }
+            #[cfg(not(unix))]
+            tokio::signal::ctrl_c().await
+        };
+        let mut service = tokio::task::spawn_blocking(move || {
+            run_device_service_with_roots_until(&config, &ca_roots, || {
+                service_stop.load(Ordering::Acquire)
+            })
+        });
+        tokio::select! {
+            result = &mut service => result.map_err(std::io::Error::other)?,
+            result = shutdown => {
+                stop.store(true, Ordering::Release);
+                let stopped = service.await.map_err(std::io::Error::other)?;
+                result?;
+                stopped
+            }
+        }
+    })
+}
+
+#[cfg(test)]
+fn run_device_service_until(
+    config: &DeviceServiceConfig,
+    should_stop: impl FnMut() -> bool,
+) -> Result<(), DeviceServiceError> {
+    run_device_service_with_roots_until(config, &[], should_stop)
 }
 
 #[allow(clippy::too_many_lines)]
-fn run_device_service_until(
+fn run_device_service_with_roots_until(
     config: &DeviceServiceConfig,
+    ca_roots: &[Vec<u8>],
     mut should_stop: impl FnMut() -> bool,
 ) -> Result<(), DeviceServiceError> {
-    let endpoint = exchange_endpoint(&config.server_url)?;
-    let origin = server_origin(&config.server_url)?;
     prepare_data_directory(&config.data_directory)?;
     let _lease = ServiceLease::acquire(&config.data_directory)?;
     let restart_path = config.data_directory.join(RESTART_FILE);
@@ -187,25 +237,58 @@ fn run_device_service_until(
         fs::remove_file(&restart_path)?;
     }
     append_log(&config.data_directory, "service started")?;
-    let preview_tls_root_der = match std::env::var_os(TLS_ROOT_DER_ENVIRONMENT) {
-        Some(path) => Some(fs::read(path)?),
-        None => None,
-    };
     let preview_registry = AuthorizedPreviewSourceRegistry::default();
 
     loop {
         let mut store = DeviceStore::open(&config.data_directory)?;
+        crate::remote_auth::retry_remote_authentication(&store)?;
+        if crate::remote_auth::load_remote_binding(&store)?
+            .is_some_and(|binding| !binding.is_bound())
+        {
+            crate::remote_auth::bind_device(&crate::remote_auth::DeviceBindConfig {
+                data_directory: config.data_directory.clone(),
+                server_url: None,
+                pairing_token: None,
+                ca_file: None,
+                seed: device_identity_seed(&config.device_display_name),
+            })?;
+        }
+        let binding = crate::remote_auth::load_remote_binding(&store)?;
+        if let Some(reason) = binding
+            .as_ref()
+            .and_then(|binding| binding.failure_reason.as_deref())
+        {
+            return Err(DeviceServiceError::InvalidConfig(reason.to_owned()));
+        }
+        let server_url = binding
+            .as_ref()
+            .map_or(config.server_url.as_str(), |binding| {
+                binding.server_url.as_str()
+            });
+        let endpoint = exchange_endpoint(server_url)?;
+        let origin = server_origin(server_url)?;
+        let auth = binding
+            .as_ref()
+            .map(crate::remote_auth::RemoteBinding::auth)
+            .map(|auth| {
+                if ca_roots.is_empty() {
+                    auth
+                } else {
+                    auth.with_ca_roots(ca_roots.to_vec())
+                }
+            });
         let identity = ensure_device_identity(
             &mut store,
             &device_identity_seed(&config.device_display_name),
             &stamp(),
         )?;
-        let transport = match std::env::var_os(TLS_ROOT_DER_ENVIRONMENT) {
-            Some(path) => {
-                HttpExchangeTransport::new(endpoint.clone()).with_tls_root_der(fs::read(path)?)
-            }
-            None => HttpExchangeTransport::new(endpoint.clone()),
-        };
+        let transport =
+            HttpExchangeTransport::new(endpoint.clone()).with_ca_roots(ca_roots.to_vec());
+        let transport = Arc::new(if let Some(auth) = &auth {
+            transport.with_device_auth(auth.clone())
+        } else {
+            transport
+        });
         let mut daemon = DeviceDaemon::start(
             DaemonConfig {
                 server_profile_id: "default".to_owned(),
@@ -223,9 +306,11 @@ fn run_device_service_until(
                 capacity: service_worker_capacity(),
             },
             store,
-            Arc::new(transport),
+            transport.clone(),
             &identity,
         )?;
+        crate::apply_engine::recover_started_applications(&mut daemon)
+            .map_err(|error| DeviceServiceError::InvalidConfig(error.to_string()))?;
         let mut worker_lane_wired = false;
         let mut preview_tunnel = None;
         if identity.identity().is_enrolled() {
@@ -236,19 +321,21 @@ fn run_device_service_until(
                 identity.identity().client_node_id(),
                 identity.current_instance_id(),
                 preview_registry.clone(),
+                transport.clone(),
             )?;
             worker_lane_wired = true;
             preview_tunnel = Some(start_preview_tunnel(
                 &origin,
                 &identity,
                 preview_registry.clone(),
-                preview_tls_root_der.as_deref(),
+                auth.clone(),
             )?);
         }
         let mut last_retry = None;
         loop {
             if should_stop() {
                 drop(preview_tunnel.take());
+                daemon.shutdown_workers()?;
                 append_log(&config.data_directory, "service stopped")?;
                 return Ok(());
             }
@@ -256,9 +343,19 @@ fn run_device_service_until(
                 fs::remove_file(&restart_path)?;
                 append_log(&config.data_directory, "daemon session restarted")?;
                 drop(preview_tunnel.take());
+                daemon.shutdown_workers()?;
                 break;
             }
-            let ready_in = match daemon.tick(Instant::now())? {
+            let tick = match daemon.tick(Instant::now()) {
+                Ok(tick) => tick,
+                Err(error) => {
+                    drop(preview_tunnel.take());
+                    daemon.shutdown_workers()?;
+                    append_log(&config.data_directory, &error.to_string())?;
+                    return Err(DeviceServiceError::Daemon(error));
+                }
+            };
+            let ready_in = match tick {
                 TickOutcome::Waiting { ready_in } => ready_in,
                 TickOutcome::Retrying { after, reason } => {
                     if last_retry.as_deref() != Some(reason.as_str()) {
@@ -286,6 +383,7 @@ fn run_device_service_until(
                     enrolled.identity().client_node_id(),
                     enrolled.current_instance_id(),
                     preview_registry.clone(),
+                    transport.clone(),
                 )?;
                 worker_lane_wired = true;
                 let enrolled = load_device_identity(&DeviceStore::open(&config.data_directory)?)?
@@ -298,7 +396,7 @@ fn run_device_service_until(
                     &origin,
                     &enrolled,
                     preview_registry.clone(),
-                    preview_tls_root_der.as_deref(),
+                    auth.clone(),
                 )?);
                 append_log(&config.data_directory, "local worker lane ready")?;
             }
@@ -311,30 +409,28 @@ fn start_preview_tunnel(
     origin: &str,
     identity: &IdentityRecord,
     registry: AuthorizedPreviewSourceRegistry,
-    tls_root_der: Option<&[u8]>,
+    auth: Option<crate::remote_auth::DeviceRemoteAuth>,
 ) -> Result<PreviewTunnelSupervisor, DeviceServiceError> {
-    PreviewTunnelSupervisor::start_with_tls_root_der(
+    PreviewTunnelSupervisor::start_with_auth(
         preview_tunnel_endpoint(origin)?,
         identity.identity().client_node_id().to_owned(),
-        identity.credential().material_hex(),
         registry,
-        tls_root_der.map(<[u8]>::to_vec),
+        auth,
     )
     .map_err(DeviceServiceError::from)
 }
 
 fn preview_tunnel_endpoint(server_url: &str) -> Result<String, DeviceServiceError> {
-    let uri = http::Uri::from_str(server_url).map_err(|_| {
-        DeviceServiceError::InvalidConfig("server URL is not a valid URI".to_owned())
-    })?;
-    if uri.scheme_str() != Some("https") || uri.authority().is_none() {
-        return Err(DeviceServiceError::InvalidConfig(
-            "preview tunnel requires an https server origin".to_owned(),
-        ));
-    }
+    let origin = server_origin(server_url)?;
+    let uri = http::Uri::from_str(&origin).expect("validated origin");
+    let scheme = if uri.scheme_str() == Some("https") {
+        "wss"
+    } else {
+        "ws"
+    };
     Ok(format!(
-        "wss://{}{PREVIEW_TUNNEL_PATH}",
-        uri.authority().expect("authority checked")
+        "{scheme}://{}{PREVIEW_TUNNEL_PATH}",
+        uri.authority().expect("validated authority")
     ))
 }
 
@@ -345,13 +441,14 @@ fn wire_worker_lane(
     client_node_id: &str,
     client_instance_id: &str,
     preview_sources: AuthorizedPreviewSourceRegistry,
+    transport: Arc<dyn crate::ExchangeTransport>,
 ) -> Result<(), DeviceServiceError> {
     let supervisor = SessionSupervisor::new(
         service_worker_supervisor_config(server_origin, client_node_id, client_instance_id),
         DeviceStore::open(data_directory)?,
     )?;
+    supervisor.set_worker_relay_transport(transport);
     daemon.set_worker_supervisor(supervisor.clone());
-    daemon.recover_worker_stop_intents()?;
     daemon
         .set_worker_capacity_source(Arc::new(supervisor.clone()) as Arc<dyn WorkerCapacitySource>);
     daemon.set_lease_worker_controller(Arc::new(supervisor) as Arc<dyn LeaseWorkerController>);
@@ -394,7 +491,7 @@ fn service_worker_supervisor_config(
         model_route: None,
         worker_binary_path: None,
         max_concurrent_worker_sessions: 0,
-        stop_grace_period: Duration::from_secs(10),
+        stop_grace_period: Duration::from_secs(20),
     }
 }
 
@@ -466,7 +563,18 @@ pub fn device_service_status(data_directory: &Path) -> DeviceServiceStatus {
         .ok()
         .and_then(|value| value.trim().parse::<u32>().ok())
         .filter(|pid| process_is_alive(*pid));
+    let binding = if data_directory.join("device-client.sqlite3").is_file() {
+        DeviceStore::open(data_directory).ok().and_then(|store| {
+            crate::remote_auth::load_remote_binding(&store)
+                .ok()
+                .flatten()
+        })
+    } else {
+        None
+    };
     DeviceServiceStatus {
+        server_url: binding.as_ref().map(|binding| binding.server_url.clone()),
+        authorization_failure: binding.and_then(|binding| binding.failure_reason),
         running: pid.is_some(),
         pid,
         restart_pending: data_directory.join(RESTART_FILE).is_file(),
@@ -547,39 +655,11 @@ impl Drop for ServiceLease {
 }
 
 fn exchange_endpoint(server_url: &str) -> Result<String, DeviceServiceError> {
-    let uri = http::Uri::from_str(server_url).map_err(|_| {
-        DeviceServiceError::InvalidConfig("server URL is not a valid URI".to_owned())
-    })?;
-    if uri.scheme_str() != Some("https") || uri.authority().is_none() {
-        return Err(DeviceServiceError::InvalidConfig(
-            "server URL must be an absolute https:// URL".to_owned(),
-        ));
-    }
-    match uri.path() {
-        "" | "/" => Ok(format!(
-            "https://{}{EXCHANGE_PATH}",
-            uri.authority().expect("authority checked")
-        )),
-        EXCHANGE_PATH if uri.query().is_none() => Ok(server_url.to_owned()),
-        _ => Err(DeviceServiceError::InvalidConfig(format!(
-            "server URL path must be / or {EXCHANGE_PATH}"
-        ))),
-    }
+    Ok(format!("{}{EXCHANGE_PATH}", server_origin(server_url)?))
 }
 
 fn server_origin(server_url: &str) -> Result<String, DeviceServiceError> {
-    let uri = http::Uri::from_str(server_url).map_err(|_| {
-        DeviceServiceError::InvalidConfig("server URL is not a valid URI".to_owned())
-    })?;
-    if uri.scheme_str() != Some("https") || uri.authority().is_none() {
-        return Err(DeviceServiceError::InvalidConfig(
-            "server URL must be an absolute https:// URL".to_owned(),
-        ));
-    }
-    Ok(format!(
-        "https://{}",
-        uri.authority().expect("authority checked")
-    ))
+    crate::remote_auth::server_origin(server_url).map_err(DeviceServiceError::Store)
 }
 
 fn prepare_data_directory(path: &Path) -> Result<(), DeviceServiceError> {
@@ -639,7 +719,7 @@ fn stamp() -> String {
         .to_string()
 }
 
-fn device_identity_seed(display_name: &str) -> DeviceIdentitySeed {
+pub fn device_identity_seed(display_name: &str) -> DeviceIdentitySeed {
     let (platform, architecture) = release_target();
     DeviceIdentitySeed {
         display_name: display_name.to_owned(),
@@ -725,7 +805,7 @@ mod tests {
         let _ = fs::remove_dir_all(&root);
         let config = DeviceServiceConfig {
             data_directory: root.clone(),
-            server_url: "https://server.example:8443".to_owned(),
+            server_url: "http://127.0.0.1:8443".to_owned(),
             server_display_name: "Server".to_owned(),
             device_display_name: "Device".to_owned(),
         };
@@ -738,6 +818,395 @@ mod tests {
                 .contains("service started")
         );
         fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)]
+    fn authentication_failure_allows_signed_service_restart_and_revocation_stays_terminal() {
+        use base64::{Engine as _, engine::general_purpose::STANDARD_NO_PAD as BASE64};
+        use ed25519_dalek::{Signature, SigningKey};
+        use std::io::Read as _;
+        use std::net::{TcpListener, TcpStream};
+        use std::sync::atomic::AtomicUsize;
+
+        let root = temporary_directory("authentication-restart");
+        let _ = fs::remove_dir_all(&root);
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server_url = format!("http://{address}");
+        let stopping = Arc::new(AtomicBool::new(false));
+        let stopped = Arc::clone(&stopping);
+        let exchanges = Arc::new(AtomicUsize::new(0));
+        let received = Arc::clone(&exchanges);
+        let response_status = Arc::new(AtomicUsize::new(401));
+        let responding_status = Arc::clone(&response_status);
+        let revoked = Arc::new(AtomicBool::new(false));
+        let responding_revoked = Arc::clone(&revoked);
+        let server = thread::spawn(move || {
+            while !stopped.load(Ordering::Acquire) {
+                let (mut socket, _) = listener.accept().unwrap();
+                if stopped.load(Ordering::Acquire) {
+                    break;
+                }
+                socket
+                    .set_read_timeout(Some(Duration::from_secs(5)))
+                    .unwrap();
+                let mut head = Vec::new();
+                let mut byte = [0_u8; 1];
+                while !head.ends_with(b"\r\n\r\n") {
+                    socket.read_exact(&mut byte).unwrap();
+                    head.push(byte[0]);
+                }
+                let head = String::from_utf8(head).unwrap();
+                let path = head
+                    .lines()
+                    .next()
+                    .unwrap()
+                    .split_whitespace()
+                    .nth(1)
+                    .unwrap();
+                let size = head
+                    .lines()
+                    .find_map(|line| {
+                        let (name, value) = line.split_once(':')?;
+                        name.eq_ignore_ascii_case("content-length")
+                            .then(|| value.trim().parse::<usize>().unwrap())
+                    })
+                    .unwrap_or(0);
+                let mut body = vec![0_u8; size];
+                socket.read_exact(&mut body).unwrap();
+                if path == "/internal/v1/device/challenge" {
+                    let body = br#"{"schemaVersion":"winwincode/v1","challengeId":"fixture","challenge":"fixture","expiresAt":"2099-01-01T00:00:00.000Z"}"#;
+                    write!(
+                        socket,
+                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                        body.len()
+                    )
+                    .unwrap();
+                    socket.write_all(body).unwrap();
+                } else if path == EXCHANGE_PATH {
+                    let headers: std::collections::BTreeMap<_, _> = head
+                        .lines()
+                        .filter_map(|line| line.split_once(':'))
+                        .map(|(name, value)| (name.to_ascii_lowercase(), value.trim()))
+                        .collect();
+                    let key = SigningKey::from_bytes(&[7; 32]).verifying_key();
+                    assert_eq!(
+                        headers["x-winwincode-device-public-key"],
+                        BASE64.encode(key.as_bytes())
+                    );
+                    let signature = Signature::from_slice(
+                        &BASE64
+                            .decode(headers["x-winwincode-device-signature"])
+                            .unwrap(),
+                    )
+                    .unwrap();
+                    key.verify_strict(
+                        &winwincode_client_port::device_auth::signing_bytes(
+                            "fixture",
+                            "fixture",
+                            "POST",
+                            EXCHANGE_PATH,
+                            &format!("cnd_{}", "A".repeat(26)),
+                            &body,
+                        ),
+                        &signature,
+                    )
+                    .unwrap();
+                    received.fetch_add(1, Ordering::AcqRel);
+                    let accepted = if responding_status.load(Ordering::Acquire) == 200 {
+                        let request: serde_json::Value = serde_json::from_slice(&body).unwrap();
+                        serde_json::to_vec(&serde_json::json!({"schemaVersion":"winwincode/v1","ackSequence":request["frames"].as_array().unwrap().last().unwrap()["sequence"],"frames":[]})).unwrap()
+                    } else {
+                        Vec::new()
+                    };
+                    let body = if !accepted.is_empty() {
+                        accepted.as_slice()
+                    } else if responding_revoked.load(Ordering::Acquire) {
+                        br#"{"schemaVersion":"winwincode/v1","code":"DEVICE_REVOKED"}"#.as_slice()
+                    } else if responding_status.load(Ordering::Acquire) == 403 {
+                        br#"{"schemaVersion":"winwincode/v1","code":"PERMISSION_DENIED"}"#
+                            .as_slice()
+                    } else {
+                        b""
+                    };
+                    write!(
+                        socket,
+                        "HTTP/1.1 {} Rejected\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                        responding_status.load(Ordering::Acquire),
+                        body.len()
+                    )
+                    .unwrap();
+                    socket.write_all(body).unwrap();
+                } else {
+                    assert_eq!(path, PREVIEW_TUNNEL_PATH);
+                    socket.write_all(b"HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").unwrap();
+                }
+            }
+        });
+        let config = DeviceServiceConfig {
+            data_directory: root.clone(),
+            server_url: server_url.clone(),
+            server_display_name: "Server".to_owned(),
+            device_display_name: "Device".to_owned(),
+        };
+        let mut store = DeviceStore::open(&root).unwrap();
+        let identity =
+            ensure_device_identity(&mut store, &device_identity_seed("Device"), &stamp()).unwrap();
+        let node = format!("cnd_{}", "A".repeat(26));
+        crate::adopt_enrollment(
+            &mut store,
+            identity.identity().device_id(),
+            &crate::IssuedEnrollment {
+                client_node_id: node.clone(),
+                public_client_id: "123456789".to_owned(),
+            },
+            &stamp(),
+        )
+        .unwrap();
+        store.connection().unwrap().execute(
+            "INSERT INTO remote_device_binding (singleton,server_url,signing_key,request_id,intent_json,ca_roots_json,client_node_id,public_client_id,owner_user_id,bound_at) VALUES(1,?1,?2,'dbr_authentication_restart','{}','[]',?3,'123456789','usr_owner',?4)",
+            rusqlite::params![server_url, [7_u8; 32].as_slice(), node, stamp()],
+        ).unwrap();
+        let mut expected_exchanges = 0;
+        for (status, attempts) in [(401, 2), (403, 1)] {
+            response_status.store(status, Ordering::Release);
+            for restart in 0..2 {
+                if restart == 1 {
+                    crate::remote_auth::record_remote_failure(
+                        &store,
+                        if status == 401 {
+                            "Device 身份认证失败；服务已停止。"
+                        } else {
+                            "Device 绑定已吊销；服务已停止。"
+                        },
+                    )
+                    .unwrap();
+                }
+                let started = Instant::now();
+                let result = run_device_service_until(&config, || {
+                    started.elapsed() > Duration::from_secs(5)
+                });
+                assert!(
+                    matches!(result, Err(DeviceServiceError::Daemon(DaemonError::Network(failure))) if failure.http_status == Some(u16::try_from(status).unwrap()))
+                );
+                expected_exchanges += attempts;
+                assert_eq!(exchanges.load(Ordering::Acquire), expected_exchanges);
+                assert!(
+                    crate::remote_auth::load_remote_binding(&store)
+                        .unwrap()
+                        .unwrap()
+                        .failure_reason
+                        .is_none()
+                );
+            }
+        }
+        let binding_material = || {
+            store.connection().unwrap().query_row("SELECT signing_key,request_id,intent_json FROM remote_device_binding WHERE singleton=1", [], |row| Ok((row.get::<_,Vec<u8>>(0)?,row.get::<_,String>(1)?,row.get::<_,String>(2)?))).unwrap()
+        };
+        let original_material = binding_material();
+        crate::remote_auth::record_remote_failure(&store, "Device 绑定已吊销；服务已停止。")
+            .unwrap();
+        response_status.store(200, Ordering::Release);
+        let expected_before_success = expected_exchanges;
+        let started = Instant::now();
+        run_device_service_until(&config, || {
+            exchanges.load(Ordering::Acquire) > expected_before_success
+                || started.elapsed() > Duration::from_secs(5)
+        })
+        .expect("an active identity recovers after an old ambiguous 403 cache");
+        expected_exchanges += 1;
+        assert_eq!(exchanges.load(Ordering::Acquire), expected_exchanges);
+        assert_eq!(binding_material(), original_material);
+        assert!(
+            crate::remote_auth::load_remote_binding(&store)
+                .unwrap()
+                .unwrap()
+                .failure_reason
+                .is_none()
+        );
+        crate::remote_auth::record_remote_failure(&store, "Device 绑定已吊销；服务已停止。")
+            .unwrap();
+        response_status.store(403, Ordering::Release);
+        revoked.store(true, Ordering::Release);
+        assert!(
+            matches!(run_device_service_until(&config, || false), Err(DeviceServiceError::Daemon(DaemonError::Network(failure))) if failure.http_status == Some(403))
+        );
+        expected_exchanges += 1;
+        assert_eq!(
+            crate::remote_auth::load_remote_binding(&store)
+                .unwrap()
+                .unwrap()
+                .failure_reason
+                .as_deref(),
+            Some(crate::remote_auth::DEVICE_REVOKED_REASON)
+        );
+        assert!(matches!(
+            run_device_service_until(&config, || false),
+            Err(DeviceServiceError::InvalidConfig(_))
+        ));
+        assert_eq!(exchanges.load(Ordering::Acquire), expected_exchanges);
+        stopping.store(true, Ordering::Release);
+        drop(TcpStream::connect(address).unwrap());
+        server.join().unwrap();
+        drop(store);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)]
+    fn service_restart_announces_before_application_and_worker_stop_recovery() {
+        use winwincode_client_port::domain::{ApplyResult, ApplyStrategy, LocalApplyReceipt};
+        use winwincode_client_port::messages::{ClientToServerEnvelope, ClientToServerMessage};
+        let root = temporary_directory("recovery-order");
+        let _ = fs::remove_dir_all(&root);
+        let address = std::net::TcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap();
+        let config = DeviceServiceConfig {
+            data_directory: root.clone(),
+            server_url: format!("http://{address}"),
+            server_display_name: "Server".into(),
+            device_display_name: "Device".into(),
+        };
+        let mut store = DeviceStore::open(&root).unwrap();
+        let seed = device_identity_seed("Device");
+        let identity = ensure_device_identity(&mut store, &seed, &stamp()).unwrap();
+        crate::adopt_enrollment(
+            &mut store,
+            identity.identity().device_id(),
+            &crate::IssuedEnrollment {
+                client_node_id: format!("cnd_{}", "A".repeat(26)),
+                public_client_id: "0123456789".into(),
+            },
+            &stamp(),
+        )
+        .unwrap();
+        store
+            .advance_occupancy_mirror(&OccupancyMirrorUpdate {
+                occupancy_lease_id: "ocl_service_recovery".into(),
+                fencing_token: 7,
+                holder_user_id: Some("usr_service_owner".into()),
+                claim_request_id: None,
+                idle_expires_at: None,
+                acknowledged_at: stamp(),
+            })
+            .unwrap();
+        let identity = load_device_identity(&store).unwrap().unwrap();
+        let mut daemon = DeviceDaemon::start(
+            DaemonConfig {
+                server_profile_id: "default".into(),
+                base_url: format!("http://{address}{EXCHANGE_PATH}"),
+                ..DaemonConfig::default()
+            },
+            store,
+            Arc::new(HttpExchangeTransport::new(format!(
+                "http://{address}{EXCHANGE_PATH}"
+            ))),
+            &identity,
+        )
+        .unwrap();
+        daemon
+            .enqueue(ClientToServerMessage::Heartbeat(
+                winwincode_client_port::messages::ClientHeartbeatPayload {
+                    capacity: service_worker_capacity(),
+                    accepting_connections: true,
+                    lock_state: winwincode_client_port::domain::ClientLockState::Unlocked,
+                    presence_state: winwincode_client_port::domain::PresenceState::Online,
+                    occupancy_lease_id: Some("ocl_service_recovery".into()),
+                },
+            ))
+            .unwrap();
+        let retained = daemon.outbox_snapshot().unwrap();
+        let request = crate::apply_engine::CandidateApplyRequest {
+            application_id: "lar_service_recovery".into(),
+            approval_id: "apr_service_recovery".into(),
+            candidate_digest: "sha256:service_recovery".into(),
+            reconciled_retry: false,
+            repository_binding_id: "rbd_service_recovery".into(),
+            candidate_ref: format!("refs/winwincode/candidates/{}", "a".repeat(40)),
+            target_branch: "main".into(),
+            expected_head: "b".repeat(40),
+            strategy: ApplyStrategy::CherryPick,
+            occupancy_lease_id: "ocl_service_recovery".into(),
+            occupancy_fencing_token: 7,
+        };
+        crate::application_journal::start_application(daemon.store_mut(), &request, &stamp())
+            .unwrap();
+        crate::application_journal::finish_application(
+            daemon.store_mut(),
+            &LocalApplyReceipt {
+                local_apply_receipt_id: request.application_id.clone(),
+                candidate_ref: request.candidate_ref.clone(),
+                repository_binding_id: request.repository_binding_id.clone(),
+                target_branch: request.target_branch.clone(),
+                expected_head: request.expected_head.clone(),
+                strategy: request.strategy,
+                result: ApplyResult::Applied,
+                resulting_commit: Some("c".repeat(40)),
+                conflict_artifact_ref: None,
+                created_at: stamp(),
+                revision: 1,
+            },
+        )
+        .unwrap();
+        daemon
+            .store_mut()
+            .record_worker_stop_intent(&crate::WorkerStopIntentRecord {
+                command_message_id: "service-recovery-stop".into(),
+                idempotency_key: "service-recovery-stop".into(),
+                worker_session_id: "wsn_service_recovery".into(),
+                worker_id: "wrk_service_recovery".into(),
+                reason: winwincode_client_port::domain::ClientWorkerStopReason::LeaseRecovered,
+                occupancy_lease_id: request.occupancy_lease_id.clone(),
+                fencing_token: 7,
+                expected_revision: 1,
+                receipt_payload: None,
+                recorded_at: stamp(),
+                completed_at: None,
+            })
+            .unwrap();
+        daemon.into_store().close().unwrap();
+        let mut polls = 0;
+        run_device_service_until(&config, || {
+            polls += 1;
+            polls > 1
+        })
+        .unwrap();
+        let mut store = DeviceStore::open(&root).unwrap();
+        let restarted = load_device_identity(&store).unwrap().unwrap();
+        assert_ne!(
+            restarted.current_instance_id(),
+            identity.current_instance_id()
+        );
+        store
+            .bind_outbox_stream(
+                restarted.identity().client_node_id(),
+                restarted.current_instance_id(),
+            )
+            .unwrap();
+        let queued = winwincode_client_port::exchange::FrameOutbox::load(&mut store)
+            .unwrap()
+            .unwrap();
+        assert_eq!(&queued.frames[..retained.frames.len()], &retained.frames);
+        let new_frames = queued.frames[retained.frames.len()..]
+            .iter()
+            .map(|frame| serde_json::from_slice::<ClientToServerEnvelope>(&frame.frame).unwrap())
+            .collect::<Vec<_>>();
+        assert!(matches!(
+            new_frames[0].message,
+            ClientToServerMessage::Hello(_)
+        ));
+        assert!(
+            new_frames
+                .iter()
+                .all(|frame| frame.client_instance_id == restarted.current_instance_id())
+        );
+        assert!(new_frames.iter().any(|frame| matches!(&frame.message, ClientToServerMessage::ApplicationReconciled(payload) if payload.application_id == request.application_id)));
+        assert!(new_frames.iter().any(|frame| matches!(&frame.message, ClientToServerMessage::CommandAck(payload) if payload.command_message_id == "service-recovery-stop")));
+        store.close().unwrap();
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
@@ -761,7 +1230,7 @@ mod tests {
             })
             .expect("authorized occupancy");
         let mut config = service_worker_supervisor_config(
-            "https://server.example:8443",
+            "http://127.0.0.1:8443",
             "cnd_SERVICE_DEVICE",
             "cix_SERVICE_INSTANCE",
         );
@@ -788,7 +1257,6 @@ mod tests {
                     worker_instance_id: &instance_id,
                     occupancy_lease_id: lease_id,
                     occupancy_fencing_token: 7,
-                    worker_credential_token: "fixture-only-worker-credential",
                     repository_binding_id: "rbd_SERVICE_SOURCE",
                     launch_grant_id: "wlg_SERVICE_LAUNCH",
                     product_session_id: None,
@@ -852,13 +1320,14 @@ mod tests {
     }
 
     #[test]
-    fn service_requires_https_and_canonical_exchange_path() {
+    fn service_accepts_https_and_canonical_exchange_path() {
+        assert!(exchange_endpoint("https://server.example:8080").is_ok());
         assert!(exchange_endpoint("http://server.example:8080").is_err());
         assert_eq!(
-            exchange_endpoint("https://server.example:8443").expect("origin"),
-            "https://server.example:8443/internal/v1/client/exchange"
+            exchange_endpoint("http://127.0.0.1:8443").expect("origin"),
+            "http://127.0.0.1:8443/internal/v1/client/exchange"
         );
-        assert!(exchange_endpoint("https://server.example:8443/other").is_err());
+        assert!(exchange_endpoint("http://127.0.0.1:8443/other").is_err());
     }
 
     #[test]

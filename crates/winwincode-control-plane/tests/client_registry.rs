@@ -25,10 +25,6 @@ fn instance_id(seed: u64) -> String {
     format!("cix_{seed:026}")
 }
 
-fn digest(seed: u64) -> String {
-    format!("sha256:{seed:064x}")
-}
-
 fn registration(seed: u64) -> winwincode_storage::ClientNodeRegistration {
     winwincode_storage::ClientNodeRegistration::try_new(
         node_id(seed),
@@ -37,7 +33,6 @@ fn registration(seed: u64) -> winwincode_storage::ClientNodeRegistration {
         "aarch64-unknown-linux-gnu",
         "aarch64",
         "1.0.0",
-        Some(digest(seed)),
         Some(instance_id(seed)),
         2,
     )
@@ -99,7 +94,6 @@ fn service_registers_projects_heartbeats_and_recovers_cursors() {
         "aarch64-unknown-linux-gnu",
         "aarch64",
         "1.1.0",
-        Some(digest(1)),
         Some(instance_id(1)),
         3,
     )

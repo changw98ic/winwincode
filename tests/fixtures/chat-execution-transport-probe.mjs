@@ -1,14 +1,43 @@
 // SPDX-License-Identifier: Apache-2.0
 
-// Production acceptance helper. Reads a real Device launch and retained Worker
-// messages. It never registers a Worker or writes state. It acknowledges only
-// its own received replay ACK deliveries, never unrelated Worker controls.
 import assert from 'node:assert/strict'
 import { createHash } from 'node:crypto'
-import { globSync, readFileSync, realpathSync, statSync } from 'node:fs'
-import { request } from 'node:https'
-import { dirname, join, relative } from 'node:path'
+import { globSync, readFileSync, realpathSync } from 'node:fs'
+import { request } from 'node:http'
+import { request as httpsRequest } from 'node:https'
+import { join, relative } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
+
+export async function loseCommittedCommandResponse(api, command, expectedRevision, payload, requestId) {
+  const endpoint = new URL('/api/v1/commands', api.baseUrl)
+  const send = endpoint.protocol === 'https:' ? httpsRequest : request
+  const serialized = JSON.stringify({
+    schemaVersion: 'winwincode/v1', requestId, actor: api.actor, scope: api.scope,
+    command, expectedRevision, payload,
+  })
+  return new Promise((resolveResponse, rejectResponse) => {
+    let intentionallyClosed = false
+    const request = send(endpoint, {
+      method: 'POST', servername: 'control.localhost', timeout: 30_000,
+      rejectUnauthorized: api.ca !== undefined,
+      ...(api.ca === undefined ? {} : { ca: api.ca }),
+      headers: {
+        Origin: api.origin, Accept: 'application/json', Connection: 'close',
+        'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(serialized),
+        ...(api.cookie === null ? {} : { Cookie: api.cookie }),
+      },
+    }, response => {
+      const status = response.statusCode
+      const bodyComplete = response.complete
+      intentionallyClosed = true
+      response.destroy()
+      resolveResponse({ status, bodyComplete, destroyed: response.destroyed })
+    })
+    request.on('error', error => { if (!intentionallyClosed) rejectResponse(error) })
+    request.on('timeout', () => request.destroy(new Error('lost response fixture timed out')))
+    request.end(serialized)
+  })
+}
 
 export function signalIfPresent(pid, signal) {
   try {
@@ -29,8 +58,6 @@ function inside(root, path) {
 
 function acknowledgementId(message) {
   if (message.kind === 'worker.heartbeat') {
-    // RemoteDeliveryQueue separates positive and retryable-gap receipts.
-    // Match its accepted tuple and runtime::crockford_26 at the wire boundary.
     const digest = createHash('sha256').update(JSON.stringify([
       'worker-heartbeat-receipt-v1', message.messageId, message.workerId,
       message.workerInstanceId, message.heartbeatSequence, 'accepted',
@@ -63,8 +90,6 @@ function sortedJson(value) {
 }
 
 function expectedOutcomeResponseDigest(message) {
-  // ExecutionOutbox::response_replay_digest removes messageId/sentAt and
-  // normalizes duplicate to accepted. serde_json::Value serializes sorted keys.
   const accepted = { kind: 'job.outcome_ack', lease: message.lease,
     schemaVersion: 'winwincode/v1', sessionIdentity: message.sessionIdentity,
     status: 'accepted', workerSessionId: message.workerSessionId }
@@ -80,41 +105,34 @@ export function readWorkerTransport(deviceData, authority, { launch = null } = {
   const workerInstanceId = launch?.workerInstanceId ?? authority.worker_instance_id
   const store = new DatabaseSync(join(deviceData, 'device-client.sqlite3'), { readOnly: true })
   let row
+  let profile
   try {
     store.exec('PRAGMA busy_timeout=5000')
     const rows = store.prepare('SELECT * FROM worker_process_registry WHERE worker_id=? AND worker_instance_id=?')
       .all(workerId, workerInstanceId)
     assert.equal(rows.length, 1, 'one actual Device-supervised process owns the exact dispatch Worker instance')
     row = rows[0]
+    const profiles = store.prepare('SELECT base_url FROM server_profile').all()
+    assert.equal(profiles.length, 1, 'the production fixture has one actual Device server profile')
+    profile = profiles[0]
   } finally { store.close() }
   assert.ok(row, 'the actual Device-supervised Worker process is registered')
   if (launch !== null) assert.equal(row.worker_session_id, launch.workerSessionId,
     'pre-dispatch transport belongs to the exact actual Device launch WorkerSession')
   const dataDirectory = inside(deviceData, row.data_directory)
   const configurationPath = inside(deviceData, join(dataDirectory, 'managed-session.json'))
-  assert.equal(statSync(configurationPath).mode & 0o777, 0o600)
   const configuration = JSON.parse(readFileSync(configurationPath, 'utf8'))
-  // A managed launch has its own WorkerSession. Each accepted Job receives
-  // the execution WorkerSession frozen in its CP dispatch authority.
   assert.equal(configuration.workerSessionId, row.worker_session_id)
   assert.equal(configuration.workerId, row.worker_id)
   assert.equal(configuration.workerInstanceId, row.worker_instance_id)
-  const credentialPath = inside(deviceData, configuration.workerCredentialPath)
-  assert.equal(statSync(credentialPath).mode & 0o777, 0o600)
-  const credential = readFileSync(credentialPath, 'utf8').trim()
-  assert.ok(credential.length >= 16 && credential.length <= 512)
-  const networkJournalPath = inside(deviceData, join(dirname(credentialPath), 'network-requests.sqlite3'))
-  const endpoint = new URL('/internal/v1/execution-port/exchange', configuration.serverOrigin)
-  assert.equal(endpoint.protocol, 'https:')
-  assert.ok(['127.0.0.1', 'localhost', 'control.localhost'].includes(endpoint.hostname),
-    'the private credential can only be sent to this local production fixture')
+  const endpoint = new URL('/internal/v1/client/worker-exchange', profile.base_url)
+  assert.equal(endpoint.protocol, 'http:')
+  assert.ok(['127.0.0.1', 'localhost', 'control.localhost'].includes(endpoint.hostname))
   const replayAcknowledgements = new Set()
-  // Keep secret material in a closure. Evidence output contains only identities.
   return {
     workerId: row.worker_id, workerInstanceId: row.worker_instance_id,
-    workerSessionId, launchWorkerSessionId: row.worker_session_id, pid: row.pid, dataDirectory, networkJournalPath,
-    async postRetainedMessage(bytes, { ca, timeoutMillis = 10_000, loseResponseAfterHeaders = false } = {}) {
-      assert.ok(ca, 'the real fixture TLS root is required')
+    workerSessionId, launchWorkerSessionId: row.worker_session_id, pid: row.pid, dataDirectory,
+    async postRetainedMessage(bytes, { timeoutMillis = 10_000, loseResponseAfterHeaders = false } = {}) {
       assert.equal(typeof loseResponseAfterHeaders, 'boolean')
       const message = JSON.parse(Buffer.from(bytes).toString('utf8'))
       assert.ok(['runtime.event', 'job.outcome', 'worker.heartbeat'].includes(message.kind))
@@ -137,24 +155,27 @@ export function readWorkerTransport(deviceData, authority, { launch = null } = {
       ])
       assert.ok(frame.length > 0 && frame.length <= 256 * 1024,
         'the replay uses the production canonical frame bound')
-      const body = Buffer.from(JSON.stringify({
+      const exchange = JSON.stringify({
         schemaVersion: 'execution-port.remote-exchange.v2',
         workerId: row.worker_id, workerInstanceId: row.worker_instance_id,
         acknowledgements: [...replayAcknowledgements], frame: [...frame],
+      })
+      const body = Buffer.from(JSON.stringify({
+        clientNodeId: configuration.clientNodeId,
+        workerId: row.worker_id, workerInstanceId: row.worker_instance_id,
+        request: { kind: 'exchange', body: exchange },
       }))
       return new Promise((resolveResponse, rejectResponse) => {
         const outgoing = request(endpoint, {
-          method: 'POST', ca, servername: 'control.localhost', rejectUnauthorized: true,
+          method: 'POST',
           timeout: timeoutMillis,
-          headers: { Authorization: `Bearer ${credential}`, 'Content-Type': 'application/json',
+          headers: { 'Content-Type': 'application/json',
             'Content-Length': body.length, Connection: 'close' },
         }, incoming => {
           if (loseResponseAfterHeaders) {
             try {
-              assert.equal(incoming.statusCode, 200, 'only a successful real exchange response is deliberately lost')
-              // No response body or delivery is read. In particular, this
-              // client cannot confirm the business ACK it deliberately loses.
-              resolveResponse({ status: incoming.statusCode, frameAccepted: null,
+              assert.equal(incoming.statusCode, 200, 'the Device relay HTTP response is deliberately lost')
+              resolveResponse({ httpStatus: incoming.statusCode, status: null, frameAccepted: null,
                 acknowledgement: null, responseLostAfterHeaders: true })
             } catch { rejectResponse(new Error('the lost-response exchange was not successful')) }
             incoming.destroy()
@@ -172,8 +193,12 @@ export function readWorkerTransport(deviceData, authority, { launch = null } = {
           incoming.on('end', () => {
             try {
               const responseBytes = Buffer.concat(parts)
-              const status = incoming.statusCode
-              const response = status === 200 ? JSON.parse(responseBytes.toString('utf8')) : null
+              assert.equal(incoming.statusCode, 200, 'the Device relay returns its Worker response envelope')
+              const relay = JSON.parse(responseBytes.toString('utf8'))
+              assert.ok(Number.isInteger(relay.status))
+              assert.equal(typeof relay.body, 'string')
+              const status = relay.status
+              const response = status === 200 ? JSON.parse(relay.body) : null
               if (status === 200) {
                 assert.equal(response.schemaVersion, 'execution-port.remote-exchange.v2')
                 assert.equal(typeof response.frameAccepted, 'boolean')
@@ -213,8 +238,8 @@ export function readWorkerTransport(deviceData, authority, { launch = null } = {
               resolveResponse({ status, frameAccepted: response?.frameAccepted ?? null,
                 acknowledgement: acknowledgement ?? null,
                 deliveries,
-                // A 401 proves transport rejection. It does not prove CP fencing.
-                rejectionBoundary: status === 401 ? 'http-authentication'
+                rejectionBoundary: status === 400 && relay.body === 'Worker route does not match its Device session' ? 'device-worker-route'
+                  : status === 400 && relay.body === 'remote Worker frame rejected' ? 'control-plane-worker-instance'
                   : ['rejected_worker_instance', 'rejected_stale_fencing_token'].includes(acknowledgement?.status)
                     ? 'control-plane-authority'
                     : acknowledgement?.status.startsWith('rejected_') ? 'control-plane-message-rejection' : null })
@@ -222,7 +247,7 @@ export function readWorkerTransport(deviceData, authority, { launch = null } = {
           })
         })
         outgoing.on('timeout', () => outgoing.destroy(new Error('retained-frame exchange timed out')))
-        outgoing.on('error', () => rejectResponse(new Error('retained-frame HTTPS exchange failed')))
+        outgoing.on('error', () => rejectResponse(new Error('retained-frame Device relay failed')))
         outgoing.end(body)
       })
     },
@@ -291,8 +316,6 @@ export function readRetainedCoreCommandResults(deviceData, kernelSessionId) {
         WHERE r.thread_id=? ORDER BY r.sequence`).all(kernelSessionId)
       return rows.filter(row => JSON.parse(row.request_json).tool_name.endsWith('exec_command'))
         .map(row => {
-          // Rejected attempts retain their original error text, which is not a
-          // code-mode command result. Keep the row for negative evidence.
           const session = row.execution === 'completed' && row.disposition === 'accepted' && row.execution_result
             ? JSON.parse(row.execution_result).code_mode_result?.session_id : undefined
           const turn = JSON.parse(row.request_json).turn_id
@@ -317,8 +340,6 @@ export function assertSuccessfulRetainedCommands(commands, expectedCount) {
       assert.equal(receipt.execution, 'completed')
       assert.equal(receipt.disposition, 'accepted')
     }
-    // exec_command can return a running session. The same session's retained
-    // write_stdin receipt, rather than handler acceptance, proves its OS exit.
     for (const field of ['execution_result', 'accepted_result']) {
       assert.ok(row[field], `the exact command has its real retained ${field}`)
       const initial = JSON.parse(row[field]).code_mode_result
@@ -364,9 +385,6 @@ export function readRetainedOutcomes(deviceData, jobId) {
         assert.equal(message.kind, 'job.outcome')
         assert.equal(message.schemaVersion, 'winwincode/v1')
         assert.equal(row.frame_digest, `sha256:${createHash('sha256').update(bytes).digest('hex')}`)
-        // The retained Rust-serialized authority objects preserve the exact
-        // field order used by ExecutionOutbox's tuple correlation. This lookup
-        // reads the actual Worker proof; it never creates a response receipt.
         const correlation = `sha256:${createHash('sha256').update(JSON.stringify([
           message.lease, message.workerSessionId, message.sessionIdentity,
         ])).digest('hex')}`

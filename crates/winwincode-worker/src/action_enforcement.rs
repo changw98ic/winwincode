@@ -5,8 +5,8 @@ use std::path::Path;
 use winwincode_domain::{ExecutionMessageId, Instant};
 use winwincode_execution_port::{
     action_enforcement::{
-        ActionEnforcementError, ActionEnforcementSigningKey, ActionReceiptUseError,
-        FileActionReceiptUseStore, prepare_action_enforcement_request,
+        ActionEnforcementError, ActionReceiptUseError, FileActionReceiptUseStore,
+        prepare_action_enforcement_request,
     },
     action_gateway::{
         ActionGatewayResult, CodexToolExecutor, DeterministicActionGate, PreActionDecisionRecorder,
@@ -17,7 +17,6 @@ use winwincode_execution_port::{
 
 pub struct DurableWorkerActionEnforcement<Policy, Gate, Recorder, Executor> {
     gateway: WorkerActionGateway<Policy, Gate, Recorder, Executor>,
-    verifier: winwincode_execution_port::action_enforcement::ActionEnforcementVerifier,
     receipt_store: FileActionReceiptUseStore,
 }
 
@@ -30,12 +29,10 @@ where
 {
     pub fn open(
         worker_data_root: impl AsRef<Path>,
-        signing_key: ActionEnforcementSigningKey,
         gateway: WorkerActionGateway<Policy, Gate, Recorder, Executor>,
     ) -> Result<Self, ActionReceiptUseError> {
         Ok(Self {
             gateway,
-            verifier: signing_key.into_verifier(),
             receipt_store: FileActionReceiptUseStore::open(worker_data_root)?,
         })
     }
@@ -55,12 +52,7 @@ where
         action: &WorkerActionRequest,
         receipt: &ActionEnforcementReceiptMessage,
     ) -> ActionGatewayResult<Executor::Output, Recorder::Error, Executor::Error> {
-        self.gateway.execute(
-            now,
-            action,
-            receipt,
-            &self.verifier,
-            &mut self.receipt_store,
-        )
+        self.gateway
+            .execute(now, action, receipt, &mut self.receipt_store)
     }
 }

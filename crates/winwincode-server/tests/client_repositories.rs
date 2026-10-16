@@ -22,7 +22,7 @@ use winwincode_domain::Instant;
 use winwincode_server::{
     ApiError, AuthSessionBootstrap, AuthSessionConfig, AuthenticatedPrincipal,
     ClientExchangeApplication, ClientExchangeConfig, ClientExchangePort, ControlPlaneApiPort,
-    EventSubscription, RequestAuthenticator, ServerConfig, ServerTls, SqliteAuthSessionManager,
+    EventSubscription, RequestAuthenticator, ServerConfig, SqliteAuthSessionManager,
     UserAccountService, start_server_with_remote_worker,
 };
 use winwincode_storage::{
@@ -127,7 +127,6 @@ fn server_config(data_directory: &Path) -> ServerConfig {
     ServerConfig::new(
         "127.0.0.1:0".parse().expect("loopback address"),
         "http://control.example",
-        ServerTls::Disabled,
         BTreeSet::from([ORIGIN.to_owned()]),
         data_directory.to_path_buf(),
         Duration::from_secs(2),
@@ -304,7 +303,6 @@ fn stage_device(data_directory: &Path) {
         "aarch64-apple-darwin",
         "aarch64",
         "0.1.0-alpha.1",
-        None,
         None,
         4,
     )

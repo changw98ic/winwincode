@@ -41,7 +41,7 @@ use winwincode_server::{
     ApiError, AuthSessionBootstrap, AuthSessionConfig, AuthenticatedPrincipal,
     ClientConnectionsApplication, ClientConnectionsConfig, ClientConnectionsErrorKind,
     ClientExchangeApplication, ClientExchangeConfig, ClientExchangePort, ControlPlaneApiPort,
-    EventSubscription, RequestAuthenticator, ServerConfig, ServerTls, SqliteAuthSessionManager,
+    EventSubscription, RequestAuthenticator, ServerConfig, SqliteAuthSessionManager,
     UserAccountService, start_server_with_remote_worker,
 };
 use winwincode_storage::{
@@ -130,7 +130,6 @@ fn server_config(data_directory: &Path) -> ServerConfig {
     ServerConfig::new(
         "127.0.0.1:0".parse().expect("loopback address"),
         "http://control.example",
-        ServerTls::Disabled,
         BTreeSet::from([ORIGIN.to_owned()]),
         data_directory.to_path_buf(),
         Duration::from_secs(2),
@@ -288,17 +287,10 @@ async fn login(address: std::net::SocketAddr, username: &str, password: &str) ->
     (session_cookie_from_response(&response), user_id)
 }
 
-async fn post_exchange(
-    address: std::net::SocketAddr,
-    body: &str,
-    credential: Option<&str>,
-) -> (String, Option<Value>) {
+async fn post_exchange(address: std::net::SocketAddr, body: &str) -> (String, Option<Value>) {
     let mut stream = TcpStream::connect(address).await.expect("connect server");
-    let authorization = credential
-        .map(|value| format!("Authorization: Bearer {value}\r\n"))
-        .unwrap_or_default();
     let request = format!(
-        "POST /internal/v1/client/exchange HTTP/1.1\r\nHost: control.example\r\n{authorization}Content-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        "POST /internal/v1/client/exchange HTTP/1.1\r\nHost: control.example\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
         body.len()
     );
     stream
@@ -333,6 +325,7 @@ fn frame(node: &str, instance: &str, sequence: u64, message: ClientToServerMessa
 fn exchange_request(frames: &[Value], ack_sequence: u64) -> String {
     json!({
         "schemaVersion": SCHEMA_VERSION,
+        "clientNodeId": frames.first().expect("exchange frame")["clientNodeId"],
         "frames": frames,
         "ackSequence": ack_sequence,
     })
@@ -348,7 +341,7 @@ fn capacity() -> ClientCapacityReport {
     }
 }
 
-async fn enroll_device(address: std::net::SocketAddr) -> (String, String, String, u64) {
+async fn enroll_device(address: std::net::SocketAddr) -> (String, String, u64) {
     let enroll = ClientToServerMessage::Enroll(Box::new(ClientEnrollPayload {
         command: CommandContext {
             expected_revision: 0,
@@ -362,7 +355,6 @@ async fn enroll_device(address: std::net::SocketAddr) -> (String, String, String
     let (status, body) = post_exchange(
         address,
         &exchange_request(&[frame(FRESH_NODE, INSTANCE, 1, enroll)], 0),
-        None,
     )
     .await;
     assert!(status.starts_with("HTTP/1.1 200"), "{status}");
@@ -376,25 +368,15 @@ async fn enroll_device(address: std::net::SocketAddr) -> (String, String, String
         .as_str()
         .expect("public client id")
         .to_owned();
-    let credential = enrollment["deviceCredential"]
-        .as_str()
-        .expect("credential")
-        .to_owned();
     assert_eq!(
         body["frames"].as_array().expect("downlink batch").len(),
         0,
-        "enrollment returns credentials without a downlink notification"
+        "enrollment does not enqueue a downlink notification"
     );
-    (node, public_client_id, credential, 2)
+    (node, public_client_id, 2)
 }
 
-async fn walk_hello(
-    address: std::net::SocketAddr,
-    node: &str,
-    instance: &str,
-    credential: &str,
-    sequence: u64,
-) {
+async fn walk_hello(address: std::net::SocketAddr, node: &str, instance: &str, sequence: u64) {
     let hello = ClientToServerMessage::Hello(ClientHelloPayload {
         client_version: "0.1.0-alpha.1".to_owned(),
         capacity: capacity(),
@@ -405,7 +387,6 @@ async fn walk_hello(
     let (status, body) = post_exchange(
         address,
         &exchange_request(&[frame(node, instance, sequence, hello)], 0),
-        Some(credential),
     )
     .await;
     assert!(status.starts_with("HTTP/1.1 200"), "{status}");
@@ -415,10 +396,10 @@ async fn walk_hello(
     );
 }
 
-async fn enroll_online_device(address: std::net::SocketAddr) -> (String, String, String, u64) {
-    let (node, public_client_id, credential, next) = enroll_device(address).await;
-    walk_hello(address, &node, INSTANCE, &credential, next).await;
-    (node, public_client_id, credential, next + 1)
+async fn enroll_online_device(address: std::net::SocketAddr) -> (String, String, u64) {
+    let (node, public_client_id, next) = enroll_device(address).await;
+    walk_hello(address, &node, INSTANCE, next).await;
+    (node, public_client_id, next + 1)
 }
 
 fn publish_connect_code(data_directory: &Path, node: &str, code: &str) -> String {
@@ -752,7 +733,7 @@ async fn connect_reports_every_domain_failure_of_the_taxonomy() {
     assert_eq!(status_of(&response), "404", "{response}");
     assert_eq!(wire_code(&response), "CLIENT_NOT_FOUND");
 
-    let (node, public_client_id, credential, next) = enroll_device(address).await;
+    let (node, public_client_id, next) = enroll_device(address).await;
     let response = http_request(
         address,
         &cookie_post(
@@ -777,14 +758,7 @@ async fn connect_reports_every_domain_failure_of_the_taxonomy() {
     assert_eq!(status_of(&response), "400", "{response}");
     assert_eq!(wire_code(&response), "INVALID_REQUEST");
 
-    walk_hello(
-        address,
-        &node,
-        "cix_B2B2B2B2B2B2B2B2B2B2B2B2B2",
-        &credential,
-        next,
-    )
-    .await;
+    walk_hello(address, &node, "cix_B2B2B2B2B2B2B2B2B2B2B2B2B2", next).await;
     publish_connect_code(&data_directory, &node, "11112222");
     let response = http_request(
         address,
@@ -914,7 +888,7 @@ async fn server_connect_completes_without_device_traffic_and_stays_idempotent() 
     let address = running.local_address();
     let (cookie, user_id) = initialize_and_login_owner(address).await;
 
-    let (node, public_client_id, _credential, _next_sequence) = enroll_online_device(address).await;
+    let (node, public_client_id, next_sequence) = enroll_online_device(address).await;
     let code = publish_connect_code(&data_directory, &node, "68421975");
 
     let response = http_request(
@@ -934,6 +908,20 @@ async fn server_connect_completes_without_device_traffic_and_stays_idempotent() 
     assert_eq!(clients[0]["clientId"], json!(public_client_id));
     assert_eq!(clients[0]["presence"], json!("online"));
     assert_eq!(clients[0]["occupancy"], json!("available"));
+    let hello = ClientToServerMessage::Hello(ClientHelloPayload {
+        client_version: "0.2.0".into(),
+        capacity: capacity(),
+        accepting_connections: true,
+        lock_state: ClientLockState::Unlocked,
+        presence_state: PresenceState::Online,
+    });
+    let (status, body) = post_exchange(
+        address,
+        &exchange_request(&[frame(&node, INSTANCE, next_sequence, hello)], 0),
+    )
+    .await;
+    assert!(status.starts_with("HTTP/1.1 200"), "{status}");
+    assert_eq!(body.unwrap()["ackSequence"], json!(next_sequence));
 
     {
         let mut storage = SqliteStorage::open(&data_directory).expect("storage");
@@ -1018,15 +1006,8 @@ async fn owner_directory_and_immediate_self_revocation() {
     let address = running.local_address();
     let (owner_cookie, owner_id) = initialize_and_login_owner(address).await;
 
-    let (node, public_client_id, credential, next) = enroll_device(address).await;
-    walk_hello(
-        address,
-        &node,
-        "cix_B2B2B2B2B2B2B2B2B2B2B2B2B2",
-        &credential,
-        next,
-    )
-    .await;
+    let (node, public_client_id, next) = enroll_device(address).await;
+    walk_hello(address, &node, "cix_B2B2B2B2B2B2B2B2B2B2B2B2B2", next).await;
     consume_code_as(
         &data_directory,
         &node,
@@ -1125,7 +1106,6 @@ async fn downlink_outbox_retains_by_acknowledgement_cursor_and_purges() {
             "aarch64-apple-darwin",
             "aarch64",
             "0.1.0",
-            None,
             Some(INSTANCE.to_owned()),
             4,
         )
@@ -1200,8 +1180,7 @@ async fn offline_device_authorization_is_immediate_and_server_rechecks_code_stat
     let auth_directory = test_directory("server-connect-offline-sessions");
     let running = start_server(&data_directory, &auth_directory).await;
     let (cookie, user) = initialize_and_login_owner(running.local_address()).await;
-    let (node, public_client_id, _credential, _) =
-        enroll_online_device(running.local_address()).await;
+    let (node, public_client_id, _) = enroll_online_device(running.local_address()).await;
     let code = publish_connect_code(&data_directory, &node, "55556666");
     set_presence(&data_directory, &node, ClientPresenceState::Offline);
     let application =

@@ -227,7 +227,15 @@ pub(crate) async fn run_command(
         },
         None => command.spawn(),
     };
-    #[cfg(not(windows))]
+    #[cfg(unix)]
+    let (child, _lifeline) =
+        match codex_utils_pty::process_group::ProcessGroupLifeline::configure_command(
+            command.as_std_mut(),
+        ) {
+            Ok(lifeline) => (command.spawn(), Some(lifeline)),
+            Err(error) => (Err(error), None),
+        };
+    #[cfg(not(any(unix, windows)))]
     let child = command.spawn();
 
     let mut child = match child {

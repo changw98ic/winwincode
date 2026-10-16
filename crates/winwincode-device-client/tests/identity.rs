@@ -4,7 +4,6 @@ use std::fs;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use sha2::{Digest, Sha256};
 use winwincode_device_client::{
     DeviceIdentitySeed, DeviceStore, DeviceStoreErrorKind, IssuedEnrollment, adopt_enrollment,
     ensure_device_identity,
@@ -29,22 +28,10 @@ fn seed() -> DeviceIdentitySeed {
     }
 }
 
-fn issued_enrollment(secret_byte: u8) -> IssuedEnrollment {
-    fn hex(bytes: &[u8]) -> String {
-        const HEX: &[u8; 16] = b"0123456789abcdef";
-        let mut encoded = String::with_capacity(bytes.len() * 2);
-        for byte in bytes {
-            encoded.push(HEX[usize::from(byte >> 4)] as char);
-            encoded.push(HEX[usize::from(byte & 0x0f)] as char);
-        }
-        encoded
-    }
-    let secret = [secret_byte; 32];
+fn issued_enrollment() -> IssuedEnrollment {
     IssuedEnrollment {
         client_node_id: "cnd_A1A1A1A1A1A1A1A1A1A1A1A1A1".to_owned(),
         public_client_id: "0123456789".to_owned(),
-        credential_material: hex(&secret),
-        credential_digest: format!("sha256:{:x}", Sha256::digest(secret)),
     }
 }
 
@@ -79,13 +66,7 @@ fn first_boot_creates_identity_and_the_enrollment_completes_it_across_restarts()
             .all(|byte| byte.is_ascii_uppercase() || byte.is_ascii_digit()),
         "clientInstanceId suffix must be Crockford Base32: {instance_shape}"
     );
-    let local_digest = first.credential().digest();
-    assert_eq!(local_digest.len(), 71);
-    assert!(local_digest.starts_with("sha256:"));
-    assert_eq!(first.credential().expose_secret().len(), 32);
-    assert_eq!(first.credential().generation(), 1);
-
-    let issued = issued_enrollment(0xab);
+    let issued = issued_enrollment();
     adopt_enrollment(
         &mut store,
         first.identity().device_id(),
@@ -102,28 +83,6 @@ fn first_boot_creates_identity_and_the_enrollment_completes_it_across_restarts()
         issued.public_client_id
     );
     assert!(reloaded.identity().is_enrolled());
-    let mut secret_bytes = [0_u8; 32];
-    for (index, slot) in secret_bytes.iter_mut().enumerate() {
-        let high = (issued.credential_material.as_bytes()[index * 2] as char)
-            .to_digit(16)
-            .expect("high nibble");
-        let low = (issued.credential_material.as_bytes()[index * 2 + 1] as char)
-            .to_digit(16)
-            .expect("low nibble");
-        *slot = u8::try_from(high << 4 | low).expect("byte");
-    }
-    assert_eq!(reloaded.credential().expose_secret(), &secret_bytes[..]);
-    assert_eq!(
-        reloaded.credential().digest(),
-        issued.credential_digest,
-        "the issued digest persists exactly the sha256 of the issued material"
-    );
-    assert_eq!(reloaded.credential().generation(), 2);
-    assert_eq!(
-        reloaded.credential().material_hex(),
-        issued.credential_material
-    );
-
     store.close().expect("store should close");
     let mut store = DeviceStore::open(&root).expect("device store should restart");
     let second = ensure_device_identity(&mut store, &seed(), "2026-09-04T01:00:00.000Z")
@@ -144,11 +103,6 @@ fn first_boot_creates_identity_and_the_enrollment_completes_it_across_restarts()
         issued.public_client_id,
         "the server-assigned publicClientId must be stable across restarts"
     );
-    assert_eq!(
-        second.credential().digest(),
-        issued.credential_digest,
-        "the issued credential must survive restarts"
-    );
     assert_eq!(second.created_at(), "2026-09-04T00:00:00.000Z");
     assert_eq!(second.revision(), 4, "launch rotations plus the adoption");
     assert_ne!(
@@ -160,7 +114,7 @@ fn first_boot_creates_identity_and_the_enrollment_completes_it_across_restarts()
     let error = adopt_enrollment(
         &mut store,
         second.identity().device_id(),
-        &issued_enrollment(0xcd),
+        &issued_enrollment(),
         "2026-09-04T01:00:30.000Z",
     )
     .expect_err("a second adoption must be refused");
@@ -187,10 +141,6 @@ fn separate_devices_receive_distinct_stable_identities() {
         second.current_instance_id(),
         "every launch draws a fresh canonical instance id"
     );
-    assert_ne!(
-        first.credential().expose_secret(),
-        second.credential().expose_secret()
-    );
     assert_eq!(
         first.identity().client_node_id(),
         second.identity().client_node_id(),
@@ -199,12 +149,11 @@ fn separate_devices_receive_distinct_stable_identities() {
 
     let first_issued = IssuedEnrollment {
         client_node_id: "cnd_A1A1A1A1A1A1A1A1A1A1A1A1A1".to_owned(),
-        ..issued_enrollment(0x01)
+        ..issued_enrollment()
     };
     let second_issued = IssuedEnrollment {
         client_node_id: "cnd_B2B2B2B2B2B2B2B2B2B2B2B2B2".to_owned(),
         public_client_id: "9876543210".to_owned(),
-        ..issued_enrollment(0x02)
     };
     adopt_enrollment(
         &mut first_store,
@@ -255,19 +204,11 @@ fn identity_seed_launch_stamp_and_issued_identity_are_validated() {
     let cases = vec![
         IssuedEnrollment {
             client_node_id: "cnd_NOTCANONICAL".to_owned(),
-            ..issued_enrollment(0x11)
+            ..issued_enrollment()
         },
         IssuedEnrollment {
             public_client_id: "12".to_owned(),
-            ..issued_enrollment(0x11)
-        },
-        IssuedEnrollment {
-            credential_material: "zz".repeat(32),
-            ..issued_enrollment(0x11)
-        },
-        IssuedEnrollment {
-            credential_digest: "sha256:deadbeef".to_owned(),
-            ..issued_enrollment(0x11)
+            ..issued_enrollment()
         },
     ];
     for issued in cases {
@@ -287,12 +228,11 @@ fn identity_seed_launch_stamp_and_issued_identity_are_validated() {
     let unchanged = ensure_device_identity(&mut store, &seed(), "2026-09-04T00:01:00.000Z")
         .expect("identity reload");
     assert_eq!(unchanged.identity().client_node_id(), "");
-    assert_eq!(unchanged.credential().generation(), 1);
 
     let foreign = adopt_enrollment(
         &mut store,
         "dvc_missing",
-        &issued_enrollment(0x11),
+        &issued_enrollment(),
         "2026-09-04T00:00:30.000Z",
     )
     .expect_err("an unknown device row must be refused");

@@ -9,6 +9,7 @@ mod client_occupancy;
 mod client_repositories;
 mod client_sessions;
 mod config;
+mod device_auth;
 mod device_providers;
 mod dispatcher;
 mod durable_event_hub;
@@ -20,7 +21,6 @@ mod runtime;
 mod server;
 mod transport;
 mod user_accounts;
-mod worker_session_credentials;
 
 pub use application::{
     StandaloneApplicationClock, StandaloneControlPlaneApplication, SystemStandaloneApplicationClock,
@@ -39,7 +39,7 @@ pub use client_connections::{
 };
 pub use client_exchange::{
     ClientExchangeApplication, ClientExchangeConfig, ClientExchangeError, ClientExchangeErrorKind,
-    ClientExchangePort, WorkerCredentialDelivery,
+    ClientExchangePort,
 };
 pub use client_occupancy::{
     ClientOccupancyApplication, ClientOccupancyConfig, ClientOccupancyError,
@@ -54,7 +54,7 @@ pub use client_sessions::{
 };
 pub use winwincode_api::generated::{AuthSessionRequest, AuthSessionResponse};
 
-pub use config::{ServerConfig, ServerConfigError, ServerTls};
+pub use config::{ServerConfig, ServerConfigError};
 pub use dispatcher::{
     CommandDispatchResponse, CommandFamily, GeneratedContractDispatcher, QueryFamily,
     TypedControlPlaneApiPort,
@@ -64,9 +64,7 @@ pub use durable_event_hub::{
     DurableEventHubError, DurableEventHubErrorCode, DurableEventPublisher,
 };
 pub use remote_worker_transport::{
-    CompositeRemoteWorkerAuthenticator, FileRemoteWorkerAuthenticator,
     ProductionRemoteWorkerExchange, RemoteWorkerExchangePort, RemoteWorkerTransportError,
-    WorkerSessionRemoteAuthenticator,
 };
 pub use runtime::{
     HealthyRuntimeHealth, RepositoryRuntimeScheduler, RuntimeControlOutbound, RuntimeHealthPort,
@@ -75,16 +73,14 @@ pub use runtime::{
 };
 #[cfg(feature = "local-worker")]
 pub use runtime::{LocalRuntimeScheduler, LocalRuntimeSupervisor, RuntimeHealthHandle};
-pub use server::{RunningServer, ServerError, start_server, start_server_with_remote_worker};
+pub use server::{
+    RunningServer, ServerError, start_server, start_server_with_remote_worker,
+    wait_for_owner_initialization,
+};
 pub use transport::{
     ApiError, AuthError, AuthenticatedPrincipal, ControlPlaneApiPort, EventSubscription,
     RequestAuthenticator, TransportCredentials,
 };
 pub use user_accounts::{
     CredentialRejection, UserAccountService, UserAccountServiceError, UserAccountServiceErrorKind,
-};
-pub use worker_session_credentials::{
-    CredentialMaterial, CredentialRotationReceipt, DEFAULT_CREDENTIAL_TTL,
-    WorkerSessionCredentialError, WorkerSessionCredentialErrorKind, WorkerSessionCredentialPolicy,
-    WorkerSessionCredentialService, issue_credential_material,
 };

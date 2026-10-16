@@ -1117,6 +1117,49 @@ function registeredFixtureWorkers(deviceData, snapshot) {
   } finally { database.close() }
 }
 
+export function captureDeviceWorkerProcess({ deviceData, launched }) {
+  const database = new DatabaseSync(join(deviceData, 'device-client.sqlite3'), { readOnly: true })
+  try {
+    database.exec('PRAGMA busy_timeout = 1000')
+    const record = database.prepare('SELECT * FROM worker_process_registry WHERE worker_session_id = ?')
+      .get(launched.workerSessionId)
+    if (!record || record.state !== 'running') return null
+    assert.equal(record.worker_id, launched.workerId)
+    assert.equal(record.worker_instance_id, launched.workerInstanceId)
+    const observed = processSnapshot().get(record.pid)
+    if (!observed || observed.state.startsWith('Z')) return null
+    const identity = process.platform === 'linux' ? observed.start : `darwin-ps-${observed.start}`
+    if (record.process_start_identity !== identity) return null
+    return {
+      workerSessionId: record.worker_session_id,
+      workerId: record.worker_id,
+      workerInstanceId: record.worker_instance_id,
+      pid: record.pid,
+      processStartIdentity: identity,
+    }
+  } finally { database.close() }
+}
+
+export async function stopDeviceWorkerProcess({ deviceData, worker, timeoutMillis = 30_000 }) {
+  assert.deepEqual(captureDeviceWorkerProcess({ deviceData, launched: worker }), worker,
+    'only the exact Device-owned Worker process can be terminated')
+  const snapshot = processSnapshot().get(worker.pid)
+  assert.ok(snapshot && ownedProcessAlive(snapshot, processSnapshot()))
+  const identity = process.platform === 'linux' ? snapshot.start : `darwin-ps-${snapshot.start}`
+  assert.equal(identity, worker.processStartIdentity, 'Worker process boot identity changed before termination')
+  process.kill(worker.pid, 'SIGKILL')
+  const database = new DatabaseSync(join(deviceData, 'device-client.sqlite3'), { readOnly: true })
+  try {
+    database.exec('PRAGMA busy_timeout = 1000')
+    await waitFor(() => {
+      const record = database.prepare('SELECT state FROM worker_process_registry WHERE worker_session_id = ?')
+        .get(worker.workerSessionId)
+      return record?.state !== 'running' && !ownedProcessAlive(snapshot, processSnapshot())
+    }, 'Device observes the terminated Worker process', timeoutMillis)
+  } finally { database.close() }
+  return true
+}
+
 export async function stopUnusedDeviceTaskAnchor({ api, directory, deviceData, launched, productSessionId }) {
   const server = new DatabaseSync(join(directory, 'server-data', 'control-plane.sqlite3'), { readOnly: true })
   try {
@@ -1209,7 +1252,16 @@ export async function stopProcessGroup(child, { graceMillis = 1000, deviceData }
     for (const [target, witnesses] of targets) {
       if (!witnesses.some(row => ownedProcessAlive(row, processSnapshot()))) continue
       try { process.kill(target, signal) } catch (error) {
-        if (error.code !== 'ESRCH') throw error
+        if (error.code !== 'ESRCH') {
+          const targetIdentity = target < 0 ? `pgid:${-target}` : `pid:${target}`
+          const ownership = witnesses.map(row => ({ pid: row.pid, parentPid: row.parent,
+            processGroupId: row.group, state: row.state,
+            startIdentity: process.platform === 'linux' ? row.start : `darwin-ps-${row.start}` }))
+          const failure = new Error(`fixture process signal failed: target=${targetIdentity} signal=${signal} ownership=${JSON.stringify(ownership)}`,
+            { cause: error })
+          failure.code = error.code
+          throw failure
+        }
       }
     }
   }
@@ -1244,7 +1296,6 @@ export async function establishDeviceOnlyExecutionPath({
   deviceData = join(directory, 'device-data'),
   certificatePath = join(directory, 'fixture-cert.pem'),
   privateKeyPath = join(directory, 'fixture-key.pem'),
-  helperReleaseManifest,
   helperExecutable,
   modelRouteSource,
   timeoutMillis = 60_000,
@@ -1259,34 +1310,23 @@ export async function establishDeviceOnlyExecutionPath({
   assert.equal(typeof api?.request, 'function')
   const steps = []
   const report = { steps, complete: false }
-  const tlsRoot = writeDeviceTrustRoot({
-    certificatePath,
-    destination: join(directory, 'device-provider-trust-root.der'),
-  })
+  const tlsRoot = seedDeviceProvider && deviceProvider !== null && !deviceProvider.endpoint
+    ? writeDeviceTrustRoot({
+      certificatePath,
+      destination: join(directory, 'device-provider-trust-root.der'),
+    }) : undefined
   const deviceEnvironment = {
     ...runtimeChildEnvironment(),
     ...deviceAgentEnvironment(agentEnvironment),
-    WWC_DEVICE_TLS_ROOT_DER_FILE: tlsRoot,
     WWC_DEVICE_PROVIDER_TLS_ROOT_DER_FILE: deviceProvider?.endpoint
       ? process.env.WWC_DEVICE_PROVIDER_TLS_ROOT_DER_FILE
       : tlsRoot,
-    WWC_WORKER_TLS_ROOT_DER_FILE: tlsRoot,
-    ...(helperReleaseManifest === undefined ? {} : {
-      WWC_WORKER_HELPER_RELEASE_MANIFEST: helperReleaseManifest,
-    }),
     ...(helperExecutable === undefined ? {} : {
       WWC_WORKER_HELPER_EXECUTABLE: helperExecutable,
     }),
-    WWC_WORKER_ACTION_SIGNING_KEY_HEX: '1f'.repeat(32),
-    WWC_WORKER_EXECUTION_ENVELOPE_DIGEST: `sha256:${'a'.repeat(64)}`,
     WWC_DEBUG_REMOTE_WORKER: '1',
     GIT_CONFIG_NOSYSTEM: '1',
-    ...(process.env.WINWINCODE_HELPER_RELEASE_PUBLIC_KEY_HEX === undefined
-      ? {}
-      : {
-        WINWINCODE_HELPER_RELEASE_PUBLIC_KEY_HEX:
-          process.env.WINWINCODE_HELPER_RELEASE_PUBLIC_KEY_HEX,
-      }),
+
   }
   if (modelRouteSource !== undefined && modelRouteSource !== null) {
     deviceEnvironment.WWC_WORKER_MODEL_PROVIDER_ID = modelRouteSource.providerId

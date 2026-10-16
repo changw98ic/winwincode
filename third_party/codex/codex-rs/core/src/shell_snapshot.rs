@@ -289,14 +289,11 @@ async fn run_script_with_timeout(
     handler.args(&args[1..]);
     handler.stdin(Stdio::null());
     handler.current_dir(cwd);
-    #[cfg(unix)]
-    unsafe {
-        handler.pre_exec(|| {
-            codex_utils_pty::process_group::detach_from_tty()?;
-            Ok(())
-        });
-    }
     handler.kill_on_drop(true);
+    #[cfg(unix)]
+    let _lifeline = codex_utils_pty::process_group::ProcessGroupLifeline::configure_command(
+        handler.as_std_mut(),
+    )?;
     let output = timeout(snapshot_timeout, handler.output())
         .await
         .map_err(|_| anyhow!("Snapshot command timed out for {shell_name}"))?

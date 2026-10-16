@@ -73,29 +73,35 @@ jobs:
         run: corepack pnpm verify:typescript
 
   rust:
-    name: rust-${{ matrix.lane }}
+    name: rust-lint
+    uses: ./.github/workflows/rust-build.yml
+    with:
+      lane: lint
+
+  rust-runtime-build:
+    name: Rust runtime producer
+    uses: ./.github/workflows/rust-build.yml
+    with:
+      lane: runtime
+
+  rust-runtime-sessions:
+    name: runtime-sessions-${{ matrix.group }}
+    needs: rust-runtime-build
     runs-on: ubuntu-24.04
-    timeout-minutes: 360
+    timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
-        lane:
-          - lint
-          - test
-          - e2e
-          - runtime
+        group: [load, api, recovery, boundaries]
     env:
-      CARGO_INCREMENTAL: "0"
-      CARGO_PROFILE_DEV_DEBUG: "0"
-      CARGO_PROFILE_TEST_DEBUG: "0"
       CI: "1"
-      COREPACK_ENABLE_DOWNLOAD_PROMPT: "0"
-      RUSTC_WRAPPER: "sccache"
-      RUSTFLAGS: "-C link-arg=-fuse-ld=lld"
-      SCCACHE_GHA_ENABLED: "true"
-      SCCACHE_IDLE_TIMEOUT: "0"
+      WWC_API_SKIP_BUILD: "1"
+      WWC_CODE_MODE_ACCEPTANCE_BIN_DIR: ${{ github.workspace }}/target/debug
+      WWC_CLI_BINARY: ${{ github.workspace }}/target/debug/wwc
+      WWC_RUNTIME_PRODUCER_ATTEMPT: ${{ needs.rust-runtime-build.outputs.producer_attempt }}
+      WWC_RUNTIME_ARCHIVE_SHA256: ${{ needs.rust-runtime-build.outputs.archive_sha256 }}
     steps:
-      - name: Check out source
+      - name: Check out identical source
         uses: actions/checkout@v7
         with:
           persist-credentials: false
@@ -105,126 +111,111 @@ jobs:
         with:
           node-version-file: .node-version
 
-      - name: Install Linux build dependencies
+      - name: Install runtime dependencies and verify sandbox
         shell: bash
         run: |
           set -euo pipefail
-          sudo bash scripts/install-code-mode-linux-build-deps.sh
-          printf 'LIBCLANG_PATH=/usr/lib/llvm-23/lib\n' >> "${GITHUB_ENV}"
-          printf 'CLANG_BASE_PATH=/usr/lib/llvm-23\n' >> "${GITHUB_ENV}"
-          printf 'CLANG_PATH=/usr/lib/llvm-23/bin/clang\n' >> "${GITHUB_ENV}"
-          printf '/usr/lib/llvm-23/bin\n' >> "${GITHUB_PATH}"
-          if [[ ! -e /usr/local/bin/ld.lld ]]; then
-            if [[ -x /usr/lib/llvm-23/bin/ld.lld ]]; then
-              sudo ln -sf /usr/lib/llvm-23/bin/ld.lld /usr/local/bin/ld.lld
-            else
-              sudo ln -sf "$(command -v ld.lld-23)" /usr/local/bin/ld.lld
-            fi
-          fi
+          mkdir -p "${RUNNER_TEMP}/runtime-sessions"
+          sudo apt-get update -y
+          sudo apt-get install -y --no-install-recommends bubblewrap libcap2
           if [[ -e /proc/sys/kernel/apparmor_restrict_unprivileged_userns ]]; then
             sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
           fi
           bwrap --ro-bind / / --unshare-user --unshare-pid --unshare-net --as-pid-1 -- true
 
-      - name: Install pinned Rust
-        shell: bash
-        run: |
-          rustup toolchain install 1.95.0 --profile minimal --component clippy,rust-src
-          rustup override set 1.95.0
-          rustc -Vv
-          cargo -V
-
-      - name: Install persistent Rust compiler cache
-        uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba
+      - name: Download exact producer runtime products
+        uses: actions/download-artifact@v8
         with:
-          version: "v0.17.0"
+          artifact-ids: ${{ needs.rust-runtime-build.outputs.artifact_id }}
+          path: .cache/runtime-products/
 
-      - name: Wire C/C++ compiler cache
+      - name: Restore canonical runtime products and verify original source seal
+        run: node scripts/runtime-products.mjs restore
+
+      - name: Verify shared Device product Sessions without compiling
+        env:
+          TMPDIR: ${{ runner.temp }}/runtime-sessions
         shell: bash
         run: |
           set -euo pipefail
-          sccache_bin=$(command -v sccache)
-          printf 'SCCACHE=%s\n' "${sccache_bin}" >> "${GITHUB_ENV}"
-          printf 'CC_WRAPPER=%s\n' "${sccache_bin}" >> "${GITHUB_ENV}"
-          printf 'CC=%s\n' "${CLANG_PATH}" >> "${GITHUB_ENV}"
-          printf 'CXX=%s++\n' "${CLANG_PATH}" >> "${GITHUB_ENV}"
+          tools="${RUNNER_TEMP}/no-runtime-compilers"
+          mkdir -p "${tools}"
+          for compiler in cargo rustc; do
+            printf '#!/bin/sh\nprintf "Unexpected runtime compilation\\n" >&2\nexit 91\n' > "${tools}/${compiler}"
+            chmod +x "${tools}/${compiler}"
+          done
+          export PATH="${tools}:${PATH}"
+          node scripts/run-api-production-sessions.mjs --group ${{ matrix.group }} 2>&1 | tee "${RUNNER_TEMP}/runtime-sessions.log"
+
+      - name: Collect safe failed scenario diagnostics
+        if: ${{ failure() }}
+        continue-on-error: true
+        env:
+          TMPDIR: ${{ runner.temp }}/runtime-sessions
+        run: node scripts/collect-runtime-diagnostics.mjs
+
+      - name: Retain failed scenario diagnostics
+        if: ${{ failure() }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: runtime-diagnostics-${{ matrix.group }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: .cache/runtime-diagnostics/
+          if-no-files-found: ignore
+          include-hidden-files: true
+          retention-days: 7
+
+  rust-test-build:
+    name: Rust test producer
+    uses: ./.github/workflows/rust-build.yml
+    with:
+      lane: archive
+
+  rust-tests:
+    name: rust-${{ matrix.lane }}
+    needs: rust-test-build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        lane: [test, e2e]
+    env:
+      CI: "1"
+      WWC_RUST_TEST_PRODUCER_ATTEMPT: ${{ needs.rust-test-build.outputs.producer_attempt }}
+      WWC_RUST_TEST_ARCHIVE_SHA256: ${{ needs.rust-test-build.outputs.archive_sha256 }}
+    steps:
+      - name: Check out identical source
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Install pinned Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version-file: .node-version
+
+      - name: Install test runtime dependencies and verify sandbox
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update -y
+          sudo apt-get install -y --no-install-recommends bubblewrap libcap2
+          if [[ -e /proc/sys/kernel/apparmor_restrict_unprivileged_userns ]]; then
+            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          fi
+          bwrap --ro-bind / / --unshare-user --unshare-pid --unshare-net --as-pid-1 -- true
 
       - name: Install cargo-nextest
-        if: ${{ matrix.lane == 'test' || matrix.lane == 'e2e' }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          tools="${RUNNER_TEMP}/cargo-nextest"
-          mkdir -p "${tools}"
-          archive="${tools}/cargo-nextest.tar.gz"
-          curl --fail --location --silent --show-error --output "${archive}" \
-            https://github.com/nextest-rs/nextest/releases/download/cargo-nextest-0.9.143/cargo-nextest-0.9.143-x86_64-unknown-linux-gnu.tar.gz
-          printf '%s  %s\n' '66786b9abe23920d022a182d1416b1bbc8130dd4872a9553d76985a1708dcd1e' "${archive}" | sha256sum -c -
-          tar -xzf "${archive}" -C "${tools}" cargo-nextest
-          printf '%s\n' "${tools}" >> "${GITHUB_PATH}"
-          "${tools}/cargo-nextest" --version
+        uses: ./.github/actions/setup-nextest
 
-      - name: Materialize V8 cache identity
-        shell: bash
-        run: |
-          set -euo pipefail
-          {
-            printf 'GN_ARGS=%s\n' 'is_debug=false icu_use_data_file=true icu_copy_icudata_to_root_build_dir=false v8_enable_temporal_support=false'
-            "${CLANG_PATH}" --version
-          } > .github/v8-cache-identity.txt
-
-      - name: Cache pinned V8 source build
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
+      - name: Download this run's Rust test archive
+        uses: actions/download-artifact@v8
         with:
-          path: |
-            target/debug/gn_out
-            target/**/gn_out
-          key: v8-gn-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.lock', '.cargo/config.toml', 'rust-toolchain.toml', 'scripts/code-mode-ninja.mjs', 'scripts/install-code-mode-linux-build-deps.sh', '.github/v8-cache-identity.txt') }}
+          artifact-ids: ${{ needs.rust-test-build.outputs.artifact_id }}
+          path: .cache/rust-test-archive/
 
-      - name: Lint Rust workspace
-        if: ${{ matrix.lane == 'lint' }}
-        shell: bash
-        run: |
-          corepack enable
-          corepack pnpm lint:rust
-
-      - name: Test Rust workspace
-        if: ${{ matrix.lane == 'test' }}
-        shell: bash
-        env:
-          WWC_RUST_E2E: "0"
-          WWC_WORKER_HELPER_EXECUTABLE: ${{ github.workspace }}/target/debug/winwincode-kernel-helper
-        run: |
-          corepack enable
-          corepack pnpm test:rust
-
-      - name: Test Rust heavy e2e
-        if: ${{ matrix.lane == 'e2e' }}
-        shell: bash
-        env:
-          WWC_RUST_E2E: "1"
-          WWC_WORKER_HELPER_EXECUTABLE: ${{ github.workspace }}/target/debug/winwincode-kernel-helper
-        run: |
-          corepack enable
-          corepack pnpm test:rust
-
-      - name: Build and verify Rust products
-        if: ${{ matrix.lane == 'runtime' }}
-        shell: bash
-        run: |
-          corepack enable
-          corepack pnpm build:rust
-          node scripts/verify-products.mjs --scope rust
-
-      - name: Verify API production vertical
-        if: ${{ matrix.lane == 'runtime' }}
-        shell: bash
-        run: corepack pnpm verify:api-production-vertical
-
-      - name: Verify shared Device product Sessions
-        if: ${{ matrix.lane == 'runtime' }}
-        shell: bash
-        run: corepack pnpm verify:api-production-sessions
+      - name: Run original Rust test selection without compiling
+        run: node scripts/rust-test-archive.mjs ${{ matrix.lane }}
 
   verify:
     name: Canonical workspace verification
@@ -233,12 +224,20 @@ jobs:
       - source
       - typescript
       - rust
+      - rust-runtime-build
+      - rust-runtime-sessions
+      - rust-test-build
+      - rust-tests
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
       - name: Require every independent lane to pass
         env:
+          RUNTIME_BUILD_RESULT: ${{ needs.rust-runtime-build.result }}
+          RUNTIME_SESSIONS_RESULT: ${{ needs.rust-runtime-sessions.result }}
           RUST_RESULT: ${{ needs.rust.result }}
+          ARCHIVE_RESULT: ${{ needs.rust-test-build.result }}
+          TESTS_RESULT: ${{ needs.rust-tests.result }}
           SOURCE_RESULT: ${{ needs.source.result }}
           TYPESCRIPT_RESULT: ${{ needs.typescript.result }}
         shell: bash
@@ -247,3 +246,7 @@ jobs:
           test "${SOURCE_RESULT}" = "success"
           test "${TYPESCRIPT_RESULT}" = "success"
           test "${RUST_RESULT}" = "success"
+          test "${RUNTIME_BUILD_RESULT}" = "success"
+          test "${RUNTIME_SESSIONS_RESULT}" = "success"
+          test "${ARCHIVE_RESULT}" = "success"
+          test "${TESTS_RESULT}" = "success"

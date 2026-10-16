@@ -604,7 +604,7 @@ fn terminal_candidates(
         .connection()?
         .prepare(
             "SELECT candidate_id, worker_session_id, repository_binding_id, local_git_ref, \
-             local_state, created_at, candidate_ref, candidate_commit, retained_at \
+             local_state, created_at, candidate_ref, candidate_commit, retained_at, base_commit \
              FROM candidate_local_refs ORDER BY candidate_id",
         )
         .map_err(crate::store::sql_error)?;
@@ -807,7 +807,7 @@ fn active_candidates(
         .connection()?
         .prepare(
             "SELECT candidate_id, worker_session_id, repository_binding_id, local_git_ref, \
-             local_state, created_at, candidate_ref, candidate_commit, retained_at \
+             local_state, created_at, candidate_ref, candidate_commit, retained_at, base_commit \
              FROM candidate_local_refs \
              WHERE repository_binding_id = ?1 \
                AND local_state IN ('retained', 'branch_created') \
@@ -838,6 +838,7 @@ fn row_to_candidate_record(row: &rusqlite::Row<'_>) -> rusqlite::Result<Candidat
         candidate_ref: row.get(6)?,
         candidate_commit: row.get(7)?,
         retained_at: row.get(8)?,
+        base_commit: row.get(9)?,
     })
 }
 

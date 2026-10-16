@@ -39,8 +39,8 @@ use winwincode_execution_port::generated::ApprovalRequestMessage;
 use winwincode_server::{
     AuthSessionBootstrap, AuthSessionConfig, AuthenticatedPrincipal, DurableEventHub,
     DurableEventHubConfig, DurableEventPublisher, GeneratedContractDispatcher,
-    OwnerInitializationHook, RequestAuthenticator, ServerConfig, ServerTls,
-    SqliteAuthSessionManager, StandaloneControlPlaneApplication, UserAccountService, start_server,
+    OwnerInitializationHook, RequestAuthenticator, ServerConfig, SqliteAuthSessionManager,
+    StandaloneControlPlaneApplication, UserAccountService, start_server,
 };
 use winwincode_session::SessionBindingIdentity;
 use winwincode_storage::{
@@ -658,14 +658,9 @@ fn environment_config() -> Result<ServerConfig, Box<dyn Error>> {
         .filter(|origin| !origin.is_empty())
         .map(str::to_owned)
         .collect::<BTreeSet<_>>();
-    let tls = ServerTls::Pem {
-        certificate_path: PathBuf::from(required_environment("WWC_SERVER_TLS_CERTIFICATE")?),
-        private_key_path: PathBuf::from(required_environment("WWC_SERVER_TLS_PRIVATE_KEY")?),
-    };
     Ok(ServerConfig::new(
         bind_address,
         public_url,
-        tls,
         allowed_origins,
         data_directory,
         Duration::from_secs(30),

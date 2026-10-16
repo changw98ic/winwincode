@@ -351,6 +351,74 @@ fn head_tail_buffer_default_preserves_prefix_and_suffix() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn shutdown_stops_registered_and_starting_independent_process_groups() -> anyhow::Result<()> {
+    for starting in [false, true] {
+        let (session, turn) = test_session_and_turn().await;
+        let manager = &session.services.unified_exec_manager;
+        let response = exec_command(&session, &turn, "echo $$; sleep 60", 250, None).await?;
+        let process_id = response.process_id.expect("live unified exec process");
+        let mut raw_output = response.raw_output;
+        let output_deadline = Instant::now() + Duration::from_secs(3);
+        while raw_output.is_empty() {
+            assert!(
+                Instant::now() < output_deadline,
+                "shell did not report its PID"
+            );
+            raw_output.extend(write_stdin(&session, process_id, "", 250).await?.raw_output);
+        }
+        let pid: u32 = String::from_utf8_lossy(&raw_output)
+            .split_whitespace()
+            .next()
+            .expect("shell PID")
+            .parse()?;
+        let output = std::process::Command::new("/bin/ps")
+            .args(["-o", "pgid=", "-p", &pid.to_string()])
+            .output()?;
+        assert_eq!(
+            String::from_utf8(output.stdout)?.trim().parse::<u32>()?,
+            pid
+        );
+        let process = {
+            let mut store = manager.process_store.lock().await;
+            let process = Arc::clone(&store.processes[&process_id].process);
+            if starting {
+                store.processes.remove(&process_id);
+                store
+                    .starting_processes
+                    .insert(process_id, Arc::clone(&process));
+            }
+            process
+        };
+        manager.shutdown().await;
+        let deadline = Instant::now() + Duration::from_secs(3);
+        loop {
+            let output = std::process::Command::new("/bin/ps")
+                .args(["-axo", "pgid=,stat="])
+                .output()?;
+            let group = pid.to_string();
+            let stopped = String::from_utf8_lossy(&output.stdout).lines().all(|line| {
+                let mut fields = line.split_whitespace();
+                fields.next() != Some(group.as_str())
+                    || fields.next().is_none_or(|state| state.starts_with('Z'))
+            });
+            if stopped && process.has_exited() {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "shutdown left process group {pid} alive"
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        let store = manager.process_store.lock().await;
+        assert!(store.closed);
+        assert!(store.processes.is_empty());
+        assert!(store.starting_processes.is_empty());
+    }
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn unified_exec_persists_across_requests() -> anyhow::Result<()> {
     skip_if_sandbox!(Ok(()));
 

@@ -163,7 +163,6 @@ test('argument parser accepts the documented release invocation', () => {
   assert.equal(parsed.sourceCommit, sourceCommit)
   assert.equal(parsed.sourceDateEpoch, sourceDateEpoch)
   assert.equal(parsed.dryRun, true)
-  assert.equal(parsed.helperReleaseManifest, null)
   const equalsForm = parseDeviceClientReleaseArguments([
     `--target=x86_64-apple-darwin`,
     `--source-commit=${sourceCommit}`,
@@ -247,7 +246,6 @@ test('staged package manifest and checksums verify end to end', () => {
       assert.equal(descriptor.bytes, readFileSync(join(artifactRoot, descriptor.path)).length)
       assert.equal(descriptor.sha256, sha256(readFileSync(join(artifactRoot, descriptor.path))))
     }
-    assert.equal(manifest.helperReleaseManifest, null)
     assert.equal(manifest.service.path, 'service/dev.winwincode.device-client.plist')
     assert.equal(manifest.service.mode, 0o644)
     assert.deepEqual(manifest.checks, DEVICE_CLIENT_RELEASE_CHECKS)
@@ -393,42 +391,6 @@ test('verification rejects a target mismatch', () => {
         expectedTarget: 'x86_64-unknown-linux-gnu',
       }),
       'TARGET_MISMATCH',
-    )
-  } finally {
-    rmSync(artifactRoot, { recursive: true, force: true })
-  }
-})
-
-test('optional helper release manifest must bind the packaged helper', () => {
-  const artifactRoot = makePackageFixture()
-  const helperReleaseManifest = {
-    schemaVersion: 1,
-    protocol: 'winwincode-kernel-helper-release',
-    version: 1,
-    packageVersion: JSON.parse(readFileSync(join(root, 'package.json'), 'utf8')).version,
-    sourceSha256: `sha256:${sha256(readFileSync(join(root, 'crates', 'helper', 'src', 'main.rs')))}`,
-    binarySha256: `sha256:${sha256(readFileSync(join(artifactRoot, 'bin', 'winwincode-kernel-helper')))}`,
-    binaryPath: 'winwincode-kernel-helper',
-    binaryMode: 0o755,
-    signature: 'A'.repeat(86),
-  }
-  const destination = join(artifactRoot, 'bin', 'winwincode-kernel-helper.release.json')
-  writeFileSync(destination, JSON.stringify(helperReleaseManifest))
-  chmodSync(destination, 0o644)
-  const manifest = writeManifestAndChecksums(artifactRoot)
-  try {
-    assert.notEqual(manifest.helperReleaseManifest, null)
-    assert.equal(manifest.helperReleaseManifest.mode, 0o644)
-    verifyDeviceClientReleaseDirectory({
-      root,
-      artifactRoot,
-      expectedTarget: 'aarch64-apple-darwin',
-    })
-    const tampered = { ...helperReleaseManifest, binarySha256: `sha256:${'0'.repeat(64)}` }
-    writeFileSync(destination, JSON.stringify(tampered))
-    assertDeviceClientReleaseError(
-      () => writeManifestAndChecksums(artifactRoot),
-      'HELPER_RELEASE_MANIFEST_INVALID',
     )
   } finally {
     rmSync(artifactRoot, { recursive: true, force: true })

@@ -255,7 +255,7 @@ async fn run_task_context_replay(database_reopened: bool, jev_enabled: bool) {
             capability: "model".into(),
             route: "different-synthetic-route".into(),
         },
-        "loopback".into(),
+        Some("loopback".into()),
         SharedAuthoritySource::default().with_store(store.clone()),
     ));
     wrong_route

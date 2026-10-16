@@ -177,7 +177,8 @@ fn serve_retry(
 }
 
 fn run_worker_retry(directory: &Path, endpoint: &str) {
-    let mut models = DeviceModels::open(directory).unwrap();
+    let _ = DeviceProviderStore::open(directory).unwrap();
+    let mut models = DeviceModels::new(directory);
     let database = rusqlite::Connection::open(directory.join("providers.sqlite3")).unwrap();
     configure_retry_provider(&database, endpoint);
     let open = completed_tool_history_open();
@@ -264,7 +265,8 @@ fn configure_retry_provider(database: &rusqlite::Connection, endpoint: &str) {
 }
 
 fn crash_after_retained_retry(directory: &Path, endpoint: &str) -> ! {
-    let mut models = DeviceModels::open(directory).unwrap();
+    let _ = DeviceProviderStore::open(directory).unwrap();
+    let mut models = DeviceModels::new(directory);
     let database = rusqlite::Connection::open(directory.join("providers.sqlite3")).unwrap();
     configure_retry_provider(&database, endpoint);
     let open = completed_tool_history_open();
@@ -300,7 +302,7 @@ fn run_reopened_retry(directory: &Path) {
         DeviceModelAdmission::RecoverExchange
     ));
     let mut held = (0..3).map(|_| acquire(&store, &open)).collect::<Vec<_>>();
-    let mut models = DeviceModels::open(directory).unwrap();
+    let mut models = DeviceModels::new(directory);
     assert_eq!(
         models
             .send(
@@ -328,7 +330,7 @@ fn run_reopened_retry(directory: &Path) {
     held.push(acquire(&store, &open));
     assert_full(&store, &open);
     drop(models);
-    let mut replay = DeviceModels::open(directory).unwrap();
+    let mut replay = DeviceModels::new(directory);
     assert_eq!(
         replay
             .send(

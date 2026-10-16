@@ -4,13 +4,21 @@ import { spawnSync } from 'node:child_process'
 import { readdirSync, statSync } from 'node:fs'
 import { resolve } from 'node:path'
 
-import { prepareCompactKernelHelper } from './compact-kernel-helper.mjs'
-
 const root = resolve(import.meta.dirname, '..')
+if (!process.env.CARGO_BUILD_BUILD_DIR && process.env.WWC_RUST_CACHE !== 'off') {
+  const result = spawnSync('python3', [resolve(root, 'scripts/rust-build-cache.py'),
+    '--variant', 'all-features', '--', process.execPath, ...process.argv.slice(1)],
+  { cwd: root, env: process.env, stdio: 'inherit' })
+  if (result.error) throw result.error
+  process.exit(result.status ?? 1)
+}
 const e2eOnly = process.env.WWC_RUST_E2E === '1'
 const standardOnly = process.env.WWC_RUST_E2E === '0'
 const heavyBins = ['production_vertical', 'worker_lifecycle', 'code_mode_kernel']
 const heavyExpression = heavyBins.map(name => `binary(${name})`).join(' | ')
+process.env.CARGO_TARGET_DIR = resolve(root, process.env.CARGO_TARGET_DIR || 'target')
+process.env.WWC_WORKER_HELPER_EXECUTABLE ??= resolve(process.env.CARGO_TARGET_DIR, 'debug/winwincode-kernel-helper')
+process.env.WINWINCODE_CODE_MODE_TEST_HELPER ??= process.env.WWC_WORKER_HELPER_EXECUTABLE
 
 function run(command, args) {
   const result = spawnSync(command, args, { cwd: root, env: process.env, stdio: 'inherit' })
@@ -35,13 +43,10 @@ function integrationTests(dir) {
   })
 }
 
-run('cargo', ['test', '--all-features', '--locked', '-p', 'winwincode-kernel-helper', '--no-run'])
+if (process.argv.includes('--build-helper')) {
+  run('cargo', ['build', '--locked', '-p', 'winwincode-kernel-helper', '--bin', 'winwincode-kernel-helper'])
+}
 run('cargo', ['test', '--all-features', '--locked', '-p', 'winwincode-kernel-helper'])
-prepareCompactKernelHelper({
-  root,
-  targetDirectory: resolve(root, process.env.CARGO_TARGET_DIR || 'target'),
-  environment: process.env,
-})
 
 if (hasNextest()) {
   const filter = e2eOnly ? heavyExpression : standardOnly ? `not (${heavyExpression})` : null

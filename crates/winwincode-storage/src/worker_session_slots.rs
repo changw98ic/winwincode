@@ -827,6 +827,35 @@ pub(crate) fn ensure_worker_session_slot_schema(
         .map_err(sql_error)
 }
 
+pub(crate) fn fence_device_worker_sessions_in_transaction(
+    connection: &Connection,
+    client_node_id: &str,
+    fenced_at: &Instant,
+) -> Result<(), WorkerSlotError> {
+    let slots = connection
+        .prepare(
+            "SELECT s.worker_session_id, s.codex_thread_id, s.job_id, s.worker_id,
+                s.worker_instance_id, s.lease_id, s.attempt, s.fencing_token, s.state,
+                s.event_cursor, s.memory_bytes, s.disk_bytes, s.process_slots, s.revision,
+                s.opened_at, s.updated_at, s.cancellation_requested_at, s.terminal_at
+         FROM worker_session_slots s
+         WHERE s.state IN ('running','cancelling') AND EXISTS (
+             SELECT 1 FROM worker_launch_grants g WHERE g.client_node_id=?1
+               AND g.worker_id=s.worker_id AND g.worker_instance_id=s.worker_instance_id
+         ) ORDER BY s.worker_session_id",
+        )
+        .map_err(sql_error)?
+        .query_map([client_node_id], stored_slot_row)
+        .map_err(sql_error)?
+        .map(|row| complete_slot(row.map_err(sql_error)?))
+        .collect::<Result<Vec<_>, _>>()?;
+    for slot in slots {
+        require_time(&slot, fenced_at)?;
+        mark_recovery_failed(connection, &slot, fenced_at)?;
+    }
+    Ok(())
+}
+
 pub(crate) fn fence_worker_session_for_replacement_in_transaction(
     connection: &Connection,
     lease: &ExecutionLeaseRecord,

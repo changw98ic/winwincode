@@ -126,6 +126,7 @@
     "upstream/patches/codex/0117-shared-tool-fatal-storage.patch",
     "upstream/patches/codex/0118-guardian-transcript-test-registration.patch",
     "upstream/patches/codex/0119-native-fixture-transport-lifecycle.patch",
-    "upstream/patches/codex/0120-native-fixture-network-isolation.patch"
+    "upstream/patches/codex/0120-native-fixture-network-isolation.patch",
+    "upstream/patches/codex/0121-tool-review-supervised-process-shutdown.patch"
   ]
 }

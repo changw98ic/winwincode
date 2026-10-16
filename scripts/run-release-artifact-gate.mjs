@@ -1,7 +1,6 @@
 #!/usr/bin/env node
 
 import { spawnSync } from 'node:child_process'
-import { createPrivateKey, createPublicKey } from 'node:crypto'
 import {
   chmodSync,
   copyFileSync,
@@ -18,34 +17,23 @@ import { dirname, join, resolve } from 'node:path'
 import {
   RELEASE_ARTIFACT_MANIFEST,
   RELEASE_CHECKSUMS,
-  HELPER_RELEASE_MANIFEST_NAME,
   RUST_RELEASE_ARTIFACTS,
+  assertReleaseApiReport,
   canonicalJson,
   createReleaseBuildEnvironment,
   createReleaseArtifactManifest,
   descriptorForFile,
   descriptorsBelow,
-  helperReleaseBuildBaseEnvironment,
-  helperReleaseManifestArtifactPath,
-  helperReleaseVerificationBaseEnvironment,
   machoUuidForFile,
   releaseChecksums,
   targetConfiguration,
   verifyReleaseArtifactDirectory,
 } from './release-artifact-contract.mjs'
-import {
-  serverTargetDirectory,
-  writeApiProductionSourceSeal,
-  writeHelperReleaseManifest,
-} from './run-api-production-vertical.mjs'
+import { writeApiProductionSourceSeal } from './run-api-production-vertical.mjs'
 import { capturedStandardOutput } from './child-process-output.mjs'
 import { releaseSourceSha256 } from './release-source-contract.mjs'
 
 const root = resolve(import.meta.dirname, '..')
-
-function verificationChildEnvironment() {
-  return helperReleaseVerificationBaseEnvironment(process.env)
-}
 
 function parseArguments(argv) {
   const values = new Map()
@@ -80,7 +68,7 @@ function parseArguments(argv) {
 function run(command, arguments_, options = {}) {
   const result = spawnSync(command, arguments_, {
     cwd: root,
-    env: options.env ?? verificationChildEnvironment(),
+    env: options.env ?? process.env,
     encoding: 'utf8',
     stdio: options.capture === true ? 'pipe' : 'inherit',
     maxBuffer: 64 * 1_024 * 1_024,
@@ -98,7 +86,7 @@ function run(command, arguments_, options = {}) {
 
 function releaseEnvironment(target, targetDirectory, sourceDateEpoch, buildPaths) {
   return createReleaseBuildEnvironment({
-    baseEnvironment: helperReleaseBuildBaseEnvironment(process.env),
+    baseEnvironment: { ...process.env, WWC_RUST_CACHE: 'off' },
     root,
     buildRoot: buildPaths.buildRoot,
     targetDirectory,
@@ -108,30 +96,6 @@ function releaseEnvironment(target, targetDirectory, sourceDateEpoch, buildPaths
     home: process.env.HOME,
     sourceDateEpoch,
   })
-}
-
-function releaseSigningConfiguration() {
-  const privateKeyHex = process.env.WINWINCODE_HELPER_RELEASE_PRIVATE_KEY_HEX
-  const publicKeyHex = process.env.WINWINCODE_HELPER_RELEASE_PUBLIC_KEY_HEX
-  if (!/^[0-9a-f]{64}$/u.test(privateKeyHex ?? '')) {
-    throw new Error('WINWINCODE_HELPER_RELEASE_PRIVATE_KEY_HEX must be configured for a release build')
-  }
-  if (!/^[0-9a-f]{64}$/u.test(publicKeyHex ?? '')) {
-    throw new Error('WINWINCODE_HELPER_RELEASE_PUBLIC_KEY_HEX must be configured for a release build')
-  }
-  const privateKey = createPrivateKey({
-    key: Buffer.from(`302e020100300506032b657004220420${privateKeyHex}`, 'hex'),
-    format: 'der',
-    type: 'pkcs8',
-  })
-  const derivedPublicKeyHex = createPublicKey(privateKey)
-    .export({ format: 'der', type: 'spki' })
-    .subarray(-32)
-    .toString('hex')
-  if (publicKeyHex !== derivedPublicKeyHex) {
-    throw new Error('helper release public key does not match the configured private key')
-  }
-  return Object.freeze({ publicKeyHex })
 }
 
 function assertCleanCommit(sourceCommit, sourceDateEpoch, expectedReleaseSourceSha256) {
@@ -213,15 +177,7 @@ function rustBuild(target, targetDirectory, sourceDateEpoch, buildPaths) {
       sourcePath: path,
     })
   })
-  const helper = rust.find(artifact => artifact.binaryName === 'winwincode-kernel-helper')
-  if (helper === undefined) throw new Error('Kernel helper release artifact is missing')
-  const helperReleaseManifestPath = writeHelperReleaseManifest(root, helper.sourcePath)
-  chmodSync(helperReleaseManifestPath, 0o644)
-  const helperReleaseManifest = descriptorForFile(
-    dirname(helperReleaseManifestPath),
-    helperReleaseManifestPath,
-  )
-  return Object.freeze({ rust: Object.freeze(rust), helperReleaseManifest, helperReleaseManifestPath })
+  return Object.freeze({ rust: Object.freeze(rust) })
 }
 
 function snapshotRustBuild(rustBuildResult, snapshotRoot) {
@@ -239,14 +195,7 @@ function snapshotRustBuild(rustBuildResult, snapshotRoot) {
       sourcePath,
     })
   })
-  const helperReleaseManifestPath = resolve(snapshotRoot, HELPER_RELEASE_MANIFEST_NAME)
-  copyFileSync(rustBuildResult.helperReleaseManifestPath, helperReleaseManifestPath)
-  chmodSync(helperReleaseManifestPath, 0o444)
-  return Object.freeze({
-    rust: Object.freeze(rust),
-    helperReleaseManifest: descriptorForFile(snapshotRoot, helperReleaseManifestPath),
-    helperReleaseManifestPath,
-  })
+  return Object.freeze({ rust: Object.freeze(rust) })
 }
 
 function resetCargoTarget(targetDirectory) {
@@ -257,7 +206,7 @@ function resetCargoTarget(targetDirectory) {
 function clientBuild(sourceDateEpoch) {
   run('corepack', ['pnpm', 'build:ts'], {
     env: {
-      ...verificationChildEnvironment(),
+      ...process.env,
       CI: '1',
       SOURCE_DATE_EPOCH: String(sourceDateEpoch),
     },
@@ -279,38 +228,11 @@ function stageArtifacts(artifactRoot, rustBuildResult, clientSnapshot) {
     copyFileSync(artifact.sourcePath, destination)
     chmodSync(destination, 0o755)
   }
-  const helperReleaseManifestDestination = helperReleaseManifestArtifactPath(artifactRoot)
-  copyFileSync(rustBuildResult.helperReleaseManifestPath, helperReleaseManifestDestination)
-  chmodSync(helperReleaseManifestDestination, 0o644)
   cpSync(clientSnapshot, resolve(artifactRoot, 'client'), { recursive: true, force: true })
   for (const name of ['LICENSE', 'NOTICE', 'THIRD_PARTY_NOTICES.md']) {
     const destination = resolve(artifactRoot, 'legal', name)
     copyFileSync(resolve(root, name), destination)
     chmodSync(destination, 0o644)
-  }
-}
-
-function assertReleaseApiReport(report) {
-  if (report?.health?.initial !== 'ready' || report.health.afterRestart !== 'ready') {
-    throw new Error('release API vertical did not keep the Server ready across restart')
-  }
-  if (report.flow?.chat?.status !== 'Completed'
-    || report.flow?.cancel?.state !== 'cancelled'
-    || report.flow?.strongflow?.status !== 'done'
-    || report.flow?.strongflow?.verdictStatus !== 'pass') {
-    throw new Error('release API vertical did not complete Chat, cancel and StrongFlow')
-  }
-  if (report.deterministic?.contentEqual !== true
-    || report.restart?.messageBytesStable !== true
-    || report.restart?.deliveryBytesStable !== true) {
-    throw new Error('release API vertical was not byte-stable across repeat and restart')
-  }
-  if (report.remoteWorker?.terminalAfterWorkerRestart !== true
-    || report.remoteWorker?.terminalAfterServerRestart !== true
-    || !Number.isInteger(report.remoteWorker.restartedPid)
-    || report.remoteWorker.restartedPid === report.remoteWorker.initialPid
-    || report.remoteWorker.survivedServerRestartPid !== report.remoteWorker.restartedPid) {
-    throw new Error('release API vertical did not prove the remote Worker restart boundary')
   }
 }
 
@@ -326,18 +248,10 @@ function runReleaseApiVertical(buildRoot, rustBuildResult) {
     chmodSync(path, 0o755)
     return [artifact.binaryName, path]
   }))
-  const helperReleaseManifest = resolve(binaryRoot, HELPER_RELEASE_MANIFEST_NAME)
-  copyFileSync(rustBuildResult.helperReleaseManifestPath, helperReleaseManifest)
-  chmodSync(helperReleaseManifest, 0o644)
-  run('cargo', ['build', '-p', 'winwincode-cli', '--bin', 'wwc', '--locked', '--offline'])
-  const cliBinary = resolve(binaryRoot, 'wwc')
-  copyFileSync(resolve(serverTargetDirectory(root), 'debug/wwc'), cliBinary)
-  chmodSync(cliBinary, 0o755)
-  writeApiProductionSourceSeal({
+  const sourceSeal = writeApiProductionSourceSeal({
     root,
     serverBinary: paths['winwincode-server'],
     helperExecutable: paths['winwincode-kernel-helper'],
-    helperReleaseManifest,
   })
   const report = JSON.parse(run(process.execPath, [
     'scripts/run-api-production-vertical.mjs',
@@ -345,13 +259,13 @@ function runReleaseApiVertical(buildRoot, rustBuildResult) {
     '--server-binary', paths['winwincode-server'],
     '--worker-binary', paths['winwincode-worker'],
     '--directory', fixtureRoot,
-  ], { capture: true, env: verificationChildEnvironment() }))
-  assertReleaseApiReport(report)
+  ], { capture: true, env: process.env }))
+  assertReleaseApiReport(report, sourceSeal.seal)
   run(process.execPath, [
     '--test', '--test-name-pattern=public API cancellation closes',
     'tests/api-production-vertical.test.mjs',
   ], { env: {
-    ...verificationChildEnvironment(),
+    ...process.env,
     WWC_API_SKIP_BUILD: '1',
     WWC_CODE_MODE_ACCEPTANCE_BIN_DIR: binaryRoot,
   } })
@@ -360,7 +274,6 @@ function runReleaseApiVertical(buildRoot, rustBuildResult) {
 const { target, sourceCommit, sourceDateEpoch, output } = parseArguments(process.argv.slice(2))
 targetConfiguration(target)
 const expectedReleaseSourceSha256 = assertCleanCommit(sourceCommit, sourceDateEpoch)
-const { publicKeyHex: helperReleasePublicKeyHex } = releaseSigningConfiguration()
 
 const buildBase = process.env.WWC_RELEASE_BUILD_ROOT
   ?? process.env.RUNNER_TEMP
@@ -432,12 +345,6 @@ try {
       ...(targetConfiguration(target).os === 'macos' ? { machoUuid } : {}),
     })),
     replayClient: replay.client,
-    helperReleasePublicKeyHex,
-    replayHelperReleaseManifest: Object.freeze({
-      bytes: replay.rust.helperReleaseManifest.bytes,
-      sha256: replay.rust.helperReleaseManifest.sha256,
-      publicKeyHex: helperReleasePublicKeyHex,
-    }),
   })
   writeFileSync(resolve(artifactRoot, RELEASE_ARTIFACT_MANIFEST), canonicalJson(manifest))
   writeFileSync(resolve(artifactRoot, RELEASE_CHECKSUMS), releaseChecksums(manifest))

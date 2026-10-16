@@ -21,8 +21,9 @@ use std::sync::atomic::AtomicBool;
 use std::time::Duration;
 
 use anyhow::Result;
+#[cfg(not(unix))]
 use portable_pty::CommandBuilder;
-#[cfg(not(windows))]
+#[cfg(not(any(unix, windows)))]
 use portable_pty::native_pty_system;
 use tokio::sync::mpsc;
 use tokio::sync::oneshot;
@@ -50,12 +51,14 @@ pub fn conpty_supported() -> bool {
     true
 }
 
+#[cfg(not(unix))]
 struct PtyChildTerminator {
     killer: Box<dyn portable_pty::ChildKiller + Send + Sync>,
     #[cfg(unix)]
     process_group_id: Option<u32>,
 }
 
+#[cfg(not(unix))]
 impl ChildTerminator for PtyChildTerminator {
     fn signal(&mut self, signal: ProcessSignal) -> std::io::Result<()> {
         match signal {
@@ -93,6 +96,7 @@ impl ChildTerminator for PtyChildTerminator {
 #[cfg(unix)]
 struct RawPidTerminator {
     process_group_id: u32,
+    _lifeline: std::os::unix::net::UnixStream,
 }
 
 #[cfg(unix)]
@@ -106,10 +110,18 @@ impl ChildTerminator for RawPidTerminator {
     }
 
     fn kill(&mut self) -> std::io::Result<()> {
-        crate::process_group::kill_process_group(self.process_group_id)
+        #[cfg(target_os = "macos")]
+        {
+            crate::process_group::kill_process_group_with_member_fallback(self.process_group_id)
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            crate::process_group::kill_process_group(self.process_group_id)
+        }
     }
 }
 
+#[cfg(not(unix))]
 fn platform_native_pty_system() -> Box<dyn portable_pty::PtySystem + Send> {
     #[cfg(windows)]
     {
@@ -141,14 +153,16 @@ pub async fn spawn_process(
     let _ = inherited_fds;
 
     #[cfg(unix)]
-    if !inherited_fds.is_empty() {
+    {
         return spawn_process_preserving_fds(program, args, cwd, env, arg0, size, inherited_fds)
             .await;
     }
 
+    #[cfg(not(unix))]
     spawn_process_portable(program, args, cwd, env, arg0, size).await
 }
 
+#[cfg(not(unix))]
 async fn spawn_process_portable(
     program: &str,
     args: &[String],
@@ -300,6 +314,8 @@ async fn spawn_process_preserving_fds(
     let stdout = slave.try_clone()?;
     let stderr = slave.try_clone()?;
     let inherited_fds = inherited_fds.to_vec();
+    let lifeline = crate::process_group::ProcessGroupLifeline::new()?;
+    let lifeline_fds = lifeline.child_fds();
 
     unsafe {
         command
@@ -324,6 +340,8 @@ async fn spawn_process_preserving_fds(
                 if libc::setsid() == -1 {
                     return Err(std::io::Error::last_os_error());
                 }
+
+                crate::process_group::guard_process_group_lifetime(lifeline_fds)?;
 
                 // stdin now refers to the PTY slave, so make that fd the
                 // controlling terminal for the child's new session. stdout and
@@ -404,7 +422,10 @@ async fn spawn_process_preserving_fds(
 
     let handle = ProcessHandle::new(
         writer_tx,
-        Box::new(RawPidTerminator { process_group_id }),
+        Box::new(RawPidTerminator {
+            process_group_id,
+            _lifeline: lifeline.into_writer(),
+        }),
         reader_handle,
         Vec::new(),
         writer_handle,

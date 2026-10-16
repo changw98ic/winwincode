@@ -30,15 +30,30 @@
 
 约束：状态、命令回执、聚合日志记录和 outbox 事件在一个数据库事务中提交。调用方只能发送已经进入持久 outbox 的消息。发送尝试不能替代持久化。只有与原消息匹配的 ACK 才能推进或删除 outbox 项。
 
+Worker 延后发送暂时不可用的消息及依赖它的后续消息。取消 ACK 和独立执行的终态继续发送。同一运行时流、Artifact 分片和模型流保持顺序；终态等待它引用的事件和产物。重试成功后，Worker 从持久队列重新扫描先前跳过的依赖，再推进后续批次。重试沿用原消息和现有网络退避。
+
 源码依据：
 
 - `crates/winwincode-storage/src/lib.rs`：`append_state_commit` 依次写状态、日志、回执和 outbox，并由 `SqliteStorage::commit` 提交同一事务。
 - `crates/winwincode-control-plane/src/delivery_execution.rs`：`commit_and_dispatch` 先调用 `commit_delivery_and_job_intent`，再派发，最后用 `mark_job_dispatched` 标记持久 outbox 事件。
 - `crates/winwincode-codex/src/adapter.rs`：`take_execution_messages` 在返回消息前调用 `ExecutionOutbox::retain_in_transaction`。
 - `crates/winwincode-codex/src/outbox.rs`：`ExecutionOutbox::acknowledge_response`、`apply_runtime_ack`。
+- `crates/winwincode-worker/src/execution_effects.rs`：`flush_durable_outbox`、`execution_delivery_depends_on`。
 - `crates/winwincode-client-port/src/exchange/outbox.rs`：`OutboxSession::enqueue`、`acknowledge`、`compact_through`。
 
-相关测试：`crates/winwincode-control-plane/tests/delivery_atomic_transaction.rs`、`crates/winwincode-codex/src/storage_mechanism_regression.rs`、`tests/chat-execution-ack-loss-production.test.mjs`、`tests/chat-execution-transport-production.test.mjs`。
+相关测试：`crates/winwincode-control-plane/tests/delivery_atomic_transaction.rs`、`crates/winwincode-codex/src/storage_mechanism_regression.rs`、`crates/winwincode-worker/tests/support/durable_cancel_ack.rs`、`tests/chat-execution-ack-loss-production.test.mjs`、`tests/chat-execution-transport-production.test.mjs`。
+
+## Device 绑定与身份恢复
+
+约束：Device 在首次请求前持久化 Ed25519 私钥、Server URL、稳定请求 ID、配对令牌和绑定意图。Server 原子保存令牌消费、设备绑定、管理授权和回执。丢失成功响应或在保存本地回执前崩溃后，Device 使用原请求与原私钥恢复同一绑定。
+
+约束：Device 重启使用已保存的 Server URL 和身份。一次性配对令牌只用于建立绑定。每次签名使用新的单次挑战。已吊销绑定不能通过旧请求、重启或旧令牌重新激活。
+
+约束：Device 吊销必须在保存吊销事实的同一事务内收尾该 Device 的执行资源。系统按原 Worker 和 Worker instance 的组合关闭全部 running 或 cancelling slot，包括旧 attempt 的 slot。仍属于该实例的 Worker 标记为断开。系统同时收尾当前租约及其非终态 Job 和 admission reservation，并覆盖已经准备但尚未领取租约的预留。清理依据持久归属；绑定或启动授权已释放时仍须收尾原预留，其他 Device 的后继归属保持不变。确认从未派发的任务直接释放 reservation，保留金额 NULL，不生成待对账记录。已执行但无法确认的 tokens 和 cost 保持 unknown，reconciliation 保持 pending，并保留已知 tokens 下界和 Server 已观测的运行时。原 Worker 不能再获得新任务，已有终态保持不变。
+
+源码依据：`crates/winwincode-device-client/src/remote_auth.rs::bind_device`、`crates/winwincode-storage/src/device_auth.rs::bind_device_identity`、`revoke_device_identity`、`settle_revoked_executions`、`crates/winwincode-storage/src/worker_session_slots.rs::fence_device_worker_sessions_in_transaction`、`crates/winwincode-server/src/device_auth.rs::DeviceAuthApplication`。
+
+相关测试：Device `remote_auth::tests`；Server `device_auth::tests`；Storage `device_auth::tests::token_binding_access_and_receipt_roll_back_together`、`revoke_closes_running_and_unaccepted_leases_without_changing_success_or_other_devices`。测试支持钩子与证据边界见 [远程 Device 验证](testing.md#远程-device-验证)。
 
 ## 租约与 fencing
 
@@ -46,7 +61,13 @@
 
 Device 占用和 Worker 执行使用不同的租约域。新的 Device 占用使用更高的 token。Device 的 `FencingGuard` 只接受与本地 occupancy mirror 完全相同的 lease ID 和 token。较低 token、未见过的较高 token 或其他 lease 均拒绝。mirror revision 变化会使原本地 ticket 失效。
 
-Worker 凭据绑定 WorkerSession、Worker、Worker instance 和启动授权。远程连接还绑定当前 placement。任务结果与用量结算再次核对当前执行身份和会话状态。
+Device 转发子 Worker 消息时绑定 Client Node、Worker、Worker instance 和启动授权。Server 核对当前 placement。任务结果与用量结算再次核对当前执行身份和会话状态。
+
+远程交换按本次响应的 `serverTime` 计算剩余租约。Worker 在 relay 调用前记录 `request_started`，使用 `request_started + max(expiresAt - serverTime, 0)` 作为本地单调时钟截止时间。relay 排队和网络耗时消耗同一预算。截止已过的派发或续租不能进入控制队列；取出控制时再次核对。派发重放不延长截止时间。续租只有被当前执行接受后才更新权限。
+
+Server 在同一当前时间核对帧自身期限、当前 Job 租约、完整 lease 身份和已接受的历史派发或续租 period。旧 fencing、未知 period、已过期或终态租约的派发与续租从出站队列移除。保留帧沿用原始字节；本次响应时间不能改写持久化帧的发送时间。
+
+已经在原租约期合法进入 durable outbox 的 Artifact 原帧，在续租后仍按该已接受租约期校验。Server 必须把原 period 与当前续租链关联，并继续核对 Job、payload、Worker、Worker instance、attempt、fencing token 和 SessionBinding。未接受的 period 或外来身份必须失败关闭。续租不能改写原帧或其中的 lease。Server 不能仅因续租拒绝原 final Artifact 帧。ACK 回显原 lease；精确重放按重复写处理。
 
 源码依据：
 
@@ -55,8 +76,12 @@ Worker 凭据绑定 WorkerSession、Worker、Worker instance 和启动授权。�
 - `crates/winwincode-control-plane/src/runtime_event_transaction.rs`：`validate_authority` 及 `Rejection::StaleFencingToken`、`Rejection::WorkerInstance`。
 - `crates/winwincode-device-client/src/fencing.rs`：`FencingGuard::verify_ticket` 在占用镜像缺失或票据过期时失败关闭。
 - `crates/winwincode-codex/src/model_bridge.rs`：`SharedAuthoritySource::install_run_binding`、`validate_invocation`。
+- `crates/winwincode-server/src/remote_worker_transport.rs`：远程出站租约筛选与响应时钟。
+- `crates/winwincode-worker/src/remote_transport.rs`：`SharedRemoteState::receive_response` 的本地截止时间与重放校验。
+- `crates/winwincode-control-plane/src/execution_lease_period.rs`：`accepted_lease_window_matches` 核对已接受的续租链。
+- `crates/winwincode-control-plane/src/artifact_transaction.rs`：`ArtifactMessageContext::from_authority`、`validate_durable` 和 `validate_authority`。
 
-相关测试：`tests/execution-port-contract.test.mjs`、`tests/chat-execution-obsolete-owner-production.test.mjs`、`crates/winwincode-device-client/src/fencing.rs` 的单元测试。
+相关测试：`tests/execution-port-contract.test.mjs`、`tests/chat-execution-obsolete-owner-production.test.mjs`、`crates/winwincode-device-client/src/fencing.rs` 的单元测试、`crates/winwincode-control-plane/tests/session_binding_transaction.rs`、`crates/winwincode-control-plane/tests/durable_execution_port_ingress.rs`。
 
 ## 崩溃恢复与新 attempt
 
@@ -101,6 +126,28 @@ Worker 凭据绑定 WorkerSession、Worker、Worker instance 和启动授权。�
 
 相关测试：`crates/winwincode-control-plane/tests/candidate_git_release_vertical.rs`、`crates/winwincode-storage/tests/git_candidate_retention.rs`、`crates/winwincode-control-plane/tests/session_binding_transaction.rs`。
 
+## 候选应用与恢复
+
+约束：候选的 `baseCommit` 来自生成时冻结的源码链。多轮修改沿该链追溯原始基线。Device 拒绝缺失或成环的来源。应用时，目标分支 HEAD 必须仍等于该基线，工作树必须干净，候选摘要必须匹配授权。基线变化要求重新准备候选与审批。
+
+Server 在同一事务中持久化应用授权、审批事件和下行命令。重试授权也与对应下行命令一并提交。入队失败时，授权和事件一并回滚。`applicationId` 和 `approvalId` 绑定设备、仓库、候选、基线、目标分支、策略与候选摘要。摘要使用 `sha256:` 加规范 JSON `[repository_binding_id, base_commit, candidate_commit]` 的摘要。摘要用于关联候选，验证结论仍须来自独立执行证据。
+
+Device 必须先把带 `started_at` 的应用记录写入 `candidate_applications` 并持久化，再写 Git。应用提交携带 `WinWinCode-Application: <application_id>` 尾注。完成回执先进入本地 journal，再进入持久 outbox。
+
+Device 重启后核对原基线到目标分支 HEAD 之间的应用尾注。找到原应用提交时补记结果。目标分支仍在原基线、工作树干净且没有残留应用工作区时，记录 `not_started`。其他无法确定的结果记录为 `outcome_unknown`。
+
+某个应用的仓库暂时无法访问时，Device 保留该应用的未完成记录和具体诊断，继续 Hello、Worker 装配及其他应用恢复。路径或权限恢复后，再次核对该应用。无法读取仓库本身不构成 `outcome_unknown` 事实。
+
+实际写入前，工作树脏、候选引用暂时不可用或访问权限不足等拒绝走 `not_started` 恢复流程。该应用不产生完成失败回执，候选保持可重试状态。前提恢复后，用户可沿原应用和审批重试。真正开始下一次应用前，Device 清除上一次未写入的标记；后续崩溃重新核对 Git 事实。
+
+Device 启动完成日志核对后，在有效的当前占用授权下主动补报。已绑定 Device 的新实例先入队 Hello，再入队恢复的应用结果和 Worker 停止回执。已有未确认消息保留原序列与原字节。每次新的占用 offer 安装本地 mirror 后，也执行相同应用补报。journal 保存已进入持久 outbox 的 `reported_epoch`，避免同一事实在同一 epoch 重复补报。持久化结果变化时，该标记失效，新事实继续补报。旧 instance 或旧占用下的应用命令返回拒绝 ACK 并消费游标，使后续恢复授权能够到达。
+
+恢复事实通过当前占用授权下的 `client.application.reconciled` 上报。Server 同时核对原审批与候选绑定。旧 epoch 的普通 `apply_result` 只写事实。候选已到终态时，补报保留真实应用事实。`not_started` 进入 `awaiting_retry`，用户再次申请后，Server 才能在当前租约下授予同一应用的 `reconciledRetry`。`outcome_unknown` 进入 blocked，后续应用请求返回 `409 WRONG_STATE`。
+
+应用请求超时或仍显示 `applying` 时，用户可以选择“恢复原应用”。请求保留原候选、目标分支和基线，Server 复用原 `applicationId` 与 `approvalId`，向当前 Device 实例重发。Device 已有本地应用记录时，根据 journal 和 Git 事实裁决：已完成则返回原结果，确认未开始则补报 `not_started`，结果不明则补报 `outcome_unknown`。本地尚无该应用记录时，Device 按当前授权执行原请求。单条命令的拒绝 ACK 不能证明整个应用尚未开始。
+
+源码依据：`crates/winwincode-device-client/src/candidate_registry.rs`、`application_journal.rs`、`apply_engine.rs`；`crates/winwincode-storage/src/candidate_applications.rs`；`crates/winwincode-server/src/client_candidates.rs`。相关测试位于 Device 的 `tests/apply_engine.rs` 和 Server 的 `tests/client_candidates.rs`。
+
 ## 验证必须来自真实观察
 
 约束：executor 和 remediator 不能验证自己的 Candidate。reviewer、verifier 和 adversarial-verifier 使用只读 Candidate 工作区。每个结论必须引用实际保存的 Command 或 Test 事件。验证命令必须按验收标准指定的方法独立运行。模型生成的文字、未执行的检查、检查命令的局部输出或旧回执不能单独证明通过。
@@ -122,11 +169,20 @@ Worker 凭据绑定 WorkerSession、Worker、Worker instance 和启动授权。�
 
 约束：已保留的 Candidate 工件在取消意图提交后不能恢复上传。已经消费的原始终态仍可按原身份重放 ACK。
 
+Worker 的独立终止监测每 25 毫秒检查一次终止错误与本地租约截止时间。当前 managed Worker 为完整 `shutdown` 等待最多 10 秒；未确认执行清理完成时，再为 Core `stop_execution` 等待最多 5 秒。租约到期且执行已停止后，Worker 再用最多 5 秒重放原持久化终态并处理对应业务 ACK。此时执行权限保持到期；未收到 ACK 的终态保留在 outbox。Device supervisor 的生产停止宽限为 20 秒。Device 服务控制轮询为 200 毫秒，单次控制 HTTP 仍可能占用 10 秒。
+
+这些数值分别表示检测周期和等待预算。完整进程退出以 Worker、已登记后代和工具独立进程组的实际退出证据为准。常规关闭、租约到期和突发 `SIGKILL` 分别验证。进程归属核对同时使用 PID 和启动身份；无法确认身份时报告未确认状态。
+
+Unix 受管 pipe、PTY、legacy shell、原生验证、MCP 子进程、hook、Shell 快照和 Git 子进程通过私有 lifeline 管道维持 owner 归属。owner 退出使管道写端关闭，guardian 随后回收同一受管工具进程组。Linux sandbox、工具主动创建新会话或 PTY job control 创建新进程组的情形需要独立验收。
+
 源码依据：
 
 - `crates/winwincode-codex/src/model_bridge.rs`：`ExecutionPortModelBridge::fence_binding`、`cancel_thread`。
 - `crates/winwincode-codex/src/adapter.rs`：`fence_thread`、`interrupt`、`poll`。
 - `crates/winwincode-codex/src/candidate_artifact_outbox.rs`：`request_cancel`、`cancel`、`delivery_allowed`。
+- `crates/winwincode-worker/src/main.rs`：`shutdown_worker`；`remote_transport.rs`：`wait_for_terminal_error`。
+- `crates/winwincode-device-client/src/service.rs` 和 `supervisor.rs`：控制轮询、停止宽限和进程身份核对。
+- `third_party/codex/codex-rs/utils/pty/src/process_group.rs`：受管工具进程组与 lifeline guardian。
 
 相关测试：`crates/winwincode-codex/src/model_local_cancellation_tests.rs`、`crates/winwincode-codex/src/candidate_artifact_outbox.rs` 的 `cancellation_intent_survives_restart_and_blocks_candidate_replay`、`tests/code-mode-cancellation-evidence.test.mjs`。
 
@@ -154,6 +210,8 @@ Worker 凭据绑定 WorkerSession、Worker、Worker instance 和启动授权。�
 
 - `crates/winwincode-storage/src/lib.rs` 的 `SqliteStorage::open` 及其调用的 `initialize_schema`。
 - `crates/winwincode-device-client/src/store.rs` 的 `DeviceStore::open` 及其调用的 `initialize_schema`。
+
+当前 Server 存储版本为 `8`，Device 存储版本为 `11`。进程归属、执行租约和回执消费记录分别由对应存储保存。
 
 这两个函数先取得 `TransactionBehavior::Immediate` 事务，再读取 SQLite `user_version`。值为 `0` 时，函数创建当前结构并写入当前版本。值为当前常量时，函数校验既有结构。其他值返回 `unsupported schema version <version>`。初始化、版本写入、结构校验和提交位于同一事务。`SqliteStorage` 调用 `validate_journal_schema` 等校验函数。`DeviceStore` 调用 `validate_store_schema` 和 `validate_worker_report_schema`。这些实现依据不能推广为所有产品数据库的保证。
 

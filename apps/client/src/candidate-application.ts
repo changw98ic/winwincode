@@ -40,9 +40,20 @@ export function candidateCanApply(state: StrongFlowReviewState): boolean {
 }
 
 const RESULTS: Record<string, string> = {
-  applied: '已应用到项目', base_stale: '目标分支已变化，请核对当前提交后重试',
+  applied: '已应用到项目', base_stale: '目标分支已变化，请重新生成候选版本',
   working_tree_dirty: '目标工作区有未提交改动，请先处理改动', merge_conflict: '合并发生冲突，可创建候选分支继续处理',
-  candidate_missing: '设备上的候选版本已不可用', permission_denied: '没有应用此版本的权限', failed: '应用失败，请检查设备后重试',
+  candidate_missing: '设备上的候选版本已不可用', permission_denied: '没有应用此版本的权限',
+  failed: '应用失败，请处理失败原因并重新生成候选版本',
+  outcome_unknown: '应用结果尚未确认，请刷新设备结果',
+}
+
+const APPLICATION_STATUS = {
+  applying: '正在等待设备确认。可恢复原应用，由设备核对并返回执行结果。',
+  applied: '设备已确认应用完成。',
+  stale: '目标分支已偏离候选基线，请重新生成候选版本。',
+  awaiting_retry: '设备确认上次操作尚未开始。检查原分支后，可重试原应用。',
+  blocked: '上次应用结果尚未确认。已暂停再次应用，请检查设备并刷新结果。',
+  failed: '设备已确认应用失败。请处理失败原因并重新生成候选版本。',
 }
 
 export function mountCandidateApplication(options: CandidateApplicationOptions): { close(): void } {
@@ -67,11 +78,12 @@ export function mountCandidateApplication(options: CandidateApplicationOptions):
   branchLabel.htmlFor = branch.id; branchLabel.append(branch)
   const head = node('input')
   head.id = 'wwc-apply-head'; head.required = true; head.pattern = '(?:[0-9a-f]{40}|[0-9a-f]{64})'
-  const headLabel = node('label', '目标分支当前提交')
+  head.readOnly = true
+  const headLabel = node('label', '候选版本基线提交')
   headLabel.htmlFor = head.id; headLabel.append(head)
   const details = node('details')
   const commitResult = node('p')
-  details.append(node('summary', '分支检查详情'), headLabel, node('p', '默认使用设备最近上报的分支和提交。改用其他分支时，请填写该分支当前提交；应用前设备会再次核对。'), commitResult)
+  details.append(node('summary', '分支检查详情'), headLabel, node('p', '目标分支必须仍停在候选版本的基线提交。设备会在应用前再次核对。'), commitResult)
   const confirm = node('input'); confirm.type = 'checkbox'; confirm.required = true
   const confirmLabel = node('label')
   confirmLabel.append(confirm, document.createTextNode('已检查变更和验收结果，确认应用到此分支'))
@@ -88,8 +100,15 @@ export function mountCandidateApplication(options: CandidateApplicationOptions):
   let busy = false
   let closed = false
   let generation = 0
+  function canApply(candidate: ControlPlaneCandidateSummary): boolean {
+    const application = candidate.application
+    return (candidate.state === 'retained' || candidate.state === 'branch_created')
+      && (application == null || ((application.status === 'applying' || application.status === 'awaiting_retry')
+        && application.baseCommit === candidate.baseCommit))
+  }
   function lock(): void {
-    const applied = targets[destination.selectedIndex]?.candidate.state === 'applied'
+    const selected = targets[destination.selectedIndex]?.candidate
+    const applied = selected?.state === 'applied' || selected?.application?.status === 'applied'
     fields.hidden = applied
     eligibility.hidden = applied
     headLabel.hidden = applied
@@ -98,10 +117,13 @@ export function mountCandidateApplication(options: CandidateApplicationOptions):
       : candidateCanApply(options.model.state)
       ? '当前版本的必需验收项均已通过，可检查变更后应用。'
       : '当前版本尚未通过全部必需验收项，请先查看验收结果和证据。'
-    const disabled = applied || busy || !candidateCanApply(options.model.state) || targets.length === 0
+    const disabled = applied || busy || !candidateCanApply(options.model.state)
+      || selected === undefined || !canApply(selected)
     apply.disabled = disabled
-      || targets[destination.selectedIndex]?.candidate.state === 'applied'
+    apply.textContent = selected?.application?.status === 'applying' ? '恢复原应用'
+      : selected?.application?.status === 'awaiting_retry' ? '重试原应用' : '应用到项目'
     for (const control of [destination, branch, head, confirm]) control.disabled = disabled
+    if (selected?.application != null) branch.disabled = true
     refresh.disabled = busy
     createBranch.disabled = busy || targets.length === 0
   }
@@ -109,18 +131,25 @@ export function mountCandidateApplication(options: CandidateApplicationOptions):
     status.textContent = `${RESULTS[result.result] ?? result.result} · ${result.targetBranch}`
     commitResult.textContent = result.resultingCommit === null ? '' : `应用后的提交：${result.resultingCommit}`
     createBranch.hidden = result.result !== 'merge_conflict'
-    options.onStatusChange?.(result.result === 'applied' ? 'applied' : 'not-applied')
+    options.onStatusChange?.(result.result === 'applied' ? 'applied'
+      : result.result === 'outcome_unknown' ? 'unavailable' : 'not-applied')
   }
   function select(): void {
     const target = targets[destination.selectedIndex]
     if (target === undefined) return
     createBranch.hidden = true
     commitResult.textContent = ''
-    branch.value = target.repository.defaultBranch
-    head.value = target.repository.headCommit
+    branch.value = target.candidate.application?.targetBranch ?? target.repository.defaultBranch
+    head.value = target.candidate.application?.baseCommit ?? target.candidate.baseCommit
     confirm.checked = false
     const previous = target.candidate.history.at(-1)
-    if (previous !== undefined) receipt(previous)
+    const application = target.candidate.application
+    if (application != null) {
+      status.textContent = APPLICATION_STATUS[application.status]
+      if (application.baseCommit !== target.candidate.baseCommit) status.textContent = '应用记录与当前候选基线不一致，请刷新设备结果。'
+      options.onStatusChange?.(application.status === 'applied' ? 'applied'
+        : application.status === 'applying' || application.status === 'blocked' ? 'unavailable' : 'not-applied')
+    } else if (previous !== undefined) receipt(previous)
     else { status.textContent = '该版本尚未应用到项目。'; options.onStatusChange?.('not-applied') }
     lock()
     if (target.candidate.state === 'applied') apply.disabled = true
@@ -158,13 +187,27 @@ export function mountCandidateApplication(options: CandidateApplicationOptions):
   }
   async function submit(createOnly: boolean): Promise<void> {
     const target = targets[destination.selectedIndex]
-    if (busy || target === undefined || (!createOnly && (!candidateCanApply(options.model.state) || !confirm.checked || !form.reportValidity()))) return
+    if (busy || target === undefined || (!createOnly && (!canApply(target.candidate)
+      || !candidateCanApply(options.model.state) || !confirm.checked || !form.reportValidity()))) return
     const commit = options.model.state.detail?.currentCandidate?.candidateCommitId
     const selectedBranch = branch.value.trim(), expectedHead = head.value.trim()
     busy = true; lock(); status.textContent = createOnly ? '正在创建候选分支…' : '正在核对版本并应用…'
     try {
       await options.model.refresh()
       if (closed) return
+      if (!createOnly) {
+        const candidates = await options.candidates.listDeviceCandidates({ clientId: target.clientId })
+        if (closed) return
+        const current = candidates.find(candidate => candidate.candidateRef === target.candidate.candidateRef
+          && candidate.repositoryBindingId === target.repository.repositoryBindingId
+          && candidate.candidateCommit === commit)
+        if (current === undefined) throw new Error('设备上的候选版本已变化，请刷新设备结果。')
+        target.candidate = current
+        if (!canApply(current)) throw new Error(current.application == null
+          ? '当前候选版本不能再次应用。' : APPLICATION_STATUS[current.application.status])
+        if (expectedHead !== current.baseCommit || (current.application != null
+          && selectedBranch !== current.application.targetBranch)) throw new Error('应用参数与原操作不一致，请刷新设备结果。')
+      }
       if (options.model.state.detail?.currentCandidate?.candidateCommitId !== commit || (!createOnly && !candidateCanApply(options.model.state))) throw new Error('版本或验收结果已变化，请重新检查。')
       if (!createOnly && commit !== undefined) await options.model.acceptDelivery(commit)
       if (closed) return
@@ -181,7 +224,7 @@ export function mountCandidateApplication(options: CandidateApplicationOptions):
         if (!closed) { receipt(result); if (result.result === 'applied') target.candidate = { ...target.candidate, state: 'applied' } }
       }
     } catch (error) { if (!closed) status.textContent = publicErrorText(error, '应用请求未完成') }
-    finally { busy = false; if (!closed) { lock(); if (target.candidate.state === 'applied') apply.disabled = true } }
+    finally { if (!closed && !createOnly) await load(); busy = false; if (!closed) lock() }
   }
   form.addEventListener('submit', event => { event.preventDefault(); void submit(false) })
   createBranch.addEventListener('click', () => { void submit(true) })

@@ -3,7 +3,7 @@
 use std::collections::BTreeMap;
 use std::fmt;
 use std::fs;
-use std::io::{Read, Write};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
@@ -17,7 +17,9 @@ use std::os::unix::process::CommandExt;
 
 use time::OffsetDateTime;
 
-use crate::daemon::{LeaseWorkerController, WorkerCapacitySnapshot, WorkerCapacitySource};
+use crate::daemon::{
+    ExchangeTransport, LeaseWorkerController, WorkerCapacitySnapshot, WorkerCapacitySource,
+};
 use crate::fencing::{FencedCommandKind, FencingGuard, FencingRejection, FencingVerdict};
 use crate::store::{DeviceStore, DeviceStoreError, WorkerProcessRecord};
 use crate::worker_logs::{
@@ -32,7 +34,6 @@ pub const WORKER_STATE_CRASHED: &str = "crashed";
 pub const WORKER_STATE_MISSING: &str = "missing";
 
 const MANAGED_SESSION_CONFIG_FILE: &str = "managed-session.json";
-const WORKER_CREDENTIAL_FILE: &str = "worker-credential";
 const MANAGED_SESSION_ARG: &str = "--managed-session";
 const WORKER_BINARY_NAME: &str = "winwincode-worker";
 const STOP_POLL_INTERVAL: Duration = Duration::from_millis(20);
@@ -57,7 +58,7 @@ impl Default for SupervisorConfig {
             model_route: None,
             worker_binary_path: None,
             max_concurrent_worker_sessions: 0,
-            stop_grace_period: Duration::from_secs(10),
+            stop_grace_period: Duration::from_secs(20),
         }
     }
 }
@@ -75,7 +76,6 @@ pub struct SpawnRequest<'a> {
     pub worker_instance_id: &'a str,
     pub occupancy_lease_id: &'a str,
     pub occupancy_fencing_token: u64,
-    pub worker_credential_token: &'a str,
     pub repository_binding_id: &'a str,
     pub launch_grant_id: &'a str,
     pub product_session_id: Option<&'a str>,
@@ -143,7 +143,6 @@ pub enum SupervisorError {
     UnverifiableExisting { worker_session_id: String, pid: u32 },
     CapacityExhausted { max_concurrent_worker_sessions: u32 },
     InvalidInput(String),
-    WorkerBinary { path: PathBuf, reason: String },
     Spawn { reason: String },
     WorkerLogs(String),
     ProcessIdentityUnavailable { pid: u32 },
@@ -185,9 +184,6 @@ impl fmt::Display for SupervisorError {
                  concurrent worker sessions)"
             ),
             Self::InvalidInput(message) => write!(formatter, "worker supervisor input: {message}"),
-            Self::WorkerBinary { path, reason } => {
-                write!(formatter, "worker binary {}: {reason}", path.display())
-            }
             Self::Spawn { reason } => write!(formatter, "worker process spawn failed: {reason}"),
             Self::WorkerLogs(reason) => write!(formatter, "worker log recorder failure: {reason}"),
             Self::ProcessIdentityUnavailable { pid } => write!(
@@ -240,6 +236,7 @@ struct SupervisorInner {
     store: Mutex<DeviceStore>,
     children: Mutex<BTreeMap<String, TrackedChild>>,
     worker_logs: WorkerLogRecorder,
+    worker_relay_transport: Mutex<Option<Arc<dyn ExchangeTransport>>>,
 }
 
 #[derive(Clone)]
@@ -271,6 +268,7 @@ impl SessionSupervisor {
                 store: Mutex::new(store),
                 children: Mutex::new(BTreeMap::new()),
                 worker_logs,
+                worker_relay_transport: Mutex::new(None),
             }),
         })
     }
@@ -325,6 +323,9 @@ impl SessionSupervisor {
         let status = Command::new(self.resolve_worker_binary()?)
             .arg("--recover-interrupted-calls")
             .arg(&config_path)
+            .env_remove("WWC_DEVICE_CA_FILE")
+            .env_remove("WWC_DEVICE_PAIRING_TOKEN")
+            .env_remove("WWC_DEVICE_SERVER_URL")
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(recovery_stderr)
@@ -347,23 +348,35 @@ impl SessionSupervisor {
         Ok(self.lock_store().worker_process(worker_session_id)?)
     }
 
-    pub fn write_worker_credential(
-        &self,
-        worker_session_id: &str,
-        material: &str,
-    ) -> Result<(), SupervisorError> {
-        let record = self
-            .lock_store()
-            .worker_process(worker_session_id)?
-            .ok_or_else(|| SupervisorError::NotFound {
-                worker_session_id: worker_session_id.to_owned(),
-            })?;
-        let path = PathBuf::from(record.data_directory).join(WORKER_CREDENTIAL_FILE);
-        write_private_file(&path, material.as_bytes())
-    }
-
     pub fn worker_processes(&self) -> Result<Vec<WorkerProcessRecord>, SupervisorError> {
         Ok(self.lock_store().worker_processes()?)
+    }
+
+    pub fn set_worker_relay_transport(&self, transport: Arc<dyn ExchangeTransport>) {
+        *self
+            .inner
+            .worker_relay_transport
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = Some(transport);
+    }
+
+    pub fn shutdown(&self) -> Result<(), SupervisorError> {
+        let mut failure = None;
+        for record in self.worker_processes()? {
+            if record.state == WORKER_STATE_RUNNING {
+                match self.stop_with_fencing(&record.worker_session_id, true, false) {
+                    Ok(stopped) => {
+                        if let Err(error) = self.recover_terminated_calls(&stopped) {
+                            failure.get_or_insert(error);
+                        }
+                    }
+                    Err(error) => {
+                        failure.get_or_insert(error);
+                    }
+                }
+            }
+        }
+        failure.map_or(Ok(()), Err)
     }
 
     pub fn count_worker_processes_in_state(&self, state: &str) -> Result<u64, SupervisorError> {
@@ -415,18 +428,14 @@ impl SessionSupervisor {
 
         let worker_id = request.worker_id;
         let worker_instance_id = request.worker_instance_id;
-
         create_directory(request.data_directory, "worker data directory")?;
         create_directory(request.worker_root, "worker root")?;
-        let credential_path = request.data_directory.join(WORKER_CREDENTIAL_FILE);
-        write_private_file(&credential_path, request.worker_credential_token.as_bytes())?;
         let config_path = request.data_directory.join(MANAGED_SESSION_CONFIG_FILE);
         let config_json = managed_session_config_json(
             &self.inner.config,
             request,
             worker_id,
             worker_instance_id,
-            &credential_path,
             &store
                 .database_path()
                 .parent()
@@ -471,20 +480,6 @@ impl SessionSupervisor {
                 return Err(error);
             }
         };
-        let release = child
-            .stdin
-            .take()
-            .ok_or_else(|| SupervisorError::invalid("managed start gate unavailable"))
-            .and_then(|mut pipe| {
-                pipe.write_all(&[1])
-                    .map_err(|_| SupervisorError::invalid("managed start gate unavailable"))
-            });
-        if let Err(error) = release {
-            let _ = child.kill();
-            let _ = child.wait();
-            join_log_readers(log_readers);
-            return Err(error);
-        }
         self.lock_children().insert(
             request.worker_session_id.to_owned(),
             TrackedChild { child, log_readers },
@@ -538,13 +533,19 @@ impl SessionSupervisor {
         config_path: &Path,
         request: SpawnRequest<'_>,
     ) -> Result<Child, SupervisorError> {
-        let binary = self.resolve_worker_binary()?;
+        let binary = std::path::absolute(self.resolve_worker_binary()?).map_err(|error| {
+            SupervisorError::Spawn {
+                reason: error.to_string(),
+            }
+        })?;
         let mut command = Command::new(&binary);
         command
             .arg(MANAGED_SESSION_ARG)
             .arg(config_path)
+            .env_remove("WWC_DEVICE_CA_FILE")
+            .env_remove("WWC_DEVICE_PAIRING_TOKEN")
+            .env_remove("WWC_DEVICE_SERVER_URL")
             .current_dir(request.worker_root)
-            .env("WWC_MANAGED_START_GATE", "1")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
@@ -561,13 +562,60 @@ impl SessionSupervisor {
         request: SpawnRequest<'_>,
     ) -> Vec<thread::JoinHandle<()>> {
         let mut readers = Vec::with_capacity(2);
-        if let Some(pipe) = child.stdout.take() {
-            readers.push(self.start_log_reader(pipe, WorkerLogStream::Stdout, request));
+        if let Some(pipe) = child.stdout.take()
+            && let Some(input) = child.stdin.take()
+        {
+            readers.push(self.start_worker_relay(pipe, input, request));
         }
         if let Some(pipe) = child.stderr.take() {
             readers.push(self.start_log_reader(pipe, WorkerLogStream::Stderr, request));
         }
         readers
+    }
+
+    fn start_worker_relay<R: Read + Send + 'static>(
+        &self,
+        output: R,
+        mut input: std::process::ChildStdin,
+        request: SpawnRequest<'_>,
+    ) -> thread::JoinHandle<()> {
+        let endpoint = format!(
+            "{}/internal/v1/client/worker-exchange",
+            self.inner.config.server_origin
+        );
+        let node = self.inner.config.client_node_id.clone();
+        let worker = request.worker_id.to_owned();
+        let instance = request.worker_instance_id.to_owned();
+        let transport = self
+            .inner
+            .worker_relay_transport
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone();
+        thread::spawn(move || {
+            use winwincode_client_port::worker_relay::{
+                DeviceWorkerRelayRequest, WorkerRelayRequest,
+            };
+            for line in BufReader::new(output).lines() {
+                let Ok(line) = line else { break };
+                let Ok(request) = serde_json::from_str::<WorkerRelayRequest>(&line) else {
+                    break;
+                };
+                let payload = DeviceWorkerRelayRequest {
+                    client_node_id: node.clone(),
+                    worker_id: worker.clone(),
+                    worker_instance_id: instance.clone(),
+                    request,
+                };
+                let response = relay_worker_request(&endpoint, transport.as_deref(), &payload);
+                if serde_json::to_writer(&mut input, &response).is_err()
+                    || input.write_all(b"\n").is_err()
+                    || input.flush().is_err()
+                {
+                    break;
+                }
+            }
+        })
     }
 
     fn start_log_reader<R: Read + Send + 'static>(
@@ -576,7 +624,7 @@ impl SessionSupervisor {
         stream: WorkerLogStream,
         request: SpawnRequest<'_>,
     ) -> thread::JoinHandle<()> {
-        let supervisor = Arc::clone(&self.inner);
+        let recorder = self.inner.worker_logs.clone();
         let session = request.worker_session_id.to_owned();
         let instance = request.worker_instance_id.to_owned();
         thread::spawn(move || {
@@ -585,7 +633,7 @@ impl SessionSupervisor {
                 match pipe.read(&mut buffer) {
                     Ok(0) | Err(_) => break,
                     Ok(bytes) => {
-                        let _ = supervisor.worker_logs.append(
+                        let _ = recorder.append(
                             &session,
                             &instance,
                             stream,
@@ -756,6 +804,10 @@ impl SessionSupervisor {
             }
             for (worker_session_id, _, _) in &finished {
                 if let Some(tracked) = children.remove(worker_session_id) {
+                    if let Err(error) = retire_child_group(tracked.child.id(), self.stop_grace()) {
+                        children.insert(worker_session_id.clone(), tracked);
+                        return Err(error);
+                    }
                     join_log_readers(tracked.log_readers);
                 }
             }
@@ -898,7 +950,7 @@ impl SessionSupervisor {
                 });
                 continue;
             }
-            match self.stop(&row.worker_session_id, true) {
+            match self.stop_with_fencing(&row.worker_session_id, true, false) {
                 Ok(final_row) => outcomes.push(WorkerStopOutcome {
                     worker_session_id: final_row.worker_session_id,
                     stopped: true,
@@ -971,29 +1023,71 @@ impl SessionSupervisor {
 
     fn resolve_worker_binary(&self) -> Result<PathBuf, SupervisorError> {
         if let Some(configured) = &self.inner.config.worker_binary_path {
-            if configured.is_file() {
-                return Ok(configured.clone());
-            }
-            return Err(SupervisorError::WorkerBinary {
-                path: configured.clone(),
-                reason: "the configured worker binary is missing".to_owned(),
-            });
+            return Ok(configured.clone());
         }
-        if let Ok(current) = std::env::current_exe()
-            && let Some(directory) = current.parent()
-        {
-            let sibling = directory.join(WORKER_BINARY_NAME);
-            if sibling.is_file() {
-                return Ok(sibling);
-            }
-        }
-        Err(SupervisorError::WorkerBinary {
-            path: PathBuf::from(WORKER_BINARY_NAME),
-            reason: "no configured worker binary and no winwincode-worker sibling \
-                     next to the current executable"
-                .to_owned(),
-        })
+        std::env::current_exe()
+            .map(|path| path.with_file_name(WORKER_BINARY_NAME))
+            .map_err(|error| SupervisorError::Spawn {
+                reason: error.to_string(),
+            })
     }
+}
+
+fn relay_worker_request(
+    endpoint: &str,
+    transport: Option<&dyn ExchangeTransport>,
+    payload: &winwincode_client_port::worker_relay::DeviceWorkerRelayRequest,
+) -> winwincode_client_port::worker_relay::WorkerRelayResponse {
+    use winwincode_client_port::worker_relay::WorkerRelayResponse;
+    use winwincode_network::{Acceptance, ErrorKind, NetworkFailure, Phase};
+    let protocol_error = || {
+        let mut failure = NetworkFailure::new(
+            ErrorKind::ProtocolInvalid,
+            Acceptance::ResponseReceived,
+            Phase::Decode,
+        )
+        .with_diagnostic(winwincode_network::NetworkDiagnostic::new(
+            winwincode_network::DiagnosticCode::JsonSchema,
+        ));
+        failure.http_status = Some(200);
+        failure
+    };
+    let result = serde_json::to_vec(payload)
+        .map_err(|_| {
+            NetworkFailure::new(
+                ErrorKind::RequestInvalid,
+                Acceptance::NotSent,
+                Phase::Connect,
+            )
+        })
+        .and_then(|body| {
+            transport
+                .map_or_else(
+                    || crate::http::post_json(endpoint, &body, Duration::from_secs(10), &|| true),
+                    |transport| transport.worker_exchange(&body),
+                )
+                .map_err(|error| error.network_failure())
+        })
+        .and_then(|body| serde_json::from_slice(&body).map_err(|_| protocol_error()));
+    result.unwrap_or_else(|failure| WorkerRelayResponse {
+        status: failure.http_status.unwrap_or(502),
+        body: String::new(),
+        failure: Some(failure),
+    })
+}
+
+fn helper_executable() -> Result<PathBuf, SupervisorError> {
+    let path = std::env::var_os("WWC_WORKER_HELPER_EXECUTABLE")
+        .map_or_else(
+            || std::env::current_exe().map(|path| path.with_file_name("winwincode-kernel-helper")),
+            |path| Ok(PathBuf::from(path)),
+        )
+        .map_err(|error| SupervisorError::Spawn {
+            reason: error.to_string(),
+        })?;
+    std::path::absolute(path).map_err(|error| SupervisorError::Spawn {
+        reason: error.to_string(),
+    })
 }
 
 impl WorkerCapacitySource for SessionSupervisor {
@@ -1058,29 +1152,9 @@ fn validate_config(config: &SupervisorConfig) -> Result<(), SupervisorError> {
 }
 
 fn validate_server_origin(origin: &str) -> Result<(), SupervisorError> {
-    let authority = origin
-        .strip_prefix("https://")
-        .filter(|value| !value.contains('/') && !value.contains('@'))
-        .ok_or_else(|| {
-            SupervisorError::invalid("server origin must be an https://HOST:PORT origin")
-        })?;
-    let (host, port) = authority.rsplit_once(':').ok_or_else(|| {
-        SupervisorError::invalid("server origin must be an https://HOST:PORT origin")
-    })?;
-    if host.is_empty() || host.bytes().any(|byte| byte.is_ascii_control()) {
-        return Err(SupervisorError::invalid(
-            "server origin host must be non-empty and free of control characters",
-        ));
-    }
-    let port: u16 = port
-        .parse()
-        .map_err(|_| SupervisorError::invalid("server origin port must be a port number"))?;
-    if port == 0 {
-        return Err(SupervisorError::invalid(
-            "server origin port must be nonzero",
-        ));
-    }
-    Ok(())
+    crate::remote_auth::server_origin(origin)
+        .map(|_| ())
+        .map_err(|error| SupervisorError::invalid(error.to_string()))
 }
 
 fn validate_request(request: SpawnRequest<'_>) -> Result<(), SupervisorError> {
@@ -1170,7 +1244,6 @@ fn managed_session_config_json(
     request: SpawnRequest<'_>,
     worker_id: &str,
     worker_instance_id: &str,
-    credential_path: &Path,
     provider_directory: &Path,
 ) -> Result<String, SupervisorError> {
     let local_path = |path: &Path, label: &str| -> Result<String, SupervisorError> {
@@ -1190,8 +1263,7 @@ fn managed_session_config_json(
         "sourceDirectory": local_path(request.source_directory, "source directory")?,
         "dataDirectory": local_path(request.data_directory, "data directory")?,
         "providerDirectory": local_path(provider_directory, "Provider directory")?,
-        "serverOrigin": config.server_origin,
-        "workerCredentialPath": local_path(credential_path, "worker credential path")?,
+        "helperExecutable": local_path(&helper_executable()?, "helper executable")?,
     });
     if let Some(product_session_id) = request.product_session_id {
         object["productSessionId"] = serde_json::Value::String(product_session_id.to_owned());
@@ -1316,6 +1388,21 @@ fn join_log_readers(readers: Vec<thread::JoinHandle<()>>) {
     }
 }
 
+fn retire_child_group(pid: u32, grace: Duration) -> Result<(), SupervisorError> {
+    let target = ProcessSignalTarget::Group(pid);
+    if process_group_is_empty(target) == Some(true) {
+        return Ok(());
+    }
+    if (!signal_process(target, "KILL") && process_group_is_empty(target) != Some(true))
+        || wait_for_group_empty(target, Instant::now() + grace) != StopOutcome::Stopped
+    {
+        return Err(SupervisorError::Spawn {
+            reason: format!("terminated Worker {pid} still owns live subprocesses"),
+        });
+    }
+    Ok(())
+}
+
 fn stop_observation(status: Option<ExitStatus>) -> (&'static str, Option<i64>) {
     match status {
         Some(status) => match status.code() {
@@ -1339,8 +1426,10 @@ fn stop_registered_process(
     graceful: bool,
     grace: Duration,
 ) -> StopOutcome {
-    if probe_process(record.pid, &record.process_start_identity) != ProcessProbe::Alive {
-        return StopOutcome::AlreadyGone;
+    match probe_process(record.pid, &record.process_start_identity) {
+        ProcessProbe::Alive => {}
+        ProcessProbe::Gone => return StopOutcome::AlreadyGone,
+        ProcessProbe::Unknown => return StopOutcome::Unverifiable,
     }
     let Some(target) = validated_process_group_target(record.pid) else {
         return StopOutcome::Unverifiable;
@@ -1558,8 +1647,7 @@ mod tests {
     const LEASE: &str = "ocl_AAAAAAAAAAAAAAAAAAAAAAAAAA";
     const NODE: &str = "cnd_A1A1A1A1A1A1A1A1A1A1A1A1A1";
     const CLIENT_INSTANCE: &str = "cix_B2B2B2B2B2B2B2B2B2B2B2B2B2";
-    const ORIGIN: &str = "https://127.0.0.1:8443";
-    const CREDENTIAL_TOKEN: &str = "wsc-supervisor-test-token";
+    const ORIGIN: &str = "http://127.0.0.1:8443";
     const WORKER_ID: &str = "wrk_TESTWORKER00000000000001";
     const WORKER_INSTANCE: &str = "wki_TESTINSTANCE000000000001";
     const WORKER_INSTANCE_2: &str = "wki_TESTINSTANCE000000000002";
@@ -1572,9 +1660,9 @@ mod tests {
          trap 'exit 0' TERM\n\
          echo ready > \"$(dirname \"$2\")/worker-ready\"\n\
          while :; do sleep 0.1; done";
-    const CRASH_BODY: &str = "exit 3";
+    const CRASH_BODY: &str = "sleep 0.1; exit 3";
     const LOGGING_CRASH_BODY: &str =
-        "printf 'worker stdout\n'; printf 'worker stderr\n' >&2; printf '%*s\\n' 1500 x; exit 3";
+        "printf 'worker diagnostic\n' >&2; printf '%*s\\n' 1500 x >&2; sleep 0.1; exit 3";
 
     fn wait_for_ready_marker(data_directory: &Path, worker_session_id: &str) {
         let marker = data_directory.join("worker-ready");
@@ -1595,6 +1683,229 @@ mod tests {
             .stderr(Stdio::null())
             .status()
             .is_ok_and(|status| status.success())
+    }
+
+    fn http_relay_fixture(
+        responses: Vec<(u16, Option<u64>, String)>,
+    ) -> (String, thread::JoinHandle<Vec<Vec<u8>>>) {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let endpoint = format!(
+            "http://{}/internal/v1/client/worker-exchange",
+            listener.local_addr().unwrap()
+        );
+        let task = thread::spawn(move || {
+            let mut requests = Vec::new();
+            for (status, retry_after, body) in responses {
+                let (mut stream, _) = listener.accept().unwrap();
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(5)))
+                    .unwrap();
+                let mut reader = BufReader::new(stream.try_clone().unwrap());
+                let mut line = String::new();
+                reader.read_line(&mut line).unwrap();
+                let mut length = 0;
+                loop {
+                    line.clear();
+                    reader.read_line(&mut line).unwrap();
+                    if line == "\r\n" {
+                        break;
+                    }
+                    if let Some((name, value)) = line.split_once(':')
+                        && name.eq_ignore_ascii_case("content-length")
+                    {
+                        length = value.trim().parse().unwrap();
+                    }
+                }
+                let mut request = vec![0; length];
+                reader.read_exact(&mut request).unwrap();
+                requests.push(request);
+                let retry = retry_after.map_or(String::new(), |seconds| {
+                    format!("Retry-After: {seconds}\r\n")
+                });
+                write!(stream, "HTTP/1.1 {status} fixture\r\n{retry}Content-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();
+            }
+            requests
+        });
+        (endpoint, task)
+    }
+
+    #[test]
+    fn worker_relay_preserves_permanent_http_and_protocol_failures() {
+        use winwincode_client_port::worker_relay::{DeviceWorkerRelayRequest, WorkerRelayRequest};
+        use winwincode_network::ErrorKind;
+        for (status, body, expected) in [
+            (401, "denied", ErrorKind::Authentication),
+            (403, "denied", ErrorKind::Authorization),
+            (404, "missing", ErrorKind::RequestInvalid),
+            (413, "too large", ErrorKind::RequestInvalid),
+            (
+                200,
+                "<html>proxy failure</html>",
+                ErrorKind::ProtocolInvalid,
+            ),
+        ] {
+            let (endpoint, server) = http_relay_fixture(vec![(status, None, body.into())]);
+            let response = relay_worker_request(
+                &endpoint,
+                None,
+                &DeviceWorkerRelayRequest {
+                    client_node_id: NODE.into(),
+                    worker_id: WORKER_ID.into(),
+                    worker_instance_id: WORKER_INSTANCE.into(),
+                    request: WorkerRelayRequest::Exchange {
+                        body: "registration".into(),
+                    },
+                },
+            );
+            let failure = response.failure.unwrap();
+            assert_eq!(failure.kind, expected);
+            assert!(!failure.retryable() || failure.phase == winwincode_network::Phase::Decode);
+            assert_eq!(failure.http_status, Some(status));
+            assert_eq!(server.join().unwrap().len(), 1);
+        }
+        let inner = winwincode_client_port::worker_relay::WorkerRelayResponse {
+            status: 400,
+            body: "inner rejection".into(),
+            failure: None,
+        };
+        let (endpoint, server) =
+            http_relay_fixture(vec![(200, None, serde_json::to_string(&inner).unwrap())]);
+        let response = relay_worker_request(
+            &endpoint,
+            None,
+            &DeviceWorkerRelayRequest {
+                client_node_id: NODE.into(),
+                worker_id: WORKER_ID.into(),
+                worker_instance_id: WORKER_INSTANCE.into(),
+                request: WorkerRelayRequest::Exchange {
+                    body: "registration".into(),
+                },
+            },
+        );
+        assert_eq!(response, inner);
+        server.join().unwrap();
+    }
+
+    #[tokio::test]
+    #[allow(clippy::too_many_lines)]
+    async fn worker_relay_retries_the_same_message_after_http_backoff_and_keeps_cancel() {
+        use std::os::unix::net::UnixStream;
+        use winwincode_client_port::worker_relay::{
+            DeviceWorkerRelayRequest, WorkerRelayRequest, WorkerRelayResponse,
+        };
+        use winwincode_worker::WorkerExecutionPort;
+        use winwincode_worker::composition::{
+            ExecutionPortCore, ExecutionPortMessage, FrameDirection, RemoteTransportAdapter,
+            TypedFrame,
+        };
+        use winwincode_worker::remote_transport::{RemoteWorkerPort, RemoteWorkerPortError};
+        struct Core;
+        impl ExecutionPortCore for Core {
+            type Output = ();
+            type Error = std::convert::Infallible;
+            fn accept(&mut self, _: &ExecutionPortMessage) -> Result<(), Self::Error> {
+                Ok(())
+            }
+        }
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../tests/fixtures/contracts/execution-port.valid.json"
+        ))
+        .unwrap();
+        let message = |kind| {
+            serde_json::from_value::<ExecutionPortMessage>(
+                fixture["messages"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .find(|message| message["kind"] == kind)
+                    .unwrap()
+                    .clone(),
+            )
+            .unwrap()
+        };
+        let register = message("worker.register");
+        let ExecutionPortMessage::WorkerRegisterMessage(registration) = &register else {
+            unreachable!()
+        };
+        let cancel = message("job.cancel");
+        let ExecutionPortMessage::JobCancelMessage(cancellation) = &cancel else {
+            unreachable!()
+        };
+        let frame = RemoteTransportAdapter::<Core>::encode(
+            &TypedFrame::new(FrameDirection::ControlPlaneToWorker, cancel.clone()).unwrap(),
+        )
+        .unwrap();
+        let body = serde_json::json!({
+            "schemaVersion": "execution-port.remote-exchange.v2", "frameAccepted": true,
+            "serverTime": "2026-10-15T00:00:00.000Z",
+            "deliveries": [{"deliveryId": cancellation.message_id, "frame": frame}]
+        })
+        .to_string();
+        let success = serde_json::to_string(&WorkerRelayResponse {
+            status: 200,
+            body,
+            failure: None,
+        })
+        .unwrap();
+        let (endpoint, server) = http_relay_fixture(vec![
+            (503, Some(1), String::new()),
+            (429, Some(1), String::new()),
+            (200, None, success),
+        ]);
+        let (worker, device) = UnixStream::pair().unwrap();
+        let relay = thread::spawn(move || {
+            let mut output = device.try_clone().unwrap();
+            for line in BufReader::new(device).lines() {
+                let request = serde_json::from_str::<WorkerRelayRequest>(&line.unwrap()).unwrap();
+                let response = relay_worker_request(
+                    &endpoint,
+                    None,
+                    &DeviceWorkerRelayRequest {
+                        client_node_id: NODE.into(),
+                        worker_id: WORKER_ID.into(),
+                        worker_instance_id: WORKER_INSTANCE.into(),
+                        request,
+                    },
+                );
+                serde_json::to_writer(&mut output, &response).unwrap();
+                output.write_all(b"\n").unwrap();
+                output.flush().unwrap();
+            }
+        });
+        let (mut port, handle) = RemoteWorkerPort::with_io(
+            registration.worker_id.clone(),
+            registration.worker_instance_id.clone(),
+            BufReader::new(worker.try_clone().unwrap()),
+            worker,
+        );
+        let started = Instant::now();
+        for (status, delay) in [(503, 5300), (429, 10300)] {
+            let RemoteWorkerPortError::Network(failure) =
+                port.send(register.clone()).await.unwrap_err()
+            else {
+                panic!("transient HTTP must retry")
+            };
+            assert_eq!(failure.http_status, Some(status));
+            assert_eq!(failure.retry_after_ms, Some(1000));
+            assert!(matches!(
+                port.send(register.clone()).await,
+                Err(RemoteWorkerPortError::Network(_))
+            ));
+            assert!(handle.terminal_error().is_none());
+            tokio::time::sleep(Duration::from_millis(delay)).await;
+        }
+        port.send(register).await.unwrap();
+        assert!(started.elapsed() >= Duration::from_secs(2));
+        assert!(matches!(
+            handle.next_control().unwrap(),
+            Some((_, ExecutionPortMessage::JobCancelMessage(_)))
+        ));
+        drop(port);
+        let requests = server.join().unwrap();
+        assert_eq!(requests.len(), 3);
+        assert_eq!(requests[0], requests[1]);
+        assert_eq!(requests[1], requests[2]);
+        relay.join().unwrap();
     }
 
     #[test]
@@ -1642,18 +1953,7 @@ mod tests {
     }
 
     fn write_executable_script(path: &Path, body: &str) {
-        fs::write(
-            path,
-            format!(
-                "#!/bin/sh\n\
-                 if [ \"${{WWC_MANAGED_START_GATE:-}}\" = 1 ]; then\n\
-                 gate=$(dd bs=1 count=1 2>/dev/null)\n\
-                 [ \"$gate\" = \"$(printf '\\001')\" ] || exit 1\n\
-                 fi\n\
-                 {body}\n"
-            ),
-        )
-        .expect("script writes");
+        fs::write(path, format!("#!/bin/sh\n{body}\n")).expect("script writes");
         let mut permissions = fs::metadata(path).expect("script metadata").permissions();
         permissions.set_mode(0o755);
         fs::set_permissions(path, permissions).expect("script chmod");
@@ -1669,6 +1969,118 @@ mod tests {
             max_concurrent_worker_sessions: 8,
             stop_grace_period: Duration::from_secs(5),
         }
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)]
+    fn worker_stdio_requests_are_relayed_with_device_routes_and_responses() {
+        use std::net::TcpListener;
+        use winwincode_client_port::worker_relay::{
+            DeviceWorkerRelayRequest, WorkerRelayRequest, WorkerRelayResponse,
+        };
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = thread::spawn(move || {
+            for expected in [
+                WorkerRelayRequest::Exchange { body: "{}".into() },
+                WorkerRelayRequest::Accounting {
+                    body: Some("[]".into()),
+                    offset: 7,
+                },
+            ] {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut reader = BufReader::new(stream.try_clone().unwrap());
+                let mut line = String::new();
+                reader.read_line(&mut line).unwrap();
+                assert!(line.starts_with("POST /internal/v1/client/worker-exchange "));
+                let mut length = 0;
+                loop {
+                    line.clear();
+                    reader.read_line(&mut line).unwrap();
+                    if line == "\r\n" {
+                        break;
+                    }
+                    if let Some((name, value)) = line.split_once(':')
+                        && name.eq_ignore_ascii_case("content-length")
+                    {
+                        length = value.trim().parse().unwrap();
+                    }
+                    assert!(!line.to_ascii_lowercase().starts_with("authorization:"));
+                }
+                let mut body = vec![0; length];
+                reader.read_exact(&mut body).unwrap();
+                let request: DeviceWorkerRelayRequest = serde_json::from_slice(&body).unwrap();
+                assert_eq!(request.client_node_id, NODE);
+                assert_eq!(request.worker_id, WORKER_ID);
+                assert_eq!(request.worker_instance_id, WORKER_INSTANCE);
+                assert_eq!(request.request, expected);
+                let response = serde_json::to_string(&WorkerRelayResponse {
+                    failure: None,
+                    status: 202,
+                    body: "relayed".into(),
+                })
+                .unwrap();
+                write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{response}", response.len()).unwrap();
+            }
+        });
+        let bin = temp_root("relay-bin");
+        let binary = bin.join(WORKER_BINARY_NAME);
+        write_executable_script(
+            &binary,
+            r#"
+            trap 'exit 0' TERM
+            printf '%s\n' '{"kind":"exchange","body":"{}"}'
+            IFS= read -r response
+            printf '%s' "$response" > "$(dirname "$2")/exchange-response.json"
+            printf '%s\n' '{"kind":"accounting","body":"[]","offset":7}'
+            IFS= read -r response
+            printf '%s' "$response" > "$(dirname "$2")/accounting-response.json"
+            printf 'worker diagnostic\n' >&2
+            echo ready > "$(dirname "$2")/worker-ready"
+            while :; do sleep 0.1; done
+        "#,
+        );
+        let root = temp_root("relay-device");
+        let mut store = DeviceStore::open(&root).unwrap();
+        store
+            .advance_occupancy_mirror(&mirror_update(LEASE, 7))
+            .unwrap();
+        let mut config = test_config(&binary);
+        config.server_origin = format!("http://{address}");
+        let supervisor = SessionSupervisor::new(config, store).unwrap();
+        let data = root.join("session");
+        supervisor
+            .spawn(spawn_request(
+                "wss_RELAY",
+                WORKER_INSTANCE,
+                &root,
+                &data,
+                &root,
+            ))
+            .unwrap();
+        let guard = StopOnDrop::watch(&supervisor, "wss_RELAY");
+        wait_for_ready_marker(&data, "wss_RELAY");
+        server.join().unwrap();
+        for file in ["exchange-response.json", "accounting-response.json"] {
+            let response: WorkerRelayResponse =
+                serde_json::from_slice(&fs::read(data.join(file)).unwrap()).unwrap();
+            assert_eq!(response.status, 202);
+            assert_eq!(response.body, "relayed");
+        }
+        supervisor.shutdown().unwrap();
+        assert_eq!(
+            supervisor
+                .worker_process("wss_RELAY")
+                .unwrap()
+                .unwrap()
+                .state,
+            WORKER_STATE_EXITED
+        );
+        drop(guard);
+        drop(supervisor);
+        fs::remove_dir_all(root).unwrap();
+        fs::remove_dir_all(bin).unwrap();
     }
 
     fn mirror_update(lease: &str, token: u64) -> OccupancyMirrorUpdate {
@@ -1711,7 +2123,6 @@ mod tests {
             worker_instance_id,
             occupancy_lease_id: LEASE,
             occupancy_fencing_token: 7,
-            worker_credential_token: CREDENTIAL_TOKEN,
             repository_binding_id: "rbn_TESTREPO",
             launch_grant_id: "wlg_TESTGRANT",
             product_session_id: None,
@@ -1761,7 +2172,7 @@ mod tests {
         );
     }
 
-    const WORKER_CONFIG_CONTRACT_FIELDS: [&str; 17] = [
+    const WORKER_CONFIG_CONTRACT_FIELDS: [&str; 16] = [
         "clientNodeId",
         "clientInstanceId",
         "occupancyLeaseId",
@@ -1776,8 +2187,7 @@ mod tests {
         "dataDirectory",
         "executionWorkspaceDirectory",
         "providerDirectory",
-        "serverOrigin",
-        "workerCredentialPath",
+        "helperExecutable",
         "modelRoute",
     ];
 
@@ -1792,7 +2202,6 @@ mod tests {
                 request,
                 WORKER_ID,
                 WORKER_INSTANCE,
-                Path::new("/workspace/credential"),
                 Path::new("/workspace/providers"),
             )
             .expect("managed config");
@@ -1860,7 +2269,6 @@ mod tests {
         assert_eq!(record.exit_code, None);
 
         assert_mode_0600(&data.join("managed-session.json"));
-        assert_mode_0600(&data.join("worker-credential"));
         let config_text =
             fs::read_to_string(data.join("managed-session.json")).expect("config read");
         let config: serde_json::Value =
@@ -1884,8 +2292,7 @@ mod tests {
             "sourceDirectory",
             "dataDirectory",
             "providerDirectory",
-            "serverOrigin",
-            "workerCredentialPath",
+            "helperExecutable",
         ] {
             assert!(
                 object.contains_key(required),
@@ -1902,15 +2309,6 @@ mod tests {
         assert_eq!(object["workerInstanceId"], handle.worker_instance_id);
         assert_eq!(object["sourceDirectory"], source.to_str().expect("utf8"));
         assert_eq!(object["dataDirectory"], data.to_str().expect("utf8"));
-        assert_eq!(object["serverOrigin"], ORIGIN);
-        assert_eq!(
-            object["workerCredentialPath"],
-            data.join("worker-credential").to_str().expect("utf8")
-        );
-        assert_eq!(
-            fs::read_to_string(data.join("worker-credential")).expect("credential read"),
-            CREDENTIAL_TOKEN
-        );
 
         assert_eq!(
             supervisor
@@ -1944,6 +2342,68 @@ mod tests {
             .expect("a later occupancy advances the mirror");
         let again = supervisor.stop("wss_ONE", true).expect("second stop");
         assert_eq!(again.state, WORKER_STATE_EXITED);
+    }
+
+    #[test]
+    fn reaping_a_killed_worker_stops_its_surviving_subprocesses() {
+        let bin_root = temp_root("reap-tree");
+        let binary = bin_root.join("winwincode-worker");
+        write_executable_script(&binary, TREE_RUNNING_BODY);
+        let (supervisor, root) = supervisor_with_mirror("reap-tree", &binary, LEASE, 7);
+        let source = root.join("repo");
+        let data = root.join("data");
+        let worker_root = root.join("worker-root");
+        let SpawnOutcome::Started(handle) = supervisor
+            .spawn(spawn_request(
+                "wss_REAP_TREE",
+                WORKER_INSTANCE,
+                &source,
+                &data,
+                &worker_root,
+            ))
+            .unwrap()
+        else {
+            panic!("worker starts")
+        };
+        let _guard = StopOnDrop::watch(&supervisor, "wss_REAP_TREE");
+        wait_for_ready_marker(&data, "wss_REAP_TREE");
+        let child_pid: u32 = fs::read_to_string(data.join("child-pid"))
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+        assert!(process_alive(child_pid));
+        assert!(
+            Command::new("/bin/kill")
+                .args(["-KILL", &handle.pid.to_string()])
+                .status()
+                .unwrap()
+                .success()
+        );
+        let deadline = Instant::now() + Duration::from_secs(3);
+        loop {
+            if !supervisor.reap().unwrap().is_empty() {
+                break;
+            }
+            assert!(Instant::now() < deadline, "killed Worker was not reaped");
+            thread::sleep(STOP_POLL_INTERVAL);
+        }
+        assert!(!matches!(
+            observe_process(child_pid),
+            ProcessObservation::Boot { working: true, .. }
+        ));
+        assert_eq!(
+            process_group_is_empty(ProcessSignalTarget::Group(handle.pid)),
+            Some(true)
+        );
+        assert_ne!(
+            supervisor
+                .worker_process("wss_REAP_TREE")
+                .unwrap()
+                .unwrap()
+                .state,
+            WORKER_STATE_RUNNING
+        );
     }
 
     #[test]
@@ -2333,8 +2793,18 @@ mod tests {
         assert_eq!(summary.worker_session_id, session);
         assert_eq!(summary.worker_instance_id.as_deref(), Some(WORKER_INSTANCE));
         assert_eq!(summary.stderr_lines, 1);
-        assert!(summary.stdout_lines >= 1);
+        assert_eq!(summary.stdout_lines, 1);
         assert_eq!(summary.lines_omitted_oversize, 1);
+        let session_logs = root.join("worker-logs").join(session);
+        assert_eq!(
+            fs::read_to_string(session_logs.join("stderr.log")).unwrap(),
+            "worker diagnostic\n"
+        );
+        let terminal_log = fs::read_to_string(session_logs.join("stdout.log")).unwrap();
+        assert_eq!(terminal_log.lines().count(), 1);
+        assert!(
+            terminal_log.starts_with("[winwincode] worker process exit state=crashed exitCode=3")
+        );
         let reference = logs
             .crash_reference(session)
             .expect("crash reference reads")
@@ -2573,9 +3043,8 @@ mod tests {
             DeviceStore::open(&root).expect("store reopens for the crasher"),
         )
         .expect("crash supervisor builds");
-        let mut crash_request =
+        let crash_request =
             spawn_request("wss_CRASHED", WORKER_INSTANCE, &source, &data, &worker_root);
-        crash_request.worker_credential_token = "wsc-second-token";
         assert!(matches!(
             crash_supervisor.spawn(crash_request).expect("crash spawn"),
             SpawnOutcome::Started(_)
@@ -2708,10 +3177,10 @@ mod tests {
             .expect("mirror advances");
 
         let mut bad_config = test_config(&binary);
-        bad_config.server_origin = "http://127.0.0.1:8443".to_owned();
+        bad_config.server_origin = "http://server.example:8443".to_owned();
         let error = SessionSupervisor::new(bad_config, DeviceStore::open(&root).expect("open"))
-            .expect_err("http origin must refuse");
-        assert!(error.to_string().contains("https"), "{error}");
+            .expect_err("remote cleartext origin must refuse");
+        assert!(error.to_string().contains("HTTP"), "{error}");
 
         drop(SessionSupervisor::new(test_config(&binary), store).expect("builds"));
         let source = root.join("repo");
@@ -2729,17 +3198,16 @@ mod tests {
         let error = validate_request(request).expect_err("zero fencing token must refuse");
         assert!(error.to_string().contains("fencing token"), "{error}");
 
-        let mut request = spawn_request(
+        let request = spawn_request(
             "wss_VALIDATE",
             WORKER_INSTANCE,
             &source,
             &data,
             &worker_root,
         );
-        request.worker_credential_token = "";
         assert!(
             validate_request(request).is_ok(),
-            "deferred material is valid"
+            "the complete launch request is valid"
         );
 
         let mut config = test_config(&binary);
@@ -2762,10 +3230,7 @@ mod tests {
                 &worker_root,
             ))
             .expect_err("missing binary must refuse");
-        assert!(
-            matches!(error, SupervisorError::WorkerBinary { .. }),
-            "{error}"
-        );
+        assert!(matches!(error, SupervisorError::Spawn { .. }), "{error}");
         assert!(
             supervisor
                 .worker_process("wss_VALIDATE")

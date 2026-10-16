@@ -6,7 +6,6 @@ import { join, resolve } from 'node:path'
 import test from 'node:test'
 
 import {
-  certificate,
   chromeBinary,
   closeServer,
   command,
@@ -36,10 +35,8 @@ test('every component state renders exactly the committed visual baseline', asyn
   assert.notEqual(chromePath, null, 'Chrome or Chromium is required for the UI-608 visual lane')
   command(root, 'corepack', ['pnpm', '--filter', '@winwincode/client', 'build'])
   const directory = mkdtempSync(join(tmpdir(), 'winwincode-ui608-components-'))
-  const certificateFiles = certificate(root, directory)
   const clientServer = staticClientServer({
     root,
-    certificateFiles,
     fixturePath: 'tests/fixtures/browser-visual-component-states.mjs',
     configuration: () => ({}),
   })
@@ -70,7 +67,7 @@ test('every component state renders exactly the committed visual baseline', asyn
   await devtools.send('Runtime.enable', {}, sessionId)
   await devtools.send('Page.enable', {}, sessionId)
   await devtools.send('Page.navigate', {
-    url: `https://client.localhost:${String(clientPort)}/#/home`,
+    url: `http://127.0.0.1:${String(clientPort)}/#/home`,
   }, sessionId)
   await waitForGlobal(devtools, sessionId, 'captureComponentStates')
 

@@ -921,7 +921,11 @@ async fn exec(
         ))
     })?;
     let arg0_ref = arg0.as_deref();
-    let child = spawn_child_async(SpawnChildRequest {
+    let crate::spawn::SpawnedChild {
+        child,
+        #[cfg(unix)]
+        _lifeline,
+    } = spawn_child_async(SpawnChildRequest {
         program: PathBuf::from(program),
         args: args.into(),
         arg0: arg0_ref,

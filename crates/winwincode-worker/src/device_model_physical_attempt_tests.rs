@@ -251,7 +251,8 @@ fn serve(
 }
 
 fn seed_and_crash(directory: &Path, endpoint: &str) -> ! {
-    let mut models = DeviceModels::open(directory).unwrap();
+    let _ = DeviceProviderStore::open(directory).unwrap();
+    let mut models = DeviceModels::new(directory);
     let database = rusqlite::Connection::open(directory.join("providers.sqlite3")).unwrap();
     for (provider, protocol) in [
         ("qwen", "openai_chat_completions"),
@@ -298,7 +299,7 @@ fn seed_and_crash(directory: &Path, endpoint: &str) -> ! {
 fn recover_under_three_live_requests(directory: &Path) {
     let database = rusqlite::Connection::open(directory.join("providers.sqlite3")).unwrap();
     let store = DeviceProviderStore::open(directory).unwrap();
-    let mut models = DeviceModels::open(directory).unwrap();
+    let mut models = DeviceModels::new(directory);
     for (member, index) in LIVE.into_iter().enumerate() {
         send(&mut models, &open("qwen", index, &format!("live-{member}")));
     }

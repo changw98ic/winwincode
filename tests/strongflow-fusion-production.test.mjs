@@ -15,7 +15,8 @@ import { assertCompletedDelivery, createCertificate, driveDelivery,
 import { configuredDeviceModelRoute, deviceFixtureCodeModeCommand,
   deterministicVerificationProduct, DETERMINISTIC_EXECUTOR_BEHAVIOR_MARKER,
   DETERMINISTIC_VERIFICATION_BEHAVIOR_MARKER, observeToolProcess,
-  seedDeviceLocalProvider, waitFor, workInputFromRequest } from '../scripts/device-production-fixture.mjs'
+  seedDeviceLocalProvider, waitFor, workInputFromRequest,
+  writeDeviceTrustRoot } from '../scripts/device-production-fixture.mjs'
 import { readDeviceExecutionReceipts } from '../scripts/export-device-candidate.mjs'
 import { assertSuccessfulRetainedCommands, readRetainedCoreCommandResults,
   readRetainedOutcomes } from './fixtures/chat-execution-transport-probe.mjs'
@@ -279,7 +280,7 @@ function assertAcceptedReviewEvidence(deviceData, reviewer, finalReview, detail)
     const result = parsed(original[0][field])
     assert.equal(result.response.call_id, finalReview.sourceId,
       'the runtime command traces to the original embedded Core command receipt')
-    assert.equal(result.post_hook_input.command, VERIFY,
+    assert.equal(parsed(result.effective_input.input).cmd, VERIFY,
       'the Core receipt records the assigned exact verification method')
   }
   const results = reviewer.runtime.filter(event => event.message.event.category === 'activity'
@@ -380,6 +381,8 @@ for (const mode of ['complete-after-shared-slot-contention', 'cancel-in-flight-p
   test('StrongFlow Fusion production: ' + mode, async t => {
     const directory = mkdtempSync(join(tmpdir(), 'wwc-strongflow-fusion-'))
     const certificate = createCertificate(directory)
+    writeDeviceTrustRoot({ certificatePath: certificate.cert,
+      destination: join(directory, 'device-provider-trust-root.der') })
     const apiKey = 'owned-fusion-secret-' + randomBytes(24).toString('hex')
     const primary = await primaryProvider(certificate, apiKey)
     const responses = Object.fromEntries(MEMBERS.map((member, index) => [member.model, { claims: [{
@@ -569,16 +572,16 @@ for (const mode of ['complete-after-shared-slot-contention', 'cancel-in-flight-p
           assert.equal(totals.tokens, null)
           assert.equal(totals.known_tokens, 0)
           assert.equal(totals.cost, null)
-          const signed = await waitFor(() => accountingStatement(cp, jobId, beforeFacts),
-            'the server accepts the complete original three-member signed accounting manifest', 30_000)
-          assert.match(signed.statement.signature, /^sha256:[0-9a-f]{64}$/u)
+          const accountedStatement = await waitFor(() => accountingStatement(cp, jobId, beforeFacts),
+            'the server accepts the complete original three-member accounting manifest', 30_000)
+          assert.match(accountedStatement.digest, /^sha256:[0-9a-f]{64}$/u)
           for (const key of ['jobId', 'leaseId', 'workerId', 'workerInstanceId', 'attempt', 'fencingToken', 'issuedAt']) {
-            assert.equal(signed.statement.lease[key], originalTerminal.lease[key])
+            assert.equal(accountedStatement.statement.lease[key], originalTerminal.lease[key])
           }
-          assert.equal(signed.statement.receipts.length, 3)
-          for (const receipt of signed.statement.receipts) {
+          assert.equal(accountedStatement.statement.receipts.length, 3)
+          for (const receipt of accountedStatement.statement.receipts) {
             const exchange = beforeFacts.find(item => item.open.modelExchangeId === receipt.modelExchangeId)
-            assert.ok(exchange, 'the signed receipt belongs to an original retained member exchange')
+            assert.ok(exchange, 'the receipt belongs to an original retained member exchange')
             assert.equal(receipt.providerId, exchange.request.provider)
             assert.equal(receipt.tokens, null)
             assert.equal(receipt.knownTokens ?? 0, 0)
@@ -587,7 +590,7 @@ for (const mode of ['complete-after-shared-slot-contention', 'cancel-in-flight-p
           assert.equal(primary.errors.length, 0)
           return { mode, deliveryId, reviewerJobId: jobId, workRunId, memberCalls: beforeCount,
             status: 'cancelled', accountingStatus: usage.accountingStatus, knownTokens: totals.known_tokens,
-            accountingStatementDigest: signed.digest }
+            accountingStatementDigest: accountedStatement.digest }
         } finally { cp.close() }
       } },
     })

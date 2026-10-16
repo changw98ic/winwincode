@@ -32,6 +32,9 @@ use winwincode_storage::{
     WorkerOutboundQueueConfig, WorkerPlatform, WorkerRegistrationRequest, WorkerRegistryScope,
 };
 
+#[path = "support/device_worker_route.rs"]
+mod device_worker_route;
+
 static NEXT_ROOT: AtomicU64 = AtomicU64::new(1);
 
 #[test]
@@ -39,8 +42,8 @@ fn production_main_uses_the_real_application_registry() {
     let source = include_str!("../src/main.rs");
     assert!(source.contains("StandaloneControlPlaneApplication::new"));
     assert!(source.contains("DurableEventPublisher::new"));
-    assert!(source.contains("ControlPlane::start_local_with_production_adapters"));
-    assert!(!source.contains("ControlPlane::start_local_with_delivery_adapters"));
+    assert!(source.contains("ControlPlane::start_local_with_delivery_adapters"));
+    assert!(source.contains("install_local_publication_adapters"));
     assert!(!source.contains("ControlPlane::start_local("));
     for required_name in [
         "WWC_SERVER_REPOSITORY_ROOT",
@@ -84,7 +87,7 @@ fn production_main_routes_execution_to_device_workers() {
         "ServerExecutionPortCore",
         "RepositoryRuntimeScheduler",
         "ProductSessionExecutionConfig",
-        "WorkerSessionRemoteAuthenticator",
+        "ProductionRemoteWorkerExchange",
         "DeviceModelBoundary",
     ] {
         assert!(
@@ -140,7 +143,7 @@ impl EventPublisher for RecordingPublisher {
     }
 }
 
-struct FixedClock(u64);
+struct FixedClock(u64, winwincode_domain::Instant);
 
 impl StandaloneApplicationClock for FixedClock {
     fn now_millis(&self) -> u64 {
@@ -148,7 +151,7 @@ impl StandaloneApplicationClock for FixedClock {
     }
 
     fn now_instant(&self) -> winwincode_domain::Instant {
-        winwincode_domain::Instant("2027-01-15T08:00:00.000Z".to_owned())
+        self.1.clone()
     }
 }
 
@@ -255,7 +258,10 @@ fn compose_application(
         storage,
         worker_outbound,
         hub,
-        Arc::new(FixedClock(1_800_000_000_000)),
+        Arc::new(FixedClock(
+            1_800_000_000_000,
+            winwincode_domain::Instant("2027-01-15T08:00:00.000Z".into()),
+        )),
         execution_config(1),
     )
 }
@@ -300,7 +306,10 @@ fn composition_rejects_a_control_plane_from_another_database() {
         storage,
         worker_outbound,
         hub,
-        Arc::new(FixedClock(1_800_000_000_000)),
+        Arc::new(FixedClock(
+            1_800_000_000_000,
+            winwincode_domain::Instant("2027-01-15T08:00:00.000Z".into()),
+        )),
         execution_config(1),
     );
     let Err(error) = result else {
@@ -332,7 +341,10 @@ fn composition_rejects_a_control_plane_from_another_database() {
         storage,
         foreign_worker_outbound,
         hub,
-        Arc::new(FixedClock(1_800_000_000_000)),
+        Arc::new(FixedClock(
+            1_800_000_000_000,
+            winwincode_domain::Instant("2027-01-15T08:00:00.000Z".into()),
+        )),
         execution_config(1),
     );
     let Err(error) = result else {
@@ -675,10 +687,8 @@ fn worker_management_routes_replay_conflict_isolate_and_recover_after_restart() 
 
 fn worker_registration() -> WorkerRegistrationRequest {
     WorkerRegistrationRequest {
-        authentication_identity: WorkerAuthenticationIdentity::TransportPrincipal {
-            issuer: "fixture-issuer".to_owned(),
-            subject: "worker-1".to_owned(),
-            credential_fingerprint: Sha256Digest(format!("sha256:{}", "f".repeat(64))),
+        authentication_identity: WorkerAuthenticationIdentity::LocalEmbedded {
+            control_plane_principal: "fixture-worker-1".to_owned(),
         },
         protocol_version: EXECUTION_PROTOCOL_VERSION.to_owned(),
         platform: WorkerPlatform::X86_64UnknownLinuxGnu,
@@ -1126,7 +1136,6 @@ impl winwincode_execution_port::transport::ExecutionPortCore for FloodRemoteCore
 #[test]
 #[allow(clippy::too_many_lines)]
 fn production_backpressure_returns_pages_without_accepting_the_upstream_frame() {
-    use std::os::unix::fs::PermissionsExt;
     use std::sync::Mutex;
     use std::time::Duration;
     use winwincode_domain::Instant;
@@ -1136,29 +1145,14 @@ fn production_backpressure_returns_pages_without_accepting_the_upstream_frame() 
         TypedFrame,
     };
     use winwincode_server::{
-        FileRemoteWorkerAuthenticator, ProductionRemoteWorkerExchange, RemoteWorkerExchangePort,
-        RepositoryRuntimeScheduler,
+        ProductionRemoteWorkerExchange, RemoteWorkerExchangePort, RepositoryRuntimeScheduler,
     };
     let root = temporary_root("remote-heartbeat");
     let application = open_application(&root, "fixture").expect("application");
     let worker = WorkerId(id("wrk", 1));
     let instance = WorkerInstanceId(id("wki", 1));
     let now = Instant("2027-01-15T08:00:02.000Z".into());
-    let token = root.join("worker.token");
-    fs::write(&token, b"fixture-remote-proof").expect("token");
-    fs::set_permissions(&token, fs::Permissions::from_mode(0o600)).expect("private token");
-    let auth = FileRemoteWorkerAuthenticator::open(
-        &token,
-        worker.clone(),
-        winwincode_storage::WorkerPoolId(id("wpl", 1)),
-        worker_scope(1),
-        "fixture-issuer".into(),
-        "worker-1".into(),
-        "build-local".into(),
-        Instant("2027-01-15T09:00:00.000Z".into()),
-        &now,
-    )
-    .expect("authenticator");
+    let client_node_id = device_worker_route::stage(&root, &worker, &instance);
     let scope = serde_json::from_value(repository_scope_json(1)).expect("scope");
     let scheduler = RepositoryRuntimeScheduler::from_application(
         &application,
@@ -1172,10 +1166,11 @@ fn production_backpressure_returns_pages_without_accepting_the_upstream_frame() 
     let recorded = Arc::new(Mutex::new(vec![]));
     let exchange = ProductionRemoteWorkerExchange::new(
         &root,
-        Arc::new(auth),
+        serde_json::from_value(repository_scope_json(1)).unwrap(),
         scheduler,
         FloodRemoteCore(recorded.clone()),
-    );
+    )
+    .with_clock(Arc::new(FixedClock(1_800_000_000_000, now.clone())));
     let send = |message: ExecutionPortMessage, acknowledgements, v2: bool| {
         let frame = TypedFrame::new(FrameDirection::WorkerToControlPlane, message).expect("frame");
         let bytes = RemoteTransportAdapter::<RecordingRemoteCore>::encode(&frame).expect("encoded");
@@ -1188,7 +1183,13 @@ fn production_backpressure_returns_pages_without_accepting_the_upstream_frame() 
             request
         };
         let request = request.encode().expect("request bytes");
-        exchange.exchange(b"fixture-remote-proof".to_vec(), &request, now.clone())
+        exchange.exchange(
+            &client_node_id,
+            &worker.0,
+            &instance.0,
+            &request,
+            now.clone(),
+        )
     };
     let register = serde_json::from_value(serde_json::json!({
         "kind":"worker.register", "schemaVersion":SchemaVersion::WinwincodeV1,
@@ -1199,6 +1200,7 @@ fn production_backpressure_returns_pages_without_accepting_the_upstream_frame() 
     })).expect("register frame");
     let registration =
         RemoteExchangeResponse::decode(&send(register, vec![], true).expect("register")).unwrap();
+    assert_eq!(registration.server_time(), &now);
     let registration_id = registration.deliveries()[0].delivery_id.clone();
     let heartbeat: ExecutionPortMessage = serde_json::from_value(serde_json::json!({
         "kind":"worker.heartbeat", "schemaVersion":SchemaVersion::WinwincodeV1, "messageId":id("xmsg",2),
@@ -1256,8 +1258,7 @@ fn production_backpressure_returns_pages_without_accepting_the_upstream_frame() 
 
 #[test]
 #[allow(clippy::too_many_lines)]
-fn remote_heartbeat_reaches_shared_core_after_authentication() {
-    use std::os::unix::fs::PermissionsExt;
+fn relayed_heartbeat_reaches_shared_core_after_session_routing() {
     use std::sync::Mutex;
     use std::time::Duration;
     use winwincode_domain::Instant;
@@ -1266,29 +1267,14 @@ fn remote_heartbeat_reaches_shared_core_after_authentication() {
         FrameDirection, RemoteExchangeRequest, RemoteTransportAdapter, TypedFrame,
     };
     use winwincode_server::{
-        FileRemoteWorkerAuthenticator, ProductionRemoteWorkerExchange, RemoteWorkerExchangePort,
-        RepositoryRuntimeScheduler,
+        ProductionRemoteWorkerExchange, RemoteWorkerExchangePort, RepositoryRuntimeScheduler,
     };
     let root = temporary_root("remote-heartbeat");
     let application = open_application(&root, "fixture").expect("application");
     let worker = WorkerId(id("wrk", 1));
     let instance = WorkerInstanceId(id("wki", 1));
     let now = Instant("2027-01-15T08:00:02.000Z".into());
-    let token = root.join("worker.token");
-    fs::write(&token, b"fixture-remote-proof").expect("token");
-    fs::set_permissions(&token, fs::Permissions::from_mode(0o600)).expect("private token");
-    let auth = FileRemoteWorkerAuthenticator::open(
-        &token,
-        worker.clone(),
-        winwincode_storage::WorkerPoolId(id("wpl", 1)),
-        worker_scope(1),
-        "fixture-issuer".into(),
-        "worker-1".into(),
-        "build-local".into(),
-        Instant("2027-01-15T09:00:00.000Z".into()),
-        &now,
-    )
-    .expect("authenticator");
+    let client_node_id = device_worker_route::stage(&root, &worker, &instance);
     let scope = serde_json::from_value(repository_scope_json(1)).expect("scope");
     let scheduler = RepositoryRuntimeScheduler::from_application(
         &application,
@@ -1302,10 +1288,11 @@ fn remote_heartbeat_reaches_shared_core_after_authentication() {
     let recorded = Arc::new(Mutex::new(vec![]));
     let exchange = ProductionRemoteWorkerExchange::new(
         &root,
-        Arc::new(auth),
+        serde_json::from_value(repository_scope_json(1)).unwrap(),
         scheduler,
         RecordingRemoteCore(recorded.clone()),
-    );
+    )
+    .with_clock(Arc::new(FixedClock(1_800_000_000_000, now.clone())));
     let send = |message: ExecutionPortMessage| {
         let frame = TypedFrame::new(FrameDirection::WorkerToControlPlane, message).expect("frame");
         let bytes = RemoteTransportAdapter::<RecordingRemoteCore>::encode(&frame).expect("encoded");
@@ -1313,7 +1300,13 @@ fn remote_heartbeat_reaches_shared_core_after_authentication() {
             .expect("request")
             .encode()
             .expect("request bytes");
-        exchange.exchange(b"fixture-remote-proof".to_vec(), &request, now.clone())
+        exchange.exchange(
+            &client_node_id,
+            &worker.0,
+            &instance.0,
+            &request,
+            now.clone(),
+        )
     };
     let register = serde_json::from_value(serde_json::json!({
         "kind":"worker.register", "schemaVersion":SchemaVersion::WinwincodeV1,
@@ -1359,9 +1352,6 @@ fn remote_heartbeat_reaches_shared_core_after_authentication() {
             "foreign lease is rejected before Core"
         );
     }
-    fs::write(&token, b"rotated-fixture-proof").expect("rotate");
-    assert!(send(heartbeat).is_err());
-    assert_eq!(recorded.lock().expect("frames").len(), 1);
     drop(exchange);
     drop(application);
     fs::remove_dir_all(root).expect("cleanup");
@@ -1392,8 +1382,7 @@ mod heartbeat_gap {
         },
     };
     use winwincode_server::{
-        FileRemoteWorkerAuthenticator, ProductionRemoteWorkerExchange, RemoteWorkerExchangePort,
-        RepositoryRuntimeScheduler,
+        ProductionRemoteWorkerExchange, RemoteWorkerExchangePort, RepositoryRuntimeScheduler,
     };
     use winwincode_storage::SqliteStorage;
 
@@ -1420,6 +1409,7 @@ mod heartbeat_gap {
     struct LossyWire {
         exchange: Arc<dyn RemoteWorkerExchangePort>,
         state: Arc<Mutex<WireState>>,
+        client_node_id: String,
         worker: WorkerId,
         instance: WorkerInstanceId,
         now: Instant,
@@ -1448,7 +1438,9 @@ mod heartbeat_gap {
             let bytes = self
                 .exchange
                 .exchange(
-                    b"heartbeat-gap-fixture".to_vec(),
+                    &self.client_node_id,
+                    &self.worker.0,
+                    &self.instance.0,
                     &request.encode().unwrap(),
                     self.now.clone(),
                 )
@@ -1469,7 +1461,6 @@ mod heartbeat_gap {
 
     #[tokio::test]
     async fn missing_heartbeat_then_gap_drains_real_worker_and_server_queues() {
-        use std::os::unix::fs::PermissionsExt;
         use winwincode_codex::{
             ProductionCodexAdapter, ProductionCodexConfig, ProductionCodexOptions,
         };
@@ -1479,21 +1470,7 @@ mod heartbeat_gap {
         let now = Instant("2027-01-15T08:00:05.000Z".into());
         let worker_id = WorkerId("wrk_00000000000000000000000001".into());
         let instance = WorkerInstanceId("wki_00000000000000000000000001".into());
-        let token = root.join("worker.token");
-        fs::write(&token, b"heartbeat-gap-fixture").unwrap();
-        fs::set_permissions(&token, fs::Permissions::from_mode(0o600)).unwrap();
-        let auth = FileRemoteWorkerAuthenticator::open(
-            &token,
-            worker_id.clone(),
-            winwincode_storage::WorkerPoolId("wpl_00000000000000000000000001".into()),
-            winwincode_storage::WorkerRegistryScope::local_default(),
-            "fixture".into(),
-            "fixture-worker".into(),
-            "local".into(),
-            Instant("2027-01-15T09:00:00.000Z".into()),
-            &now,
-        )
-        .unwrap();
+        let client_node_id = super::device_worker_route::stage(&root, &worker_id, &instance);
         let application = super::open_application(&root, "heartbeat-fixture").unwrap();
         let scope = serde_json::from_value(super::repository_scope_json(1)).unwrap();
         let scheduler = RepositoryRuntimeScheduler::from_application(
@@ -1505,35 +1482,54 @@ mod heartbeat_gap {
             Duration::from_secs(10),
         )
         .unwrap();
-        let exchange: Arc<dyn RemoteWorkerExchangePort> =
-            Arc::new(ProductionRemoteWorkerExchange::new(
+        let exchange: Arc<dyn RemoteWorkerExchangePort> = Arc::new(
+            ProductionRemoteWorkerExchange::new(
                 &root,
-                Arc::new(auth),
+                serde_json::from_value(super::repository_scope_json(1)).unwrap(),
                 scheduler,
                 HeartbeatCore(SqliteStorage::open(&root).unwrap(), now.clone()),
-            ));
+            )
+            .with_clock(Arc::new(super::FixedClock(1_800_000_000_000, now.clone()))),
+        );
         let state = Arc::new(Mutex::new(WireState::default()));
         let wire = LossyWire {
             exchange,
             state: state.clone(),
+            client_node_id,
             worker: worker_id.clone(),
             instance: instance.clone(),
             now: now.clone(),
         };
         let capabilities: WorkerCapabilitySet = serde_json::from_value(serde_json::json!({"platform":"aarch64-apple-darwin", "features":["sandbox"], "capabilityDigest":format!("sha256:{}", "a".repeat(64)), "maxConcurrentJobs":1})).unwrap();
         let target = std::env::var_os("CARGO_TARGET_DIR").map_or_else(
-            || PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target"),
+            || {
+                PathBuf::from(
+                    std::env::var("CARGO_MANIFEST_DIR").expect("Cargo manifest directory"),
+                )
+                .join("../../target")
+            },
             PathBuf::from,
         );
         let helper = target.join("debug/winwincode-kernel-helper");
-        let adapter = ProductionCodexAdapter::open(ProductionCodexConfig::try_new(ProductionCodexOptions {
-        data_directory: root.join("worker"), helper_release_manifest: winwincode_codex::HelperReleaseManifest::from_test_helper(&helper).unwrap(), helper_executable: helper,
-        provider: "fixture-provider".into(), model: "fixture-model".into(), gateway_route: ModelGatewayRoute { capability: "reasoning".into(), route: "fixture".into() },
-        registered_capabilities: capabilities.clone(), discovered_capabilities: vec![],
-        action_signing_key: winwincode_execution_port::action_enforcement::ActionEnforcementSigningKey::from_bytes([31;32]).unwrap(),
-        execution_envelope: winwincode_execution_port::action_gateway::ExecutionEnvelopeToken { version:1, digest: winwincode_domain::Sha256Digest(format!("sha256:{}", "a".repeat(64))) },
-        execution_mode: winwincode_codex::ExecutionMode::React, observer_mode: winwincode_codex::ObserverMode::Off,
-    }).unwrap()).unwrap();
+        let adapter = ProductionCodexAdapter::open(
+            ProductionCodexConfig::try_new(ProductionCodexOptions {
+                data_directory: root.join("worker"),
+                helper_executable: helper,
+                provider: Some("fixture-provider".into()),
+                model: Some("fixture-model".into()),
+                gateway_route: ModelGatewayRoute {
+                    capability: "reasoning".into(),
+                    route: "fixture".into(),
+                },
+                registered_capabilities: capabilities.clone(),
+                discovered_capabilities: vec![],
+
+                execution_mode: winwincode_codex::ExecutionMode::React,
+                observer_mode: winwincode_codex::ObserverMode::Off,
+            })
+            .unwrap(),
+        )
+        .unwrap();
         let config = winwincode_worker::WorkerConfig {
             worker_id,
             worker_instance_id: instance,

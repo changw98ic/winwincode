@@ -9,6 +9,7 @@ import { createHash } from 'node:crypto'
 import {
   existsSync, globSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync,
 } from 'node:fs'
+import { request as httpRequest } from 'node:http'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
@@ -17,7 +18,10 @@ import { isDeepStrictEqual } from 'node:util'
 
 import { runApiProductionVertical } from '../scripts/run-api-production-vertical.mjs'
 import { deterministicDeviceProvider, waitFor } from '../scripts/device-production-fixture.mjs'
-import { readRetainedOutcomes } from './fixtures/chat-execution-transport-probe.mjs'
+import {
+  assertSuccessfulRetainedCommands, completedCommandScript, readRetainedCoreCommandResults,
+  readRetainedOutcomes,
+} from './fixtures/chat-execution-transport-probe.mjs'
 
 const SECRET = 'fixture-secret-chat-error-boundaries-792615'
 const sha256 = bytes => createHash('sha256').update(bytes).digest('hex')
@@ -69,7 +73,7 @@ function retainedRequests(deviceData, jobId, family, attempt = 1) {
   })
 }
 
-function signedActionReceipt(cp, request) {
+function actionReceipt(cp, request) {
   const suffix = sha256(request.requestId)
   const row = cp.prepare('SELECT revision,payload FROM product_state WHERE stream_id=?')
     .get(`action-enforcement-receipt:${suffix}`)
@@ -77,7 +81,7 @@ function signedActionReceipt(cp, request) {
   const bytes = Buffer.from(row.payload)
   const receipt = jsonBytes(bytes)
   for (const field of ['requestId', 'jobId', 'workerSessionId', 'sessionIdentity', 'lease']) {
-    assert.deepEqual(receipt[field], request[field], `the signed action receipt keeps original ${field}`)
+    assert.deepEqual(receipt[field], request[field], `the action receipt keeps original ${field}`)
   }
   return { revision: row.revision, bytes, receipt }
 }
@@ -104,11 +108,50 @@ function workerLog(surface) {
   return existsSync(surface.logPath) ? readFileSync(surface.logPath, 'utf8') : ''
 }
 
-function transportAttempts(surface, request) {
-  const operation = sha256(`${request.frame.lease.workerId}:${request.frame.lease.workerInstanceId}:${request.frame.messageId}`)
-  return globSync('**/network-requests.sqlite3', { cwd: surface.dataDirectory })
-    .flatMap(path => readStore(join(surface.dataDirectory, path), store => store.prepare(`SELECT *
-      FROM network_request_attempts WHERE operation_hash=? ORDER BY sequence`).all(operation)))
+async function relayRetainedAction(deviceData, authority, bytes) {
+  const rows = readStore(join(deviceData, 'device-client.sqlite3'), store => store.prepare(`SELECT *
+    FROM worker_process_registry WHERE worker_id=? AND worker_instance_id=?`)
+    .all(authority.worker_id, authority.worker_instance_id))
+  assert.equal(rows.length, 1, 'one parent Device process owns the original Worker relay')
+  const configuration = JSON.parse(readFileSync(join(rows[0].data_directory, 'managed-session.json'), 'utf8'))
+  assert.equal(configuration.workerSessionId, rows[0].worker_session_id)
+  assert.equal(configuration.workerId, authority.worker_id)
+  assert.equal(configuration.workerInstanceId, authority.worker_instance_id)
+  const profile = readStore(join(deviceData, 'device-client.sqlite3'), store => {
+    const profiles = store.prepare('SELECT base_url FROM server_profile').all()
+    assert.equal(profiles.length, 1)
+    return profiles[0]
+  })
+  const endpoint = new URL('/internal/v1/client/worker-exchange', profile.base_url)
+  assert.equal(endpoint.protocol, 'http:')
+  assert.ok(['127.0.0.1', 'localhost', 'control.localhost'].includes(endpoint.hostname))
+  const frame = Buffer.concat([
+    Buffer.from('{"frameType":"message","direction":"worker-to-control-plane","message":'),
+    Buffer.from(bytes), Buffer.from('}'),
+  ])
+  const exchange = JSON.stringify({ schemaVersion: 'execution-port.remote-exchange.v2',
+    workerId: authority.worker_id, workerInstanceId: authority.worker_instance_id,
+    acknowledgements: [], frame: [...frame] })
+  const body = Buffer.from(JSON.stringify({ clientNodeId: configuration.clientNodeId,
+    workerId: authority.worker_id, workerInstanceId: authority.worker_instance_id,
+    request: { kind: 'exchange', body: exchange } }))
+  return new Promise((resolveResponse, rejectResponse) => {
+    const outgoing = httpRequest(endpoint, { method: 'POST', timeout: 10_000,
+      headers: { 'Content-Type': 'application/json', 'Content-Length': body.length, Connection: 'close' } }, incoming => {
+      const parts = []
+      incoming.on('data', part => parts.push(part))
+      incoming.on('error', rejectResponse)
+      incoming.on('end', () => {
+        try {
+          assert.equal(incoming.statusCode, 200, 'the parent Device relay returns its response envelope')
+          resolveResponse(JSON.parse(Buffer.concat(parts).toString('utf8')))
+        } catch (error) { rejectResponse(error) }
+      })
+    })
+    outgoing.on('timeout', () => outgoing.destroy(new Error('parent Device relay probe timed out')))
+    outgoing.on('error', rejectResponse)
+    outgoing.end(body)
+  })
 }
 
 function coreCommands(deviceData, jobId, attempt = 1) {
@@ -123,15 +166,13 @@ function coreCommands(deviceData, jobId, attempt = 1) {
       ? JSON.parse(JSON.parse(row.effective_input).input).cmd : null })))
 }
 
-function assertOneSuccessfulCommand(deviceData, jobId, command) {
-  const rows = coreCommands(deviceData, jobId).filter(row => row.command === command)
+function assertOneSuccessfulCommand(deviceData, jobId, command, attempt = 1) {
+  const rows = coreCommands(deviceData, jobId, attempt).filter(row => row.command === command)
   assert.equal(rows.length, 1, 'the original command has one actual Core handler attempt')
-  assert.equal(rows[0].execution, 'completed')
-  assert.equal(rows[0].disposition, 'accepted')
-  for (const field of ['execution_result', 'accepted_result']) {
-    assert.equal(JSON.parse(rows[0][field]).code_mode_result?.exit_code, 0,
-      `the original ${field} records actual OS completion`)
-  }
+  const original = rows[0]
+  const retained = readRetainedCoreCommandResults(deviceData, JSON.parse(original.request_json).thread_id)
+    .filter(row => row.attempt_id === original.attempt_id)
+  assertSuccessfulRetainedCommands(retained, 1)
 }
 
 function requiredStoreCoreCauseReference(core, run, observed, source, command) {
@@ -189,27 +230,6 @@ function requiredStoreCoreCauseReference(core, run, observed, source, command) {
     parentCallId: request.parent_call_id, rolloutDigest: sha256(bytes),
     errorLineIndex: error.lineIndex, errorOrdinal: error.item.ordinal ?? null,
     errorLineDigest: sha256(error.bytes), sourceCause: 'tool_fact_store_unavailable' }
-}
-
-function expiredModelSourceReference(run) {
-  assert.ok(run.rolloutPath, 'the original rejected model reply belongs to its actual private Core rollout')
-  const bytes = readFileSync(run.rolloutPath)
-  const lines = bytes.toString('utf8').split('\n').flatMap((line, index) => line.trim()
-    ? [{ lineIndex: index + 1, bytes: Buffer.from(line), item: JSON.parse(line) }] : [])
-  assert.equal(lines.find(row => row.item.type === 'session_meta')?.item.payload.id, run.kernelSessionId)
-  const starts = lines.filter(row => row.item.type === 'event_msg'
-    && ['task_started', 'turn_started'].includes(row.item.payload.type))
-  assert.deepEqual(starts.map(row => row.item.payload.turn_id), [run.submissionId])
-  const errors = lines.filter(row => row.item.type === 'event_msg'
-    && row.item.payload.type === 'error'
-    && row.item.payload.codex_error_info === 'model_authority_expired')
-  assert.equal(errors.length, 1, 'the original Core terminal preserves the typed execution lease failure')
-  assert.ok(errors[0].lineIndex > starts[0].lineIndex)
-  assert.deepEqual(run.failureDiagnostic, { stage: 'core_event', cause: 'MODEL_AUTHORITY_EXPIRED' })
-  return { scope: 'execution_lease', cause: 'lease_expired', sourceCode: 'MODEL_AUTHORITY_EXPIRED',
-    kernelThreadId: run.kernelSessionId, coreTurnId: run.submissionId,
-    rolloutDigest: sha256(bytes), errorLineIndex: errors[0].lineIndex,
-    errorLineDigest: sha256(errors[0].bytes) }
 }
 
 function providerFacts(deviceData, jobId, attempt = 1) {
@@ -284,7 +304,8 @@ function assertRetainedOutcomeAuthority(cp, authority, productSessionId, run, wo
     businessAcknowledged: worker.workerAcknowledged }
 }
 
-function terminalAccountingReady(cp, jobId, reservation, usage, reconciledUsage = usage) {
+function terminalAccountingReady(cp, jobId, reservation, usage, reconciledUsage = usage,
+  releaseReason = 'failed') {
   if (!reservation || !usage) return false
   if (usage.accountingStatus === 'known') {
     return reservation.state === 'settled' && reservation.release_reason === null
@@ -298,7 +319,7 @@ function terminalAccountingReady(cp, jobId, reservation, usage, reconciledUsage 
     WHERE job_id=? ORDER BY sequence DESC LIMIT 1`).get(jobId)
   const retainedUsage = reconciliation && jsonBytes(reconciliation.terminal_usage_json)
   const latestUsage = latest && jsonBytes(latest.usage_json)
-  return reservation.state === 'released' && reservation.release_reason === 'failed'
+  return reservation.state === 'released' && reservation.release_reason === releaseReason
     && reservation.actual_tokens === null && reservation.actual_cost_microunits === null
     && reservation.actual_runtime_millis === null
     && reconciliation?.accounting_status === 'pending' && reconciliation.settlement_request_id === null
@@ -309,7 +330,9 @@ function terminalAccountingReady(cp, jobId, reservation, usage, reconciledUsage 
 
 async function waitAcknowledgedTerminal(cp, api, deviceData, productSessionId, jobId, authority,
   expectedStatus = 'succeeded', { reconciliationEvidence = null } = {}) {
-  const expectedOutcome = expectedStatus === 'succeeded' ? 'completed' : 'failed'
+  const expectedState = expectedStatus === 'succeeded' ? 'completed'
+    : expectedStatus === 'cancelled' ? 'cancelled' : 'failed'
+  const expectedJobState = expectedStatus === 'cancelled' ? 'failed' : expectedState
   let settled
   try {
     settled = await waitFor(async () => {
@@ -326,14 +349,15 @@ async function waitAcknowledgedTerminal(cp, api, deviceData, productSessionId, j
       const runs = retainedRuns(deviceData, jobId, authority.attempt)
       const run = runs.length === 1 ? runs[0].run : null
       const accountingEvidence = reconciliationEvidence?.(outcomes[0]?.message.outcome.usage)
-      return job?.state === expectedOutcome && job.attempt === authority.attempt
-        && terminal?.outcome === expectedOutcome && slot?.state === expectedOutcome
+      return job?.state === expectedJobState && job.attempt === authority.attempt
+        && terminal?.outcome === expectedState && slot?.state === expectedState
         && (!reconciliationEvidence || accountingEvidence)
         && terminalAccountingReady(cp, jobId, reservation, outcomes[0]?.message.outcome.usage,
-          accountingEvidence?.usage ?? outcomes[0]?.message.outcome.usage)
+          accountingEvidence?.usage ?? outcomes[0]?.message.outcome.usage,
+          expectedStatus === 'cancelled' ? 'cancelled' : 'failed')
         && accepted?.revision === 2 && raw?.acknowledgementReady
         && outcomes.length === 1 && outcomes[0].workerAcknowledged && run?.terminal
-        && messages.filter(message => message.role === 'assistant' && message.state === expectedOutcome).length === 1
+        && messages.filter(message => message.role === 'assistant' && message.state === expectedState).length === 1
         ? { job, terminal, slot, reservation, raw, worker: outcomes[0], run, accountingEvidence } : false
     }, `the original immutable raw ${expectedStatus} terminal receives its real normalized business ACK and resource settlement`, 120_000)
   } catch (cause) {
@@ -401,8 +425,9 @@ async function launch(context, cp, productSessionId, marker) {
   return { job, authority }
 }
 
-function nativeCommand(command, { escalated = false, continuation = null, expectedRejection = null } = {}) {
-  const invocation = `text(await tools[command.name]({cmd:${JSON.stringify(command)},yield_time_ms:1000${escalated
+function nativeCommand(command, { escalated = false, continuation = null, expectedRejection = null,
+  yieldMillis = 1000 } = {}) {
+  const invocation = `text(await tools[command.name]({cmd:${JSON.stringify(command)},yield_time_ms:${yieldMillis}${escalated
     ? ',sandbox_permissions:"require_escalated",justification:"Exercise the original fixture approval."' : ''}}));`
   return `const command=ALL_TOOLS.find(tool=>tool.name.endsWith("exec_command"));
     if(!command) throw new Error("command tool missing");
@@ -483,11 +508,11 @@ test('Chat formal user rejection consumes the original approval and never runs t
     }, { gated: false })
 })
 
-test('Chat signed action receipt write failure keeps the original pending action instead of fabricating user denial', async t => {
+test('Chat action receipt write failure keeps the original pending action instead of fabricating user denial', async t => {
   const marker = 'action-receipt-write'
   const productSessionId = 'psn_01J00000000000000000000172'
   const command = "printf '%s' 'written' > CHAT-ACTION-WRITE-RECOVERED.txt"
-  await runFixture(t, 'action-write', marker, nativeCommand(command), async context => {
+  await runFixture(t, 'action-write', marker, nativeCommand(command, { yieldMillis: 5000 }), async context => {
     const { cp, api, devicePath } = context
     const { job, authority } = await launch(context, cp, productSessionId, marker)
     await waitFor(() => devicePath.modelServer.requests.some(value => value.gateMarker === marker && value.active),
@@ -501,15 +526,13 @@ test('Chat signed action receipt write failure keeps the original pending action
       devicePath.modelServer.releaseResponseGate(marker)
       const request = await waitFor(() => retainedRequests(devicePath.deviceData, job.job_id, 'action_request')[0],
         'the actual Core action retains its original authority request', 60_000)
-      const surface = workerSurface(devicePath.deviceData, authority)
-      const failed = await waitFor(() => transportAttempts(surface, request)
-        .find(row => row.outcome === 'failed' && row.failure_json
-          && JSON.parse(row.failure_json).httpStatus === 503),
-      'the original authenticated action request actually receives a failed CP write response', 30_000)
+      const failed = await relayRetainedAction(devicePath.deviceData, authority, request.bytes)
+      assert.equal(failed.status, 503,
+        'the original authenticated action request receives the real failed CP write status through its parent Device')
       const frozen = cp.prepare('SELECT revision,payload FROM product_state WHERE stream_id=?')
         .get(`action-enforcement-evaluation-time:${sha256(request.frame.requestId)}`)
-      assert.ok(frozen, 'the original signed evaluation time is independently retained')
-      assert.equal(signedActionReceipt(cp, request.frame), null)
+      assert.ok(frozen, 'the original recorded evaluation time is independently retained')
+      assert.equal(actionReceipt(cp, request.frame), null)
       assert.equal(responseProof(request), null)
       assert.equal(existsSync(actionClaimPath(request)), false)
       assert.equal(globSync('**/CHAT-ACTION-WRITE-RECOVERED.txt', { cwd: context.directory }).length, 0)
@@ -517,29 +540,29 @@ test('Chat signed action receipt write failure keeps the original pending action
       assert.equal((await api.query('approval.list', { states: ['rejected'] })).result.items
         .filter(item => item.binding.executionJobId === job.job_id).length, 0)
       cp.exec('DROP TRIGGER refuse_original_action_receipt')
-      const receipt = await waitFor(() => signedActionReceipt(cp, request.frame),
-        'the same original request obtains its signed receipt after storage recovers', 60_000)
+      const receipt = await waitFor(() => actionReceipt(cp, request.frame),
+        'the same original request obtains its recorded receipt after storage recovers', 60_000)
       assert.equal(receipt.receipt.decision, 'permit')
       assert.equal(receipt.receipt.evaluatedAt, jsonBytes(frozen.payload).evaluatedAt)
       await waitAcknowledgedTerminal(cp, api, devicePath.deviceData, productSessionId, job.job_id, authority)
       assertOneSuccessfulCommand(devicePath.deviceData, job.job_id, command)
       assert.ok(responseProof(request))
-      assert.deepEqual(signedActionReceipt(cp, request.frame).bytes, receipt.bytes)
+      assert.deepEqual(actionReceipt(cp, request.frame).bytes, receipt.bytes)
       await assertPublicSafe(api, productSessionId)
       return { jobId: job.job_id, requestId: request.frame.requestId, scope: 'control_plane_action_receipt',
-        source: 'required_receipt_storage', failedTransportAttempt: failed.sequence,
+        source: 'required_receipt_storage', failedRelayStatus: failed.status,
         originalRequestSha256: sha256(request.bytes), recoveredReceiptSha256: sha256(receipt.bytes), userDenied: false }
     } finally { cp.exec('DROP TRIGGER IF EXISTS refuse_original_action_receipt') }
   })
 })
 
 for (const fault of ['action-store-read', 'applied-response-write']) {
-  test(`Chat ${fault} keeps original signed authority and repairs its reliable delivery once`, async t => {
+  test(`Chat ${fault} keeps original recorded authority and repairs its reliable delivery once`, async t => {
     const marker = fault
     const productSessionId = fault === 'action-store-read'
       ? 'psn_01J00000000000000000000173' : 'psn_01J00000000000000000000174'
     const command = `printf '%s' 'once' > CHAT-${fault.toUpperCase()}.txt`
-    await runFixture(t, fault, marker, nativeCommand(command), async context => {
+    await runFixture(t, fault, marker, completedCommandScript(command), async context => {
       const { cp, api, devicePath } = context
       const { job, authority } = await launch(context, cp, productSessionId, marker)
       await waitFor(() => devicePath.modelServer.requests.some(value => value.gateMarker === marker && value.active),
@@ -570,9 +593,9 @@ for (const fault of ['action-store-read', 'applied-response-write']) {
         devicePath.modelServer.releaseResponseGate(marker)
         const request = await waitFor(() => retainedRequests(devicePath.deviceData, job.job_id, 'action_request')[0],
           'the original Core action reaches its durable request', 60_000)
-        const signed = await waitFor(() => signedActionReceipt(cp, request.frame),
-          'the actual CP signs and saves the original action receipt', 30_000)
-        assert.equal(signed.receipt.decision, 'permit')
+        const recorded = await waitFor(() => actionReceipt(cp, request.frame),
+          'the actual CP records the original action receipt', 30_000)
+        assert.equal(recorded.receipt.decision, 'permit')
         await waitFor(() => workerLog(surface).slice(beforeLog.length).includes('stage=control_consume code=CodexDurableState'),
           'the original Adapter acceptance actually fails at the installed required-storage cut', 30_000)
         assert.equal(responseProof(request), null, 'a missing required response proof is never presented as applied')
@@ -590,15 +613,15 @@ for (const fault of ['action-store-read', 'applied-response-write']) {
         } else {
           originalClaim = readFileSync(actionClaimPath(request))
           const claim = jsonBytes(originalClaim)
-          assert.equal(claim.requestId, signed.receipt.requestId)
-          assert.equal(claim.receiptSignature, signed.receipt.receiptSignature)
+          assert.equal(claim.requestId, recorded.receipt.requestId)
+          assert.deepEqual(claim.receipt, recorded.receipt)
           store.exec('DROP TRIGGER refuse_original_applied_action')
         }
         const proof = await waitFor(() => responseProof(request),
-          'the exact original signed receipt repairs its required response proof', 60_000)
+          'the exact original recorded receipt repairs its required response proof', 60_000)
         await waitAcknowledgedTerminal(cp, api, devicePath.deviceData, productSessionId, job.job_id, authority)
-        assertOneSuccessfulCommand(devicePath.deviceData, job.job_id, command)
-        assert.deepEqual(signedActionReceipt(cp, request.frame).bytes, signed.bytes)
+        assertOneSuccessfulCommand(devicePath.deviceData, job.job_id, command, authority.attempt)
+        assert.deepEqual(actionReceipt(cp, request.frame).bytes, recorded.bytes)
         if (originalClaim) assert.deepEqual(readFileSync(actionClaimPath(request)), originalClaim,
           'reliable-delivery repair never creates a second action claim')
         assert.equal(store.prepare(`SELECT COUNT(*) AS count FROM execution_response_receipt
@@ -606,7 +629,7 @@ for (const fault of ['action-store-read', 'applied-response-write']) {
         await assertPublicSafe(api, productSessionId)
         return { jobId: job.job_id, requestId: request.frame.requestId,
           scope: fault === 'action-store-read' ? 'adapter_consumed_receipt_read' : 'adapter_applied_response_save',
-          originalRequestSha256: sha256(request.bytes), originalReceiptSha256: sha256(signed.bytes),
+          originalRequestSha256: sha256(request.bytes), originalReceiptSha256: sha256(recorded.bytes),
           responseProofDigest: proof.response_digest, repaired: true, realCommandAttempts: 1, userDenied: false }
       } finally {
         store.exec('DROP TRIGGER IF EXISTS refuse_original_applied_action')
@@ -620,7 +643,7 @@ for (const fault of ['action-store-read', 'applied-response-write']) {
   })
 }
 
-test('Chat a refused real Provider connection retains not_sent proof and its signed zero-charge accounting', async t => {
+test('Chat a refused real Provider connection retains not_sent proof and its zero-charge accounting', async t => {
   const marker = 'provider-connect-not-sent'
   const productSessionId = 'psn_01J00000000000000000000180'
   await runFixture(t, 'connect-not-sent', marker, nativeCommand('true'), async context => {
@@ -656,7 +679,7 @@ test('Chat a refused real Provider connection retains not_sent proof and its sig
       return terminal?.outcome === 'cancelled' && worker?.workerAcknowledged
         && accepted?.revision === 2 && raw?.acknowledgementReady && statement
         ? { terminal, worker, raw, statement } : false
-    }, 'the original cancellation receives its actual business ACK and signed accounting statement', 30_000)
+    }, 'the original cancellation receives its actual business ACK and accounting statement', 30_000)
     assert.deepEqual(settled.raw.message, settled.worker.message)
     assert.equal(settled.worker.message.outcome.status, 'cancelled')
     const statement = jsonBytes(settled.statement.statement_json)
@@ -667,9 +690,8 @@ test('Chat a refused real Provider connection retains not_sent proof and its sig
     assert.equal(receipt.slot, slot)
     assert.equal(receipt.modelExchangeId, failed.exchange.exchange_id)
     assert.equal(receipt.tokens, 0)
-    assert.equal(receipt.knownTokens, undefined, 'the signed receipt omits its zero lower bound')
+    assert.equal(receipt.knownTokens, undefined, 'the recorded receipt omits its zero lower bound')
     assert.equal(receipt.costMicrounits, 0)
-    assert.match(statement.signature, /^sha256:[0-9a-f]{64}$/u)
     assert.match(receipt.sourceDigest, /^sha256:[0-9a-f]{64}$/u)
     const final = providerFacts(devicePath.deviceData, job.job_id)
     assert.equal(final.length, 1)
@@ -745,53 +767,7 @@ test('Chat real Provider opening timeout retains model-attempt unknown facts whi
   })
 })
 
-function originalProviderReconciliation(cp, deviceData, authority, usage, providerId) {
-  if (!usage) return false
-  const [original] = providerFacts(deviceData, authority.job_id, authority.attempt)
-  if (!original || original.attempts.length !== 1 || original.attempts[0].state !== 'completed'
-    || !original.attempts[0].accounting_chunks) return false
-  const frames = jsonBytes(original.attempts[0].accounting_chunks)
-  const completions = frames.flatMap(frame => {
-    assert.equal(frame.modelExchangeId, original.exchange.exchange_id)
-    assert.deepEqual(frame.lease, original.open.lease)
-    assert.deepEqual(frame.sessionIdentity, original.open.sessionIdentity)
-    if (!frame.payload) return []
-    const bytes = Buffer.from(frame.payload.dataBase64, 'base64')
-    assert.equal(frame.payload.payloadDigest, `sha256:${sha256(bytes)}`)
-    const item = JSON.parse(bytes.toString('utf8'))
-    return item.type === 'completed' ? [item] : []
-  })
-  assert.equal(completions.length, 1, 'one actual sent Provider attempt supplies its original measured completion')
-  const tokens = completions[0].tokenUsage.total_tokens
-  assert.ok(Number.isSafeInteger(tokens) && tokens > 0)
-  assert.equal(usage.knownTokens, tokens, 'the immutable unknown terminal retains the measured lower bound')
-  const facts = cp.prepare(`SELECT statement_digest,statement_json FROM execution_attempt_accounting_facts
-    WHERE job_id=? AND attempt=?`).all(authority.job_id, authority.attempt)
-  if (facts.length === 0) return false
-  assert.equal(facts.length, 1)
-  const statement = jsonBytes(facts[0].statement_json)
-  assert.deepEqual(statement.lease, original.open.lease)
-  const slot = `primary:${original.exchange.exchange_id}`
-  assert.deepEqual(statement.manifest, [slot])
-  assert.equal(statement.receipts.length, 1)
-  const receipt = statement.receipts[0]
-  assert.equal(receipt.slot, slot)
-  assert.equal(receipt.modelExchangeId, original.exchange.exchange_id)
-  assert.equal(receipt.providerId, providerId)
-  assert.equal(receipt.tokens, tokens)
-  assert.equal(receipt.knownTokens, tokens)
-  assert.equal(receipt.costMicrounits, null, 'the actual Provider did not supply a measured cost')
-  assert.match(receipt.sourceDigest, /^sha256:[0-9a-f]{64}$/u)
-  assert.equal(receipt.providerReceiptId, `device-attempt-set:${receipt.sourceDigest}`)
-  assert.match(statement.signature, /^sha256:[0-9a-f]{64}$/u)
-  return { usage: { accountingStatus: 'known', tokens, knownTokens: tokens,
-    costMicrounits: null, runtimeMillis: usage.runtimeMillis },
-    source: { statementDigest: facts[0].statement_digest, providerReceiptId: receipt.providerReceiptId,
-      modelExchangeId: receipt.modelExchangeId,
-      completionDigest: sha256(JSON.stringify(completions[0])) } }
-}
-
-test('Chat original execution lease expires naturally while an already sent model request remains unknown', async t => {
+test('Chat original execution lease expiry cancels an already sent model request and rejects its late response', async t => {
   const marker = 'execution-lease-expiry'
   const productSessionId = 'psn_01J00000000000000000000176'
   const command = "printf '%s' 'forbidden' > CHAT-OLD-LEASE-EFFECT.txt"
@@ -818,16 +794,23 @@ test('Chat original execution lease expires naturally while an already sent mode
       if (current && current.lease_id === period.lease_id && current.attempt === period.attempt) {
         assert.deepEqual(leasePeriod(current), leasePeriod(period))
       }
-      const original = providerFacts(devicePath.deviceData, job.job_id, period.attempt)
+      const original = await waitFor(() => {
+        const facts = providerFacts(devicePath.deviceData, job.job_id, period.attempt)
+        return facts.length === 1 && facts[0].attempts.length === 1
+          && facts[0].attempts[0].state === 'failed' ? facts : false
+      }, 'the local execution deadline cancels the original sent Provider request', 10_000)
       assert.equal(original.length, 1, 'inspect only the original fenced attempt, not a possible replacement')
       assert.equal(original[0].attempts.length, 1)
-      assert.equal(original[0].attempts[0].state, 'invoking',
-        'the original sent request is still awaiting its actual physical response at the expiry cut')
       assert.equal(original[0].attempts[0].accounting_chunks, null,
         'a sent request with no receipt retains unknown charge certainty')
-      assert.equal(original[0].attempts[0].failure_chunks, null)
-      assert.equal(original[0].exchange.accounting_chunks, null)
-      assert.equal(original[0].exchange.chunks, null)
+      const cancelled = JSON.parse(original[0].attempts[0].failure_chunks)
+      assert.equal(cancelled.length, 1)
+      const cancellationFacts = jsonBytes(Buffer.from(cancelled[0].payload.dataBase64, 'base64')).facts
+      assert.equal(cancellationFacts.cause, 'cancelled')
+      assert.equal(cancellationFacts.acceptance, 'unknown')
+      assert.equal(cancellationFacts.phase, 'response_headers')
+      assert.equal(original[0].exchange.accounting_chunks, original[0].attempts[0].failure_chunks)
+      assert.equal(original[0].exchange.chunks, original[0].attempts[0].failure_chunks)
       assert.equal(globSync('**/CHAT-OLD-LEASE-EFFECT.txt', { cwd: context.directory }).length, 0)
       devicePath.modelServer.releaseResponseGate(marker)
       const worker = await waitFor(() => {
@@ -838,23 +821,20 @@ test('Chat original execution lease expires naturally while an already sent mode
       const [runtime] = retainedRuns(devicePath.deviceData, job.job_id, period.attempt)
       const retained = assertRetainedOutcomeAuthority(cp, authority, productSessionId, runtime.run, worker)
       assert.deepEqual(leasePeriod(retained.period), leasePeriod(period))
-      assert.equal(worker.message.outcome.status, 'infrastructure_error')
-      assert.equal(worker.message.outcome.error.code, 'INFRASTRUCTURE_ERROR')
-      assert.match(worker.message.outcome.error.message, /cause=MODEL_AUTHORITY_EXPIRED/u)
+      assert.equal(worker.message.outcome.status, 'cancelled')
+      assert.equal(worker.message.outcome.error.code, 'CANCELLED')
       const usage = worker.message.outcome.usage
       assert.equal(usage.accountingStatus, 'unknown')
       assert.equal(usage.tokens, null)
       assert.equal(usage.costMicrounits, null)
       const settled = await waitAcknowledgedTerminal(cp, api, devicePath.deviceData, productSessionId,
-        job.job_id, authority, 'infrastructure_error', {
-          reconciliationEvidence: actualUsage => originalProviderReconciliation(cp, devicePath.deviceData,
-            authority, actualUsage, context.modelRoute.providerId),
-        })
+        job.job_id, authority, 'cancelled')
       assert.deepEqual(settled.worker.bytes, worker.bytes)
       assert.equal(settled.run.kernelSessionId, runtime.run.kernelSessionId)
       assert.equal(settled.run.submissionId, runtime.run.submissionId)
-      assert.equal(settled.run.terminal.kind, 'infrastructure_failed')
-      const sourceCause = expiredModelSourceReference(settled.run)
+      assert.equal(settled.run.terminal.kind, 'cancelled')
+      assert.ok(settled.run.operationFencedAt)
+      assert.equal(settled.run.failureDiagnostic ?? null, null)
       const commands = coreCommands(devicePath.deviceData, job.job_id, period.attempt)
       assert.equal(commands.filter(row => row.command === command).length, 0,
         'the original expired execution does not start the late reply command')
@@ -864,10 +844,10 @@ test('Chat original execution lease expires naturally while an already sent mode
       return { jobId: job.job_id, attempt: period.attempt, leaseId: period.lease_id,
         fencingToken: period.fencing_token, scope: 'execution_lease', expiresAt: period.expires_at,
         originalPhysicalAttempts: 1, originalLateCommandAttempts: 0,
-        chargeCertaintyAtExpiry: 'unknown', expiryRejectionCauseVerified: true, sourceCause,
-        terminalCauseVerified: true, immutableOutcomeDigest: worker.digest,
+        chargeCertaintyAtExpiry: 'unknown', expiryCancellationVerified: true,
+        cancellationFacts, immutableOutcomeDigest: worker.digest,
         businessAcknowledged: settled.worker.workerAcknowledged,
-        accountingEvidence: settled.accountingEvidence }
+        accountingStatus: usage.accountingStatus }
     } finally { cp.exec('DROP TRIGGER IF EXISTS refuse_original_lease_renewal') }
   })
 })

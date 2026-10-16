@@ -7,6 +7,7 @@ import {
   type ControlPlaneClientDirectory,
   type ControlPlaneDeviceSummary,
 } from './community-control-plane-client.js'
+import type { DevicePairingResponse } from './generated/contracts.js'
 
 export type ClientsAddFailure =
   | ControlPlaneClientAddFailure
@@ -25,14 +26,22 @@ export interface ClientsViewModelState {
   readonly failure: ClientsAddFailure | null
   readonly devices: readonly ControlPlaneDeviceSummary[]
   readonly devicesStatus: ClientsLoadStatus
+  readonly pairing: DevicePairingResponse | null
+  readonly pairingStatus: 'idle' | 'creating' | 'ready' | 'failed'
+  readonly revokingNodeId: string | null
+  readonly revokedNodeIds: readonly string[]
+  readonly managementMessage: string
 }
 
 export type ClientsViewModelListener = (state: ClientsViewModelState) => void
 
 export interface ClientsViewModel {
+  readonly serverUrl: string
   readonly state: ClientsViewModelState
   subscribe(listener: ClientsViewModelListener): () => void
   addClient(input: ClientsConnectInput): Promise<void>
+  createDevicePairing(): Promise<void>
+  revokeDevice(clientNodeId: string): Promise<void>
   refresh(): Promise<void>
   dismissFailure(): void
   reset(): void
@@ -44,7 +53,7 @@ function state(
   failure: ClientsAddFailure | null,
   devices: readonly ControlPlaneDeviceSummary[],
   devicesStatus: ClientsLoadStatus,
-): ClientsViewModelState {
+): Pick<ClientsViewModelState, 'status' | 'failure' | 'devices' | 'devicesStatus'> {
   return Object.freeze({ status, failure, devices, devicesStatus })
 }
 
@@ -120,16 +129,27 @@ export function createClientsViewModel(options: {
 }): ClientsViewModel {
   const client = options.client
   const listeners = new Set<ClientsViewModelListener>()
-  let current = state('idle', null, [], 'unloaded')
+  let current: ClientsViewModelState = Object.freeze({ ...state('idle', null, [], 'unloaded'),
+    pairing: null, pairingStatus: 'idle', revokingNodeId: null,
+    revokedNodeIds: Object.freeze([]), managementMessage: '' })
   let refreshEpoch = 0
+  let managementEpoch = 0
   let closed = false
 
-  function publish(next: ClientsViewModelState): void {
-    current = next
+  function publish(next: Partial<ClientsViewModelState>): void {
+    current = Object.freeze({ ...current, ...next })
     for (const listener of listeners) listener(current)
   }
 
+  function managementFailure(error: unknown): string {
+    return error instanceof ControlPlaneClientError && (error.kind === 'authorization'
+      || error.code === 'PERMISSION_DENIED' || error.code === 'ACCESS_DENIED')
+      ? '只有 Owner 可以配对或永久吊销设备。'
+      : '设备管理请求未完成，请检查连接后重试。'
+  }
+
   return {
+    get serverUrl() { return client.serverUrl },
     get state() {
       return current
     },
@@ -138,6 +158,35 @@ export function createClientsViewModel(options: {
       listeners.add(listener)
       listener(current)
       return () => { listeners.delete(listener) }
+    },
+    async createDevicePairing() {
+      if (closed || current.pairingStatus === 'creating') return
+      const epoch = managementEpoch
+      publish({ pairing: null, pairingStatus: 'creating', managementMessage: '' })
+      try {
+        const pairing = await client.createDevicePairing()
+        if (closed || epoch !== managementEpoch) return
+        publish({ pairing, pairingStatus: 'ready' })
+      } catch (error) {
+        if (closed || epoch !== managementEpoch) return
+        publish({ pairingStatus: 'failed', managementMessage: managementFailure(error) })
+      }
+    },
+    async revokeDevice(clientNodeId) {
+      if (closed || current.revokingNodeId !== null || current.revokedNodeIds.includes(clientNodeId)) return
+      const epoch = managementEpoch
+      publish({ revokingNodeId: clientNodeId, managementMessage: '' })
+      try {
+        const result = await client.revokeDevice(clientNodeId)
+        if (closed || epoch !== managementEpoch) return
+        if (!result.revoked) throw new Error('Device revocation did not complete')
+        publish({ revokingNodeId: null,
+          revokedNodeIds: Object.freeze([...current.revokedNodeIds, clientNodeId]),
+          managementMessage: '设备已永久吊销。重新接入需要新的配对令牌。' })
+      } catch (error) {
+        if (closed || epoch !== managementEpoch) return
+        publish({ revokingNodeId: null, managementMessage: managementFailure(error) })
+      }
     },
     async addClient(input) {
       if (closed || current.status === 'submitting') return
@@ -180,12 +229,16 @@ export function createClientsViewModel(options: {
     },
     reset() {
       if (closed) return
-      publish(state('idle', null, current.devices, current.devicesStatus))
+      managementEpoch += 1
+      publish({ ...state('idle', null, current.devices, current.devicesStatus),
+        pairing: null, pairingStatus: 'idle', revokingNodeId: null, managementMessage: '' })
     },
     close() {
       if (closed) return
       closed = true
+      current = Object.freeze({ ...current, pairing: null })
       refreshEpoch += 1
+      managementEpoch += 1
       listeners.clear()
     },
   }

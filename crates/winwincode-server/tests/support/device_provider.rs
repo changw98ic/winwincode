@@ -37,7 +37,7 @@ pub fn stage(storage: &mut SqliteStorage, node: &str) {
             revision,
             bytes,
             vec![NewOutboxEvent::internal(
-                "provider-test-change",
+                format!("provider-test-change:{node}:{revision}"),
                 "device.provider.changed.v1",
                 b"{}".to_vec(),
             )],

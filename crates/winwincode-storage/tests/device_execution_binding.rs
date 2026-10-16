@@ -47,8 +47,6 @@ const T2: &str = "2026-01-01T00:02:00.000Z";
 const T3: &str = "2026-01-01T00:03:00.000Z";
 const GRANT_EXPIRES: &str = "2026-01-01T01:00:00.000Z";
 
-const DIGEST: &str = "sha256:00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff";
-
 struct Fixture {
     node: String,
     instance: String,
@@ -71,7 +69,6 @@ fn seed_fixture(storage: &mut SqliteStorage, seed: u64) -> Fixture {
             "aarch64-apple-darwin",
             "aarch64",
             "1.2.3",
-            None,
             Some(instance.clone()),
             4,
         )
@@ -190,7 +187,6 @@ fn issue_launch_grant_for_session(
         worker_session_id,
         id("wrk", seed + 9),
         id("wki", seed + 10),
-        DIGEST,
         Some(id("ps", seed + 11)),
         Some(WorkRunId(id("wrn", seed + 12))),
         instant(GRANT_EXPIRES),
@@ -961,282 +957,6 @@ fn a_non_canonical_command_is_rejected_before_any_durable_write() {
 }
 
 #[test]
-#[allow(clippy::too_many_lines)]
-fn credential_renewal_preserves_current_launch_authority_and_audit_across_workers() {
-    use rusqlite::params;
-    use winwincode_execution_port::generated::WorkerHeartbeatMessage;
-    use winwincode_storage::{CredentialAuditAction, CredentialIssuance, CredentialRotation};
-    let root = temporary_directory("credential-renewal");
-    let mut storage = SqliteStorage::open(&root).unwrap();
-    storage.execution_registry().unwrap();
-    for (seed, occupancy_state) in [(20000, "draining"), (22000, "recovery_pending")] {
-        let (fixture, grant, job) = seed_bound_job(&mut storage, seed);
-        storage
-            .worker_launch_grant_ledger()
-            .unwrap()
-            .settle_launch_ack(
-                &LaunchAckSettlement::try_new(
-                    &grant.worker_launch_grant_id,
-                    &fixture.lease_id,
-                    fixture.fencing_token,
-                    &grant.worker_session_id,
-                    &grant.worker_id,
-                    &grant.worker_instance_id,
-                    true,
-                    None,
-                )
-                .unwrap(),
-                &instant(T2),
-            )
-            .unwrap();
-        let record = storage
-            .worker_session_credential_ledger()
-            .unwrap()
-            .issue(
-                &CredentialIssuance::try_new(
-                    id("wcred", seed),
-                    &grant.worker_session_id,
-                    &grant.worker_id,
-                    &grant.worker_instance_id,
-                    &grant.worker_launch_grant_id,
-                    DIGEST,
-                    instant("2026-01-01T00:30:00.000Z"),
-                )
-                .unwrap(),
-                &instant(T0),
-            )
-            .unwrap();
-        let heartbeat: WorkerHeartbeatMessage = serde_json::from_value(serde_json::json!({
-            "schemaVersion":"winwincode/v1", "kind":"worker.heartbeat",
-            "messageId":id("xmsg",7), "sentAt":T2, "observedAt":T2,
-            "workerId":grant.worker_id, "workerInstanceId":grant.worker_instance_id,
-            "heartbeatSequence":7, "capacity":{"availableSlots":0,"runningJobs":1},
-            "activeLeases":[{"jobId":job,"leaseId":id("lease",seed),"attempt":1,
-                "fencingToken":"1", "expiresAt":GRANT_EXPIRES,"lastEventSequence":0}]
-        }))
-        .unwrap();
-        let db = rusqlite::Connection::open(storage.database_path()).unwrap();
-        db.execute("UPDATE client_occupancy_leases SET idle_expires_at=?1, state=?3 WHERE occupancy_lease_id=?2",
-            params![T1,fixture.lease_id,occupancy_state]).unwrap();
-        db.execute("INSERT INTO execution_workers VALUES (?1,?2,?3,'auth','v1','{}','{}','digest','local','healthy',?3,7,1,1,0)",
-            params![grant.worker_id,grant.worker_instance_id,T0]).unwrap();
-        db.execute(
-            "INSERT INTO execution_heartbeats VALUES (?1,?2,7,'digest','{}')",
-            params![grant.worker_id, grant.worker_instance_id],
-        )
-        .unwrap();
-        db.execute(
-            "INSERT INTO execution_leases VALUES (?1,?2,'digest',?3,?4,1,'1',?5,?6)",
-            params![
-                job,
-                id("lease", seed),
-                grant.worker_id,
-                grant.worker_instance_id,
-                T0,
-                GRANT_EXPIRES
-            ],
-        )
-        .unwrap();
-        db.execute("INSERT INTO execution_dispatch_authorities VALUES (?1,?2,'digest',?3,?4,?5,1,'1',?6,?7,?8,?6)",
-            params![job,id("lease",seed),grant.worker_id,grant.worker_instance_id,id("wsn",seed+900),T0,GRANT_EXPIRES,id("req",seed+901)]).unwrap();
-        let lease = &heartbeat.active_leases[0];
-        let renewal_time = instant("2026-01-01T00:20:00.000Z");
-        let expiry = instant("2026-01-01T00:50:00.000Z");
-        assert!(
-            storage
-                .worker_session_credential_ledger()
-                .unwrap()
-                .renew_after_accepted_heartbeat(&record, &heartbeat, lease, &expiry, &renewal_time)
-                .unwrap()
-                .is_none()
-        );
-        storage
-            .device_execution_binding_ledger()
-            .unwrap()
-            .attach_facts(
-                &DeviceExecutionFactsAttachment::try_new(
-                    id("req", seed + 902),
-                    &job,
-                    &grant.worker_launch_grant_id,
-                )
-                .unwrap(),
-                &instant(T2),
-            )
-            .unwrap();
-        let mut wrong_fence = lease.clone();
-        wrong_fence.fencing_token.0 = "2".into();
-        assert!(
-            storage
-                .worker_session_credential_ledger()
-                .unwrap()
-                .renew_after_accepted_heartbeat(
-                    &record,
-                    &heartbeat,
-                    &wrong_fence,
-                    &expiry,
-                    &renewal_time
-                )
-                .unwrap()
-                .is_none()
-        );
-        for forbidden_state in ["recovery_pending_issued", "released"] {
-            if forbidden_state == "released" {
-                db.execute("UPDATE client_occupancy_leases SET state='released' WHERE occupancy_lease_id=?1", [&fixture.lease_id]).unwrap();
-            } else {
-                db.execute("UPDATE worker_launch_grants SET state='issued' WHERE worker_launch_grant_id=?1", [&grant.worker_launch_grant_id]).unwrap();
-            }
-            assert!(
-                storage
-                    .worker_session_credential_ledger()
-                    .unwrap()
-                    .renew_after_accepted_heartbeat(
-                        &record,
-                        &heartbeat,
-                        lease,
-                        &expiry,
-                        &renewal_time
-                    )
-                    .unwrap()
-                    .is_none(),
-                "{forbidden_state} must not renew credentials"
-            );
-            db.execute(
-                "UPDATE client_occupancy_leases SET state=?2 WHERE occupancy_lease_id=?1",
-                params![fixture.lease_id, occupancy_state],
-            )
-            .unwrap();
-            db.execute(
-                "UPDATE worker_launch_grants SET state='consumed' WHERE worker_launch_grant_id=?1",
-                [&grant.worker_launch_grant_id],
-            )
-            .unwrap();
-        }
-        let renewed = storage
-            .worker_session_credential_ledger()
-            .unwrap()
-            .renew_after_accepted_heartbeat(&record, &heartbeat, lease, &expiry, &renewal_time)
-            .unwrap()
-            .unwrap();
-        assert_eq!(renewed.revision, 2);
-        assert!(
-            storage
-                .worker_session_credential_ledger()
-                .unwrap()
-                .renew_after_accepted_heartbeat(&record, &heartbeat, lease, &expiry, &renewal_time)
-                .unwrap()
-                .is_none()
-        );
-        assert_eq!(
-            storage
-                .worker_session_credential_ledger()
-                .unwrap()
-                .audit_trail(&record.worker_session_credential_id)
-                .unwrap()
-                .iter()
-                .filter(|entry| entry.action == CredentialAuditAction::Renewed)
-                .count(),
-            1
-        );
-        let rotated = storage
-            .worker_session_credential_ledger()
-            .unwrap()
-            .rotate(
-                &CredentialRotation::try_new(
-                    &grant.worker_session_id,
-                    id("wcred", seed + 903),
-                    format!("sha256:{:064}", 1),
-                    expiry.clone(),
-                    None,
-                )
-                .unwrap(),
-                &renewal_time,
-            )
-            .unwrap()
-            .issued;
-        assert!(
-            storage
-                .worker_session_credential_ledger()
-                .unwrap()
-                .renew_after_accepted_heartbeat(
-                    &renewed,
-                    &heartbeat,
-                    lease,
-                    &instant(GRANT_EXPIRES),
-                    &renewal_time
-                )
-                .unwrap()
-                .is_none()
-        );
-        let rotated_renewed = storage
-            .worker_session_credential_ledger()
-            .unwrap()
-            .renew_after_accepted_heartbeat(
-                &rotated,
-                &heartbeat,
-                lease,
-                &instant(GRANT_EXPIRES),
-                &renewal_time,
-            )
-            .unwrap()
-            .unwrap();
-        storage
-            .worker_session_credential_ledger()
-            .unwrap()
-            .revoke_for_session(
-                &grant.worker_session_id,
-                &fixture.holder,
-                None,
-                &renewal_time,
-            )
-            .unwrap();
-        assert!(
-            storage
-                .worker_session_credential_ledger()
-                .unwrap()
-                .renew_after_accepted_heartbeat(
-                    &rotated_renewed,
-                    &heartbeat,
-                    lease,
-                    &instant("2026-01-01T01:10:00.000Z"),
-                    &renewal_time
-                )
-                .unwrap()
-                .is_none()
-        );
-        assert!(
-            storage
-                .worker_session_credential_ledger()
-                .unwrap()
-                .renew_after_accepted_heartbeat(
-                    &rotated_renewed,
-                    &heartbeat,
-                    lease,
-                    &instant("2026-01-01T01:10:00.000Z"),
-                    &instant(GRANT_EXPIRES)
-                )
-                .unwrap()
-                .is_none()
-        );
-    }
-    drop(storage);
-    let mut reopened = SqliteStorage::open(&root).unwrap();
-    let audits = reopened
-        .worker_session_credential_ledger()
-        .unwrap()
-        .audit_trail(&id("wcred", 20000))
-        .unwrap();
-    assert_eq!(
-        audits
-            .iter()
-            .filter(|entry| entry.action == CredentialAuditAction::Renewed)
-            .count(),
-        1
-    );
-    drop(reopened);
-    std::fs::remove_dir_all(root).unwrap();
-}
-
-#[test]
 fn trusted_exit_replaces_a_running_attempt_in_the_same_server_and_retains_history() {
     exercise_trusted_recovery(false, false);
 }
@@ -1285,7 +1005,6 @@ fn exercise_trusted_recovery(replace_queued: bool, chat: bool) {
         id("wsn", seed + 100),
         id("wrk", seed + 100),
         id("wki", seed + 100),
-        DIGEST,
         Some(id("psn", seed + 300)),
         (!chat).then(|| WorkRunId(id("wrn", seed + 100))),
         instant(GRANT_EXPIRES),
@@ -1462,7 +1181,6 @@ fn exercise_trusted_recovery(replace_queued: bool, chat: bool) {
             id("wsn", 8101),
             &initial.worker_id,
             id("wki", 8101),
-            DIGEST,
             initial.product_session_id.clone(),
             initial.work_run_id.clone(),
             instant(GRANT_EXPIRES),
@@ -1556,7 +1274,6 @@ fn exercise_trusted_recovery(replace_queued: bool, chat: bool) {
             id("wsn", 8200 + n),
             &initial.worker_id,
             id("wki", 8200 + n),
-            DIGEST,
             initial.product_session_id.clone(),
             current.work_run_id.clone().map(WorkRunId),
             instant(GRANT_EXPIRES),
@@ -1658,30 +1375,25 @@ fn independent_launch_bundles_reserve_distinct_downlink_positions() {
     let mut storage = SqliteStorage::open(&directory).unwrap();
     let f = seed_fixture(&mut storage, 32000);
     let launches = [32000, 32001].map(|seed| {
-        let digest = format!("sha256:{seed:064x}");
         let issuance = LaunchGrantIssuance::try_new(
             id("wlg", seed), &f.node, &f.instance, &f.holder, &f.lease_id,
             f.fencing_token, &f.binding_id, id("wsn", seed), id("wrk", seed),
-            id("wki", seed), &digest, Some(id("psn", seed)), None,
+            id("wki", seed), Some(id("psn", seed)), None,
             instant(GRANT_EXPIRES),
         ).unwrap();
-        let credential = winwincode_storage::CredentialIssuance::try_new(
-            id("wcred", seed * 100), id("wsn", seed), id("wrk", seed), id("wki", seed),
-            id("wlg", seed), &digest, instant(GRANT_EXPIRES),
-        ).unwrap();
+
         let frame = serde_json::json!({"schemaVersion":"winwincode/v1","kind":"client.worker.launch",
             "messageId":id("msg",seed),"clientNodeId":f.node,"clientInstanceId":f.instance,"occurredAt":T1,
             "payload":{"expectedRevision":1,"idempotencyKey":format!("launch-{seed}"),"occupancyLeaseId":f.lease_id,"occupancyFencingToken":f.fencing_token.to_string(),"launchGrant":{
             "workerLaunchGrantId":id("wlg",seed),"clientNodeId":f.node,"clientInstanceId":f.instance,"occupancyLeaseId":f.lease_id,"occupancyFencingToken":f.fencing_token.to_string(),
-            "repositoryBindingId":f.binding_id,"productSessionId":id("psn",seed),"workerSessionId":id("wsn",seed),"workerId":id("wrk",seed),"workerInstanceId":id("wki",seed),"credentialDigest":&digest,"expiresAt":GRANT_EXPIRES,"state":"issued","revision":1}}});
-        (issuance, credential, frame)
+            "repositoryBindingId":f.binding_id,"productSessionId":id("psn",seed),"workerSessionId":id("wsn",seed),"workerId":id("wrk",seed),"workerInstanceId":id("wki",seed),"expiresAt":GRANT_EXPIRES,"state":"issued","revision":1}}});
+        (issuance, frame)
     });
-    for (issuance, credential, frame) in &launches {
+    for (issuance, frame) in &launches {
         winwincode_storage::issue_worker_launch_bundle(
             &mut storage,
             issuance,
             None,
-            credential,
             |sequence| {
                 let mut frame = frame.clone();
                 frame["sequence"] = sequence.into();
@@ -1730,14 +1442,6 @@ fn independent_launch_bundles_reserve_distinct_downlink_positions() {
                 .as_str()
                 .map(str::to_owned)
         );
-        assert!(
-            storage
-                .worker_session_credential_ledger()
-                .unwrap()
-                .active_for_session(&grant.worker_session_id)
-                .unwrap()
-                .is_some()
-        );
     }
     let db = rusqlite::Connection::open(storage.database_path()).unwrap();
     assert_eq!(
@@ -1772,26 +1476,16 @@ fn launch_bundle_rolls_back_all_public_facts_and_retains_publication_after_ack()
         id("wsn", seed),
         id("wrk", seed),
         id("wki", seed),
-        DIGEST,
         Some(id("psn", seed)),
         None,
         instant(GRANT_EXPIRES),
     )
     .unwrap();
-    let credential = winwincode_storage::CredentialIssuance::try_new(
-        id("wcred", seed),
-        id("wsn", seed),
-        id("wrk", seed),
-        id("wki", seed),
-        id("wlg", seed),
-        DIGEST,
-        instant(GRANT_EXPIRES),
-    )
-    .unwrap();
+
     let frame = serde_json::json!({"schemaVersion":"winwincode/v1","kind":"client.worker.launch","messageId":id("msg",seed),"clientNodeId":f.node,"clientInstanceId":f.instance,"sequence":1,"occurredAt":T1,
         "payload":{"expectedRevision":1,"idempotencyKey":"launch-bundle","occupancyLeaseId":f.lease_id,"occupancyFencingToken":f.fencing_token.to_string(),"launchGrant":{
         "workerLaunchGrantId":id("wlg",seed),"clientNodeId":f.node,"clientInstanceId":f.instance,"occupancyLeaseId":f.lease_id,"occupancyFencingToken":f.fencing_token.to_string(),
-        "repositoryBindingId":f.binding_id,"productSessionId":id("psn",seed),"workerSessionId":id("wsn",seed),"workerId":id("wrk",seed),"workerInstanceId":id("wki",seed),"credentialDigest":DIGEST,"expiresAt":GRANT_EXPIRES,"state":"issued","revision":1}}});
+        "repositoryBindingId":f.binding_id,"productSessionId":id("psn",seed),"workerSessionId":id("wsn",seed),"workerId":id("wrk",seed),"workerInstanceId":id("wki",seed),"expiresAt":GRANT_EXPIRES,"state":"issued","revision":1}}});
     for pointer in [
         "/payload/occupancyFencingToken",
         "/payload/launchGrant/occupancyFencingToken",
@@ -1810,7 +1504,6 @@ fn launch_bundle_rolls_back_all_public_facts_and_retains_publication_after_ack()
                 &mut storage,
                 &issuance,
                 None,
-                &credential,
                 |_| Ok(numeric.clone()),
                 &instant(T1),
             )
@@ -1832,7 +1525,6 @@ fn launch_bundle_rolls_back_all_public_facts_and_retains_publication_after_ack()
             &mut storage,
             &issuance,
             None,
-            &credential,
             |_| Ok(invalid.clone()),
             &instant(T1)
         )
@@ -1846,21 +1538,10 @@ fn launch_bundle_rolls_back_all_public_facts_and_retains_publication_after_ack()
             .unwrap()
             .is_none()
     );
-    assert!(
-        storage
-            .worker_session_credential_ledger()
-            .unwrap()
-            .active_for_session(&id("wsn", seed))
-            .unwrap()
-            .is_none()
-    );
+
     {
         let db = rusqlite::Connection::open(storage.database_path()).unwrap();
-        for table in [
-            "worker_launch_grant_audit",
-            "worker_session_credentials_audit",
-            "client_downlink_frames",
-        ] {
+        for table in ["worker_launch_grant_audit", "client_downlink_frames"] {
             assert_eq!(
                 db.query_row(&format!("SELECT count(*) FROM {table}"), [], |row| row
                     .get::<_, i64>(0))
@@ -1888,7 +1569,6 @@ fn launch_bundle_rolls_back_all_public_facts_and_retains_publication_after_ack()
                 &mut storage,
                 &issuance,
                 None,
-                &credential,
                 |_| Ok(stale.clone()),
                 &instant(T1)
             ),
@@ -1922,7 +1602,6 @@ fn launch_bundle_rolls_back_all_public_facts_and_retains_publication_after_ack()
         &mut storage,
         &issuance,
         None,
-        &credential,
         |_| Ok(valid.clone()),
         &instant(T1),
     )
@@ -2151,7 +1830,6 @@ fn process_closure_is_exact_and_survives_multiple_device_reboots() {
         id("wsn", seed + 1),
         &grant.worker_id,
         id("wki", seed + 1),
-        DIGEST,
         grant.product_session_id.clone(),
         grant.work_run_id.clone(),
         instant(GRANT_EXPIRES),

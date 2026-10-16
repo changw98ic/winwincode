@@ -39,7 +39,7 @@ use winwincode_server::{
     ApiError, AuthSessionBootstrap, AuthSessionConfig, AuthenticatedPrincipal,
     ClientExchangeApplication, ClientExchangeConfig, ClientExchangePort,
     ClientOccupancyApplication, ClientOccupancyConfig, ClientOccupancyErrorKind,
-    ControlPlaneApiPort, EventSubscription, RequestAuthenticator, ServerConfig, ServerTls,
+    ControlPlaneApiPort, EventSubscription, RequestAuthenticator, ServerConfig,
     SqliteAuthSessionManager, UserAccountService, start_server_with_remote_worker,
 };
 use winwincode_storage::{
@@ -129,7 +129,6 @@ fn server_config(data_directory: &Path) -> ServerConfig {
     ServerConfig::new(
         "127.0.0.1:0".parse().expect("loopback address"),
         "http://control.example",
-        ServerTls::Disabled,
         BTreeSet::from([ORIGIN.to_owned()]),
         data_directory.to_path_buf(),
         Duration::from_secs(2),
@@ -303,17 +302,10 @@ async fn login(address: std::net::SocketAddr, username: &str, password: &str) ->
     (session_cookie_from_response(&response), user_id)
 }
 
-async fn post_exchange(
-    address: std::net::SocketAddr,
-    body: &str,
-    credential: Option<&str>,
-) -> (String, Option<Value>) {
+async fn post_exchange(address: std::net::SocketAddr, body: &str) -> (String, Option<Value>) {
     let mut stream = TcpStream::connect(address).await.expect("connect server");
-    let authorization = credential
-        .map(|value| format!("Authorization: Bearer {value}\r\n"))
-        .unwrap_or_default();
     let request = format!(
-        "POST /internal/v1/client/exchange HTTP/1.1\r\nHost: control.example\r\n{authorization}Content-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        "POST /internal/v1/client/exchange HTTP/1.1\r\nHost: control.example\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
         body.len()
     );
     stream
@@ -348,6 +340,7 @@ fn frame(node: &str, instance: &str, sequence: u64, message: ClientToServerMessa
 fn exchange_request(frames: &[Value], ack_sequence: u64) -> String {
     json!({
         "schemaVersion": SCHEMA_VERSION,
+        "clientNodeId": frames.first().expect("exchange frame")["clientNodeId"],
         "frames": frames,
         "ackSequence": ack_sequence,
     })
@@ -363,7 +356,7 @@ fn capacity(running: u32) -> ClientCapacityReport {
     }
 }
 
-async fn enroll_device(address: std::net::SocketAddr) -> (String, String, String, u64) {
+async fn enroll_device(address: std::net::SocketAddr) -> (String, String, u64) {
     let enroll = ClientToServerMessage::Enroll(Box::new(ClientEnrollPayload {
         command: CommandContext {
             expected_revision: 0,
@@ -377,7 +370,6 @@ async fn enroll_device(address: std::net::SocketAddr) -> (String, String, String
     let (status, body) = post_exchange(
         address,
         &exchange_request(&[frame(FRESH_NODE, ENROLL_INSTANCE, 1, enroll)], 0),
-        None,
     )
     .await;
     assert!(status.starts_with("HTTP/1.1 200"), "{status}");
@@ -391,11 +383,7 @@ async fn enroll_device(address: std::net::SocketAddr) -> (String, String, String
         .as_str()
         .expect("public client id")
         .to_owned();
-    let credential = enrollment["deviceCredential"]
-        .as_str()
-        .expect("credential")
-        .to_owned();
-    (node, public_client_id, credential, 2)
+    (node, public_client_id, 2)
 }
 
 async fn walk_hello(
@@ -403,7 +391,6 @@ async fn walk_hello(
     data_directory: &Path,
     node: &str,
     instance: &str,
-    credential: &str,
 ) {
     let hello = ClientToServerMessage::Hello(ClientHelloPayload {
         client_version: "0.1.0-alpha.1".to_owned(),
@@ -419,7 +406,6 @@ async fn walk_hello(
             &[frame(node, instance, sequence, hello)],
             downlink_ack_cursor(data_directory, node),
         ),
-        Some(credential),
     )
     .await;
     assert!(status.starts_with("HTTP/1.1 200"), "{status}");
@@ -432,11 +418,11 @@ async fn walk_hello(
 async fn enroll_online_device(
     address: std::net::SocketAddr,
     data_directory: &Path,
-) -> (String, String, String) {
-    let (node, public_client_id, credential, _next) = enroll_device(address).await;
-    walk_hello(address, data_directory, &node, DEVICE_INSTANCE, &credential).await;
-    send_heartbeat(address, data_directory, &node, &credential, 0).await;
-    (node, public_client_id, credential)
+) -> (String, String) {
+    let (node, public_client_id, _next) = enroll_device(address).await;
+    walk_hello(address, data_directory, &node, DEVICE_INSTANCE).await;
+    send_heartbeat(address, data_directory, &node, 0).await;
+    (node, public_client_id)
 }
 
 fn publish_connect_code(data_directory: &Path, node: &str, code: &str) -> String {
@@ -543,7 +529,6 @@ async fn send_heartbeat(
     address: std::net::SocketAddr,
     data_directory: &Path,
     node: &str,
-    credential: &str,
     running: u32,
 ) {
     let heartbeat = ClientToServerMessage::Heartbeat(ClientHeartbeatPayload {
@@ -560,7 +545,6 @@ async fn send_heartbeat(
             &[frame(node, DEVICE_INSTANCE, sequence, heartbeat)],
             downlink_ack_cursor(data_directory, node),
         ),
-        Some(credential),
     )
     .await;
     assert!(status.starts_with("HTTP/1.1 200"), "{status}");
@@ -570,7 +554,6 @@ fn spawn_offer_responder(
     data_directory: PathBuf,
     address: std::net::SocketAddr,
     node: String,
-    credential: String,
     mut inbox_ack: u64,
     mut next_sequence: u64,
 ) -> tokio::task::JoinHandle<()> {
@@ -622,7 +605,7 @@ fn spawn_offer_responder(
                     stored.sequence,
                 );
                 next_sequence += 1;
-                let (status, _) = post_exchange(address, &request, Some(&credential)).await;
+                let (status, _) = post_exchange(address, &request).await;
                 assert!(status.starts_with("HTTP/1.1 200"), "{status}");
             }
         }
@@ -736,14 +719,13 @@ async fn claim_completes_through_offer_ack_and_projects_occupied() {
     let address = running.local_address();
     let (cookie, user_id) = initialize_and_login_owner(address).await;
 
-    let (node, public_client_id, credential) = enroll_online_device(address, &data_directory).await;
+    let (node, public_client_id) = enroll_online_device(address, &data_directory).await;
     let code = publish_connect_code(&data_directory, &node, "68421975");
     consume_code_as(&data_directory, &node, &code, &user_id);
     let _responder = spawn_offer_responder(
         data_directory.clone(),
         address,
         node.clone(),
-        credential,
         downlink_ack_cursor(&data_directory, &node),
         next_client_sequence(&data_directory, &node),
     );
@@ -835,8 +817,7 @@ async fn unanswered_offer_times_out_rolls_back_and_feeds_the_rate_limit() {
     let address = running.local_address();
     let (_cookie, user_id) = initialize_and_login_owner(address).await;
 
-    let (node, public_client_id, _credential) =
-        enroll_online_device(address, &data_directory).await;
+    let (node, public_client_id) = enroll_online_device(address, &data_directory).await;
     consume_code_as(
         &data_directory,
         &node,
@@ -916,7 +897,7 @@ async fn release_modes_map_onto_the_service_semantics_and_downlink_frames() {
     let address = running.local_address();
     let (cookie, user_id) = initialize_and_login_owner(address).await;
 
-    let (node, public_client_id, credential) = enroll_online_device(address, &data_directory).await;
+    let (node, public_client_id) = enroll_online_device(address, &data_directory).await;
     consume_code_as(
         &data_directory,
         &node,
@@ -928,7 +909,6 @@ async fn release_modes_map_onto_the_service_semantics_and_downlink_frames() {
         data_directory.clone(),
         address,
         node.clone(),
-        credential.clone(),
         downlink_ack_cursor(&data_directory, &node),
         next_client_sequence(&data_directory, &node),
     );
@@ -974,7 +954,7 @@ async fn release_modes_map_onto_the_service_semantics_and_downlink_frames() {
         );
     }
 
-    send_heartbeat(address, &data_directory, &node, &credential, 0).await;
+    send_heartbeat(address, &data_directory, &node, 0).await;
     let drained = wait_until(|| active_lease(&data_directory, &node).is_none()).await;
     assert!(drained, "the draining lease released after the heartbeat");
 
@@ -982,7 +962,6 @@ async fn release_modes_map_onto_the_service_semantics_and_downlink_frames() {
         data_directory.clone(),
         address,
         node.clone(),
-        credential.clone(),
         downlink_ack_cursor(&data_directory, &node),
         next_client_sequence(&data_directory, &node),
     );
@@ -1010,7 +989,6 @@ async fn release_modes_map_onto_the_service_semantics_and_downlink_frames() {
         data_directory.clone(),
         address,
         node.clone(),
-        credential.clone(),
         downlink_ack_cursor(&data_directory, &node),
         next_client_sequence(&data_directory, &node),
     );
@@ -1077,7 +1055,7 @@ async fn release_modes_map_onto_the_service_semantics_and_downlink_frames() {
         &node,
         "reported_running_worker_sessions = 0",
     );
-    send_heartbeat(address, &data_directory, &node, &credential, 0).await;
+    send_heartbeat(address, &data_directory, &node, 0).await;
     let drained = wait_until(|| active_lease(&data_directory, &node).is_none()).await;
     assert!(
         drained,
@@ -1135,7 +1113,7 @@ async fn offline_sweep_marks_recovery_and_resumes_with_same_token() {
     let running = start_server(&data_directory, &auth_directory).await;
     let address = running.local_address();
     let (owner_cookie, owner_id) = initialize_and_login_owner(address).await;
-    let (node, public_client_id, credential) = enroll_online_device(address, &data_directory).await;
+    let (node, public_client_id) = enroll_online_device(address, &data_directory).await;
     consume_code_as(
         &data_directory,
         &node,
@@ -1146,7 +1124,6 @@ async fn offline_sweep_marks_recovery_and_resumes_with_same_token() {
         data_directory.clone(),
         address,
         node.clone(),
-        credential.clone(),
         downlink_ack_cursor(&data_directory, &node),
         next_client_sequence(&data_directory, &node),
     );
@@ -1181,14 +1158,7 @@ async fn offline_sweep_marks_recovery_and_resumes_with_same_token() {
         "the recovery window is still open"
     );
 
-    walk_hello(
-        address,
-        &data_directory,
-        &node,
-        DEVICE_INSTANCE,
-        &credential,
-    )
-    .await;
+    walk_hello(address, &data_directory, &node, DEVICE_INSTANCE).await;
 
     {
         let mut storage = SqliteStorage::open(&data_directory).expect("storage");
@@ -1230,7 +1200,7 @@ async fn force_release_enforces_the_recovery_deadline() {
     let running = start_server(&data_directory, &auth_directory).await;
     let address = running.local_address();
     let (owner_cookie, owner_id) = initialize_and_login_owner(address).await;
-    let (node, public_client_id, credential) = enroll_online_device(address, &data_directory).await;
+    let (node, public_client_id) = enroll_online_device(address, &data_directory).await;
     consume_code_as(
         &data_directory,
         &node,
@@ -1241,7 +1211,6 @@ async fn force_release_enforces_the_recovery_deadline() {
         data_directory.clone(),
         address,
         node.clone(),
-        credential,
         downlink_ack_cursor(&data_directory, &node),
         next_client_sequence(&data_directory, &node),
     );

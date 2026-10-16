@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 use super::super::ExecutionPortActionGate;
-use super::super::tests::{binding, catalog, signing_key};
+use super::super::tests::{binding, catalog};
 use winwincode_domain::Instant;
-use winwincode_execution_port::action_gateway::ExecutionEnvelopeToken;
+
 use winwincode_kernel::{KernelActionGate, KernelToolResultReadRequest};
 
 fn read_request() -> KernelToolResultReadRequest {
@@ -25,11 +25,6 @@ async fn stored_result_read_is_receipt_bound_and_current_lease_fenced() {
     let gate = ExecutionPortActionGate::open(
         home.as_path(),
         catalog(),
-        ExecutionEnvelopeToken {
-            version: 1,
-            digest: winwincode_domain::Sha256Digest(format!("sha256:{}", "c".repeat(64))),
-        },
-        signing_key(),
         crate::model_bridge::SharedAuthoritySource::default(),
     )
     .unwrap();
@@ -64,11 +59,6 @@ async fn expired_unknown_and_delegated_result_reads_are_rejected() {
     let gate = ExecutionPortActionGate::open(
         home.as_path(),
         catalog(),
-        ExecutionEnvelopeToken {
-            version: 1,
-            digest: winwincode_domain::Sha256Digest(format!("sha256:{}", "c".repeat(64))),
-        },
-        signing_key(),
         crate::model_bridge::SharedAuthoritySource::default(),
     )
     .unwrap();
@@ -91,19 +81,9 @@ async fn result_read_authority_expires_without_owner_clock_refresh() {
     let home =
         std::env::temp_dir().join(format!("wwc-result-read-elapsed-{}", uuid::Uuid::new_v4()));
     std::fs::create_dir_all(&home).unwrap();
-    let gate = ExecutionPortActionGate::open(
-        &home,
-        catalog(),
-        ExecutionEnvelopeToken {
-            version: 1,
-            digest: winwincode_domain::Sha256Digest(format!("sha256:{}", "c".repeat(64))),
-        },
-        signing_key(),
-        crate::model_bridge::SharedAuthoritySource::default(),
-    )
-    .unwrap();
-    let mut authority = binding();
-    authority.authority.lease.expires_at = Instant("2030-01-01T00:00:02.120Z".into());
+    let source = crate::model_bridge::SharedAuthoritySource::default();
+    let gate = ExecutionPortActionGate::open(&home, catalog(), source.clone()).unwrap();
+    let authority = binding();
     gate.install_binding(&authority, None).unwrap();
     let initial = Instant("2030-01-01T00:00:02.000Z".into());
     gate.update_now(&initial).unwrap();
@@ -112,7 +92,13 @@ async fn result_read_authority_expires_without_owner_clock_refresh() {
     gate.revalidate_result_read(request.clone(), authorization.clone())
         .await
         .unwrap();
-    tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+    source.advance_clock_for_test(std::time::Duration::from_hours(1));
+    assert!(gate.authorize_result_read(request.clone()).await.is_err());
+    assert!(
+        gate.revalidate_result_read(request.clone(), authorization.clone())
+            .await
+            .is_err()
+    );
     gate.update_now(&initial).unwrap();
     assert!(gate.authorize_result_read(request.clone()).await.is_err());
     assert!(

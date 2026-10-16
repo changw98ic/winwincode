@@ -57,7 +57,7 @@ fn envelope(message_id: &str, client_instance_id: &str, sequence: u64) -> Client
 
 #[test]
 fn open_initializes_the_full_current_schema_and_round_trips_it() {
-    assert_eq!(winwincode_device_client::CLIENT_STORE_SCHEMA_VERSION, 9);
+    assert_eq!(winwincode_device_client::CLIENT_STORE_SCHEMA_VERSION, 11);
     let (root, mut store) = open_store("schema-round-trip");
     let database_path = store.database_path().to_path_buf();
     let canonical_root = fs::canonicalize(&root).expect("root should canonicalize");
@@ -93,7 +93,10 @@ fn open_initializes_the_full_current_schema_and_round_trips_it() {
     let version: i64 = connection
         .pragma_query_value(None, "user_version", |row| row.get(0))
         .expect("schema version should be readable");
-    assert_eq!(version, 9);
+    assert_eq!(
+        version,
+        winwincode_device_client::CLIENT_STORE_SCHEMA_VERSION
+    );
     assert_canonical_local_tables(&connection);
     connection.close().expect("inspection close");
     fs::remove_dir_all(root).expect("database directory should be released");
@@ -134,17 +137,6 @@ const CANONICAL_LOCAL_TABLES: &[(&str, &str, &[&str])] = &[
             "current_instance_id",
             "created_at",
             "revision",
-        ],
-    ),
-    (
-        "device_credential",
-        "PRAGMA table_info(device_credential)",
-        &[
-            "device_id",
-            "credential_secret",
-            "credential_digest",
-            "credential_generation",
-            "rotated_at",
         ],
     ),
     (
@@ -252,6 +244,7 @@ const CANONICAL_LOCAL_TABLES: &[(&str, &str, &[&str])] = &[
             "candidate_ref",
             "candidate_commit",
             "retained_at",
+            "base_commit",
         ],
     ),
     (

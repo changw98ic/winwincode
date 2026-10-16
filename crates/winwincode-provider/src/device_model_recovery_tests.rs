@@ -14,7 +14,6 @@ use std::{
     sync::Arc,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
-use winwincode_execution_port::action_enforcement::ActionEnforcementSigningKey;
 
 type DeviceAttemptRow = (i64, String, Option<String>, Option<Vec<u8>>);
 type InvocationPairRow = (String, String, Vec<u8>, Option<String>, Option<String>);
@@ -360,20 +359,14 @@ fn interrupted_and_cancelled_attempts_close_with_honest_financial_facts() {
                 .try_model_exchange_owner(&open.model_exchange_id.0)
                 .unwrap()
                 .unwrap();
-            let key = ActionEnforcementSigningKey::from_bytes([7; 32]).unwrap();
+
             assert!(
-                store
-                    .accounting_statement(&open.lease, &key)
-                    .unwrap()
-                    .is_none(),
+                store.accounting_statement(&open.lease,).unwrap().is_none(),
                 "a live owner still controls the final exchange write"
             );
             drop(live);
-            let statement = store
-                .accounting_statement(&open.lease, &key)
-                .unwrap()
-                .unwrap();
-            statement.verify(&key).unwrap();
+            let statement = store.accounting_statement(&open.lease).unwrap().unwrap();
+            statement.validate().unwrap();
             assert_eq!(
                 statement.receipts[0].tokens,
                 Some(5),
@@ -425,12 +418,9 @@ fn interrupted_and_cancelled_attempts_close_with_honest_financial_facts() {
                 "interrupted_unknown"
             }
         );
-        let key = ActionEnforcementSigningKey::from_bytes([7; 32]).unwrap();
-        let statement = store
-            .accounting_statement(&open.lease, &key)
-            .unwrap()
-            .unwrap();
-        statement.verify(&key).unwrap();
+
+        let statement = store.accounting_statement(&open.lease).unwrap().unwrap();
+        statement.validate().unwrap();
         assert_eq!(statement.manifest.len(), 1);
         assert_eq!(statement.receipts.len(), 1);
         assert_eq!(
@@ -450,7 +440,7 @@ fn interrupted_and_cancelled_attempts_close_with_honest_financial_facts() {
             }
         );
         assert_eq!(
-            store.accounting_statement(&open.lease, &key).unwrap(),
+            store.accounting_statement(&open.lease,).unwrap(),
             Some(statement)
         );
         assert_interrupted_diagnostics_settled(&store, &open);
@@ -790,12 +780,9 @@ fn run_child(case: &str) {
             chunks.iter().all(|chunk| chunk.error.is_none()),
             "pure diagnostics cannot change a model success"
         );
-        let key = ActionEnforcementSigningKey::from_bytes([7; 32]).unwrap();
-        let statement = store
-            .accounting_statement(&open.lease, &key)
-            .unwrap()
-            .unwrap();
-        statement.verify(&key).unwrap();
+
+        let statement = store.accounting_statement(&open.lease).unwrap().unwrap();
+        statement.validate().unwrap();
         assert_eq!(statement.receipts[0].tokens, Some(5));
         drop(store);
         let reopened = DeviceProviderStore::open(&root).unwrap();
@@ -825,12 +812,9 @@ fn run_child(case: &str) {
             .connection
             .execute_batch("DROP TRIGGER accounting_failure")
             .unwrap();
-        let key = ActionEnforcementSigningKey::from_bytes([7; 32]).unwrap();
-        let statement = store
-            .accounting_statement(&open.lease, &key)
-            .unwrap()
-            .unwrap();
-        statement.verify(&key).unwrap();
+
+        let statement = store.accounting_statement(&open.lease).unwrap().unwrap();
+        statement.validate().unwrap();
         assert!(
             statement
                 .receipts
@@ -874,12 +858,9 @@ fn run_child(case: &str) {
                 .unwrap()
                 .is_empty()
         );
-        let key = ActionEnforcementSigningKey::from_bytes([7; 32]).unwrap();
-        let statement = store
-            .accounting_statement(&open.lease, &key)
-            .unwrap()
-            .unwrap();
-        statement.verify(&key).unwrap();
+
+        let statement = store.accounting_statement(&open.lease).unwrap().unwrap();
+        statement.validate().unwrap();
         assert_eq!(
             statement.receipts[0].tokens,
             Some(5),
@@ -928,12 +909,9 @@ fn run_child(case: &str) {
             chunks
         );
     }
-    let key = ActionEnforcementSigningKey::from_bytes([7; 32]).unwrap();
-    let statement = store
-        .accounting_statement(&open.lease, &key)
-        .unwrap()
-        .unwrap();
-    statement.verify(&key).unwrap();
+
+    let statement = store.accounting_statement(&open.lease).unwrap().unwrap();
+    statement.validate().unwrap();
     assert_eq!(
         statement.manifest.len(),
         1,
@@ -1036,12 +1014,9 @@ fn serve(
                 "process-local registry absence is not abandonment proof"
             );
             let open: ModelOpenMessage = serde_json::from_str(&request).unwrap();
-            let key = ActionEnforcementSigningKey::from_bytes([7; 32]).unwrap();
+
             assert!(
-                store
-                    .accounting_statement(&open.lease, &key)
-                    .unwrap()
-                    .is_none(),
+                store.accounting_statement(&open.lease,).unwrap().is_none(),
                 "a still-running model cannot have a closed charge ledger"
             );
         }

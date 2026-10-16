@@ -6,7 +6,6 @@ use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use serde_json::Value;
-use sha2::Digest as _;
 use winwincode_cli::{
     RepoAdminError, RepoAdminOutcome, SystemLocalLauncher, WwcCliExit, repo_add, repo_list,
     repo_remove, run_cli,
@@ -19,7 +18,6 @@ static SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 const ASSIGNED_NODE: &str = "cnd_D1D1D1D1D1D1D1D1D1D1D1D1D1";
 const ASSIGNED_PUBLIC_CLIENT_ID: &str = "1928374650";
-const ISSUED_SECRET: [u8; 32] = [0x6d; 32];
 const STAMP: &str = "2026-09-04T00:00:00.000Z";
 
 struct Fixture {
@@ -73,19 +71,12 @@ impl Fixture {
             .identity()
             .device_id()
             .to_owned();
-        let mut secret_hex = String::with_capacity(ISSUED_SECRET.len() * 2);
-        for byte in ISSUED_SECRET {
-            use std::fmt::Write as _;
-            let _ = write!(secret_hex, "{byte:02x}");
-        }
         adopt_enrollment(
             &mut store,
             &device_id,
             &IssuedEnrollment {
                 client_node_id: ASSIGNED_NODE.to_owned(),
                 public_client_id: ASSIGNED_PUBLIC_CLIENT_ID.to_owned(),
-                credential_material: secret_hex,
-                credential_digest: format!("sha256:{:x}", sha2::Sha256::digest(ISSUED_SECRET)),
             },
             STAMP,
         )
@@ -249,6 +240,37 @@ fn repo_add_list_remove_round_trip_reports_frames() {
 }
 
 #[test]
+fn repo_add_defaults_to_the_current_directory() {
+    require_git();
+    let fixture = Fixture::new();
+    fixture.enroll();
+    let repository = fixture.git_repository("current-directory-repo");
+    let output = Command::new(std::env::var_os("CARGO_BIN_EXE_wwc").expect("Cargo binary path"))
+        .args(["repo", "add", "--data-dir", fixture.data_dir(), "--json"])
+        .current_dir(&repository)
+        .env("WINWINCODE_HOME", fixture.workspace.join("cli-home"))
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_CONFIG_SYSTEM", "/dev/null")
+        .output()
+        .expect("wwc runs");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let added: Value = serde_json::from_slice(&output.stdout).expect("add JSON");
+    assert_eq!(added["status"], "registered");
+    assert_eq!(
+        added["repository"]["canonicalPath"].as_str(),
+        fs::canonicalize(&repository).unwrap().to_str()
+    );
+    assert_eq!(fixture.pending_kinds(), vec!["client.repository.upsert"]);
+    let extra = fixture.cli(&["add", fixture.workspace.to_str().unwrap(), "second-path"]);
+    assert_eq!(extra.code, 2);
+    fixture.cleanup();
+}
+
+#[test]
 fn repo_add_refuses_non_git_directory_until_confirmed() {
     require_git();
     let fixture = Fixture::new();
@@ -283,7 +305,7 @@ fn repo_add_refuses_non_git_directory_until_confirmed() {
 }
 
 #[test]
-fn repo_commands_require_enrollment_and_data_dir() {
+fn repo_commands_require_enrollment() {
     require_git();
     let fixture = Fixture::new();
     let repository = fixture.git_repository("unenrolled-repo");
@@ -304,12 +326,6 @@ fn repo_commands_require_enrollment_and_data_dir() {
         "guidance expected: {}",
         exit.stdout
     );
-
-    let exit = run_cli(
-        &["repo".to_owned(), "list".to_owned()],
-        &SystemLocalLauncher::new(std::env::temp_dir()),
-    );
-    assert_eq!(exit.code, 2, "usage error expected: {exit:?}");
 
     fixture.cleanup();
 }

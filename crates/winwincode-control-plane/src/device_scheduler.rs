@@ -105,7 +105,6 @@ pub struct DeviceWorkerSchedulingRequest {
     worker_session_id: String,
     worker_id: String,
     worker_instance_id: String,
-    credential_digest: String,
     product_session_id: Option<String>,
     work_run_id: Option<String>,
     expires_at: Instant,
@@ -121,7 +120,6 @@ impl DeviceWorkerSchedulingRequest {
         worker_session_id: impl Into<String>,
         worker_id: impl Into<String>,
         worker_instance_id: impl Into<String>,
-        credential_digest: impl Into<String>,
         product_session_id: Option<String>,
         work_run_id: Option<String>,
         expires_at: Instant,
@@ -134,7 +132,6 @@ impl DeviceWorkerSchedulingRequest {
             worker_session_id: worker_session_id.into(),
             worker_id: worker_id.into(),
             worker_instance_id: worker_instance_id.into(),
-            credential_digest: credential_digest.into(),
             product_session_id,
             work_run_id,
             expires_at,
@@ -150,7 +147,6 @@ impl DeviceWorkerSchedulingRequest {
         validate_prefixed(&request.worker_session_id, "wsn_", "worker session id")?;
         validate_prefixed(&request.worker_id, "wrk_", "worker id")?;
         validate_prefixed(&request.worker_instance_id, "wki_", "worker instance id")?;
-        validate_credential_digest(&request.credential_digest)?;
         if let Some(product) = &request.product_session_id {
             validate_prefixed(product, "ps_", "product session id")?;
         }
@@ -393,7 +389,6 @@ impl<'storage> DeviceSchedulerService<'storage> {
             request.worker_session_id.clone(),
             request.worker_id.clone(),
             request.worker_instance_id.clone(),
-            request.credential_digest.clone(),
             request.product_session_id.clone(),
             request.work_run_id.clone().map(WorkRunId),
             request.expires_at.clone(),
@@ -757,22 +752,6 @@ fn validate_public_client_id(value: &str) -> Result<(), DeviceSchedulerServiceEr
         Err(error(
             DeviceSchedulerServiceErrorKind::InvalidInput,
             "the public client id is not 9-12 ascii digits",
-        ))
-    }
-}
-
-fn validate_credential_digest(value: &str) -> Result<(), DeviceSchedulerServiceError> {
-    if value.len() == 71
-        && value.starts_with("sha256:")
-        && value["sha256:".len()..]
-            .bytes()
-            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
-    {
-        Ok(())
-    } else {
-        Err(error(
-            DeviceSchedulerServiceErrorKind::InvalidInput,
-            "the credential digest is not a lowercase sha256 digest",
         ))
     }
 }

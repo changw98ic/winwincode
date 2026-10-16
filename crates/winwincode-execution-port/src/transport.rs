@@ -4,7 +4,7 @@ use std::fmt;
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use winwincode_domain::{ExecutionMessageId, WorkerId, WorkerInstanceId};
+use winwincode_domain::{ExecutionMessageId, Instant, WorkerId, WorkerInstanceId};
 
 use crate::generated::ExecutionPortMessage;
 
@@ -133,6 +133,7 @@ pub struct RemoteExchangeDelivery {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct RemoteExchangeResponse {
     schema_version: String,
+    server_time: Instant,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     frame_accepted: Option<bool>,
     deliveries: Vec<RemoteExchangeDelivery>,
@@ -140,6 +141,34 @@ pub struct RemoteExchangeResponse {
 
 impl RemoteExchangeResponse {
     pub fn new(deliveries: Vec<RemoteExchangeDelivery>) -> Result<Self, FrameError> {
+        let format = time::format_description::parse(
+            "[year]-[month]-[day]T[hour]:[minute]:[second].[subsecond digits:3]Z",
+        )
+        .map_err(|error| FrameError::Malformed(error.to_string()))?;
+        let now = time::OffsetDateTime::now_utc()
+            .format(&format)
+            .map_err(|error| FrameError::Malformed(error.to_string()))?;
+        Self::new_at(deliveries, Instant(now))
+    }
+
+    pub fn new_at(
+        deliveries: Vec<RemoteExchangeDelivery>,
+        server_time: Instant,
+    ) -> Result<Self, FrameError> {
+        time::OffsetDateTime::parse(
+            &server_time.0,
+            &time::format_description::well_known::Rfc3339,
+        )
+        .map_err(|error| FrameError::Malformed(error.to_string()))?;
+        if server_time.0.len() != 24
+            || !server_time.0.ends_with('Z')
+            || server_time.0.as_bytes()[10] != b'T'
+            || server_time.0.as_bytes()[19] != b'.'
+        {
+            return Err(FrameError::Malformed(
+                "serverTime must use UTC millisecond precision".into(),
+            ));
+        }
         if deliveries.len() > MAX_REMOTE_DELIVERIES {
             return Err(FrameError::TooLarge);
         }
@@ -165,6 +194,7 @@ impl RemoteExchangeResponse {
         }
         let response = Self {
             schema_version: "execution-port.remote-exchange.v1".to_owned(),
+            server_time,
             frame_accepted: None,
             deliveries,
         };
@@ -181,6 +211,23 @@ impl RemoteExchangeResponse {
         response.frame_accepted = Some(accepted);
         response.encode()?;
         Ok(response)
+    }
+
+    pub fn with_acceptance_at(
+        deliveries: Vec<RemoteExchangeDelivery>,
+        accepted: bool,
+        server_time: Instant,
+    ) -> Result<Self, FrameError> {
+        let mut response = Self::new_at(deliveries, server_time)?;
+        "execution-port.remote-exchange.v2".clone_into(&mut response.schema_version);
+        response.frame_accepted = Some(accepted);
+        response.encode()?;
+        Ok(response)
+    }
+
+    #[must_use]
+    pub const fn server_time(&self) -> &Instant {
+        &self.server_time
     }
 
     #[must_use]
@@ -211,7 +258,7 @@ impl RemoteExchangeResponse {
                 "unsupported remote exchange schema".to_owned(),
             ));
         }
-        let mut checked = Self::new(response.deliveries)?;
+        let mut checked = Self::new_at(response.deliveries, response.server_time)?;
         checked.schema_version = response.schema_version;
         checked.frame_accepted = response.frame_accepted;
         checked.encode()?;

@@ -13,6 +13,8 @@ use tokio::time::timeout;
 
 struct KillGitProcessTreeOnDrop {
     #[cfg(unix)]
+    _lifeline: codex_utils_pty::process_group::ProcessGroupLifeline,
+    #[cfg(unix)]
     process_id: u32,
     #[cfg(windows)]
     job: Option<JobObject>,
@@ -34,6 +36,11 @@ fn spawn_git_command(command: &mut Command) -> Option<(Child, KillGitProcessTree
     #[cfg(unix)]
     command.process_group(0);
     command.kill_on_drop(true);
+    #[cfg(unix)]
+    let lifeline = codex_utils_pty::process_group::ProcessGroupLifeline::configure_command(
+        command.as_std_mut(),
+    )
+    .ok()?;
 
     command
         .stdin(Stdio::null())
@@ -55,6 +62,8 @@ fn spawn_git_command(command: &mut Command) -> Option<(Child, KillGitProcessTree
     let child = command.spawn().ok()?;
 
     let process_tree = KillGitProcessTreeOnDrop {
+        #[cfg(unix)]
+        _lifeline: lifeline,
         #[cfg(unix)]
         process_id: child.id()?,
         #[cfg(windows)]

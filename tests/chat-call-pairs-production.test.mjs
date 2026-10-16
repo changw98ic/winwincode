@@ -148,7 +148,7 @@ for (const kind of ['model', 'tool']) {
           assert.equal(oldTerminal.length, 1)
           assert.equal(oldTerminal[0].outcome, 'failed')
           for (let replay = 0; replay < 2; replay += 1) {
-            assert.equal((await probe.postRetainedMessage(retained.bytes, { ca: readFileSync(join(directory, 'fixture-cert.pem')) })).status, 401)
+            assert.equal((await probe.postRetainedMessage(retained.bytes)).status, 400)
             assert.deepEqual(calls(devicePath.deviceData, job.job_id, 1), failed, 'late old messages cannot change any original call pair')
           }
           assert.equal(successor.message.workerSessionId, database.prepare('SELECT worker_session_id FROM execution_dispatch_authorities WHERE job_id=?').get(job.job_id).worker_session_id)

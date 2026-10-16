@@ -176,7 +176,8 @@ fn store_entries(directory: &Path, request: &ModelOpenMessage) -> Vec<String> {
     reason = "same live Worker verifies original retry identity, authority, cancellation and physical accounting"
 )]
 fn run_live_worker(directory: &Path, endpoint: &str) {
-    let mut models = DeviceModels::open(directory).unwrap();
+    let _ = DeviceProviderStore::open(directory).unwrap();
+    let mut models = DeviceModels::new(directory);
     models.set_intake_log(Some(directory.join("intake.log")));
     let database = rusqlite::Connection::open(directory.join("providers.sqlite3")).unwrap();
     let config = serde_json::json!({"providerId":"qwen","displayName":"fixture","endpoint":format!("{endpoint}/qwen"),"protocol":"openai_chat_completions","modelIds":["qwen-model"],"enabled":true});

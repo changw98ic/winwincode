@@ -13,10 +13,10 @@ use tokio::sync::oneshot;
 use winwincode_domain::{ExecutionMessageId, Instant, RequestId};
 use winwincode_execution_port::{
     action_enforcement::{
-        ActionEnforcementSigningKey, ActionEnforcementVerifier, ActionReceiptClaim,
-        ActionReceiptUseStore, FileActionReceiptUseStore, prepare_action_enforcement_request,
+        ActionReceiptClaim, ActionReceiptUseStore, FileActionReceiptUseStore,
+        prepare_action_enforcement_request, validate_action_receipt_outcome_with_current_lease,
     },
-    action_gateway::{ExecutionEnvelopeToken, WorkerActionAuthority, WorkerActionRequest},
+    action_gateway::{WorkerActionAuthority, WorkerActionRequest},
     action_normalizer::{
         ActionIntent, ActionPurpose, FileAnalysis, FileOperation, FileRequest, McpRequest,
         ObservedAction, ShellRequest, ToolRequest, canonical_mcp_capability_id, observe_action,
@@ -53,8 +53,6 @@ pub(super) struct ActionGateState {
             std::collections::BTreeMap<String, crate::public_smoke_adapter::PublicSmokeAdapter>,
         >,
     >,
-    envelope: ExecutionEnvelopeToken,
-    verifier: ActionEnforcementVerifier,
     receipt_store: Mutex<FileActionReceiptUseStore>,
     authority: SharedAuthoritySource,
     pub(super) read_only_runs: RwLock<HashMap<String, PathBuf>>,
@@ -119,8 +117,6 @@ impl ExecutionPortActionGate {
     pub(crate) fn open(
         worker_data_root: &Path,
         catalog: WorkerCapabilityCatalog,
-        envelope: ExecutionEnvelopeToken,
-        signing_key: ActionEnforcementSigningKey,
         authority: SharedAuthoritySource,
     ) -> Result<Self, ActionBridgeError> {
         let receipt_store = FileActionReceiptUseStore::open(worker_data_root)
@@ -129,8 +125,6 @@ impl ExecutionPortActionGate {
             state: Arc::new(ActionGateState {
                 catalog: RwLock::new(catalog),
                 tool_dependencies: RwLock::new(HashMap::new()),
-                envelope,
-                verifier: signing_key.into_verifier(),
                 receipt_store: Mutex::new(receipt_store),
                 authority,
                 read_only_runs: RwLock::new(HashMap::new()),
@@ -313,45 +307,22 @@ impl ExecutionPortActionGate {
             return Err(error);
         }
         let _ = pending.response.send(outcome);
-        // A verified rejection consumes the decision for transport while
-        // preserving Core's denied authorization result.
         match outcome {
             Err(ActionBridgeError::Rejected) => Ok(()),
             result => result,
         }
     }
 
-    /// Closes the claim-to-outbox crash window without claiming again or
-    /// authorizing a reconstructed Core waiter.
     pub(crate) fn has_consumed_receipt(
         &self,
         receipt: &ActionEnforcementReceiptMessage,
     ) -> Result<bool, ActionBridgeError> {
-        let consumed = self
-            .state
+        self.state
             .receipt_store
             .lock()
             .map_err(|_| ActionBridgeError::Unavailable)?
             .has_consumed(receipt)
-            .map_err(|_| ActionBridgeError::Unavailable)?;
-        if !consumed {
-            return Ok(false);
-        }
-        self.state
-            .verifier
-            .verify_signature(receipt)
-            .map_err(|_| ActionBridgeError::Rejected)?;
-        Ok(true)
-    }
-
-    pub(crate) fn verify_receipt_signature(
-        &self,
-        receipt: &ActionEnforcementReceiptMessage,
-    ) -> Result<(), ActionBridgeError> {
-        self.state
-            .verifier
-            .verify_signature(receipt)
-            .map_err(|_| ActionBridgeError::Rejected)
+            .map_err(|_| ActionBridgeError::Unavailable)
     }
 
     fn pending_receipt_action(
@@ -423,11 +394,12 @@ impl ExecutionPortActionGate {
             return Err(ActionBridgeError::StaleAuthority);
         }
         let current_binding = current_binding.ok_or(ActionBridgeError::StaleAuthority)?;
-        if self
-            .state
-            .verifier
-            .verify_outcome_with_current_lease(action, receipt, &current_binding.authority.lease)
-            .is_err()
+        if validate_action_receipt_outcome_with_current_lease(
+            action,
+            receipt,
+            &current_binding.authority.lease,
+        )
+        .is_err()
         {
             reject_pending(
                 &self.state,
@@ -748,7 +720,6 @@ fn queue_action(
             lease: context.binding.authority.lease.clone(),
             worker_session_id: context.binding.authority.worker_session_id.clone(),
             session_identity: context.binding.authority.session_identity.clone(),
-            envelope: context.state.envelope.clone(),
         },
         intent,
         request,
@@ -1313,11 +1284,7 @@ fn authorize_capability(
             .catalog
             .read()
             .map_err(|_| ActionBridgeError::Unavailable)?
-            .authorize(
-                &capability_id,
-                binding.authority.worker_session_id.clone(),
-                state.envelope.clone(),
-            )
+            .authorize(&capability_id, binding.authority.worker_session_id.clone())
             .map_err(|_| ActionBridgeError::UnknownCapability)?;
     }
     Ok(())
@@ -1636,17 +1603,7 @@ pub(crate) mod tests {
         use sha2::Digest as _;
         let root = std::env::temp_dir().join(format!("wwc-action-expiry-{}", uuid::Uuid::new_v4()));
         let authority = SharedAuthoritySource::default();
-        let gate = ExecutionPortActionGate::open(
-            &root,
-            catalog(),
-            ExecutionEnvelopeToken {
-                version: 1,
-                digest: Sha256Digest(format!("sha256:{}", "c".repeat(64))),
-            },
-            signing_key(),
-            authority.clone(),
-        )
-        .unwrap();
+        let gate = ExecutionPortActionGate::open(&root, catalog(), authority.clone()).unwrap();
         let original = binding();
         gate.install_binding(&original, None).unwrap();
         let private_input = "private Provider credential and original JS bytes";
@@ -1782,10 +1739,7 @@ pub(crate) mod tests {
         UserActorKind, UserId, WorkerId, WorkerInstanceId, WorkerSessionId, WorkspaceId,
     };
     use winwincode_execution_port::{
-        action_enforcement::{
-            ActionEnforcementIssuer, ActionEnforcementSigningKey, ActionReceiptUseStore as _,
-        },
-        action_gateway::ExecutionEnvelopeToken,
+        action_enforcement::ActionReceiptUseStore as _,
         action_normalizer::{
             ActionObject, ActionOperation, ActionRisk, ToolRequest, observe_action,
         },
@@ -1803,10 +1757,6 @@ pub(crate) mod tests {
 
     fn id(prefix: &str, value: char) -> String {
         format!("{prefix}_{}", value.to_string().repeat(26))
-    }
-
-    pub(super) fn signing_key() -> ActionEnforcementSigningKey {
-        ActionEnforcementSigningKey::from_bytes([41_u8; 32]).expect("signing key")
     }
 
     pub(super) fn catalog() -> WorkerCapabilityCatalog {
@@ -1909,11 +1859,11 @@ pub(crate) mod tests {
         assert_eq!(observed.operation, ActionOperation::Modify);
     }
 
-    fn signed_permit(
+    fn permit_receipt(
         request: winwincode_execution_port::generated::ActionEnforcementRequestMessage,
         now: &Instant,
     ) -> ActionEnforcementReceiptMessage {
-        let mut receipt = ActionEnforcementReceiptMessage {
+        ActionEnforcementReceiptMessage {
             actor: UserActor {
                 id: UserId(id("usr", 'A')),
                 kind: UserActorKind::User,
@@ -1929,7 +1879,6 @@ pub(crate) mod tests {
             policy_kind: request.policy_kind,
             policy_mode: None,
             policy_version: None,
-            receipt_signature: Sha256Digest(format!("sha256:{}", "0".repeat(64))),
             request_id: request.request_id,
             resource: request.resource,
             schema_version: SchemaVersion::WinwincodeV1,
@@ -1944,11 +1893,7 @@ pub(crate) mod tests {
             session_identity: request.session_identity,
             subject_sha256: request.subject_sha256,
             worker_session_id: request.worker_session_id,
-        };
-        ActionEnforcementIssuer::new(signing_key())
-            .sign(&mut receipt)
-            .expect("sign permit");
-        receipt
+        }
     }
 
     async fn assert_consumed_action_is_fenced(
@@ -1971,7 +1916,7 @@ pub(crate) mod tests {
                 .is_empty()
         );
         let mut forged = receipt.clone();
-        forged.receipt_signature = Sha256Digest(format!("sha256:{}", "1".repeat(64)));
+        forged.resource.push_str("changed");
         assert_eq!(
             gate.accept_receipt(&forged, now),
             Err(super::ActionBridgeError::UnknownReceipt)
@@ -1996,7 +1941,7 @@ pub(crate) mod tests {
             assert_eq!(
                 gate.accept_receipt(&changed, now),
                 Err(super::ActionBridgeError::UnknownReceipt),
-                "same signature cannot authenticate changed completed receipt fields"
+                "a completed receipt cannot change its original fields"
             );
         }
         assert_eq!(
@@ -2169,22 +2114,11 @@ pub(crate) mod tests {
                 capability: "model".into(),
                 route: "loopback".into(),
             },
-            "loopback".into(),
+            Some("loopback".into()),
             SharedAuthoritySource::default(),
         );
-        let gate = Arc::new(
-            ExecutionPortActionGate::open(
-                &root,
-                catalog(),
-                ExecutionEnvelopeToken {
-                    version: 1,
-                    digest: Sha256Digest(format!("sha256:{}", "c".repeat(64))),
-                },
-                signing_key(),
-                bridge.authority(),
-            )
-            .unwrap(),
-        );
+        let gate =
+            Arc::new(ExecutionPortActionGate::open(&root, catalog(), bridge.authority()).unwrap());
         bridge.attach_action_gate(gate.clone()).unwrap();
         let original = binding();
         bridge.install_binding(original.clone()).unwrap();
@@ -2323,17 +2257,8 @@ pub(crate) mod tests {
             ],
         )
         .unwrap();
-        let gate = ExecutionPortActionGate::open(
-            &root,
-            catalog,
-            ExecutionEnvelopeToken {
-                version: 1,
-                digest: Sha256Digest(format!("sha256:{}", "c".repeat(64))),
-            },
-            signing_key(),
-            SharedAuthoritySource::default(),
-        )
-        .unwrap();
+        let gate = ExecutionPortActionGate::open(&root, catalog, SharedAuthoritySource::default())
+            .unwrap();
         gate.install_binding(&binding(), None).unwrap();
         let now = Instant("2030-01-01T00:00:02.000Z".into());
         gate.update_now(&now).unwrap();
@@ -2356,7 +2281,7 @@ pub(crate) mod tests {
                 panic!("action request expected")
             };
             assert!(messages.is_empty());
-            let receipt = signed_permit(message, &now);
+            let receipt = permit_receipt(message, &now);
             gate.accept_receipt(&receipt, &now).unwrap();
             let authorization = task.await.unwrap().unwrap();
             gate.revalidate(exact.clone(), authorization.clone())
@@ -2391,17 +2316,9 @@ pub(crate) mod tests {
                 "winwincode-codex-action-store-failure-{}",
                 uuid::Uuid::new_v4()
             ));
-            let gate = ExecutionPortActionGate::open(
-                &root,
-                catalog(),
-                ExecutionEnvelopeToken {
-                    version: 1,
-                    digest: Sha256Digest(format!("sha256:{}", "c".repeat(64))),
-                },
-                signing_key(),
-                SharedAuthoritySource::default(),
-            )
-            .unwrap();
+            let gate =
+                ExecutionPortActionGate::open(&root, catalog(), SharedAuthoritySource::default())
+                    .unwrap();
             gate.install_binding(&binding(), None).unwrap();
             let now = Instant("2030-01-01T00:00:02.000Z".into());
             gate.update_now(&now).unwrap();
@@ -2417,11 +2334,8 @@ pub(crate) mod tests {
             else {
                 panic!("live action request");
             };
-            let mut receipt = signed_permit(request, &now);
+            let mut receipt = permit_receipt(request, &now);
             receipt.decision = decision;
-            ActionEnforcementIssuer::new(signing_key())
-                .sign(&mut receipt)
-                .unwrap();
             let receipt_directory = root.join("action-enforcement-receipts");
             std::fs::remove_dir_all(&receipt_directory).unwrap();
             std::fs::write(&receipt_directory, b"storage fault").unwrap();
@@ -2448,19 +2362,9 @@ pub(crate) mod tests {
         ));
         std::fs::create_dir_all(&root).unwrap();
         std::fs::write(root.join("marker.txt"), "unchanged").unwrap();
-        let gate = ExecutionPortActionGate::open(
-            &root,
-            catalog(),
-            ExecutionEnvelopeToken {
-                version: 1,
-                digest: Sha256Digest(format!("sha256:{}", "c".repeat(64))),
-            },
-            signing_key(),
-            SharedAuthoritySource::default(),
-        )
-        .unwrap();
+        let source = SharedAuthoritySource::default();
+        let gate = ExecutionPortActionGate::open(&root, catalog(), source.clone()).unwrap();
         let mut authority = binding();
-        authority.authority.lease.expires_at = Instant("2030-01-01T00:00:02.150Z".into());
         gate.install_binding(&authority, Some(&root)).unwrap();
         let initial = Instant("2030-01-01T00:00:02.000Z".into());
         gate.update_now(&initial).unwrap();
@@ -2491,7 +2395,15 @@ pub(crate) mod tests {
                 .unwrap();
             permitted.push((request, authorization));
         }
-        tokio::time::sleep(std::time::Duration::from_millis(175)).await;
+        source.advance_clock_for_test(std::time::Duration::from_hours(1));
+        for (request, authorization) in &permitted {
+            assert!(gate.authorize(request.clone()).await.is_err());
+            assert!(
+                gate.revalidate(request.clone(), authorization.clone())
+                    .await
+                    .is_err()
+            );
+        }
         gate.update_now(&initial).unwrap();
         for (request, authorization) in &permitted {
             assert!(gate.authorize(request.clone()).await.is_err());
@@ -2502,7 +2414,7 @@ pub(crate) mod tests {
             );
         }
         assert!(gate.take_messages().unwrap().is_empty());
-        authority.authority.lease.expires_at = Instant("2030-01-01T00:00:03.000Z".into());
+        authority.authority.lease.expires_at = Instant("2030-01-01T02:00:00.000Z".into());
         gate.install_binding(&authority, Some(&root)).unwrap();
         for (request, authorization) in permitted {
             gate.revalidate(request, authorization).await.unwrap();
@@ -2516,17 +2428,9 @@ pub(crate) mod tests {
         let root =
             std::env::temp_dir().join(format!("winwincode-codex-action-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
-        let gate = ExecutionPortActionGate::open(
-            &root,
-            catalog(),
-            ExecutionEnvelopeToken {
-                version: 1,
-                digest: Sha256Digest(format!("sha256:{}", "c".repeat(64))),
-            },
-            signing_key(),
-            SharedAuthoritySource::default(),
-        )
-        .expect("open action gate");
+        let gate =
+            ExecutionPortActionGate::open(&root, catalog(), SharedAuthoritySource::default())
+                .expect("open action gate");
         gate.install_binding(&binding(), None)
             .expect("install binding");
         let mut now = Instant("2030-01-01T00:00:02.000Z".to_owned());
@@ -2562,7 +2466,7 @@ pub(crate) mod tests {
                 .expect("renew pending action");
             now = Instant("2030-01-01T01:30:00.000Z".to_owned());
         }
-        let receipt = signed_permit(request, &now);
+        let receipt = permit_receipt(request, &now);
         gate.accept_receipt(&receipt, &now)
             .expect("accept signed permit");
         let authorization = task
@@ -2611,17 +2515,9 @@ pub(crate) mod tests {
         #[cfg(unix)]
         std::os::unix::fs::symlink("/bin/cat", root.join("candidate-cat"))
             .expect("create candidate executable symlink");
-        let gate = ExecutionPortActionGate::open(
-            &root,
-            catalog(),
-            ExecutionEnvelopeToken {
-                version: 1,
-                digest: Sha256Digest(format!("sha256:{}", "c".repeat(64))),
-            },
-            signing_key(),
-            SharedAuthoritySource::default(),
-        )
-        .expect("open action gate");
+        let gate =
+            ExecutionPortActionGate::open(&root, catalog(), SharedAuthoritySource::default())
+                .expect("open action gate");
         gate.install_binding(&binding(), Some(&root))
             .expect("install delegated binding");
         gate.update_now(&Instant("2030-01-01T00:00:02.000Z".to_owned()))
@@ -2886,17 +2782,9 @@ pub(crate) mod tests {
             std::process::id()
         ));
         let _ = std::fs::remove_dir_all(&root);
-        let gate = ExecutionPortActionGate::open(
-            &root,
-            catalog(),
-            ExecutionEnvelopeToken {
-                version: 1,
-                digest: Sha256Digest(format!("sha256:{}", "c".repeat(64))),
-            },
-            signing_key(),
-            SharedAuthoritySource::default(),
-        )
-        .expect("open action gate");
+        let gate =
+            ExecutionPortActionGate::open(&root, catalog(), SharedAuthoritySource::default())
+                .expect("open action gate");
         let original = binding();
         gate.install_binding(&original, None)
             .expect("install binding");
@@ -2976,23 +2864,15 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
-    async fn expired_signed_permit_is_rejected_before_durable_claim() {
+    async fn expired_permit_receipt_is_rejected_before_durable_claim() {
         let root = std::env::temp_dir().join(format!(
             "winwincode-codex-action-expired-{}",
             std::process::id()
         ));
         let _ = std::fs::remove_dir_all(&root);
-        let gate = ExecutionPortActionGate::open(
-            &root,
-            catalog(),
-            ExecutionEnvelopeToken {
-                version: 1,
-                digest: Sha256Digest(format!("sha256:{}", "c".repeat(64))),
-            },
-            signing_key(),
-            SharedAuthoritySource::default(),
-        )
-        .expect("open action gate");
+        let gate =
+            ExecutionPortActionGate::open(&root, catalog(), SharedAuthoritySource::default())
+                .expect("open action gate");
         gate.install_binding(&binding(), None)
             .expect("install binding");
         let issued = Instant("2030-01-01T00:00:02.000Z".to_owned());
@@ -3018,7 +2898,7 @@ pub(crate) mod tests {
         else {
             panic!("expected action enforcement request");
         };
-        let mut receipt = ActionEnforcementReceiptMessage {
+        let receipt = ActionEnforcementReceiptMessage {
             actor: UserActor {
                 id: UserId(id("usr", 'A')),
                 kind: UserActorKind::User,
@@ -3034,7 +2914,6 @@ pub(crate) mod tests {
             policy_kind: request.policy_kind,
             policy_mode: None,
             policy_version: None,
-            receipt_signature: Sha256Digest(format!("sha256:{}", "0".repeat(64))),
             request_id: request.request_id,
             resource: request.resource,
             schema_version: SchemaVersion::WinwincodeV1,
@@ -3050,9 +2929,6 @@ pub(crate) mod tests {
             subject_sha256: request.subject_sha256,
             worker_session_id: request.worker_session_id,
         };
-        ActionEnforcementIssuer::new(signing_key())
-            .sign(&mut receipt)
-            .expect("sign permit");
         let expired = Instant("2030-01-01T01:00:00.000Z".to_owned());
         assert!(gate.accept_receipt(&receipt, &expired).is_err());
         assert!(task.await.expect("authorization task").is_err());
@@ -3200,17 +3076,9 @@ pub(crate) mod tests {
             CapabilityDescriptor, CapabilityHealth, CapabilityOrigin,
         };
         let root = std::env::temp_dir().join(format!("wwc-mcp-reload-{}", std::process::id()));
-        let gate = ExecutionPortActionGate::open(
-            &root,
-            catalog(),
-            ExecutionEnvelopeToken {
-                version: 1,
-                digest: Sha256Digest(format!("sha256:{}", "a".repeat(64))),
-            },
-            signing_key(),
-            SharedAuthoritySource::default(),
-        )
-        .expect("gate");
+        let gate =
+            ExecutionPortActionGate::open(&root, catalog(), SharedAuthoritySource::default())
+                .expect("gate");
         let request = super::canonical_tool_requests(&KernelActionRequest {
             session_id: "session".into(),
             turn_id: "turn".into(),

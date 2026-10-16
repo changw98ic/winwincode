@@ -5,7 +5,6 @@ import { join, resolve } from 'node:path'
 import test from 'node:test'
 
 import {
-  certificate,
   chromeBinary,
   closeServer,
   command,
@@ -32,15 +31,13 @@ test('a real browser opens 新对话 as the first screen and the board one click
   assert.notEqual(chromePath, null, 'Chrome or Chromium is required for the Home browser test')
   command(root, 'corepack', ['pnpm', '--filter', '@winwincode/client', 'build'])
   const directory = mkdtempSync(join(tmpdir(), 'winwincode-home-dashboard-'))
-  const certificateFiles = certificate(root, directory)
   const clientServer = staticClientServer({
     root,
-    certificateFiles,
     fixturePath: 'tests/fixtures/browser-home-dashboard.mjs',
     configuration: () => ({}),
   })
   const clientPort = await listen(clientServer)
-  const clientOrigin = `https://client.localhost:${String(clientPort)}`
+  const clientOrigin = `http://127.0.0.1:${String(clientPort)}`
   let chrome = null
   let devtools = null
   t.after(async () => {

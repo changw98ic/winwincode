@@ -116,11 +116,7 @@ struct FixedResponse {
 }
 
 impl ExchangeTransport for FixedResponse {
-    fn exchange(
-        &self,
-        _credential: Option<&str>,
-        _request_bytes: &[u8],
-    ) -> Result<Vec<u8>, ExchangeTransportError> {
+    fn exchange(&self, _request_bytes: &[u8]) -> Result<Vec<u8>, ExchangeTransportError> {
         self.sends.fetch_add(1, Ordering::SeqCst);
         Ok(self.bytes.clone())
     }
@@ -149,7 +145,6 @@ fn schema_mismatch_is_persisted_and_stops_exact_control_replay_after_restart() {
             replay_from_sequence: None,
             frames: vec![],
             enrollment: None,
-            worker_credentials: vec![],
         })
         .unwrap(),
         sends: AtomicUsize::new(0),

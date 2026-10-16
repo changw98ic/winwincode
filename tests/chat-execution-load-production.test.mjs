@@ -15,7 +15,7 @@ import { configuredDeviceModelRoute, deterministicDeviceProvider, seedDeviceLoca
 
 const COMMAND_HISTORY_SIZE = 512
 // Preparing real command history has its own bound before product deadline measurement.
-const HISTORY_PREPARATION_TIMEOUT_MS = 600_000
+const HISTORY_PREPARATION_TIMEOUT_MS = 1_200_000
 const LEASE_SECONDS = 30
 const CANCEL_DEADLINE_MS = 10_000
 

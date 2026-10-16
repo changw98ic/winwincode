@@ -9,7 +9,7 @@ import { DatabaseSync } from 'node:sqlite'
 import { setTimeout as delay } from 'node:timers/promises'
 import test from 'node:test'
 
-import { stopProcessGroup, waitFor } from '../scripts/device-production-fixture.mjs'
+import { captureDeviceWorkerProcess, stopDeviceWorkerProcess, stopProcessGroup, waitFor } from '../scripts/device-production-fixture.mjs'
 
 function processRunning(pid) {
   try {
@@ -148,5 +148,44 @@ test('fixture shutdown rejects an unowned live parent and preserves its process'
     await cleanup(pids)
     await waitFor(() => parent.exitCode !== null || parent.signalCode !== null,
       'fixture parent reaped', 1000, 10)
+  }
+})
+
+test('Worker lifecycle probes bind a real process to its fixture registry and wait for exit observation', async () => {
+  const directory = mkdtempSync(join(tmpdir(), 'wwc-fixture-worker-evidence-'))
+  const worker = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], {
+    detached: true, stdio: 'ignore',
+  })
+  const database = new DatabaseSync(join(directory, 'device-client.sqlite3'))
+  let observation
+  try {
+    const launched = { workerSessionId: 'fixture-session', workerId: 'fixture-worker',
+      workerInstanceId: 'fixture-instance' }
+    database.exec(`CREATE TABLE worker_process_registry (
+      worker_session_id TEXT, worker_id TEXT, worker_instance_id TEXT,
+      pid INTEGER, process_start_identity TEXT, state TEXT)`)
+    const identity = bootIdentity(worker.pid)
+    database.prepare('INSERT INTO worker_process_registry VALUES (?, ?, ?, ?, ?, ?)')
+      .run(launched.workerSessionId, launched.workerId, launched.workerInstanceId,
+        worker.pid, identity, 'running')
+    const witness = { ...launched, pid: worker.pid, processStartIdentity: identity }
+    assert.deepEqual(captureDeviceWorkerProcess({ deviceData: directory, launched }), witness)
+    database.prepare('UPDATE worker_process_registry SET process_start_identity = ?').run('reused-pid')
+    assert.equal(captureDeviceWorkerProcess({ deviceData: directory, launched }), null)
+    await assert.rejects(stopDeviceWorkerProcess({ deviceData: directory, worker: witness }),
+      /only the exact Device-owned Worker process/u)
+    assert.equal(processRunning(worker.pid), true)
+    database.prepare('UPDATE worker_process_registry SET process_start_identity = ?').run(identity)
+    observation = setInterval(() => {
+      if (worker.signalCode === 'SIGKILL') database.exec("UPDATE worker_process_registry SET state = 'exited'")
+    }, 10)
+    assert.equal(await stopDeviceWorkerProcess({ deviceData: directory, worker: witness, timeoutMillis: 5000 }), true)
+    assert.equal(worker.signalCode, 'SIGKILL')
+    assert.equal(captureDeviceWorkerProcess({ deviceData: directory, launched }), null)
+  } finally {
+    clearInterval(observation)
+    database.close()
+    await cleanup([worker.pid])
+    rmSync(directory, { recursive: true, force: true })
   }
 })

@@ -160,11 +160,11 @@ impl SqliteStorage {
     #[allow(clippy::too_many_lines)]
     pub fn reconcile_provider_attempt(
         &mut self,
-        verified: &winwincode_execution_port::accounting::VerifiedAccountingStatement,
+        statement: &winwincode_execution_port::accounting::AttemptAccountingStatement,
         now: &Instant,
     ) -> Result<(), StorageError> {
         self.execution_admission().map_err(adapter)?;
-        let statement = verified.statement();
+        statement.validate().map_err(adapter)?;
         let bytes = statement.encode().map_err(adapter)?;
         let digest = format!("sha256:{:x}", Sha256::digest(&bytes));
         let pending: Option<String> = self.connection()?.query_row("SELECT lease_json FROM execution_attempt_accounting_pending WHERE job_id=?1 AND attempt=?2",params![statement.lease.job_id.0,statement.lease.attempt],|row|row.get(0)).optional().map_err(adapter)?;
@@ -296,7 +296,7 @@ impl SqliteStorage {
             .map_err(adapter)?;
         }
         tx.commit().map_err(adapter)?;
-        self.reconcile_attempt_totals(verified, now)
+        self.reconcile_attempt_totals(statement, now)
     }
 
     fn load_reconciliation_source(
@@ -305,9 +305,6 @@ impl SqliteStorage {
     ) -> Result<Option<(String, String)>, StorageError> {
         let mut terminal: Option<(String,String)> = self.connection()?.query_row("SELECT terminal_request_id,terminal_usage_json FROM execution_admission_reconciliation WHERE job_id=?1",[&job.0],|row|Ok((row.get(0)?,row.get(1)?))).optional().map_err(adapter)?;
         if terminal.is_none() {
-            // Older Workers could mark only their final invocation as the full
-            // bill. Keep that settlement source immutable and append a separate
-            // financial reconciliation under the already imported signature.
             let settled = self
                 .execution_admission()
                 .map_err(adapter)?
@@ -337,10 +334,10 @@ impl SqliteStorage {
 
     fn reconcile_attempt_totals(
         &mut self,
-        verified: &winwincode_execution_port::accounting::VerifiedAccountingStatement,
+        statement: &winwincode_execution_port::accounting::AttemptAccountingStatement,
         now: &Instant,
     ) -> Result<(), StorageError> {
-        let job = &verified.statement().lease.job_id;
+        let job = &statement.lease.job_id;
         let terminal = self.load_reconciliation_source(job)?;
         let Some((terminal_id, original)) = terminal else {
             return Ok(());
@@ -411,12 +408,12 @@ impl SqliteStorage {
         let observed = observed.map_or_else(|| now.clone(), Instant);
         self.execution_admission()
             .map_err(adapter)?
-            .settle_verified_provider_reconciliation(
+            .settle_imported_provider_reconciliation(
                 &RequestId(terminal_id),
                 &request,
                 &usage,
                 &observed,
-                verified,
+                statement,
             )
             .map_err(adapter)?;
         Ok(())
@@ -491,8 +488,6 @@ fn merge_terminal_metrics(
         {
             return Err(invalid());
         }
-        // Provider receipts cover all physical invocations. A logical terminal
-        // may contain only the final successful call and cannot fill their gaps.
         totals.known_tokens = totals.known_tokens.max(terminal.known_tokens);
         totals.accounting_status = if totals.tokens.is_some() {
             ExecutionOutcomeUsageAccountingStatus::Known
@@ -539,7 +534,6 @@ mod tests {
             lease,
             manifest: vec!["primary:original".into()],
             receipts: Vec::new(),
-            signature: winwincode_domain::Sha256Digest(String::new()),
         };
         let connection = rusqlite::Connection::open_in_memory().unwrap();
         connection.execute_batch("CREATE TABLE execution_attempt_terminal_usage(job_id TEXT,attempt INTEGER,usage_json TEXT);").unwrap();

@@ -30,7 +30,7 @@ pub(crate) enum DeviceModelSendOutcome {
 
 pub(crate) struct DeviceModels {
     directory: PathBuf,
-    recovery_store: DeviceProviderStore,
+    recovery_store: Option<DeviceProviderStore>,
     recovery_version: Option<i64>,
     pending: HashMap<String, PendingModelOpen>,
     sender: mpsc::Sender<(String, DeviceModelStepOutcome)>,
@@ -78,13 +78,12 @@ pub(crate) struct IntakeLogLine<'a> {
 }
 
 impl DeviceModels {
-    pub(crate) fn open(directory: &Path) -> Result<Self, DeviceProviderError> {
-        let recovery_store = DeviceProviderStore::open(directory)?;
+    pub(crate) fn new(directory: &Path) -> Self {
         let intake_log = std::env::var_os("WWC_MODEL_INTAKE_LOG").map(PathBuf::from);
         let (sender, receiver) = mpsc::channel();
-        Ok(Self {
+        Self {
             directory: directory.to_owned(),
-            recovery_store,
+            recovery_store: None,
             recovery_version: None,
             pending: HashMap::new(),
             sender,
@@ -97,7 +96,7 @@ impl DeviceModels {
             intake_log,
             #[cfg(any(test, feature = "test-support"))]
             fail_next_start: false,
-        })
+        }
     }
 
     pub(crate) fn set_intake_log(&mut self, path: Option<PathBuf>) {
@@ -126,6 +125,9 @@ impl DeviceModels {
         &mut self,
         open: &winwincode_execution_port::generated::ModelOpenMessage,
     ) {
+        if self.recovery_store.is_none() {
+            self.recovery_store = DeviceProviderStore::open(&self.directory).ok();
+        }
         self.owned_exchanges
             .insert(open.model_exchange_id.0.clone());
         self.recovery_version = None;
@@ -160,7 +162,10 @@ impl DeviceModels {
                         Err(DeviceProviderError::StateInvalid)
                     };
                 }
-                let store = DeviceProviderStore::open(&self.directory);
+                let store = self
+                    .recovery_store
+                    .as_ref()
+                    .ok_or(DeviceProviderError::StateInvalid);
                 let admission = store
                     .as_ref()
                     .map_err(|error| *error)
@@ -371,7 +376,10 @@ impl DeviceModels {
             }
             if pending.retry_wake_millis.is_none_or(|wake| now >= wake)
                 || !pending.can_start()
-                || self.recovery_store.model_cancelled(id)?
+                || match self.recovery_store.as_ref() {
+                    Some(store) => store.model_cancelled(id)?,
+                    None => false,
+                }
             {
                 ready.push((
                     id.clone(),
@@ -394,22 +402,22 @@ impl DeviceModels {
     }
 
     fn recover_from_durable_store(&mut self) -> Result<(), DeviceProviderError> {
-        let version = self.recovery_store.model_data_version()?;
+        if self.owned_exchanges.is_empty() && self.session_ids.is_empty() {
+            return Ok(());
+        }
+        let Some(store) = self.recovery_store.as_ref() else {
+            return Ok(());
+        };
+        let version = store.model_data_version()?;
         if self.recovery_version == Some(version) {
             return Ok(());
         }
         let mut exchanges = self.owned_exchanges.clone();
         for session in &self.session_ids {
-            exchanges.extend(
-                self.recovery_store
-                    .model_exchanges_for_owner(Some(session), None)?,
-            );
+            exchanges.extend(store.model_exchanges_for_owner(Some(session), None)?);
         }
         for instance in &self.instance_ids {
-            exchanges.extend(
-                self.recovery_store
-                    .model_exchanges_for_owner(None, Some(instance))?,
-            );
+            exchanges.extend(store.model_exchanges_for_owner(None, Some(instance))?);
         }
         for exchange_id in exchanges {
             if self.pending.contains_key(&exchange_id) {
@@ -420,9 +428,7 @@ impl DeviceModels {
                 .get(&exchange_id)
                 .copied()
                 .unwrap_or(0);
-            let frames = self
-                .recovery_store
-                .replay_model(&exchange_id, high_water.saturating_add(1))?;
+            let frames = store.replay_model(&exchange_id, high_water.saturating_add(1))?;
             if frames.is_empty() {
                 continue;
             }
@@ -580,7 +586,7 @@ mod tests {
     #[test]
     fn full_provider_slots_defer_a_never_started_request_without_losing_its_identity() {
         let root = temp_root("deferred-start");
-        let mut models = DeviceModels::open(&root).unwrap();
+        let mut models = DeviceModels::new(&root);
         let fixture: serde_json::Value = serde_json::from_str(include_str!(
             "../../../tests/fixtures/contracts/execution-port.valid.json"
         ))
@@ -693,7 +699,8 @@ mod tests {
                 .retain_stored_model_exchange_chunks(&retained_open(&exchange, &wsn, &wki), &chunks)
                 .expect("seed durable provider exchange");
         }
-        let mut models = DeviceModels::open(&root).expect("open device models");
+        let mut models = DeviceModels::new(&root);
+        models.recovery_store = Some(DeviceProviderStore::open(&root).unwrap());
         models.owned_exchanges.insert(exchange.clone());
         models.delivered_high_water.insert(exchange.clone(), 1);
         let recovered: Vec<_> = std::iter::from_fn(|| models.next_chunk().unwrap())
@@ -742,7 +749,8 @@ mod tests {
                 )
                 .expect("seed owned verification exchange");
         }
-        let mut models = DeviceModels::open(&root).expect("open device models");
+        let mut models = DeviceModels::new(&root);
+        models.recovery_store = Some(DeviceProviderStore::open(&root).unwrap());
         models.note_worker_instance_id(&owned_wki);
         models.session_ids.insert(owned_wsn.clone());
         models.owned_exchanges.insert(owned_exchange.clone());
@@ -787,7 +795,8 @@ mod tests {
                 )
                 .expect("seed durable verification exchange");
         }
-        let mut models = DeviceModels::open(&root).expect("open device models");
+        let mut models = DeviceModels::new(&root);
+        models.recovery_store = Some(DeviceProviderStore::open(&root).unwrap());
         models.session_ids.insert(wsn.clone());
         models.note_worker_instance_id(&wki);
         let recovered: Vec<_> = std::iter::from_fn(|| models.next_chunk().unwrap()).collect();
@@ -799,5 +808,48 @@ mod tests {
             vec![1, 2]
         );
         let _ = std::fs::remove_dir_all(root);
+    }
+}
+
+#[cfg(test)]
+mod lazy_store_tests {
+    use super::DeviceModels;
+
+    #[test]
+    fn idle_worker_does_not_open_provider_store() {
+        let root = tempfile::tempdir().unwrap();
+        let directory = root.path().join("providers");
+        std::fs::write(&directory, "unavailable provider store").unwrap();
+        let mut models = DeviceModels::new(&directory);
+        models.note_worker_instance_id("worker-instance");
+        assert!(models.next_chunk().unwrap().is_none());
+        assert!(models.recovery_store.is_none());
+        assert!(directory.is_file());
+    }
+
+    #[test]
+    fn unavailable_provider_store_returns_one_model_failure_and_keeps_the_worker_idle() {
+        let root = tempfile::tempdir().unwrap();
+        let directory = root.path().join("providers");
+        std::fs::write(&directory, "unavailable provider store").unwrap();
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../tests/fixtures/contracts/execution-port.valid.json"
+        ))
+        .unwrap();
+        let open = serde_json::from_value(
+            fixture["messages"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|message| message["kind"] == "model.open")
+                .unwrap()
+                .clone(),
+        )
+        .unwrap();
+        let mut models = DeviceModels::new(&directory);
+        models.send(&open, None, None).unwrap();
+        assert!(models.next_chunk().unwrap().unwrap().error.is_some());
+        assert!(models.next_chunk().unwrap().is_none());
+        assert!(models.recovery_store.is_none());
     }
 }

@@ -159,6 +159,14 @@ impl RequestJournal {
         Ok(retained)
     }
 
+    pub fn resume_control_authentication(&self) -> Result<(), NetworkFailure> {
+        self.0.lock().map_err(|_| storage())?.execute(
+            "DELETE FROM network_queue_state WHERE json_extract(state_json,'$.stopped')=1 AND json_extract(state_json,'$.replay')='replay_exact' AND ((json_extract(state_json,'$.failure.kind')='authentication' AND json_extract(state_json,'$.failure.httpStatus')=401) OR (json_extract(state_json,'$.failure.kind')='authorization' AND json_extract(state_json,'$.failure.httpStatus')=403))",
+            [],
+        ).map_err(|_| storage())?;
+        Ok(())
+    }
+
     fn monotonic_now(&self, now: u64) -> Result<u64, NetworkFailure> {
         let mut clock = self.1.lock().map_err(|_| storage())?;
         let (origin, start) = clock.get_or_insert_with(|| (now.max(self.2), Instant::now()));
@@ -242,6 +250,28 @@ impl RequestJournal {
             params![operation, serde_json::to_string(&state).map_err(|_| storage())?]).map_err(|_| storage())?;
         transaction.commit().map_err(|_| storage())?;
         Ok(permit)
+    }
+
+    pub fn retry_delay(&self, operation: &[u8], now: u64) -> Result<Duration, NetworkFailure> {
+        let now = self.monotonic_now(now)?;
+        let encoded: String = self
+            .0
+            .lock()
+            .map_err(|_| storage())?
+            .query_row(
+                "SELECT state_json FROM network_queue_state WHERE operation_hash=?1",
+                [key(operation)],
+                |row| row.get(0),
+            )
+            .map_err(|_| storage())?;
+        let state: State = serde_json::from_str(&encoded).map_err(|_| storage())?;
+        if state.stopped {
+            return Err(state.failure);
+        }
+        if state.in_flight {
+            return Err(storage());
+        }
+        Ok(Duration::from_millis(state.ready_at.saturating_sub(now)))
     }
 
     pub fn finish(
@@ -364,6 +394,66 @@ pub fn now_millis() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn control_authentication_resume_preserves_envelopes_attempts_and_other_terminal_failures() {
+        let path = std::env::temp_dir().join(format!(
+            "network-control-auth-resume-{}-{}.sqlite3",
+            std::process::id(),
+            now_millis()
+        ));
+        let journal = RequestJournal::open(&path).unwrap();
+        let cursor = EnvelopeCursor {
+            last_sequence: 3,
+            ack_sequence: 2,
+            ..Default::default()
+        };
+        for (operation, status, replay, resumed) in [
+            (b"authentication".as_slice(), 401, Replay::ReplayExact, true),
+            (b"authorization".as_slice(), 403, Replay::ReplayExact, true),
+            (b"invalid".as_slice(), 400, Replay::ReplayExact, false),
+            (b"inference".as_slice(), 401, Replay::RetryInference, false),
+        ] {
+            journal.bind_envelope(operation, &cursor).unwrap();
+            let QueuePermit::Ready(sequence) =
+                journal.prepare(operation, replay, 4, 1_000).unwrap()
+            else {
+                panic!("first attempt")
+            };
+            journal
+                .finish(
+                    operation,
+                    sequence,
+                    Some(NetworkFailure::http(status, None)),
+                    1_000,
+                )
+                .unwrap();
+            assert!(matches!(
+                journal.prepare(operation, replay, 4, 2_000).unwrap(),
+                QueuePermit::Stopped(_)
+            ));
+            journal.resume_control_authentication().unwrap();
+            match journal.prepare(operation, replay, 4, 2_000).unwrap() {
+                QueuePermit::Ready(sequence) if resumed => assert_eq!(sequence, 2),
+                QueuePermit::Stopped(_) if !resumed => {}
+                permit => panic!("unexpected resumed permit: {permit:?}"),
+            }
+            assert_eq!(
+                journal
+                    .bind_envelope(
+                        operation,
+                        &EnvelopeCursor {
+                            last_sequence: 99,
+                            ..Default::default()
+                        }
+                    )
+                    .unwrap(),
+                cursor
+            );
+        }
+        drop(journal);
+        std::fs::remove_file(path).unwrap();
+    }
     #[test]
     fn exact_control_exchange_survives_more_than_four_transient_failures_and_restart() {
         let path = std::env::temp_dir().join(format!(
@@ -416,7 +506,7 @@ mod tests {
         tag: &str,
         failure: NetworkFailure,
         cap: Option<Duration>,
-    ) -> Option<Duration> {
+    ) -> Duration {
         let path = std::env::temp_dir().join(format!(
             "network-delay-cap-{tag}-{}-{}.sqlite3",
             std::process::id(),
@@ -443,14 +533,7 @@ mod tests {
         journal
             .finish_with_delay_cap(b"capped", sequence, Some(failure), later, cap)
             .unwrap();
-        let delay = match journal
-            .prepare(b"capped", Replay::ReplayExact, 4, later)
-            .unwrap()
-        {
-            QueuePermit::Waiting(delay, _) => Some(delay),
-            QueuePermit::Stopped(_) => None,
-            QueuePermit::Ready(_) => Some(Duration::ZERO),
-        };
+        let delay = journal.retry_delay(b"capped", later).unwrap();
         drop(journal);
         let _ = std::fs::remove_file(path);
         delay
@@ -464,13 +547,12 @@ mod tests {
             Phase::Connect,
         );
         let cap = Duration::from_millis(200);
-        let uncapped = delay_after_one_failure("none", failure, None).unwrap();
+        let uncapped = delay_after_one_failure("none", failure, None);
         assert!(uncapped > cap, "uncapped {uncapped:?} must exceed the cap");
-        let capped = delay_after_one_failure("small", failure, Some(cap)).unwrap();
+        let capped = delay_after_one_failure("small", failure, Some(cap));
         assert!(capped <= cap, "{capped:?}");
         assert!(capped > Duration::ZERO);
-        let large =
-            delay_after_one_failure("large", failure, Some(Duration::from_hours(1))).unwrap();
+        let large = delay_after_one_failure("large", failure, Some(Duration::from_hours(1)));
         assert!(
             large.abs_diff(uncapped) <= Duration::from_millis(50),
             "large {large:?} vs uncapped {uncapped:?}"
@@ -487,8 +569,7 @@ mod tests {
         );
         deferred.retry_after_ms = Some(120_000);
         let delay =
-            delay_after_one_failure("retry-after", deferred, Some(Duration::from_millis(200)))
-                .unwrap();
+            delay_after_one_failure("retry-after", deferred, Some(Duration::from_millis(200)));
         assert!(delay >= Duration::from_secs(119), "{delay:?}");
 
         let terminal = NetworkFailure::new(
@@ -518,6 +599,7 @@ mod tests {
                 Some(Duration::from_millis(1)),
             )
             .unwrap();
+        assert_eq!(journal.retry_delay(b"stop", 10_000), Err(terminal));
         assert!(matches!(
             journal
                 .prepare(b"stop", Replay::ReplayExact, 4, 10_000)

@@ -233,6 +233,11 @@ impl SharedAuthoritySource {
         self
     }
 
+    #[cfg(test)]
+    pub(crate) fn advance_clock_for_test(&self, elapsed: std::time::Duration) {
+        self.authority_clock.advance_for_test(elapsed);
+    }
+
     pub(crate) fn update_now(&self, now: &Instant) -> Result<(), BridgeError> {
         self.authority_clock
             .observe(now)
@@ -775,7 +780,7 @@ impl ModelChunkSink for KernelStreamSink {
 
 pub(crate) struct ExecutionPortModelBridge {
     route: ModelGatewayRoute,
-    expected_provider: String,
+    expected_provider: Option<String>,
     device_provider_directory: std::sync::OnceLock<std::path::PathBuf>,
     queue: QueuedModelPort,
     sink: KernelStreamSink,
@@ -815,7 +820,7 @@ impl ExecutionPortModelBridge {
         store: AdapterStore,
         outbox: ExecutionOutbox,
         route: ModelGatewayRoute,
-        expected_provider: String,
+        expected_provider: Option<String>,
         authority: SharedAuthoritySource,
     ) -> Self {
         let queue = QueuedModelPort::default();
@@ -1949,7 +1954,11 @@ impl ExecutionPortModelBridge {
         if let Some(member) = fusion_member {
             validate_fusion_model_selection(&envelope, stored.as_ref(), member)?;
         } else {
-            validate_model_selection(&envelope, stored.as_ref(), &self.expected_provider)?;
+            validate_model_selection(
+                &envelope,
+                stored.as_ref(),
+                self.expected_provider.as_deref(),
+            )?;
         }
         // the Kernel is already processing the replayed model response. The
         // shared source makes this exact binding available to the action gate
@@ -2257,14 +2266,14 @@ fn validate_fusion_model_selection(
 fn validate_model_selection(
     envelope: &KernelRequestEnvelope,
     stored: Option<&serde_json::Value>,
-    expected_provider: &str,
+    expected_provider: Option<&str>,
 ) -> Result<(), ModelPortFailure> {
     let provider = match stored {
         Some(run) => run
             .pointer("/agentConfig/profile/source/settings/provider")
             .and_then(serde_json::Value::as_str)
             .ok_or_else(|| model_failure(BridgeError::InvalidPayload))?,
-        None => expected_provider,
+        None => expected_provider.ok_or_else(|| model_failure(BridgeError::InvalidPayload))?,
     };
     if envelope.provider != provider {
         return Err(model_failure(BridgeError::InvalidPayload));
@@ -3719,7 +3728,7 @@ mod tests {
                 capability: "model".to_owned(),
                 route: "loopback".to_owned(),
             },
-            "loopback".to_owned(),
+            Some("loopback".to_owned()),
             source,
         )
     }
@@ -4118,14 +4127,12 @@ mod tests {
     #[test]
     fn shared_model_authority_expires_without_an_owner_clock_refresh() {
         let source = SharedAuthoritySource::default();
-        let mut lease = authority(&id("cdx", 'A'));
-        lease.lease.issued_at = Instant("2030-01-01T00:00:00.000Z".into());
-        lease.lease.expires_at = Instant("2030-01-01T00:00:00.200Z".into());
+        let lease = authority(&id("cdx", 'A'));
         source.install("quiet-owner", lease.clone()).unwrap();
         source
             .validate_current(&lease, &lease.lease.issued_at)
             .unwrap();
-        std::thread::sleep(std::time::Duration::from_millis(250));
+        source.advance_clock_for_test(std::time::Duration::from_hours(1));
         assert_eq!(
             source.validate_current(&lease, &lease.lease.issued_at),
             Err(ModelAuthorityRejection::ExpiredLease)
@@ -4706,7 +4713,7 @@ mod tests {
                 capability: "model".to_owned(),
                 route: "loopback".to_owned(),
             },
-            "loopback".to_owned(),
+            Some("loopback".to_owned()),
             source,
         );
         bridge
@@ -5552,7 +5559,7 @@ mod tests {
             store.clone(),
             ExecutionOutbox::open(store.clone()).unwrap(),
             route,
-            "loopback".to_owned(),
+            Some("loopback".to_owned()),
             SharedAuthoritySource::default(),
         );
         bridge.install_binding(binding.clone()).unwrap();
@@ -5615,7 +5622,7 @@ mod tests {
             store.clone(),
             ExecutionOutbox::open(store.clone()).unwrap(),
             route,
-            "primary".into(),
+            Some("primary".into()),
             SharedAuthoritySource::default(),
         );
         bridge.install_binding(binding.clone()).unwrap();
@@ -5691,7 +5698,7 @@ mod tests {
             store.clone(),
             ExecutionOutbox::open(store).unwrap(),
             route,
-            "loopback".to_owned(),
+            Some("loopback".to_owned()),
             SharedAuthoritySource::default(),
         );
         bridge.install_binding(binding).unwrap();
@@ -5720,7 +5727,7 @@ mod tests {
             store.clone(),
             ExecutionOutbox::open(store.clone()).unwrap(),
             route,
-            "loopback".to_owned(),
+            Some("loopback".to_owned()),
             SharedAuthoritySource::default(),
         );
         bridge.install_binding(binding.clone()).unwrap();
@@ -5814,7 +5821,7 @@ mod tests {
             store.clone(),
             ExecutionOutbox::open(store.clone()).expect("open child model-call outbox"),
             route.clone(),
-            "loopback".to_owned(),
+            Some("loopback".to_owned()),
             source.clone(),
         ));
         bridge
@@ -5875,7 +5882,7 @@ mod tests {
             store.clone(),
             ExecutionOutbox::open(store.clone()).expect("open child replay outbox"),
             route.clone(),
-            "loopback".to_owned(),
+            Some("loopback".to_owned()),
             restarted_source,
         ));
         bridge
@@ -5947,7 +5954,7 @@ mod tests {
             store.clone(),
             ExecutionOutbox::open(store.clone()).expect("open child replay-after-final outbox"),
             route.clone(),
-            "loopback".to_owned(),
+            Some("loopback".to_owned()),
             restarted_source,
         ));
         bridge

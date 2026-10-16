@@ -9,7 +9,6 @@ use winwincode_domain::{
     ExecutionJobId, ExecutionMessageId, Instant, RequestId, SchemaVersion, SessionIdentity,
     WorkerSessionId,
 };
-use winwincode_execution_port::action_enforcement::ActionEnforcementIssuer;
 use winwincode_execution_port::generated::{
     ActionEnforcementReceiptMessage, ActionEnforcementRequestMessage,
     ActiveLeaseSummary as WireActiveLeaseSummary, ExecutionJob, ExecutionLeaseStamp,
@@ -135,11 +134,10 @@ impl<'storage> ExecutionPortService<'storage> {
     pub fn handle_with_action_enforcement(
         &mut self,
         message: ExecutionPortMessage,
-        issuer: &ActionEnforcementIssuer,
     ) -> Result<ExecutionPortMessage, ExecutionPortServiceError> {
         match message {
             ExecutionPortMessage::ActionEnforcementRequestMessage(request) => self
-                .enforce_action(issuer, &request)
+                .enforce_action(&request)
                 .map(ExecutionPortMessage::ActionEnforcementReceiptMessage),
             other => self.handle(other),
         }
@@ -147,10 +145,9 @@ impl<'storage> ExecutionPortService<'storage> {
 
     pub fn enforce_action(
         &mut self,
-        issuer: &ActionEnforcementIssuer,
         request: &ActionEnforcementRequestMessage,
     ) -> Result<ActionEnforcementReceiptMessage, ExecutionPortServiceError> {
-        crate::issue_action_enforcement_receipt(self.storage, issuer, &self.server_time, request)
+        crate::issue_action_enforcement_receipt(self.storage, &self.server_time, request)
             .map_err(ExecutionPortServiceError::ActionPolicy)
     }
 
@@ -229,14 +226,6 @@ impl<'storage> ExecutionPortService<'storage> {
         worker_pool_id: &WorkerPoolId,
         security_zone: String,
     ) -> Result<WorkerRegistrationResultMessage, ExecutionPortServiceError> {
-        if !matches!(
-            authentication_identity,
-            WorkerAuthenticationIdentity::TransportPrincipal { .. }
-        ) {
-            return Err(ExecutionPortServiceError::Protocol(
-                "authenticationIdentity",
-            ));
-        }
         let request = worker_registration_request(message, authentication_identity, security_zone)?;
         let receipt = self
             .registry()?
@@ -342,23 +331,13 @@ impl<'storage> ExecutionPortService<'storage> {
                 "durableExecutionJob",
             ));
         }
-        let worker = self.registry()?.load_worker(&claim.worker_id)?.ok_or(
+        self.registry()?.load_worker(&claim.worker_id)?.ok_or(
             ExecutionPortServiceError::AuthorityRejected("Worker registration is missing"),
         )?;
-        let authenticated_remote = match &worker.authentication_identity {
-            WorkerAuthenticationIdentity::LocalEmbedded { .. } => false,
-            WorkerAuthenticationIdentity::TransportPrincipal { .. } => true,
-        };
-        if authenticated_remote
-            && self
-                .registry()?
-                .load_authenticated_worker_placement(&claim.worker_id, &claim.worker_instance_id)?
-                .is_none()
-        {
-            return Err(ExecutionPortServiceError::AuthorityRejected(
-                "authenticated Worker placement is missing",
-            ));
-        }
+        let authenticated_remote = self
+            .registry()?
+            .load_authenticated_worker_placement(&claim.worker_id, &claim.worker_instance_id)?
+            .is_some();
         let receipt = if authenticated_remote {
             let data_directory = self
                 .storage

@@ -63,6 +63,8 @@ const NOW: &str = "2027-01-15T08:00:02.000Z";
 mod control_driver_regressions;
 #[path = "support/mechanism_worker_fairness.rs"]
 mod mechanism_worker_fairness;
+#[path = "support/validation_fixture.rs"]
+mod validation_fixture;
 const OBSERVER_VALIDATION_CONFIG: &str = r#"schemaVersion = 1
 
 [[commands]]
@@ -1796,11 +1798,13 @@ fn output_kinds(messages: &[ExecutionPortMessage]) -> Vec<&'static str> {
 
 #[test]
 fn standalone_binary_starts_without_an_external_execution_fallback() {
-    let output = Command::new(env!("CARGO_BIN_EXE_winwincode-worker"))
-        .arg("--check")
-        .env("PATH", "")
-        .output()
-        .unwrap();
+    let output = Command::new(
+        std::env::var_os("CARGO_BIN_EXE_winwincode-worker").expect("Cargo binary path"),
+    )
+    .arg("--check")
+    .env("PATH", "")
+    .output()
+    .unwrap();
     assert!(output.status.success());
     let identity: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(identity["role"], "execution-worker");
@@ -1809,7 +1813,12 @@ fn standalone_binary_starts_without_an_external_execution_fallback() {
 
     let manifest = include_str!("../Cargo.toml");
     let source = include_str!("../src/lib.rs");
-    assert!(!manifest.contains("winwincode-cli"));
+    assert!(
+        !manifest
+            .lines()
+            .filter_map(|line| line.split_once('='))
+            .any(|(name, _)| name.trim().split('.').next() == Some("winwincode-cli"))
+    );
     assert!(!source.contains("Command::new"));
     assert!(!source.contains("codex app-server"));
 }
@@ -4044,7 +4053,7 @@ async fn deferred_observer_start_uses_common_outbox_after_renewal() {
     let ObserverWorkerFixture { worker, pump, .. } = observer_worker_fixture().await;
     let root = tempfile::tempdir().unwrap();
     let providers = root.path().join("providers");
-    let mut worker = worker.with_device_providers(&providers).unwrap();
+    let mut worker = worker.with_device_providers(&providers);
     assert!(worker.inject_device_start_fault());
     assert_eq!(
         worker.poll_codex_boxed().await.unwrap_err().code,
@@ -5263,8 +5272,7 @@ async fn deferred_local_model_start_obeys_current_lease_and_keeps_the_original_i
         let root = tempfile::tempdir().unwrap();
         let providers = root.path().join("providers");
         let mut worker = test_worker(worker_config(1), RecordingPort::default(), codex)
-            .with_device_providers(&providers)
-            .unwrap();
+            .with_device_providers(&providers);
         register(&mut worker).await;
         worker
             .accept_control_and_drive(
@@ -5369,8 +5377,7 @@ async fn preserved_clock_anchor_allows_new_leases_without_extending_expiry() {
         let root = tempfile::tempdir().unwrap();
         let providers = root.path().join("providers");
         let mut worker = test_worker(worker_config(1), RecordingPort::default(), codex)
-            .with_device_providers(&providers)
-            .unwrap();
+            .with_device_providers(&providers);
         register(&mut worker).await;
         worker.inject_driver_clock(now(), std::time::Duration::from_millis(10_005));
         let mut dispatch = dispatch('A', delivery_scope('A'));
@@ -5459,8 +5466,7 @@ async fn stale_driver_time_cannot_reset_elapsed_first_start_authority() {
         let root = tempfile::tempdir().unwrap();
         let providers = root.path().join("providers");
         let mut worker = test_worker(worker_config(1), RecordingPort::default(), codex)
-            .with_device_providers(&providers)
-            .unwrap();
+            .with_device_providers(&providers);
         register(&mut worker).await;
         let mut dispatch = dispatch('A', delivery_scope('A'));
         dispatch.lease.expires_at = Instant("2027-01-15T08:00:03.000Z".into());
@@ -5598,9 +5604,7 @@ async fn full_provider_slots_do_not_block_another_provider_or_model_cancellation
     let mut pump = codex.clone();
     let root = tempfile::tempdir().unwrap();
     let providers = root.path().join("providers");
-    let mut worker = test_worker(worker_config(1), port, codex)
-        .with_device_providers(&providers)
-        .unwrap();
+    let mut worker = test_worker(worker_config(1), port, codex).with_device_providers(&providers);
     register(&mut worker).await;
     worker
         .accept_control_and_drive(
@@ -5736,13 +5740,12 @@ async fn owned_model_chunk_retry_does_not_starve_cancelled_core_facts() {
     let port = RecordingPort::default();
     let messages = Rc::clone(&port.messages);
     let codex = FakeCodex::with_threads([thread('A')]);
-    let pump = codex.clone();
+    let mut pump = codex.clone();
     let root = tempfile::tempdir().unwrap();
     let providers = root.path().join("providers");
     let intake_log = root.path().join("intake.log");
     let mut worker = test_worker(worker_config(1), port, codex)
         .with_device_providers(&providers)
-        .unwrap()
         .with_model_intake_log(&intake_log);
     register(&mut worker).await;
     worker
@@ -5753,9 +5756,23 @@ async fn owned_model_chunk_retry_does_not_starve_cancelled_core_facts() {
         .await
         .unwrap();
     let active = worker.active_jobs()[0].clone();
-    let (open, _, _) = provider_quota_messages(&active);
+    let (open, _, mut replay) = provider_quota_messages(&active);
     let store = winwincode_provider::DeviceProviderStore::open(&providers).unwrap();
     let original = store.reject_model_start(&open).unwrap();
+    replay.model_exchange_id = open.model_exchange_id.clone();
+    replay.ack_sequence = ExecutionAckSequence(0);
+    replay.error = None;
+    replay.replay_from_sequence = Some(ExecutionSequence(1));
+    pump.retain_execution_delivery(&ExecutionPortMessage::ModelOpenMessage(open.clone()))
+        .unwrap();
+    pump.retain_execution_delivery(&ExecutionPortMessage::ModelAckMessage(replay))
+        .unwrap();
+    worker.flush_durable_outbox().await.unwrap();
+    assert_eq!(
+        pump.state.lock().unwrap().model_start_requests,
+        vec![open.clone()],
+        "the original durable open must establish ownership before its stored result is retried"
+    );
     worker
         .accept_control(
             &ExecutionPortMessage::JobCancelMessage(cancel_for(&active, 'C')),
@@ -5834,8 +5851,7 @@ async fn invalid_provider_slot_permissions_complete_with_failure_without_blockin
         let root = tempfile::tempdir().unwrap();
         let providers = root.path().join("providers");
         let mut worker = test_worker(worker_config(1), RecordingPort::default(), codex)
-            .with_device_providers(&providers)
-            .unwrap();
+            .with_device_providers(&providers);
         register(&mut worker).await;
         worker
             .accept_control_and_drive(
@@ -5956,9 +5972,7 @@ async fn never_started_local_model_retries_through_the_worker_outbox_and_release
             .unwrap()
             .as_nanos()
     ));
-    let mut worker = test_worker(worker_config(1), port, codex)
-        .with_device_providers(&root)
-        .unwrap();
+    let mut worker = test_worker(worker_config(1), port, codex).with_device_providers(&root);
     register(&mut worker).await;
     worker
         .accept_control_and_drive(

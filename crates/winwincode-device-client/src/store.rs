@@ -6,6 +6,8 @@ use std::cell::Cell;
 use std::collections::HashMap;
 use std::fmt;
 use std::fs;
+#[cfg(unix)]
+use std::os::unix::fs::{OpenOptionsExt as _, PermissionsExt as _};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock, TryLockError, Weak};
 use std::thread;
@@ -24,7 +26,7 @@ use winwincode_client_port::messages::{
 };
 
 /// Schema identity of the current local device-client database.
-pub const CLIENT_STORE_SCHEMA_VERSION: i64 = 9;
+pub const CLIENT_STORE_SCHEMA_VERSION: i64 = 11;
 
 const DATABASE_FILE_NAME: &str = "device-client.sqlite3";
 const SQLITE_BUSY_TIMEOUT: Duration = Duration::from_secs(5);
@@ -345,12 +347,32 @@ impl DeviceStore {
         let canonical_data_directory = fs::canonicalize(data_directory).map_err(|error| {
             DeviceStoreError::adapter(format!("failed to resolve the data directory: {error}"))
         })?;
+        #[cfg(unix)]
+        fs::set_permissions(&canonical_data_directory, fs::Permissions::from_mode(0o700)).map_err(
+            |_| DeviceStoreError::adapter("Device data directory permissions cannot be secured"),
+        )?;
         let database_path = canonical_data_directory.join(DATABASE_FILE_NAME);
         let open_lock = sqlite_open_lock(&database_path, open_deadline)?;
         let _open_guard = acquire_mutex_before_open_deadline(&open_lock, open_deadline)?;
         // The daemon and CLI are separate processes. Journal-mode changes and
         // schema preparation must share the same initialization lock across them.
         let _process_open_guard = acquire_sqlite_process_open_lock(&database_path, open_deadline)?;
+        #[cfg(unix)]
+        {
+            fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .create(true)
+                .truncate(false)
+                .mode(0o600)
+                .open(&database_path)
+                .map_err(|_| {
+                    DeviceStoreError::adapter("Device database cannot be opened privately")
+                })?;
+            fs::set_permissions(&database_path, fs::Permissions::from_mode(0o600)).map_err(
+                |_| DeviceStoreError::adapter("Device database permissions cannot be secured"),
+            )?;
+        }
         let flags = OpenFlags::SQLITE_OPEN_READ_WRITE
             | OpenFlags::SQLITE_OPEN_CREATE
             | OpenFlags::SQLITE_OPEN_FULL_MUTEX;
@@ -2463,6 +2485,36 @@ fn row_to_worker_process(row: &rusqlite::Row<'_>) -> rusqlite::Result<WorkerProc
 }
 
 const STORE_SCHEMA: &str = r"
+CREATE TABLE remote_device_binding (
+    singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+    server_url TEXT NOT NULL,
+    signing_key BLOB NOT NULL CHECK (length(signing_key) = 32),
+    request_id TEXT NOT NULL,
+    intent_json TEXT NOT NULL,
+    pairing_token TEXT,
+    ca_roots_json TEXT NOT NULL,
+    client_node_id TEXT,
+    public_client_id TEXT,
+    owner_user_id TEXT,
+    bound_at TEXT,
+    failure_reason TEXT
+);
+CREATE TABLE candidate_applications (
+    application_id TEXT PRIMARY KEY NOT NULL,
+    approval_id TEXT NOT NULL,
+    repository_binding_id TEXT NOT NULL,
+    candidate_ref TEXT NOT NULL,
+    candidate_digest TEXT NOT NULL,
+    target_branch TEXT NOT NULL,
+    base_commit TEXT NOT NULL,
+    strategy TEXT NOT NULL,
+    original_lease_id TEXT NOT NULL,
+    original_epoch INTEGER NOT NULL CHECK (original_epoch >= 0),
+    started_at TEXT NOT NULL,
+    finished_receipt_json TEXT,
+    recovery_outcome TEXT,
+    reported_epoch INTEGER
+);
 CREATE TABLE server_command_results (
     command_message_id TEXT PRIMARY KEY NOT NULL,
     payload BLOB NOT NULL
@@ -2478,13 +2530,6 @@ CREATE TABLE device_identity (
     current_instance_id TEXT NOT NULL,
     created_at TEXT NOT NULL,
     revision INTEGER NOT NULL CHECK (revision > 0)
-);
-CREATE TABLE device_credential (
-    device_id TEXT PRIMARY KEY NOT NULL REFERENCES device_identity (device_id) ON DELETE CASCADE,
-    credential_secret BLOB NOT NULL CHECK (length(credential_secret) = 32),
-    credential_digest TEXT NOT NULL CHECK (length(credential_digest) = 71),
-    credential_generation INTEGER NOT NULL CHECK (credential_generation > 0),
-    rotated_at TEXT NOT NULL
 );
 CREATE TABLE server_profile (
     server_profile_id TEXT PRIMARY KEY NOT NULL,
@@ -2618,7 +2663,8 @@ CREATE TABLE candidate_local_refs (
     created_at TEXT NOT NULL,
     candidate_ref TEXT NOT NULL,
     candidate_commit TEXT NOT NULL,
-    retained_at TEXT NOT NULL
+    retained_at TEXT NOT NULL,
+    base_commit TEXT NOT NULL
 );
 CREATE INDEX candidate_local_refs_by_session
     ON candidate_local_refs (worker_session_id, created_at);
@@ -2760,6 +2806,44 @@ fn initialize_schema(connection: &mut Connection) -> Result<(), DeviceStoreError
 
 const STORE_SCHEMA_COLUMNS: &[(&str, &str, &[&str])] = &[
     (
+        "remote_device_binding",
+        "PRAGMA table_info(remote_device_binding)",
+        &[
+            "singleton",
+            "server_url",
+            "signing_key",
+            "request_id",
+            "intent_json",
+            "pairing_token",
+            "ca_roots_json",
+            "client_node_id",
+            "public_client_id",
+            "owner_user_id",
+            "bound_at",
+            "failure_reason",
+        ],
+    ),
+    (
+        "candidate_applications",
+        "PRAGMA table_info(candidate_applications)",
+        &[
+            "application_id",
+            "approval_id",
+            "repository_binding_id",
+            "candidate_ref",
+            "candidate_digest",
+            "target_branch",
+            "base_commit",
+            "strategy",
+            "original_lease_id",
+            "original_epoch",
+            "started_at",
+            "finished_receipt_json",
+            "recovery_outcome",
+            "reported_epoch",
+        ],
+    ),
+    (
         "server_command_results",
         "PRAGMA table_info(server_command_results)",
         &["command_message_id", "payload"],
@@ -2778,17 +2862,6 @@ const STORE_SCHEMA_COLUMNS: &[(&str, &str, &[&str])] = &[
             "current_instance_id",
             "created_at",
             "revision",
-        ],
-    ),
-    (
-        "device_credential",
-        "PRAGMA table_info(device_credential)",
-        &[
-            "device_id",
-            "credential_secret",
-            "credential_digest",
-            "credential_generation",
-            "rotated_at",
         ],
     ),
     (
@@ -2913,6 +2986,7 @@ const STORE_SCHEMA_COLUMNS: &[(&str, &str, &[&str])] = &[
             "candidate_ref",
             "candidate_commit",
             "retained_at",
+            "base_commit",
         ],
     ),
     (

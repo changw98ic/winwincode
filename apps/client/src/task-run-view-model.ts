@@ -76,13 +76,14 @@ function candidateResultText(result: ControlPlaneCandidateApplyResult): string {
     case 'retained': return '仍保留在本地。'
     case 'branch_created': return '已创建本地分支。'
     case 'applied': return '已应用到目标分支。'
-    case 'base_stale': return '目标分支已有新提交，请刷新预期 HEAD 后重试。'
+    case 'base_stale': return '目标分支已有新提交，请重新生成候选版本。'
     case 'working_tree_dirty': return '目标工作区有未提交改动，请先处理。'
     case 'merge_conflict': return '必须先解决冲突才能应用。'
     case 'candidate_missing': return '设备上的候选引用已不存在。'
     case 'permission_denied': return '你没有目标仓库的权限。'
     case 'discarded': return '候选结果已丢弃。'
-    case 'failed': return '应用失败，请检查设备后重试。'
+    case 'failed': return '应用失败，请处理失败原因并重新生成候选版本。'
+    case 'outcome_unknown': return '应用结果尚未确认，请刷新设备结果。'
   }
 }
 
@@ -98,6 +99,7 @@ function candidateResultTone(result: ControlPlaneCandidateApplyResult): Candidat
     case 'permission_denied': return 'danger'
     case 'discarded': return 'neutral'
     case 'failed': return 'danger'
+    case 'outcome_unknown': return 'warning'
   }
 }
 

@@ -20,13 +20,11 @@ import { tmpdir } from 'node:os'
 import { join, relative, resolve, sep } from 'node:path'
 
 import {
-  HELPER_RELEASE_MANIFEST_NAME,
   assertSourceCommit,
   assertSourceDateEpoch,
   canonicalJson,
   createReleaseBuildEnvironment,
   descriptorForFile,
-  helperReleaseBuildBaseEnvironment,
   sourceIdentity,
   targetConfiguration,
 } from './release-artifact-contract.mjs'
@@ -124,7 +122,7 @@ export function parseDeviceClientReleaseArguments(argv) {
     values.set(argument.slice(2), value)
     index += 1
   }
-  const allowed = new Set(['target', 'source-commit', 'source-date-epoch', 'output', 'helper-release-manifest'])
+  const allowed = new Set(['target', 'source-commit', 'source-date-epoch', 'output'])
   for (const key of values.keys()) {
     if (!allowed.has(key)) throw new Error(`unknown argument --${key}`)
   }
@@ -135,13 +133,11 @@ export function parseDeviceClientReleaseArguments(argv) {
   if (!Number.isSafeInteger(sourceDateEpoch) || sourceDateEpoch <= 0) {
     throw new Error('--source-date-epoch must be a positive integer')
   }
-  const helperReleaseManifest = values.get('helper-release-manifest') ?? null
   return Object.freeze({
     target: values.get('target'),
     sourceCommit: values.get('source-commit'),
     sourceDateEpoch,
     output: resolve(root, values.get('output')),
-    helperReleaseManifest: helperReleaseManifest === null ? null : resolve(root, helperReleaseManifest),
     dryRun,
   })
 }
@@ -251,43 +247,11 @@ function serviceDescriptor(artifactRoot, target) {
   return Object.freeze({ path: `service/${name}`, ...descriptorForFile(artifactRoot, path), mode })
 }
 
-function helperReleaseManifestDescriptor(root, artifactRoot, source) {
-  const path = resolve(artifactRoot, 'bin', HELPER_RELEASE_MANIFEST_NAME)
-  if (!existsSync(path) || !statSync(path).isFile()) return null
-  const mode = statSync(path).mode & 0o777
-  if (mode !== TEXT_MODE) {
-    fail('HELPER_RELEASE_MANIFEST_INVALID', `${HELPER_RELEASE_MANIFEST_NAME} must have mode 0644`)
-  }
-  const manifest = JSON.parse(readFileSync(path, 'utf8'))
-  const helper = descriptorForFile(artifactRoot, resolve(artifactRoot, 'bin', 'winwincode-kernel-helper'))
-  const helperSourceSha256 = `sha256:${createHash('sha256')
-    .update(readFileSync(resolve(root, 'crates', 'helper', 'src', 'main.rs')))
-    .digest('hex')}`
-  if (manifest.schemaVersion !== 1
-    || manifest.protocol !== 'winwincode-kernel-helper-release'
-    || manifest.version !== 1
-    || manifest.packageVersion !== source.version
-    || manifest.sourceSha256 !== helperSourceSha256
-    || manifest.binaryPath !== 'winwincode-kernel-helper'
-    || manifest.binaryMode !== EXECUTABLE_MODE
-    || manifest.binarySha256 !== `sha256:${helper.sha256}`
-    || typeof manifest.signature !== 'string'
-    || !/^[A-Za-z0-9_-]{86}$/u.test(manifest.signature)) {
-    fail('HELPER_RELEASE_MANIFEST_INVALID', `staged ${HELPER_RELEASE_MANIFEST_NAME} does not bind the packaged helper`)
-  }
-  return Object.freeze({
-    path: `bin/${HELPER_RELEASE_MANIFEST_NAME}`,
-    ...descriptorForFile(artifactRoot, path),
-    mode,
-  })
-}
-
 function checksumLines(manifest) {
   const descriptors = [
     ...manifest.components,
     ...manifest.legal,
     manifest.service,
-    ...(manifest.helperReleaseManifest === null ? [] : [manifest.helperReleaseManifest]),
   ]
   return descriptors
     .map(entry => `${entry.sha256}  ${entry.path}`)
@@ -310,7 +274,6 @@ export function createDeviceClientReleaseManifest({
   const components = DEVICE_CLIENT_COMPONENTS.map(component => componentDescriptor(artifactRoot, component))
   const legal = legalDescriptors(artifactRoot)
   const service = serviceDescriptor(artifactRoot, target)
-  const helperReleaseManifest = helperReleaseManifestDescriptor(root, artifactRoot, source)
   return Object.freeze({
     schemaVersion: DEVICE_CLIENT_RELEASE_SCHEMA_VERSION,
     kind: DEVICE_CLIENT_RELEASE_KIND,
@@ -318,7 +281,6 @@ export function createDeviceClientReleaseManifest({
     source,
     deviceClient: deviceClientLibraryIdentity(root),
     components: Object.freeze(components),
-    helperReleaseManifest,
     sbom: deviceClientSbom(root),
     legal: Object.freeze(legal),
     service,
@@ -420,15 +382,6 @@ export function verifyDeviceClientReleaseDirectory({ root, artifactRoot, expecte
   for (const descriptor of manifest.components) {
     assertDescriptor(artifactRoot, descriptor, 'Device Client')
   }
-  if (manifest.helperReleaseManifest !== null) {
-    assertDescriptor(artifactRoot, manifest.helperReleaseManifest, 'helper release manifest')
-    assertExactIdentity(
-      manifest.helperReleaseManifest,
-      helperReleaseManifestDescriptor(root, artifactRoot, manifest.source),
-      'HELPER_RELEASE_MANIFEST_INVALID',
-      'helper release manifest descriptor is invalid',
-    )
-  }
   assertExactIdentity(
     manifest.legal.map(({ path }) => path),
     LEGAL_FILES.map(name => `legal/${name}`),
@@ -465,7 +418,6 @@ export function verifyDeviceClientReleaseDirectory({ root, artifactRoot, expecte
     ...manifest.components.map(entry => entry.path),
     ...manifest.legal.map(entry => entry.path),
     manifest.service.path,
-    ...(manifest.helperReleaseManifest === null ? [] : [manifest.helperReleaseManifest.path]),
   ].toSorted((left, right) => left.localeCompare(right))
   const actualPaths = packageFilesBelow(artifactRoot)
     .toSorted((left, right) => left.localeCompare(right))
@@ -504,7 +456,7 @@ export function buildDeviceClientReleasePlan({
   assertSourceCommit(sourceCommit)
   assertSourceDateEpoch(sourceDateEpoch)
   const environment = createReleaseBuildEnvironment({
-    baseEnvironment: helperReleaseBuildBaseEnvironment(process.env),
+    baseEnvironment: process.env,
     root,
     buildRoot: '<build-root>',
     targetDirectory: cargoTargetDirectory,
@@ -568,7 +520,7 @@ export function buildDeviceClientReleasePlan({
 function run(command, arguments_, options = {}) {
   const result = spawnSync(command, arguments_, {
     cwd: root,
-    env: options.env ?? helperReleaseBuildBaseEnvironment(process.env),
+    env: options.env ?? process.env,
     encoding: 'utf8',
     stdio: options.capture === true ? 'pipe' : 'inherit',
     maxBuffer: 64 * 1_024 * 1_024,
@@ -599,7 +551,7 @@ function assertReleaseSource(sourceCommit, sourceDateEpoch) {
   if (status.length > 0) fail('SOURCE_NOT_CLEAN', 'Device Client release build requires a clean checkout')
 }
 
-function stagePackage({ artifactRoot, targetDirectory, target, helperReleaseManifest }) {
+function stagePackage({ artifactRoot, targetDirectory, target }) {
   const targetIdentity = targetConfiguration(target)
   rmSync(artifactRoot, { recursive: true, force: true })
   mkdirSync(resolve(artifactRoot, 'bin'), { recursive: true })
@@ -616,11 +568,6 @@ function stagePackage({ artifactRoot, targetDirectory, target, helperReleaseMani
     if (targetIdentity.os === 'macos') {
       run('codesign', ['--force', '--sign', '-', destination])
     }
-  }
-  if (helperReleaseManifest !== null) {
-    const destination = resolve(artifactRoot, 'bin', HELPER_RELEASE_MANIFEST_NAME)
-    copyFileSync(helperReleaseManifest, destination)
-    chmodSync(destination, TEXT_MODE)
   }
   for (const name of LEGAL_FILES) {
     const destination = resolve(artifactRoot, 'legal', name)
@@ -668,7 +615,7 @@ function main(argv) {
   try {
     const targetDirectory = cargoTargetDirectoryOverride(buildRoot)
     const environment = createReleaseBuildEnvironment({
-      baseEnvironment: helperReleaseBuildBaseEnvironment(process.env),
+      baseEnvironment: process.env,
       root,
       buildRoot,
       targetDirectory,
@@ -683,7 +630,6 @@ function main(argv) {
       artifactRoot,
       targetDirectory,
       target: options.target,
-      helperReleaseManifest: options.helperReleaseManifest,
     })
     const manifest = createDeviceClientReleaseManifest({
       root,

@@ -10,7 +10,6 @@ use std::time::{Duration, Instant};
 
 use rusqlite::Connection;
 use serde_json::Value;
-use sha2::{Digest, Sha256};
 use time::OffsetDateTime;
 use winwincode_client_port::domain::{
     ClientArchitecture, ClientCapacityReport, ClientLockState, ClientPlatformTarget,
@@ -54,22 +53,7 @@ fn seed() -> DeviceIdentitySeed {
 
 const ASSIGNED_NODE: &str = "cnd_A1A1A1A1A1A1A1A1A1A1A1A1A1";
 const ASSIGNED_PUBLIC_CLIENT_ID: &str = "0123456789";
-const ISSUED_SECRET: [u8; 32] = [0xcd; 32];
 const STAMP: &str = "2026-09-04T00:00:00.000Z";
-
-fn issued_credential_material() -> String {
-    const HEX: &[u8; 16] = b"0123456789abcdef";
-    let mut encoded = String::with_capacity(ISSUED_SECRET.len() * 2);
-    for byte in ISSUED_SECRET {
-        encoded.push(HEX[usize::from(byte >> 4)] as char);
-        encoded.push(HEX[usize::from(byte & 0x0f)] as char);
-    }
-    encoded
-}
-
-fn issued_credential_digest() -> String {
-    format!("sha256:{:x}", Sha256::digest(ISSUED_SECRET))
-}
 
 fn open_enrolled(root: &Path) -> (DeviceStore, IdentityRecord) {
     let mut store = DeviceStore::open(root).expect("device store should open");
@@ -86,8 +70,6 @@ fn open_enrolled(root: &Path) -> (DeviceStore, IdentityRecord) {
         &IssuedEnrollment {
             client_node_id: ASSIGNED_NODE.to_owned(),
             public_client_id: ASSIGNED_PUBLIC_CLIENT_ID.to_owned(),
-            credential_material: issued_credential_material(),
-            credential_digest: issued_credential_digest(),
         },
         STAMP,
     )
@@ -143,11 +125,7 @@ impl ServerSim {
 }
 
 impl ExchangeTransport for ServerSim {
-    fn exchange(
-        &self,
-        _credential: Option<&str>,
-        request_bytes: &[u8],
-    ) -> Result<Vec<u8>, ExchangeTransportError> {
+    fn exchange(&self, request_bytes: &[u8]) -> Result<Vec<u8>, ExchangeTransportError> {
         let request: ExchangeRequest = serde_json::from_slice(request_bytes)
             .map_err(|error| ExchangeTransportError::new(format!("fake decode: {error}")))?;
         let (ack, frames) = {
@@ -186,7 +164,6 @@ impl ExchangeTransport for ServerSim {
             replay_from_sequence: None,
             frames,
             enrollment: None,
-            worker_credentials: Vec::new(),
         };
         serde_json::to_vec(&response)
             .map_err(|error| ExchangeTransportError::new(format!("fake encode: {error}")))

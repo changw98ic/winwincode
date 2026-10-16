@@ -8,6 +8,7 @@ use std::path::PathBuf;
 use rusqlite::OpenFlags;
 use serde_json::Value;
 use serde_json::json;
+use winwincode_client_port::candidate_application::candidate_application_digest;
 use winwincode_client_port::domain::ApplyStrategy;
 use winwincode_client_port::exchange::DEFAULT_MAX_FRAME_BYTES;
 use winwincode_client_port::exchange::FrameCodec;
@@ -23,6 +24,7 @@ use winwincode_control_plane::LocalCandidateService;
 use winwincode_control_plane::OccupancyLeaseState;
 use winwincode_control_plane::RepositoryBindingService;
 use winwincode_domain::Instant;
+use winwincode_storage::CandidateApplicationRecord;
 use winwincode_storage::ClientDownlinkAppend;
 use winwincode_storage::ClientNodeRecord;
 use winwincode_storage::ClientPresenceState;
@@ -181,6 +183,29 @@ impl ClientCandidatesApplication {
                 candidates.push(candidate_summary(&record, &history));
             }
         }
+        for candidate in &mut candidates {
+            let candidate_ref = candidate["candidateRef"].as_str().unwrap_or_default();
+            let application = storage
+                .candidate_application_for_candidate(&node.client_node_id, candidate_ref)
+                .map_err(|_| ClientCandidatesError::unavailable())?;
+            candidate["application"] = application.map_or(Value::Null, |application| {
+                json!({
+                    "applicationId": application.application_id,
+                    "approvalId": application.approval_id,
+                    "baseCommit": application.base_commit,
+                    "targetBranch": application.target_branch,
+                    "candidateDigest": application.candidate_digest,
+                    "status": match application.outcome.as_deref() {
+                        Some("outcome_unknown") => "blocked",
+                        Some("not_started") => "awaiting_retry",
+                        Some("applied") => "applied",
+                        Some("base_stale") => "stale",
+                        None | Some("retry_authorized") => "applying",
+                        Some(_) => "failed",
+                    },
+                })
+            });
+        }
         Ok(json!({
             "schemaVersion": SUPPORTED_SCHEMA_VERSION,
             "clientId": node.public_client_id,
@@ -302,7 +327,7 @@ impl ClientCandidatesApplication {
         let mirror_revision =
             client_mirror_revision_view(&self.data_directory, &prepared.node.client_node_id)
                 .map_err(|_| ClientCandidatesError::unavailable())?;
-        enqueue_apply_command(
+        let application_id = enqueue_apply_command(
             &mut storage,
             &prepared.node,
             &prepared.lease,
@@ -316,7 +341,9 @@ impl ClientCandidatesApplication {
 
         let deadline = tokio::time::Instant::now() + self.config.apply_wait;
         loop {
-            if let Some(outcome) = self.poll_settlement(&prepared, &known, kind)? {
+            if let Some(outcome) =
+                self.poll_settlement(&prepared, &known, kind, application_id.as_deref())?
+            {
                 return outcome;
             }
             if tokio::time::Instant::now() >= deadline {
@@ -334,14 +361,38 @@ impl ClientCandidatesApplication {
         prepared: &PreparedCommand,
         known: &HashSet<String>,
         kind: CommandKind,
+        application_id: Option<&str>,
     ) -> Result<Option<Result<Value, ClientCandidatesError>>, ClientCandidatesError> {
         let mut storage = self.open_storage()?;
+        if let Some(id) = application_id
+            && let Some(application) = storage
+                .candidate_application(id)
+                .map_err(|_| ClientCandidatesError::unavailable())?
+            && matches!(
+                application.outcome.as_deref(),
+                Some("outcome_unknown" | "not_started")
+            )
+        {
+            return Ok(Some(Err(ClientCandidatesError::new(
+                ClientCandidatesErrorKind::WrongState,
+                if application.outcome.as_deref() == Some("outcome_unknown") {
+                    "the application outcome is unknown and requires a user decision"
+                } else {
+                    "the application has not started and requires a new server retry authorization"
+                },
+            ))));
+        }
         let candidate = load_candidate(&mut storage, &prepared.candidate)?;
         let history = load_history(&mut storage, &candidate)?;
         let Some(newest) = history
             .iter()
             .rev()
-            .find(|receipt| !known.contains(&receipt.local_apply_receipt_id))
+            .find(|receipt| {
+                application_id.map_or_else(
+                    || !known.contains(&receipt.local_apply_receipt_id),
+                    |id| receipt.local_apply_receipt_id == id,
+                )
+            })
             .cloned()
         else {
             return Ok(None);
@@ -395,6 +446,12 @@ impl ClientCandidatesApplication {
                     )
                 })?
         };
+        if candidate.repository_binding_id != parsed.repository_binding_id {
+            return Err(ClientCandidatesError::new(
+                ClientCandidatesErrorKind::AccessDenied,
+                "the candidate belongs to a different repository binding",
+            ));
+        }
         Ok(PreparedCommand {
             node,
             lease,
@@ -727,7 +784,7 @@ fn requested_branch_name(candidate: &LocalCandidateReceiptRecord) -> String {
     format!("{BRANCH_NAMESPACE}candidate-{short}")
 }
 
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 fn enqueue_apply_command(
     storage: &mut SqliteStorage,
     node: &ClientNodeRecord,
@@ -738,12 +795,147 @@ fn enqueue_apply_command(
     strategy: LocalApplyStrategy,
     user_id: &str,
     mirror_revision: u64,
-) -> Result<(), ClientCandidatesError> {
+) -> Result<Option<String>, ClientCandidatesError> {
+    let now = now_instant();
+    let proposed = if strategy == LocalApplyStrategy::CreateBranch {
+        None
+    } else {
+        if storage
+            .candidate_application_blocked(&node.client_node_id, &candidate.candidate_ref)
+            .map_err(|_| ClientCandidatesError::unavailable())?
+        {
+            return Err(ClientCandidatesError::new(
+                ClientCandidatesErrorKind::WrongState,
+                "the application outcome is unknown and requires a user decision",
+            ));
+        }
+        if expected_head != candidate.base_commit {
+            return Err(ClientCandidatesError::new(
+                ClientCandidatesErrorKind::WrongState,
+                "the candidate source baseline differs from the requested approval baseline",
+            ));
+        }
+        if storage
+            .candidate_application_for_candidate(&node.client_node_id, &candidate.candidate_ref)
+            .map_err(|_| ClientCandidatesError::unavailable())?
+            .is_some_and(|application| application.base_commit != expected_head)
+        {
+            return Err(ClientCandidatesError::new(
+                ClientCandidatesErrorKind::WrongState,
+                "the stale candidate requires regeneration, verification and a new approval",
+            ));
+        }
+        Some(CandidateApplicationRecord {
+            application_id: generate_prefixed_id("lar_")
+                .map_err(|_| ClientCandidatesError::unavailable())?,
+            approval_id: generate_prefixed_id("apr_")
+                .map_err(|_| ClientCandidatesError::unavailable())?,
+            client_node_id: node.client_node_id.clone(),
+            local_candidate_receipt_id: candidate.local_candidate_receipt_id.clone(),
+            repository_binding_id: candidate.repository_binding_id.clone(),
+            candidate_ref: candidate.candidate_ref.clone(),
+            candidate_digest: candidate_application_digest(
+                &candidate.repository_binding_id,
+                expected_head,
+                &candidate.candidate_commit,
+            ),
+            base_commit: expected_head.into(),
+            target_branch: target_branch.into(),
+            strategy: strategy.as_str().into(),
+            original_lease_id: lease.occupancy_lease_id.clone(),
+            original_epoch: lease.fencing_token,
+            requester_user_id: user_id.into(),
+            created_at: now.0.clone(),
+            result_json: None,
+            outcome: None,
+            retry_lease_id: None,
+            retry_epoch: None,
+        })
+    };
+    if let Some(proposed) = proposed {
+        return storage
+            .publish_candidate_application(
+                &proposed,
+                &lease.occupancy_lease_id,
+                lease.fencing_token,
+                &now,
+                |application, sequence| {
+                    candidate_apply_downlink(
+                        node,
+                        lease,
+                        candidate,
+                        target_branch,
+                        expected_head,
+                        strategy,
+                        user_id,
+                        mirror_revision,
+                        Some(application),
+                        sequence,
+                        &now,
+                    )
+                    .map_err(|_| {
+                        winwincode_storage::StorageError::adapter(
+                            "candidate downlink encoding failed",
+                        )
+                    })
+                },
+            )
+            .map(|application| Some(application.application_id))
+            .map_err(|_| ClientCandidatesError::unavailable());
+    }
+    let cursors = ClientRegistryService::new(storage)
+        .exchange_cursors(&node.client_node_id)
+        .map_err(|_| ClientCandidatesError::unavailable())?
+        .ok_or_else(ClientCandidatesError::unavailable)?;
+    let mut downlink = storage
+        .client_downlink_outbox()
+        .map_err(|_| ClientCandidatesError::unavailable())?;
+    let sequence = cursors
+        .server_to_client_ack_sequence
+        .max(
+            downlink
+                .high_water(&node.client_node_id)
+                .map_err(|_| ClientCandidatesError::unavailable())?,
+        )
+        .checked_add(1)
+        .ok_or_else(ClientCandidatesError::unavailable)?;
+    let append = candidate_apply_downlink(
+        node,
+        lease,
+        candidate,
+        target_branch,
+        expected_head,
+        strategy,
+        user_id,
+        mirror_revision,
+        None,
+        sequence,
+        &now,
+    )?;
+    downlink
+        .append(&append, &now)
+        .map_err(|_| ClientCandidatesError::unavailable())?;
+    Ok(None)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn candidate_apply_downlink(
+    node: &ClientNodeRecord,
+    lease: &OccupancyLeaseRecord,
+    candidate: &LocalCandidateReceiptRecord,
+    target_branch: &str,
+    expected_head: &str,
+    strategy: LocalApplyStrategy,
+    user_id: &str,
+    mirror_revision: u64,
+    application: Option<&CandidateApplicationRecord>,
+    sequence: u64,
+    now: &Instant,
+) -> Result<ClientDownlinkAppend, ClientCandidatesError> {
     let instance = node
         .current_instance_id
         .clone()
         .ok_or_else(ClientCandidatesError::unavailable)?;
-    let now = now_instant();
     let wire_strategy = match strategy {
         LocalApplyStrategy::CreateBranch => ApplyStrategy::CreateBranch,
         LocalApplyStrategy::FastForward => ApplyStrategy::FastForward,
@@ -751,6 +943,26 @@ fn enqueue_apply_command(
         LocalApplyStrategy::Merge => ApplyStrategy::Merge,
     };
     let message = ServerToClientMessage::CandidateApply(ServerCandidateApplyPayload {
+        reconciled_retry: application.is_some_and(|application| {
+            application.outcome.as_deref() == Some("not_started")
+                || (application.outcome.as_deref() == Some("retry_authorized")
+                    && application.retry_lease_id.as_deref()
+                        == Some(lease.occupancy_lease_id.as_str())
+                    && application.retry_epoch == Some(lease.fencing_token))
+        }),
+        application_id: application.map_or_else(
+            || generate_prefixed_id("lar_").map_err(|_| ClientCandidatesError::unavailable()),
+            |record| Ok(record.application_id.clone()),
+        )?,
+        approval_id: application.map_or_else(
+            || generate_prefixed_id("apr_").map_err(|_| ClientCandidatesError::unavailable()),
+            |record| Ok(record.approval_id.clone()),
+        )?,
+        candidate_digest: candidate_application_digest(
+            &candidate.repository_binding_id,
+            expected_head,
+            &candidate.candidate_commit,
+        ),
         occupancy: occupancy_stamp(lease, mirror_revision),
         candidate_ref: candidate.candidate_ref.clone(),
         repository_binding_id: candidate.repository_binding_id.clone(),
@@ -759,24 +971,6 @@ fn enqueue_apply_command(
         requester_user_id: user_id.to_owned(),
         strategy: wire_strategy,
     });
-    let cursors = {
-        let mut registry = ClientRegistryService::new(storage);
-        registry
-            .exchange_cursors(&node.client_node_id)
-            .map_err(|_| ClientCandidatesError::unavailable())?
-            .ok_or_else(ClientCandidatesError::unavailable)?
-    };
-    let mut downlink = storage
-        .client_downlink_outbox()
-        .map_err(|_| ClientCandidatesError::unavailable())?;
-    let outbox_high_water = downlink
-        .high_water(&node.client_node_id)
-        .map_err(|_| ClientCandidatesError::unavailable())?;
-    let sequence = cursors
-        .server_to_client_ack_sequence
-        .max(outbox_high_water)
-        .checked_add(1)
-        .ok_or_else(ClientCandidatesError::unavailable)?;
     let envelope = ServerToClientEnvelope {
         schema_version: CLIENT_CONTROL_PORT_SCHEMA_VERSION.to_owned(),
         message_id: generate_prefixed_id("msg_")
@@ -794,19 +988,13 @@ fn enqueue_apply_command(
     let frame = std::str::from_utf8(&stored.frame)
         .map_err(|_| ClientCandidatesError::unavailable())?
         .to_owned();
-    downlink
-        .append(
-            &ClientDownlinkAppend::try_new(
-                node.client_node_id.clone(),
-                envelope.message_id.clone(),
-                sequence,
-                frame,
-            )
-            .map_err(|_| ClientCandidatesError::unavailable())?,
-            &now,
-        )
-        .map_err(|_| ClientCandidatesError::unavailable())?;
-    Ok(())
+    ClientDownlinkAppend::try_new(
+        node.client_node_id.clone(),
+        envelope.message_id,
+        sequence,
+        frame,
+    )
+    .map_err(|_| ClientCandidatesError::unavailable())
 }
 
 fn occupancy_stamp(lease: &OccupancyLeaseRecord, mirror_revision: u64) -> OccupancyCommandContext {
@@ -832,6 +1020,7 @@ fn candidate_summary(
         "candidateRef": record.candidate_ref,
         "repositoryBindingId": record.repository_binding_id,
         "candidateCommit": record.candidate_commit,
+        "baseCommit": record.base_commit,
         "localRefName": record.local_ref_name,
         "state": record.state.as_str(),
         "createdAt": record.created_at.0,
@@ -918,6 +1107,7 @@ fn generate_prefixed_id(prefix: &str) -> Result<String, ClientCandidatesError> {
 
 #[cfg(test)]
 mod tests {
+    const TEST_BASE_COMMIT: &str = "0123456789abcdef0123456789abcdef01234567";
     use super::*;
     use winwincode_storage::LocalCandidateRetained;
 
@@ -940,6 +1130,7 @@ mod tests {
             repository_binding_id: canonical_id("rbd_"),
             candidate_ref: "refs/winwincode/candidates/0f9e8d7".to_owned(),
             candidate_commit: "0f9e8d7c6b5a4938271605f4e3d2c1b0a9988776".to_owned(),
+            base_commit: TEST_BASE_COMMIT.into(),
             local_ref_name: "refs/winwincode/candidates/0f9e8d7c6b5a4938271605f4e3d2c1b0a9988776"
                 .to_owned(),
             state: LocalCandidateReceiptState::Retained,
@@ -1127,6 +1318,7 @@ mod tests {
             canonical_id("rbd_"),
             "refs/winwincode/candidates/0f9e8d7c6b5a4938271605f4e3d2c1b0a9988776",
             "0f9e8d7c6b5a4938271605f4e3d2c1b0a9988776",
+            TEST_BASE_COMMIT,
             "refs/winwincode/candidates/0f9e8d7c6b5a4938271605f4e3d2c1b0a9988776",
         );
         assert!(command.is_ok());
@@ -1136,6 +1328,7 @@ mod tests {
             canonical_id("rbd_"),
             "refs/winwincode/candidates/x",
             "0f9e8d7c6b5a4938271605f4e3d2c1b0a9988776",
+            TEST_BASE_COMMIT,
             "refs/winwincode/candidates/x",
         );
         assert!(wrong.is_err());

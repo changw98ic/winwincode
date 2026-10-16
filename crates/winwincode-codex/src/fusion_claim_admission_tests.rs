@@ -4,6 +4,7 @@ use super::tests::{delegated_record_and_binding, diagnostic_adapter_config};
 use super::*;
 use futures::future::BoxFuture;
 use serde_json::{Value, json};
+use std::sync::Mutex;
 use winwincode_fusion::{
     FusionBudget, FusionInput, FusionProviderCandidate, FusionProviderError,
     MapFusionProviderRouter, claims::default_claim_output_schema, run_blind_panel,

@@ -37,6 +37,8 @@ struct PipeChildTerminator {
     windows: WindowsChildTerminator,
     #[cfg(unix)]
     process_group_id: u32,
+    #[cfg(unix)]
+    _lifeline: std::os::unix::net::UnixStream,
 }
 
 impl ChildTerminator for PipeChildTerminator {
@@ -156,11 +158,16 @@ async fn spawn_process_with_stdin_mode(
     #[cfg(unix)]
     let inherited_fds = inherited_fds.to_vec();
     #[cfg(unix)]
+    let lifeline = crate::process_group::ProcessGroupLifeline::new()?;
+    #[cfg(unix)]
+    let lifeline_fds = lifeline.child_fds();
+    #[cfg(unix)]
     unsafe {
         command.pre_exec(move || {
             crate::process_group::detach_from_tty()?;
             #[cfg(target_os = "linux")]
             crate::process_group::set_parent_death_signal(parent_pid)?;
+            crate::process_group::guard_process_group_lifetime(lifeline_fds)?;
             crate::pty::close_inherited_fds_except(&inherited_fds);
             Ok(())
         });
@@ -305,6 +312,8 @@ async fn spawn_process_with_stdin_mode(
             windows: windows_terminator,
             #[cfg(unix)]
             process_group_id,
+            #[cfg(unix)]
+            _lifeline: lifeline.into_writer(),
         }),
         reader_handle,
         reader_abort_handles,

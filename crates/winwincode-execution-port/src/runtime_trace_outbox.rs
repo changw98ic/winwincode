@@ -10,8 +10,7 @@ use winwincode_domain::{
 };
 
 use crate::action_gateway::{
-    ExecutionEnvelopeToken, GateDecision, GateInput, PostActionHook, PostActionOutcome,
-    PreActionDecisionRecorder,
+    GateDecision, GateInput, PostActionHook, PostActionOutcome, PreActionDecisionRecorder,
 };
 use crate::action_normalizer::{
     ActionObject, ActionOperation, ActionRisk, ActionScope, ActionSource,
@@ -244,8 +243,6 @@ pub enum RuntimeTraceFact {
         source: ActionSource,
         operation: ActionOperation,
         decision: TraceGateOutcome,
-        envelope_version: u64,
-        envelope_digest: Sha256Digest,
     },
     Tool {
         source: ActionSource,
@@ -341,8 +338,6 @@ impl RuntimeTraceDraft {
                 source: input.observed.source,
                 operation: input.observed.operation,
                 decision: outcome,
-                envelope_version: input.envelope.token.version,
-                envelope_digest: input.envelope.token.digest.clone(),
             },
             artifacts: Vec::new(),
         })
@@ -626,13 +621,6 @@ fn validate_trace_identity(identity: &RuntimeTraceIdentity) -> Result<(), Runtim
 fn validate_trace_fact(fact: &RuntimeTraceFact) -> Result<(), RuntimeTraceInputError> {
     match fact {
         RuntimeTraceFact::Action { objects, .. } if objects.is_empty() => {
-            return Err(RuntimeTraceInputError::InvalidIdentity);
-        }
-        RuntimeTraceFact::Gate {
-            envelope_version,
-            envelope_digest,
-            ..
-        } if *envelope_version == 0 || !sha256_digest(&envelope_digest.0) => {
             return Err(RuntimeTraceInputError::InvalidIdentity);
         }
         RuntimeTraceFact::Candidate { digest } if !sha256_digest(&digest.0) => {
@@ -991,20 +979,5 @@ fn require_durably_ready<IdentityError, AuthorityError, StoreError>(
         RuntimeTraceRetention::Gap { .. } | RuntimeTraceRetention::Conflict { .. } => {
             Err(RuntimeTraceActionJournalError::NotDurablyReady)
         }
-    }
-}
-
-#[must_use]
-pub fn traced_envelope_token(fact: &RuntimeTraceFact) -> Option<ExecutionEnvelopeToken> {
-    match fact {
-        RuntimeTraceFact::Gate {
-            envelope_version,
-            envelope_digest,
-            ..
-        } => Some(ExecutionEnvelopeToken {
-            version: *envelope_version,
-            digest: envelope_digest.clone(),
-        }),
-        _ => None,
     }
 }

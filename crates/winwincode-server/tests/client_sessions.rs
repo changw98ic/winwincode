@@ -51,7 +51,7 @@ use winwincode_server::{
     ApiError, AuthSessionBootstrap, AuthSessionConfig, AuthenticatedPrincipal,
     ClientExchangeApplication, ClientExchangeConfig, ClientExchangePort, ClientSessionsApplication,
     ClientSessionsConfig, ClientSessionsErrorKind, ControlPlaneApiPort, EventSubscription,
-    RequestAuthenticator, ServerConfig, ServerTls, SqliteAuthSessionManager, UserAccountService,
+    RequestAuthenticator, ServerConfig, SqliteAuthSessionManager, UserAccountService,
     start_server_with_remote_worker, worker_stop_message,
 };
 use winwincode_storage::{
@@ -148,7 +148,6 @@ fn server_config(data_directory: &Path) -> ServerConfig {
     ServerConfig::new(
         "127.0.0.1:0".parse().expect("loopback address"),
         "http://control.example",
-        ServerTls::Disabled,
         BTreeSet::from([ORIGIN.to_owned()]),
         data_directory.to_path_buf(),
         Duration::from_secs(2),
@@ -309,17 +308,10 @@ async fn login(address: std::net::SocketAddr, username: &str, password: &str) ->
     (session_cookie_from_response(&response), user_id)
 }
 
-async fn post_exchange(
-    address: std::net::SocketAddr,
-    body: &str,
-    credential: Option<&str>,
-) -> (String, Option<Value>) {
+async fn post_exchange(address: std::net::SocketAddr, body: &str) -> (String, Option<Value>) {
     let mut stream = TcpStream::connect(address).await.expect("connect server");
-    let authorization = credential
-        .map(|value| format!("Authorization: Bearer {value}\r\n"))
-        .unwrap_or_default();
     let request = format!(
-        "POST /internal/v1/client/exchange HTTP/1.1\r\nHost: control.example\r\n{authorization}Content-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        "POST /internal/v1/client/exchange HTTP/1.1\r\nHost: control.example\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
         body.len()
     );
     stream
@@ -354,6 +346,7 @@ fn frame(node: &str, instance: &str, sequence: u64, message: ClientToServerMessa
 fn exchange_request(frames: &[Value], ack_sequence: u64) -> String {
     json!({
         "schemaVersion": SCHEMA_VERSION,
+        "clientNodeId": frames[0]["clientNodeId"],
         "frames": frames,
         "ackSequence": ack_sequence,
     })
@@ -369,7 +362,7 @@ fn capacity(running: u32) -> ClientCapacityReport {
     }
 }
 
-async fn enroll_device(address: std::net::SocketAddr) -> (String, String, String) {
+async fn enroll_device(address: std::net::SocketAddr) -> (String, String) {
     let enroll = ClientToServerMessage::Enroll(Box::new(ClientEnrollPayload {
         command: CommandContext {
             expected_revision: 0,
@@ -383,7 +376,6 @@ async fn enroll_device(address: std::net::SocketAddr) -> (String, String, String
     let (status, body) = post_exchange(
         address,
         &exchange_request(&[frame(FRESH_NODE, ENROLL_INSTANCE, 1, enroll)], 0),
-        None,
     )
     .await;
     assert!(status.starts_with("HTTP/1.1 200"), "{status}");
@@ -397,11 +389,7 @@ async fn enroll_device(address: std::net::SocketAddr) -> (String, String, String
         .as_str()
         .expect("public client id")
         .to_owned();
-    let credential = enrollment["deviceCredential"]
-        .as_str()
-        .expect("credential")
-        .to_owned();
-    (node, public_client_id, credential)
+    (node, public_client_id)
 }
 
 async fn walk_hello(
@@ -409,7 +397,6 @@ async fn walk_hello(
     data_directory: &Path,
     node: &str,
     instance: &str,
-    credential: &str,
 ) {
     let hello = ClientToServerMessage::Hello(ClientHelloPayload {
         client_version: "0.1.0-alpha.1".to_owned(),
@@ -425,7 +412,6 @@ async fn walk_hello(
             &[frame(node, instance, sequence, hello)],
             downlink_ack_cursor(data_directory, node),
         ),
-        Some(credential),
     )
     .await;
     assert!(status.starts_with("HTTP/1.1 200"), "{status}");
@@ -438,11 +424,11 @@ async fn walk_hello(
 async fn enroll_online_device(
     address: std::net::SocketAddr,
     data_directory: &Path,
-) -> (String, String, String) {
-    let (node, public_client_id, credential) = enroll_device(address).await;
-    walk_hello(address, data_directory, &node, DEVICE_INSTANCE, &credential).await;
-    send_heartbeat(address, data_directory, &node, &credential, 0).await;
-    (node, public_client_id, credential)
+) -> (String, String) {
+    let (node, public_client_id) = enroll_device(address).await;
+    walk_hello(address, data_directory, &node, DEVICE_INSTANCE).await;
+    send_heartbeat(address, data_directory, &node, 0).await;
+    (node, public_client_id)
 }
 
 fn publish_connect_code(data_directory: &Path, node: &str, code: &str) -> String {
@@ -629,7 +615,6 @@ async fn send_heartbeat(
     address: std::net::SocketAddr,
     data_directory: &Path,
     node: &str,
-    credential: &str,
     running: u32,
 ) {
     let heartbeat = ClientToServerMessage::Heartbeat(
@@ -648,7 +633,6 @@ async fn send_heartbeat(
             &[frame(node, DEVICE_INSTANCE, sequence, heartbeat)],
             downlink_ack_cursor(data_directory, node),
         ),
-        Some(credential),
     )
     .await;
     assert!(status.starts_with("HTTP/1.1 200"), "{status}");
@@ -665,7 +649,6 @@ fn spawn_device_responder(
     data_directory: PathBuf,
     address: std::net::SocketAddr,
     node: String,
-    credential: String,
     mut inbox_ack: u64,
     mut next_sequence: u64,
     verdict: LaunchVerdict,
@@ -780,7 +763,7 @@ fn spawn_device_responder(
                     stored.sequence,
                 );
                 next_sequence += 1;
-                let (status, _) = post_exchange(address, &request, Some(&credential)).await;
+                let (status, _) = post_exchange(address, &request).await;
                 assert!(status.starts_with("HTTP/1.1 200"), "{status}");
             }
         }
@@ -889,24 +872,60 @@ async fn managed_app_route_requires_a_signed_in_session() {
 
 #[tokio::test]
 #[allow(clippy::too_many_lines)]
-async fn full_launch_chain_issues_consumes_and_is_idempotent_under_replays() {
+async fn full_launch_chain_consumes_and_replays_without_provider_configuration() {
     let data_directory = test_directory("sessions-happy");
     let auth_directory = test_directory("sessions-happy-sessions");
     let running = start_server(&data_directory, &auth_directory).await;
     let address = running.local_address();
     let (cookie, user_id) = initialize_and_login_owner(address).await;
 
-    let (node, public_client_id, credential) = enroll_online_device(address, &data_directory).await;
+    let (node, public_client_id) = enroll_online_device(address, &data_directory).await;
     let code = publish_connect_code(&data_directory, &node, "68421975");
     consume_code_as(&data_directory, &node, &code, &user_id);
     let binding_id = stage_visible_binding(&data_directory, &node, &user_id);
+    {
+        use winwincode_domain::{RequestId, Sha256Digest};
+        use winwincode_storage::{
+            NewOutboxEvent, ProductStateStorage, ReceiptActorKey, ReceiptIdentity, ReceiptScopeKey,
+            StateCommit,
+        };
+        let mut storage = SqliteStorage::open(&data_directory).unwrap();
+        let stream = format!("device-provider:{node}");
+        let previous = storage.load_state(&stream).unwrap().unwrap();
+        let mut snapshot: Value = serde_json::from_slice(&previous.payload).unwrap();
+        snapshot["providers"] = json!([]);
+        snapshot["revision"] = json!(2);
+        let payload = serde_json::to_vec(&snapshot).unwrap();
+        let identity = ReceiptIdentity::new(
+            ReceiptActorKey::from_encoded(b"provider-unconfigured-launch".to_vec()).unwrap(),
+            ReceiptScopeKey::from_encoded(stream.as_bytes().to_vec()).unwrap(),
+            RequestId("provider-unconfigured-launch".to_owned()),
+        )
+        .unwrap();
+        storage
+            .commit(&StateCommit::new(
+                identity,
+                Sha256Digest(format!("sha256:{:x}", Sha256::digest(&payload))),
+                stream.clone(),
+                previous.revision,
+                payload,
+                vec![NewOutboxEvent::internal(
+                    "provider-unconfigured",
+                    "device.provider.changed.v1",
+                    b"{}".to_vec(),
+                )],
+            ))
+            .unwrap();
+        let persisted: Value =
+            serde_json::from_slice(&storage.load_state(&stream).unwrap().unwrap().payload).unwrap();
+        assert_eq!(persisted["providers"], json!([]));
+    }
     stage_occupied_lease(&data_directory, &node, &user_id);
 
     let responder = spawn_device_responder(
         data_directory.clone(),
         address,
         node.clone(),
-        credential.clone(),
         downlink_ack_cursor(&data_directory, &node),
         next_client_sequence(&data_directory, &node),
         LaunchVerdict::Accept,
@@ -954,16 +973,6 @@ async fn full_launch_chain_issues_consumes_and_is_idempotent_under_replays() {
             .starts_with("wki_"),
         "{body}"
     );
-    assert!(
-        body.get("workerCredential").is_none(),
-        "the browser response must stay secret-free"
-    );
-    let digest = body["credentialDigest"]
-        .as_str()
-        .expect("credential digest");
-    assert_eq!(digest.len(), 71);
-    assert!(digest.starts_with("sha256:"));
-
     let grant_id = body["workerLaunchGrantId"]
         .as_str()
         .expect("grant id")
@@ -1037,7 +1046,7 @@ async fn full_launch_chain_issues_consumes_and_is_idempotent_under_replays() {
 
     {
         use winwincode_control_plane::DeviceExecutionBindingService;
-        use winwincode_storage::{DeviceExecutionBindingIssuance, DeviceExecutionBindingRelease};
+        use winwincode_storage::DeviceExecutionBindingIssuance;
         let mut storage = SqliteStorage::open(&data_directory).expect("storage");
         let now = grant.consumed_at.clone().expect("consumed time");
         let command = DeviceExecutionBindingIssuance::try_new(
@@ -1056,16 +1065,48 @@ async fn full_launch_chain_issues_consumes_and_is_idempotent_under_replays() {
         )
         .expect("binding command");
         let mut bindings = DeviceExecutionBindingService::new(&mut storage);
-        let bound = bindings.bind(&command, &now).expect("bind").binding;
-        let release = DeviceExecutionBindingRelease::try_new(
-            &grant.worker_session_id,
-            "req_00000000000000000000000101",
-            bound.revision,
-            now.clone(),
-        )
-        .expect("release command");
-        bindings.release(&release, &now).expect("worker exit");
+        bindings.bind(&command, &now).expect("bind");
     }
+    responder.abort();
+    let _ = responder.await;
+    let stopped = ClientToServerMessage::WorkerState(
+        winwincode_client_port::messages::ClientWorkerStatePayload {
+            occupancy_lease_id: Some(grant.occupancy_lease_id.clone()),
+            worker_session_id: grant.worker_session_id.clone(),
+            worker_instance_id: grant.worker_instance_id.clone(),
+            state: winwincode_client_port::domain::ClientWorkerRunState::Stopped,
+            exit_code: Some(0),
+            observed_at: grant.consumed_at.as_ref().unwrap().0.clone(),
+            process_closure: None,
+        },
+    );
+    let request = exchange_request(
+        &[frame(
+            &node,
+            DEVICE_INSTANCE,
+            next_client_sequence(&data_directory, &node),
+            stopped,
+        )],
+        downlink_ack_cursor(&data_directory, &node),
+    );
+    let (status, _) = post_exchange(address, &request).await;
+    assert!(status.starts_with("HTTP/1.1 200"), "{status}");
+    {
+        let mut storage = SqliteStorage::open(&data_directory).unwrap();
+        assert!(
+            WorkerLaunchGrantService::new(&mut storage)
+                .has_trusted_exit(&grant.worker_launch_grant_id)
+                .unwrap()
+        );
+    }
+    let responder = spawn_device_responder(
+        data_directory.clone(),
+        address,
+        node.clone(),
+        downlink_ack_cursor(&data_directory, &node),
+        next_client_sequence(&data_directory, &node),
+        LaunchVerdict::Accept,
+    );
     let resumed = http_request(
         address,
         &cookie_post(
@@ -1090,15 +1131,8 @@ async fn full_launch_chain_issues_consumes_and_is_idempotent_under_replays() {
     );
     assert_eq!(replacement.holder_user_id, grant.holder_user_id);
     assert_eq!(replacement.state, WorkerLaunchGrantState::Consumed);
-    {
-        let mut storage = SqliteStorage::open(&data_directory).expect("storage");
-        assert!(
-            winwincode_server::WorkerSessionCredentialService::new(&mut storage)
-                .status_for_session(&grant.worker_session_id)
-                .expect("old credential")
-                .is_none()
-        );
-    }
+    assert_eq!(replacement.worker_id, grant.worker_id);
+    assert_ne!(replacement.worker_instance_id, grant.worker_instance_id);
 
     responder.abort();
     running.shutdown().await.expect("shutdown");
@@ -1232,7 +1266,7 @@ async fn live_worker_duplicate_start_maps_to_same_worker() {
     let running = start_server(&data_directory, &auth_directory).await;
     let address = running.local_address();
     let (cookie, user_id) = initialize_and_login_owner(address).await;
-    let (node, public_client_id, credential) = enroll_online_device(address, &data_directory).await;
+    let (node, public_client_id) = enroll_online_device(address, &data_directory).await;
     let code = publish_connect_code(&data_directory, &node, "77112233");
     consume_code_as(&data_directory, &node, &code, &user_id);
     let binding_id = stage_visible_binding(&data_directory, &node, &user_id);
@@ -1241,7 +1275,6 @@ async fn live_worker_duplicate_start_maps_to_same_worker() {
         data_directory.clone(),
         address,
         node.clone(),
-        credential.clone(),
         downlink_ack_cursor(&data_directory, &node),
         next_client_sequence(&data_directory, &node),
         LaunchVerdict::Accept,
@@ -1295,7 +1328,7 @@ async fn exited_worker_reopen_returns_restart_evidence_not_fake_start() {
     let running = start_server(&data_directory, &auth_directory).await;
     let address = running.local_address();
     let (cookie, user_id) = initialize_and_login_owner(address).await;
-    let (node, public_client_id, credential) = enroll_online_device(address, &data_directory).await;
+    let (node, public_client_id) = enroll_online_device(address, &data_directory).await;
     let code = publish_connect_code(&data_directory, &node, "77223344");
     consume_code_as(&data_directory, &node, &code, &user_id);
     let binding_id = stage_visible_binding(&data_directory, &node, &user_id);
@@ -1304,7 +1337,6 @@ async fn exited_worker_reopen_returns_restart_evidence_not_fake_start() {
         data_directory.clone(),
         address,
         node.clone(),
-        credential.clone(),
         downlink_ack_cursor(&data_directory, &node),
         next_client_sequence(&data_directory, &node),
         LaunchVerdict::Accept,
@@ -1367,7 +1399,7 @@ async fn cancelled_product_session_reopen_is_wrong_state_not_fake_start() {
     let running = start_server(&data_directory, &auth_directory).await;
     let address = running.local_address();
     let (cookie, user_id) = initialize_and_login_owner(address).await;
-    let (node, public_client_id, credential) = enroll_online_device(address, &data_directory).await;
+    let (node, public_client_id) = enroll_online_device(address, &data_directory).await;
     let code = publish_connect_code(&data_directory, &node, "77334455");
     consume_code_as(&data_directory, &node, &code, &user_id);
     let binding_id = stage_visible_binding(&data_directory, &node, &user_id);
@@ -1376,7 +1408,6 @@ async fn cancelled_product_session_reopen_is_wrong_state_not_fake_start() {
         data_directory.clone(),
         address,
         node.clone(),
-        credential.clone(),
         downlink_ack_cursor(&data_directory, &node),
         next_client_sequence(&data_directory, &node),
         LaunchVerdict::Accept,
@@ -1459,7 +1490,7 @@ async fn occupancy_rewrite_with_still_bound_worker_does_not_restart() {
     let running = start_server(&data_directory, &auth_directory).await;
     let address = running.local_address();
     let (cookie, user_id) = initialize_and_login_owner(address).await;
-    let (node, public_client_id, credential) = enroll_online_device(address, &data_directory).await;
+    let (node, public_client_id) = enroll_online_device(address, &data_directory).await;
     let code = publish_connect_code(&data_directory, &node, "77445566");
     consume_code_as(&data_directory, &node, &code, &user_id);
     let binding_id = stage_visible_binding(&data_directory, &node, &user_id);
@@ -1468,7 +1499,6 @@ async fn occupancy_rewrite_with_still_bound_worker_does_not_restart() {
         data_directory.clone(),
         address,
         node.clone(),
-        credential.clone(),
         downlink_ack_cursor(&data_directory, &node),
         next_client_sequence(&data_directory, &node),
         LaunchVerdict::Accept,
@@ -1550,7 +1580,7 @@ async fn occupancy_preconditions_binding_visibility_and_capacity_gate_the_launch
     let running = start_server(&data_directory, &auth_directory).await;
     let address = running.local_address();
     let (owner_cookie, owner_id) = initialize_and_login_owner(address).await;
-    let (node, public_client_id, credential) = enroll_online_device(address, &data_directory).await;
+    let (node, public_client_id) = enroll_online_device(address, &data_directory).await;
     let code = publish_connect_code(&data_directory, &node, "11112222");
     consume_code_as(&data_directory, &node, &code, &owner_id);
     let binding_id = stage_visible_binding(&data_directory, &node, &owner_id);
@@ -1572,7 +1602,6 @@ async fn occupancy_preconditions_binding_visibility_and_capacity_gate_the_launch
         data_directory.clone(),
         address,
         node.clone(),
-        credential,
         downlink_ack_cursor(&data_directory, &node),
         next_client_sequence(&data_directory, &node),
         LaunchVerdict::Accept,
@@ -1640,8 +1669,7 @@ async fn an_unconfirmed_occupancy_refuses_the_launch() {
     let address = running.local_address();
     let (cookie, user_id) = initialize_and_login_owner(address).await;
 
-    let (node, public_client_id, _credential) =
-        enroll_online_device(address, &data_directory).await;
+    let (node, public_client_id) = enroll_online_device(address, &data_directory).await;
     let code = publish_connect_code(&data_directory, &node, "22223333");
     consume_code_as(&data_directory, &node, &code, &user_id);
     let binding_id = stage_visible_binding(&data_directory, &node, &user_id);
@@ -1686,7 +1714,7 @@ async fn a_rejected_launch_ack_keeps_the_grant_issued_and_audits_the_reason() {
     let address = running.local_address();
     let (cookie, user_id) = initialize_and_login_owner(address).await;
 
-    let (node, public_client_id, credential) = enroll_online_device(address, &data_directory).await;
+    let (node, public_client_id) = enroll_online_device(address, &data_directory).await;
     let code = publish_connect_code(&data_directory, &node, "33334444");
     consume_code_as(&data_directory, &node, &code, &user_id);
     let binding_id = stage_visible_binding(&data_directory, &node, &user_id);
@@ -1696,7 +1724,6 @@ async fn a_rejected_launch_ack_keeps_the_grant_issued_and_audits_the_reason() {
         data_directory.clone(),
         address,
         node.clone(),
-        credential,
         downlink_ack_cursor(&data_directory, &node),
         next_client_sequence(&data_directory, &node),
         LaunchVerdict::Reject,
@@ -1765,8 +1792,7 @@ async fn an_unanswered_grant_times_out_keeps_the_frame_and_expires() {
     let address = running.local_address();
     let (_cookie, user_id) = initialize_and_login_owner(address).await;
 
-    let (node, public_client_id, _credential) =
-        enroll_online_device(address, &data_directory).await;
+    let (node, public_client_id) = enroll_online_device(address, &data_directory).await;
     let code = publish_connect_code(&data_directory, &node, "44445555");
     consume_code_as(&data_directory, &node, &code, &user_id);
     let binding_id = stage_visible_binding(&data_directory, &node, &user_id);
@@ -1855,18 +1881,10 @@ async fn an_unanswered_grant_times_out_keeps_the_frame_and_expires() {
             launch_grant_value["workerInstanceId"],
             json!(grant.worker_instance_id)
         );
-        assert_eq!(
-            launch_grant_value["credentialDigest"],
-            json!(grant.credential_digest)
-        );
         assert_eq!(launch_grant_value["expiresAt"], json!(grant.expires_at.0));
         assert_eq!(launch_grant_value["state"], json!("issued"));
         assert!(launch_grant_value["productSessionId"].is_string());
         assert!(launch_grant_value["workRunId"].is_null());
-        assert!(
-            !value.to_string().contains("workerCredential"),
-            "the raw material never goes downlink"
-        );
     }
 
     let late = Instant(format!("2099{}", &grant.expires_at.0[4..]));

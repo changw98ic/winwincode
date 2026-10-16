@@ -1,4 +1,7 @@
-import { createHash, createPublicKey, verify } from 'node:crypto'
+// SPDX-License-Identifier: Apache-2.0
+
+import assert from 'node:assert/strict'
+import { createHash } from 'node:crypto'
 import {
   chmodSync,
   copyFileSync,
@@ -17,31 +20,64 @@ import {
   verifyReleaseLegalBoundary,
 } from './release-source-contract.mjs'
 
+export function apiProductionSourceSealSummary(seal) {
+  return Object.fromEntries([
+    'gitHead', 'helperBinarySha256', 'cliBinarySha256', 'workerBinarySha256',
+    'serverBinarySha256', 'sourceSha256', 'trackedDiffSha256',
+  ].map(key => [key, seal[key]]))
+}
+
+export function assertReleaseApiReport(report, seal) {
+  assert.equal(report?.schemaVersion, 'winwincode.api-production-vertical.v1')
+  assert.equal(report.execution, 'device-worker-only')
+  assert.equal(report.devicePath?.complete, true)
+  assert.equal(report.health?.initial, 'ready')
+  assert.equal(report.health?.afterRestart, 'ready')
+  assert.equal(report.flow?.chat?.status, 'Completed')
+  assert.equal(report.flow?.cancel?.state, 'cancelled')
+  assert.equal(report.flow?.strongflow?.status, 'done')
+  assert.equal(report.flow?.strongflow?.verdictStatus, 'pass')
+  assert.equal(report.deterministic?.contentEqual, true)
+  assert.equal(report.restart?.messageBytesStable, true)
+  assert.equal(report.restart?.deliveryBytesStable, true)
+  assert.deepEqual(report.artifacts?.sourceSeal, apiProductionSourceSealSummary(seal),
+    'API report source seal must match the verified release source and executables')
+  assert.equal(report.artifacts.workerBinarySha256, seal.workerBinarySha256)
+  const lifecycle = report.deviceWorkerLifecycle
+  assert.equal(lifecycle?.stopped, true, 'Device must observe the terminated Worker')
+  for (const worker of [lifecycle.initial, lifecycle.restarted, lifecycle.serverRestartWorker]) {
+    assert.ok(Number.isSafeInteger(worker?.pid) && worker.pid > 0)
+    for (const field of ['workerSessionId', 'workerId', 'workerInstanceId', 'processStartIdentity']) {
+      assert.ok(typeof worker[field] === 'string' && worker[field].length > 0, `Worker ${field} is required`)
+    }
+  }
+  assert.notEqual(lifecycle.restarted.pid, lifecycle.initial.pid)
+  assert.notEqual(lifecycle.restarted.workerSessionId, lifecycle.initial.workerSessionId)
+  assert.equal(lifecycle.terminalAfterWorkerRestart, true)
+  assert.notEqual(lifecycle.serverRestartWorker.workerSessionId, lifecycle.restarted.workerSessionId)
+  assert.deepEqual(lifecycle.survivedServerRestart, lifecycle.serverRestartWorker,
+    'Device-owned Worker process identity must survive Server restart')
+  assert.equal(lifecycle.terminalAfterServerRestart, true)
+  for (const [completion, worker] of [[lifecycle.workerRestartCompletion, lifecycle.restarted],
+    [lifecycle.serverRestartCompletion, lifecycle.serverRestartWorker]]) {
+    assert.equal(completion?.jobState, 'completed')
+    assert.equal(completion.processWorkerSessionId, worker.workerSessionId)
+    assert.equal(completion.workerId, worker.workerId)
+    assert.equal(completion.workerInstanceId, worker.workerInstanceId)
+    for (const field of ['jobId', 'productSessionId', 'executionWorkerSessionId', 'leaseId', 'fencingToken']) {
+      assert.ok(typeof completion[field] === 'string' && completion[field].length > 0)
+    }
+    assert.ok(Number.isSafeInteger(completion.attempt) && completion.attempt > 0)
+  }
+  assert.notEqual(lifecycle.workerRestartCompletion.jobId, lifecycle.serverRestartCompletion.jobId)
+  assert.notEqual(lifecycle.workerRestartCompletion.productSessionId, lifecycle.serverRestartCompletion.productSessionId)
+}
+
 export const RELEASE_ARTIFACT_SCHEMA_VERSION = 1
 export const RELEASE_ARTIFACT_KIND = 'winwincode.release-artifact.v1'
 export const RELEASE_REPORT_KIND = 'winwincode.release-report.v1'
 export const RELEASE_ARTIFACT_MANIFEST = 'release-artifact-manifest.json'
 export const RELEASE_CHECKSUMS = 'SHA256SUMS'
-export const HELPER_RELEASE_MANIFEST_NAME = 'winwincode-kernel-helper.release.json'
-const HELPER_RELEASE_PRIVATE_KEY_ENV = 'WINWINCODE_HELPER_RELEASE_PRIVATE_KEY_HEX'
-const HELPER_RELEASE_PUBLIC_KEY_ENV = 'WINWINCODE_HELPER_RELEASE_PUBLIC_KEY_HEX'
-
-export function helperReleaseBuildBaseEnvironment(baseEnvironment) {
-  const environment = { ...baseEnvironment }
-  delete environment[HELPER_RELEASE_PRIVATE_KEY_ENV]
-  return environment
-}
-
-export function helperReleaseVerificationBaseEnvironment(baseEnvironment) {
-  const environment = helperReleaseBuildBaseEnvironment(baseEnvironment)
-  delete environment[HELPER_RELEASE_PUBLIC_KEY_ENV]
-  return environment
-}
-
-export function helperReleaseManifestArtifactPath(artifactRoot) {
-  return resolve(artifactRoot, 'bin', HELPER_RELEASE_MANIFEST_NAME)
-}
-
 export const RELEASE_TARGETS = Object.freeze([
   Object.freeze({ target: 'aarch64-apple-darwin', os: 'macos', arch: 'arm64' }),
   Object.freeze({ target: 'x86_64-apple-darwin', os: 'macos', arch: 'x64' }),
@@ -50,6 +86,12 @@ export const RELEASE_TARGETS = Object.freeze([
 ])
 
 export const RUST_RELEASE_ARTIFACTS = Object.freeze([
+  Object.freeze({
+    packageName: 'winwincode-cli',
+    binaryName: 'wwc',
+    role: 'device-client-cli',
+    distribution: 'product',
+  }),
   Object.freeze({
     packageName: 'winwincode-server',
     binaryName: 'winwincode-server',
@@ -77,17 +119,6 @@ export const RELEASE_ARTIFACT_CHECKS = Object.freeze([
 ])
 
 const LEGAL_FILES = Object.freeze(['LICENSE', 'NOTICE', 'THIRD_PARTY_NOTICES.md'])
-const HELPER_RELEASE_MANIFEST_KEYS = Object.freeze([
-  'binaryMode',
-  'binaryPath',
-  'binarySha256',
-  'packageVersion',
-  'protocol',
-  'schemaVersion',
-  'signature',
-  'sourceSha256',
-  'version',
-].toSorted())
 const COMMIT_PATTERN = /^[0-9a-f]{40}$/u
 const SHA256_PATTERN = /^[0-9a-f]{64}$/u
 const MACH_O_MAGIC_64 = 0xfeedfacf
@@ -258,6 +289,7 @@ export function createReleaseBuildEnvironment({
     ...baseEnvironment,
     CARGO_INCREMENTAL: '0',
     CARGO_TARGET_DIR: targetDirectory,
+    CARGO_BUILD_BUILD_DIR: targetDirectory,
     CI: '1',
     COREPACK_ENABLE_DOWNLOAD_PROMPT: '0',
     RUSTFLAGS: [
@@ -387,94 +419,6 @@ function legalDescriptors(artifactRoot) {
   })
 }
 
-function helperReleaseSigningBytes(fields) {
-  return Buffer.from([
-    'winwincode-kernel-helper.release.v1',
-    String(fields.schemaVersion),
-    fields.protocol,
-    String(fields.version),
-    fields.packageVersion,
-    fields.sourceSha256,
-    fields.binarySha256,
-    fields.binaryPath,
-    String(fields.binaryMode),
-  ].join('\0'))
-}
-
-function helperReleasePublicKey(publicKeyHex) {
-  if (!/^[0-9a-f]{64}$/u.test(publicKeyHex)) {
-    fail('HELPER_RELEASE_INVALID', 'helper release public key must be 32 lowercase hexadecimal bytes')
-  }
-  return createPublicKey({
-    key: Buffer.concat([
-      Buffer.from('302a300506032b6570032100', 'hex'),
-      Buffer.from(publicKeyHex, 'hex'),
-    ]),
-    format: 'der',
-    type: 'spki',
-  })
-}
-
-function helperReleaseManifestIdentity({ root, artifactRoot, publicKeyHex, productVersion }) {
-  const path = helperReleaseManifestArtifactPath(artifactRoot)
-  if (!existsSync(path) || !statSync(path).isFile()) {
-    fail('ARTIFACT_MISSING', `missing ${HELPER_RELEASE_MANIFEST_NAME}`)
-  }
-  if ((statSync(path).mode & 0o777) !== 0o644) {
-    fail('HELPER_RELEASE_INVALID', `${HELPER_RELEASE_MANIFEST_NAME} must have mode 0644`)
-  }
-  const manifest = readCanonicalJson(path)
-  assertExactIdentity(
-    Object.keys(manifest).toSorted(),
-    HELPER_RELEASE_MANIFEST_KEYS,
-    'HELPER_RELEASE_INVALID',
-    'helper release manifest fields are not canonical',
-  )
-  const helperPath = resolve(artifactRoot, 'bin/winwincode-kernel-helper')
-  const helper = descriptorForFile(artifactRoot, helperPath)
-  const helperMode = statSync(helperPath).mode & 0o777
-  const sourceSha256 = `sha256:${createHash('sha256')
-    .update(readFileSync(resolve(root, 'crates/helper/src/main.rs')))
-    .digest('hex')}`
-  if (manifest.schemaVersion !== 1
-    || manifest.protocol !== 'winwincode-kernel-helper-release'
-    || manifest.version !== 1
-    || manifest.packageVersion !== productVersion
-    || manifest.sourceSha256 !== sourceSha256
-    || manifest.binarySha256 !== `sha256:${helper.sha256}`
-    || manifest.binaryPath !== 'winwincode-kernel-helper'
-    || manifest.binaryMode !== 0o755
-    || helperMode !== manifest.binaryMode
-    || typeof manifest.signature !== 'string'
-    || !/^[A-Za-z0-9_-]{86}$/u.test(manifest.signature)) {
-    fail('HELPER_RELEASE_INVALID', 'helper release manifest identity is invalid')
-  }
-  const signatureBytes = Buffer.from(manifest.signature, 'base64url')
-  if (signatureBytes.toString('base64url') !== manifest.signature) {
-    fail('HELPER_RELEASE_INVALID', 'helper release signature encoding is invalid')
-  }
-  const signatureValid = verify(
-    null,
-    helperReleaseSigningBytes(manifest),
-    helperReleasePublicKey(publicKeyHex),
-    signatureBytes,
-  )
-  if (!signatureValid) fail('HELPER_RELEASE_INVALID', 'helper release signature is invalid')
-  for (const binaryName of ['winwincode-server', 'winwincode-worker']) {
-    const binary = readFileSync(resolve(artifactRoot, 'bin', binaryName))
-    if (binary.indexOf(Buffer.from(publicKeyHex)) === -1) {
-      fail(
-        'HELPER_RELEASE_INVALID',
-        `${binaryName} does not contain the helper release public key`,
-      )
-    }
-  }
-  return Object.freeze({
-    ...descriptorForFile(artifactRoot, path),
-    publicKeyHex,
-  })
-}
-
 export function createReleaseArtifactManifest({
   root,
   artifactRoot,
@@ -483,18 +427,10 @@ export function createReleaseArtifactManifest({
   sourceDateEpoch,
   replayRust,
   replayClient,
-  helperReleasePublicKeyHex,
-  replayHelperReleaseManifest,
 }) {
   const targetIdentity = targetConfiguration(target)
   const rust = expectedRustDescriptors(artifactRoot, target)
   const source = sourceIdentity(root, sourceCommit, sourceDateEpoch)
-  const helperReleaseManifest = helperReleaseManifestIdentity({
-    root,
-    artifactRoot,
-    publicKeyHex: helperReleasePublicKeyHex,
-    productVersion: source.version,
-  })
   const client = descriptorsBelow(resolve(artifactRoot, 'client')).map(entry => Object.freeze({
     ...entry,
     path: `client/${entry.path}`,
@@ -522,15 +458,6 @@ export function createReleaseArtifactManifest({
     replayClient,
     'Client static artifact',
   )
-  sameDescriptors(
-    {
-      bytes: helperReleaseManifest.bytes,
-      sha256: helperReleaseManifest.sha256,
-      publicKeyHex: helperReleaseManifest.publicKeyHex,
-    },
-    replayHelperReleaseManifest,
-    'helper release manifest',
-  )
   return Object.freeze({
     schemaVersion: RELEASE_ARTIFACT_SCHEMA_VERSION,
     kind: RELEASE_ARTIFACT_KIND,
@@ -552,12 +479,10 @@ export function createReleaseArtifactManifest({
         'cargo-target',
       ]),
       isolatedBuilds: 2,
-      helperReleasePublicKeyHex,
     }),
     checks: RELEASE_ARTIFACT_CHECKS,
     artifacts: Object.freeze({
       rust: Object.freeze(rust),
-      helperReleaseManifest,
       client: Object.freeze({
         package: '@winwincode/client',
         staticOnly: true,
@@ -570,7 +495,6 @@ export function createReleaseArtifactManifest({
       verified: true,
       rustSha256Equal: true,
       clientSha256Equal: true,
-      helperReleaseManifestSha256Equal: true,
     }),
   })
 }
@@ -598,7 +522,6 @@ function assertDescriptor(artifactRoot, descriptor, label) {
 function checksumLines(manifest) {
   const descriptors = [
     ...manifest.artifacts.rust,
-    manifest.artifacts.helperReleaseManifest,
     ...manifest.artifacts.client.files,
     ...manifest.artifacts.legal,
   ]
@@ -702,7 +625,6 @@ export function verifyReleaseArtifactDirectory({
       'cargo-target',
     ],
     isolatedBuilds: 2,
-    helperReleasePublicKeyHex: manifest.artifacts?.helperReleaseManifest?.publicKeyHex,
   }, 'MANIFEST_INVALID', 'release build identity is invalid')
   assertExactIdentity(
     manifest.checks,
@@ -714,7 +636,6 @@ export function verifyReleaseArtifactDirectory({
     verified: true,
     rustSha256Equal: true,
     clientSha256Equal: true,
-    helperReleaseManifestSha256Equal: true,
   }, 'REPRODUCIBILITY_FAILED', 'isolated build comparison is not verified')
 
   if (!Array.isArray(manifest.artifacts?.rust)
@@ -779,26 +700,6 @@ export function verifyReleaseArtifactDirectory({
       }
     }
   }
-  if (manifest.artifacts?.helperReleaseManifest === undefined) {
-    fail('MANIFEST_INVALID', 'helper release manifest descriptor is missing')
-  }
-  assertDescriptor(
-    artifactRoot,
-    manifest.artifacts.helperReleaseManifest,
-    'helper release manifest',
-  )
-  const helperReleaseManifest = helperReleaseManifestIdentity({
-    root,
-    artifactRoot,
-    publicKeyHex: manifest.artifacts.helperReleaseManifest.publicKeyHex,
-    productVersion: manifest.source.version,
-  })
-  assertExactIdentity(
-    manifest.artifacts.helperReleaseManifest,
-    helperReleaseManifest,
-    'HELPER_RELEASE_INVALID',
-    'helper release manifest descriptor is invalid',
-  )
   for (const descriptor of manifest.artifacts.client.files) {
     assertDescriptor(artifactRoot, descriptor, 'Client')
   }
@@ -820,7 +721,6 @@ export function verifyReleaseArtifactDirectory({
     RELEASE_ARTIFACT_MANIFEST,
     RELEASE_CHECKSUMS,
     ...manifest.artifacts.rust.map(entry => entry.path),
-    manifest.artifacts.helperReleaseManifest.path,
     ...manifest.artifacts.client.files.map(entry => entry.path),
     ...manifest.artifacts.legal.map(entry => entry.path),
   ].toSorted((left, right) => left.localeCompare(right))
@@ -859,7 +759,6 @@ export function stageCommunityCoreWorkerRuntime({
   const files = [
     ['bin/winwincode-worker', 'bin/winwincode-worker', 0o755],
     ['bin/winwincode-kernel-helper', 'bin/winwincode-kernel-helper', 0o755],
-    [`bin/${HELPER_RELEASE_MANIFEST_NAME}`, `bin/${HELPER_RELEASE_MANIFEST_NAME}`, 0o644],
     ...LEGAL_FILES.map(name => [`legal/${name}`, name, 0o644]),
   ]
   for (const [source, destination, mode] of files) {
@@ -911,15 +810,11 @@ export function createReleaseReport({ root, evidenceRoot, expectedCommit, source
       manifest: descriptorForFile(evidenceRoot, resolve(artifactRoot, RELEASE_ARTIFACT_MANIFEST)),
       checksums: descriptorForFile(evidenceRoot, resolve(artifactRoot, RELEASE_CHECKSUMS)),
       rust: manifest.artifacts.rust,
-      helperReleaseManifest: manifest.artifacts.helperReleaseManifest,
       clientSha256: jsonSha256(manifest.artifacts.client.files),
     })
   })
   if (new Set(targets.map(entry => entry.clientSha256)).size !== 1) {
     fail('CLIENT_MATRIX_MISMATCH', 'Client static artifact differs across targets')
-  }
-  if (new Set(targets.map(entry => entry.helperReleaseManifest.publicKeyHex)).size !== 1) {
-    fail('HELPER_RELEASE_INVALID', 'helper release public key differs across targets')
   }
   return Object.freeze({
     schemaVersion: RELEASE_ARTIFACT_SCHEMA_VERSION,

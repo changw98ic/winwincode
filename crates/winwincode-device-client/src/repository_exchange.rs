@@ -329,7 +329,7 @@ mod tests {
                 const { encryptDeviceRepository } = await import(pathToFileURL(process.argv[1]));
                 const {snapshot, id, path} = JSON.parse(readFileSync(0, 'utf8'));
                 process.stdout.write(JSON.stringify(await encryptDeviceRepository(snapshot, id, {path, confirmGitInit:false})));
-            "]).arg(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../apps/client/src/device-provider-encryption.ts"))
+            "]).arg(Path::new(&std::env::var("CARGO_MANIFEST_DIR").expect("Cargo manifest directory")).join("../../apps/client/src/device-provider-encryption.ts"))
                 .stdin(Stdio::piped()).stdout(Stdio::piped()).spawn().expect("WebCrypto");
             child
                 .stdin

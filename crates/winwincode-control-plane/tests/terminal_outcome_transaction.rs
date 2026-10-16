@@ -785,10 +785,8 @@ fn seed_authenticated_worker_registration(
         project_id: scope.project_id.clone(),
         repository_id: scope.repository_id.clone(),
     };
-    let authentication_identity = WorkerAuthenticationIdentity::TransportPrincipal {
-        issuer: "terminal-fixture-worker-identity".to_owned(),
-        subject: format!("remote-worker-{seed}"),
-        credential_fingerprint: Sha256Digest(format!("sha256:{}", "e".repeat(64))),
+    let authentication_identity = WorkerAuthenticationIdentity::LocalEmbedded {
+        control_plane_principal: format!("remote-worker-{seed}"),
     };
     let registration_request_id = RequestId(canonical_id("req", seed + 9_000));
     {

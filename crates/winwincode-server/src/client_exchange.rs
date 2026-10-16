@@ -8,8 +8,9 @@ use std::sync::{Arc, Mutex};
 use serde::Deserialize;
 use serde::Serialize;
 use serde_json::Value;
-use sha2::Digest;
-use sha2::Sha256;
+use serde_json::json;
+use sha2::{Digest, Sha256};
+use winwincode_client_port::candidate_application::candidate_application_digest;
 use winwincode_client_port::domain::ApplyResult;
 use winwincode_client_port::domain::ApplyStrategy;
 use winwincode_client_port::domain::ClientArchitecture;
@@ -36,6 +37,9 @@ use winwincode_client_port::messages::ClientToServerEnvelope;
 use winwincode_client_port::messages::ClientToServerMessage;
 use winwincode_client_port::messages::ServerToClientEnvelope;
 use winwincode_client_port::messages::ServerToClientMessage;
+use winwincode_client_port::messages::{
+    ApplicationReconciliationOutcome, ClientApplicationReconciledPayload,
+};
 use winwincode_control_plane::AccessGrantService;
 use winwincode_control_plane::ClientOccupancyService;
 use winwincode_control_plane::ClientRegistryService;
@@ -75,30 +79,6 @@ pub struct ClientExchangeConfig {
     pub max_frame_bytes: usize,
     pub max_frames_per_exchange: usize,
     pub heartbeat_interval_ms: u32,
-}
-
-#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct WorkerCredentialDelivery {
-    pub client_node_id: String,
-    pub worker_launch_grant_id: String,
-    pub worker_session_id: String,
-    pub credential_digest: String,
-    pub worker_credential: String,
-    pub expires_at: Instant,
-}
-
-impl fmt::Debug for WorkerCredentialDelivery {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter
-            .debug_struct("WorkerCredentialDelivery")
-            .field("client_node_id", &self.client_node_id)
-            .field("worker_launch_grant_id", &self.worker_launch_grant_id)
-            .field("worker_session_id", &self.worker_session_id)
-            .field("credential_digest", &self.credential_digest)
-            .field("worker_credential", &"[redacted]")
-            .field("expires_at", &self.expires_at)
-            .finish()
-    }
 }
 
 impl Default for ClientExchangeConfig {
@@ -176,7 +156,7 @@ impl ClientExchangeError {
 impl fmt::Display for ClientExchangeError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         let reason = match self.kind {
-            ClientExchangeErrorKind::Authentication => "device credential authentication failed",
+            ClientExchangeErrorKind::Authentication => "Device route is unavailable",
             ClientExchangeErrorKind::InvalidRequest => "client exchange request is invalid",
             ClientExchangeErrorKind::Unavailable => "client exchange storage is unavailable",
             ClientExchangeErrorKind::CommandRejected { .. } => "client command was rejected",
@@ -188,23 +168,7 @@ impl fmt::Display for ClientExchangeError {
 impl std::error::Error for ClientExchangeError {}
 
 pub trait ClientExchangePort: Send + Sync {
-    fn exchange(
-        &self,
-        credential: Option<Vec<u8>>,
-        request_body: &[u8],
-        now: Instant,
-    ) -> Result<Vec<u8>, ClientExchangeError>;
-
-    fn authenticate_device(
-        &self,
-        credential: &[u8],
-        client_node_id: &str,
-    ) -> Result<(), ClientExchangeError>;
-
-    fn publish_worker_credential(
-        &self,
-        delivery: WorkerCredentialDelivery,
-    ) -> Result<(), ClientExchangeError>;
+    fn exchange(&self, request_body: &[u8], now: Instant) -> Result<Vec<u8>, ClientExchangeError>;
 
     fn managed_app_status(&self, _client_node_id: &str, _run_id: &str) -> Option<ManagedAppStatus> {
         None
@@ -237,7 +201,6 @@ impl ClientExchangeApplication {
 
     fn apply(
         &self,
-        credential: Option<&[u8]>,
         request_body: &[u8],
         now: &Instant,
     ) -> Result<ExchangeResponseBody, ClientExchangeError> {
@@ -248,35 +211,19 @@ impl ClientExchangeApplication {
         let request = parse_request(request_body)?;
         let codec = FrameCodec::new(self.config.max_frame_bytes);
         let envelopes = decode_frames(&codec, &request, self.config.max_frames_per_exchange)?;
-        if credential.is_none()
-            && envelopes
-                .iter()
-                .any(|envelope| !matches!(envelope.message, ClientToServerMessage::Enroll(_)))
-        {
-            return Err(ClientExchangeError::authentication());
+        let node_id = &request.client_node_id;
+        if node_id.is_empty() {
+            return Err(ClientExchangeError::invalid_request());
         }
-        let node_id = envelopes[0].client_node_id.clone();
         let mut storage = SqliteStorage::open(&self.data_directory)
             .map_err(|_| ClientExchangeError::unavailable())?;
-        let response = match credential {
-            None => self.enroll_exchange(
-                &mut storage,
-                &node_id,
-                &envelopes,
-                request.ack_sequence,
-                now,
-            ),
-            Some(raw) => self.authenticated_exchange(
-                &mut storage,
-                &node_id,
-                std::str::from_utf8(raw)
-                    .ok()
-                    .and_then(decode_credential_secret)
-                    .as_ref(),
-                &envelopes,
-                &request,
-                now,
-            ),
+        let response = if envelopes
+            .first()
+            .is_some_and(|envelope| matches!(envelope.message, ClientToServerMessage::Enroll(_)))
+        {
+            self.enroll_exchange(&mut storage, node_id, &envelopes, request.ack_sequence, now)
+        } else {
+            self.client_exchange(&mut storage, node_id, &envelopes, &request, now)
         };
         Box::new(storage)
             .close()
@@ -316,10 +263,7 @@ impl ClientExchangeApplication {
                 }
                 self.create_enrollment(storage, None, payload, envelopes, now)
             }
-            Some(record)
-                if record.presence_state == ClientPresenceState::PendingEnrollment
-                    && record.device_credential_digest.is_none() =>
-            {
+            Some(record) if record.presence_state == ClientPresenceState::PendingEnrollment => {
                 let cursors = {
                     let mut registry = ClientRegistryService::new(storage);
                     cursors_or_unavailable(&mut registry, node_id)?
@@ -344,7 +288,6 @@ impl ClientExchangeApplication {
         now: &Instant,
     ) -> Result<ExchangeResponseBody, ClientExchangeError> {
         let instance = &envelopes[0].client_instance_id;
-        let (credential_hex, digest) = issue_credential()?;
         let (node_id, mut public_client_id, expected_revision) = match existing {
             None => (
                 generate_prefixed_id("cnd_")?,
@@ -366,7 +309,6 @@ impl ClientExchangeApplication {
                 platform_name(payload.platform),
                 architecture_name(payload.architecture),
                 payload.client_version.clone(),
-                Some(digest.clone()),
                 Some(instance.clone()),
                 0,
             )
@@ -416,29 +358,22 @@ impl ClientExchangeApplication {
             enrollment: Some(EnrollmentIssuance {
                 client_node_id: node_id,
                 public_client_id: receipt.record.public_client_id,
-                device_credential: credential_hex,
-                device_credential_digest: digest,
                 heartbeat_interval_ms: self.config.heartbeat_interval_ms,
                 server_time: now.0.clone(),
             }),
-            worker_credentials: Vec::new(),
         })
     }
 
     #[allow(clippy::too_many_lines)]
-    fn authenticated_exchange(
+    fn client_exchange(
         &self,
         storage: &mut SqliteStorage,
         node_id: &str,
-        secret: Option<&[u8; 32]>,
         envelopes: &[ClientToServerEnvelope],
         request: &ExchangeRequestBody,
         now: &Instant,
     ) -> Result<ExchangeResponseBody, ClientExchangeError> {
         let client_ack = request.ack_sequence;
-        let Some(secret) = secret else {
-            return Err(ClientExchangeError::authentication());
-        };
         if !is_canonical_client_node_id(node_id) {
             return Err(ClientExchangeError::authentication());
         }
@@ -449,13 +384,7 @@ impl ClientExchangeApplication {
                 .map_err(|_| ClientExchangeError::unavailable())?
                 .ok_or(ClientExchangeError::authentication())?
         };
-        let Some(stored_digest) = record.device_credential_digest.as_deref() else {
-            return Err(ClientExchangeError::authentication());
-        };
         if record.presence_state == ClientPresenceState::Revoked {
-            return Err(ClientExchangeError::authentication());
-        }
-        if !credential_digest_matches(secret, stored_digest) {
             return Err(ClientExchangeError::authentication());
         }
         let cursors = {
@@ -466,7 +395,19 @@ impl ClientExchangeApplication {
         if client_ack > cursors.server_to_client_ack_sequence.max(outbox_high_water) {
             return Err(ClientExchangeError::invalid_request());
         }
-        let effective_instance = record
+        if record.current_instance_id.is_none()
+            && record.presence_state == ClientPresenceState::PendingEnrollment
+        {
+            let first = envelopes
+                .first()
+                .filter(|envelope| matches!(envelope.message, ClientToServerMessage::Hello(_)))
+                .ok_or(ClientExchangeError::authentication())?;
+            supersede_instance(storage, &record, first, now)?;
+        }
+        let effective_instance = ClientRegistryService::new(storage)
+            .snapshot(node_id)
+            .map_err(|_| ClientExchangeError::unavailable())?
+            .ok_or(ClientExchangeError::authentication())?
             .current_instance_id
             .clone()
             .ok_or(ClientExchangeError::unavailable())?;
@@ -576,7 +517,6 @@ impl ClientExchangeApplication {
             .map(|frame| serde_json::from_str(&frame.frame))
             .collect::<Result<Vec<Value>, _>>()
             .map_err(|_| ClientExchangeError::unavailable())?;
-        let worker_credentials = self.worker_credentials_for_frames(node_id, &frames, now)?;
         downlink
             .retain_through(node_id, cursors.server_to_client_ack_sequence)
             .map_err(|_| ClientExchangeError::unavailable())?;
@@ -587,62 +527,7 @@ impl ClientExchangeApplication {
             replay_from_sequence: replay_hint,
             frames,
             enrollment: None,
-            worker_credentials,
         })
-    }
-
-    fn worker_credentials_for_frames(
-        &self,
-        node_id: &str,
-        frames: &[Value],
-        now: &Instant,
-    ) -> Result<Vec<WorkerCredentialResponse>, ClientExchangeError> {
-        let launches = frames
-            .iter()
-            .filter(|frame| {
-                frame.get("kind").and_then(Value::as_str) == Some("client.worker.launch")
-            })
-            .filter_map(|frame| frame.get("payload")?.get("launchGrant"))
-            .filter_map(|grant| {
-                Some((
-                    grant.get("workerLaunchGrantId")?.as_str()?,
-                    grant.get("workerSessionId")?.as_str()?,
-                    grant.get("credentialDigest")?.as_str()?,
-                    grant.get("expiresAt").and_then(Value::as_str),
-                ))
-            })
-            .collect::<Vec<_>>();
-        let mut responses = Vec::new();
-        for (grant_id, session_id, digest, expires_at) in launches {
-            if expires_at.is_some_and(|deadline| deadline <= now.0.as_str()) {
-                continue;
-            }
-            let Ok(bytes) =
-                winwincode_control_plane::PrivateLaunchMaterialStore::open(&self.data_directory)
-                    .and_then(|store| store.get(grant_id))
-            else {
-                continue;
-            };
-            let entry: WorkerCredentialDelivery =
-                serde_json::from_slice(&bytes).map_err(|_| ClientExchangeError::unavailable())?;
-            if entry.client_node_id != node_id
-                || entry.worker_launch_grant_id != grant_id
-                || entry.worker_session_id != session_id
-                || entry.credential_digest != digest
-            {
-                return Err(ClientExchangeError::unavailable());
-            }
-            if entry.expires_at.0 <= now.0 {
-                continue;
-            }
-            responses.push(WorkerCredentialResponse {
-                worker_launch_grant_id: entry.worker_launch_grant_id,
-                worker_session_id: entry.worker_session_id,
-                credential_digest: entry.credential_digest,
-                worker_credential: entry.worker_credential,
-            });
-        }
-        Ok(responses)
     }
 }
 
@@ -744,64 +629,9 @@ impl BatchSettler {
 }
 
 impl ClientExchangePort for ClientExchangeApplication {
-    fn exchange(
-        &self,
-        credential: Option<Vec<u8>>,
-        request_body: &[u8],
-        now: Instant,
-    ) -> Result<Vec<u8>, ClientExchangeError> {
-        let response = self.apply(credential.as_deref(), request_body, &now)?;
+    fn exchange(&self, request_body: &[u8], now: Instant) -> Result<Vec<u8>, ClientExchangeError> {
+        let response = self.apply(request_body, &now)?;
         serde_json::to_vec(&response).map_err(|_| ClientExchangeError::unavailable())
-    }
-
-    fn authenticate_device(
-        &self,
-        credential: &[u8],
-        client_node_id: &str,
-    ) -> Result<(), ClientExchangeError> {
-        let secret = std::str::from_utf8(credential)
-            .ok()
-            .and_then(decode_credential_secret)
-            .ok_or_else(ClientExchangeError::authentication)?;
-        if !is_canonical_client_node_id(client_node_id) {
-            return Err(ClientExchangeError::authentication());
-        }
-        let mut storage = SqliteStorage::open(&self.data_directory)
-            .map_err(|_| ClientExchangeError::unavailable())?;
-        let record = ClientRegistryService::new(&mut storage)
-            .snapshot(client_node_id)
-            .map_err(|_| ClientExchangeError::unavailable())?
-            .ok_or_else(ClientExchangeError::authentication)?;
-        let accepted = record.presence_state != ClientPresenceState::Revoked
-            && record
-                .device_credential_digest
-                .as_deref()
-                .is_some_and(|digest| credential_digest_matches(&secret, digest));
-        Box::new(storage)
-            .close()
-            .map_err(|_| ClientExchangeError::unavailable())?;
-        if accepted {
-            Ok(())
-        } else {
-            Err(ClientExchangeError::authentication())
-        }
-    }
-
-    fn publish_worker_credential(
-        &self,
-        delivery: WorkerCredentialDelivery,
-    ) -> Result<(), ClientExchangeError> {
-        let secret = decode_credential_secret(&delivery.worker_credential)
-            .ok_or_else(ClientExchangeError::invalid_request)?;
-        if !credential_digest_matches(&secret, &delivery.credential_digest) {
-            return Err(ClientExchangeError::invalid_request());
-        }
-        let bytes =
-            serde_json::to_vec(&delivery).map_err(|_| ClientExchangeError::unavailable())?;
-        winwincode_control_plane::PrivateLaunchMaterialStore::open(&self.data_directory)
-            .and_then(|store| store.put(&delivery.worker_launch_grant_id, &bytes))
-            .map_err(|_| ClientExchangeError::unavailable())?;
-        Ok(())
     }
 
     fn managed_app_status(&self, client_node_id: &str, run_id: &str) -> Option<ManagedAppStatus> {
@@ -817,6 +647,8 @@ impl ClientExchangePort for ClientExchangeApplication {
 struct ExchangeRequestBody {
     #[serde(rename = "schemaVersion")]
     schema_version: String,
+    #[serde(rename = "clientNodeId")]
+    client_node_id: String,
     #[serde(default)]
     frames: Vec<Value>,
     #[serde(rename = "ackSequence", default)]
@@ -834,32 +666,6 @@ struct ExchangeResponseBody {
     frames: Vec<Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     enrollment: Option<EnrollmentIssuance>,
-    #[serde(rename = "workerCredentials", skip_serializing_if = "Vec::is_empty")]
-    worker_credentials: Vec<WorkerCredentialResponse>,
-}
-
-#[derive(Serialize)]
-struct WorkerCredentialResponse {
-    #[serde(rename = "workerLaunchGrantId")]
-    worker_launch_grant_id: String,
-    #[serde(rename = "workerSessionId")]
-    worker_session_id: String,
-    #[serde(rename = "credentialDigest")]
-    credential_digest: String,
-    #[serde(rename = "workerCredential")]
-    worker_credential: String,
-}
-
-impl fmt::Debug for WorkerCredentialResponse {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter
-            .debug_struct("WorkerCredentialResponse")
-            .field("worker_launch_grant_id", &self.worker_launch_grant_id)
-            .field("worker_session_id", &self.worker_session_id)
-            .field("credential_digest", &self.credential_digest)
-            .field("worker_credential", &"[REDACTED]")
-            .finish()
-    }
 }
 
 #[derive(Debug, Serialize)]
@@ -868,10 +674,6 @@ struct EnrollmentIssuance {
     client_node_id: String,
     #[serde(rename = "publicClientId")]
     public_client_id: String,
-    #[serde(rename = "deviceCredential")]
-    device_credential: String,
-    #[serde(rename = "deviceCredentialDigest")]
-    device_credential_digest: String,
     #[serde(rename = "heartbeatIntervalMs")]
     heartbeat_interval_ms: u32,
     #[serde(rename = "serverTime")]
@@ -887,7 +689,7 @@ fn decode_frames(
     request: &ExchangeRequestBody,
     max_frames: usize,
 ) -> Result<Vec<ClientToServerEnvelope>, ClientExchangeError> {
-    if request.frames.is_empty() || request.frames.len() > max_frames {
+    if request.frames.len() > max_frames {
         return Err(ClientExchangeError::invalid_request());
     }
     if request.schema_version != CLIENT_CONTROL_PORT_SCHEMA_VERSION {
@@ -901,7 +703,9 @@ fn decode_frames(
         let envelope: ClientToServerEnvelope = codec
             .decode(&bytes)
             .map_err(|_| ClientExchangeError::invalid_request())?;
-        if envelope.schema_version != CLIENT_CONTROL_PORT_SCHEMA_VERSION {
+        if envelope.schema_version != CLIENT_CONTROL_PORT_SCHEMA_VERSION
+            || envelope.client_node_id != request.client_node_id
+        {
             return Err(ClientExchangeError::invalid_request());
         }
         match &node_id {
@@ -946,6 +750,9 @@ fn command_identity(
             &payload.occupancy.command.idempotency_key
         }
         ClientToServerMessage::CandidateApplyResult(payload) => {
+            &payload.occupancy.command.idempotency_key
+        }
+        ClientToServerMessage::ApplicationReconciled(payload) => {
             &payload.occupancy.command.idempotency_key
         }
         ClientToServerMessage::ProviderReport(_)
@@ -1304,6 +1111,16 @@ fn apply_effect_with_status(
             settle_candidate_apply_result(storage, node_id, payload, now)?;
             Ok(())
         }
+        ClientToServerMessage::ApplicationReconciled(payload) => {
+            crate::client_occupancy::observe_client_mirror_revision(
+                data_directory,
+                node_id,
+                payload.occupancy.command.expected_revision,
+                now,
+            )
+            .map_err(|_| ClientExchangeError::unavailable())?;
+            settle_application_reconciled(storage, node_id, payload, now)
+        }
         ClientToServerMessage::CommandAck(payload) => {
             observe_command_ack_revision(data_directory, node_id, payload, now)
         }
@@ -1636,30 +1453,6 @@ fn settle_worker_exit(
     if !closed {
         return Ok(());
     }
-    let grant = if let Some(closure) = &payload.process_closure {
-        WorkerLaunchGrantService::new(storage).snapshot(&closure.worker_launch_grant_id)
-    } else {
-        WorkerLaunchGrantService::new(storage).active_grant_for_session(&payload.worker_session_id)
-    };
-    if let Some(grant) = grant.map_err(|_| ClientExchangeError::unavailable())? {
-        let mut credentials = crate::WorkerSessionCredentialService::new(storage);
-        if credentials
-            .status_for_session(&payload.worker_session_id)
-            .map_err(|_| ClientExchangeError::unavailable())?
-            .is_some_and(|record| {
-                record.state == winwincode_storage::WorkerSessionCredentialState::Active
-            })
-        {
-            credentials
-                .revoke_for_session(
-                    &payload.worker_session_id,
-                    &grant.holder_user_id,
-                    Some("trusted Device process exit"),
-                    now,
-                )
-                .map_err(|_| ClientExchangeError::unavailable())?;
-        }
-    }
     let Some(binding) = DeviceExecutionBindingService::new(storage)
         .snapshot(&payload.worker_session_id)
         .map_err(|_| ClientExchangeError::unavailable())?
@@ -1679,9 +1472,20 @@ fn settle_worker_exit(
     {
         return Ok(());
     }
+    let mut release_request_id = format!(
+        "req_{:X}",
+        Sha256::digest(
+            format!(
+                "worker-binding-release:{}",
+                binding.device_execution_binding_id
+            )
+            .as_bytes()
+        )
+    );
+    release_request_id.truncate(30);
     let release = DeviceExecutionBindingRelease::try_new(
         &binding.worker_session_id,
-        binding.device_execution_binding_id.replace("deb_", "req_"),
+        release_request_id,
         binding.revision,
         now.clone(),
     )
@@ -1820,6 +1624,7 @@ fn settle_candidate_retained(
         receipt.repository_binding_id.clone(),
         receipt.candidate_ref.clone(),
         receipt.candidate_commit.clone(),
+        receipt.base_commit.clone(),
         receipt.local_ref_name.clone(),
     ) else {
         return Err(rejected_command(None));
@@ -1835,6 +1640,7 @@ fn settle_candidate_retained(
     Ok(())
 }
 
+#[allow(clippy::too_many_lines)]
 fn settle_candidate_apply_result(
     storage: &mut SqliteStorage,
     node_id: &str,
@@ -1851,16 +1657,71 @@ fn settle_candidate_apply_result(
                     && lease.fencing_token == payload.occupancy.occupancy_fencing_token
             })
     };
-    if !fenced {
-        return Err(rejected_command(None));
-    }
     let receipt = &payload.receipt;
-    let mut candidates = LocalCandidateService::new(storage);
-    let Some(candidate) = candidates
+    let Some(candidate) = LocalCandidateService::new(storage)
         .candidate_for_ref(node_id, &receipt.candidate_ref)
         .map_err(|_| ClientExchangeError::unavailable())?
     else {
         return Err(rejected_command(None));
+    };
+    let application = if receipt.strategy == ApplyStrategy::CreateBranch {
+        if !fenced {
+            return Err(rejected_command(None));
+        }
+        None
+    } else {
+        let application = storage
+            .candidate_application(&receipt.local_apply_receipt_id)
+            .map_err(|_| ClientExchangeError::unavailable())?
+            .ok_or_else(|| rejected_command(None))?;
+        let original_authority = application.original_lease_id
+            == payload.occupancy.occupancy_lease_id
+            && application.original_epoch == payload.occupancy.occupancy_fencing_token;
+        let retry_authority = application.retry_lease_id.as_deref()
+            == Some(payload.occupancy.occupancy_lease_id.as_str())
+            && application.retry_epoch == Some(payload.occupancy.occupancy_fencing_token);
+        if application.client_node_id != node_id
+            || application.local_candidate_receipt_id != candidate.local_candidate_receipt_id
+            || application.repository_binding_id != receipt.repository_binding_id
+            || application.candidate_ref != receipt.candidate_ref
+            || application.base_commit != receipt.expected_head
+            || application.target_branch != receipt.target_branch
+            || application.strategy != storage_strategy(receipt.strategy).as_str()
+            || application.candidate_digest
+                != candidate_application_digest(
+                    &receipt.repository_binding_id,
+                    &receipt.expected_head,
+                    &candidate.candidate_commit,
+                )
+            || !(original_authority || retry_authority)
+        {
+            return Err(rejected_command(None));
+        }
+        let fact =
+            serde_json::to_string(receipt).map_err(|_| ClientExchangeError::unavailable())?;
+        storage
+            .record_candidate_application_fact(
+                &application.application_id,
+                if fenced {
+                    "application.finished"
+                } else {
+                    "application.fact"
+                },
+                payload.occupancy.occupancy_fencing_token,
+                &fact,
+                &now.0,
+            )
+            .map_err(|_| ClientExchangeError::unavailable())?;
+        if !fenced {
+            return Ok(());
+        }
+        if receipt.result == ApplyResult::OutcomeUnknown {
+            storage
+                .note_candidate_application_outcome(&application.application_id, "outcome_unknown")
+                .map_err(|_| ClientExchangeError::unavailable())?;
+            return Ok(());
+        }
+        Some(application)
     };
     let Ok(settlement) = LocalApplySettlement::try_new(
         receipt.local_apply_receipt_id.clone(),
@@ -1877,8 +1738,8 @@ fn settle_candidate_apply_result(
     ) else {
         return Err(rejected_command(None));
     };
-    candidates
-        .record_apply_result(&settlement, now)
+    LocalCandidateService::new(storage)
+        .record_reconciled_apply_result(&settlement, now)
         .map_err(|error| {
             domain_command_error(matches!(
                 error.kind(),
@@ -1886,6 +1747,112 @@ fn settle_candidate_apply_result(
                     | winwincode_control_plane::LocalCandidateServiceErrorKind::CorruptState
             ))
         })?;
+    if let Some(application) = application {
+        let result = json!({ "result": storage_result(receipt.result).as_str(),
+            "resultCommit": receipt.resulting_commit, "conflictArtifactRef": receipt.conflict_artifact_ref }).to_string();
+        storage
+            .settle_candidate_application(
+                &application.application_id,
+                storage_result(receipt.result).as_str(),
+                &result,
+            )
+            .map_err(|_| rejected_command(None))?;
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_lines)]
+fn settle_application_reconciled(
+    storage: &mut SqliteStorage,
+    node_id: &str,
+    payload: &ClientApplicationReconciledPayload,
+    now: &Instant,
+) -> Result<(), ClientExchangeError> {
+    let current = ClientOccupancyService::new(storage)
+        .active_lease_for_node(node_id)
+        .map_err(|_| ClientExchangeError::unavailable())?;
+    if !current.is_some_and(|lease| {
+        lease.occupancy_lease_id == payload.occupancy.occupancy_lease_id
+            && lease.fencing_token == payload.occupancy.occupancy_fencing_token
+    }) {
+        return Err(rejected_command(None));
+    }
+    let application = storage
+        .candidate_application(&payload.application_id)
+        .map_err(|_| ClientExchangeError::unavailable())?
+        .ok_or_else(|| rejected_command(None))?;
+    if application.client_node_id != node_id
+        || application.approval_id != payload.approval_id
+        || application.original_epoch != payload.original_epoch
+        || application.repository_binding_id != payload.repository_binding_id
+        || application.candidate_ref != payload.candidate_ref
+        || application.candidate_digest != payload.candidate_digest
+        || application.base_commit != payload.base_commit
+        || application.target_branch != payload.target_branch
+        || payload.original_epoch > payload.occupancy.occupancy_fencing_token
+    {
+        return Err(rejected_command(None));
+    }
+    let outcome = match payload.outcome {
+        ApplicationReconciliationOutcome::Applied => "applied",
+        ApplicationReconciliationOutcome::NotStarted => "not_started",
+        ApplicationReconciliationOutcome::OutcomeUnknown => "outcome_unknown",
+    };
+    if (outcome == "applied") != payload.result_commit.is_some() {
+        return Err(rejected_command(None));
+    }
+    let fact = serde_json::to_string(payload).map_err(|_| ClientExchangeError::unavailable())?;
+    storage
+        .record_candidate_application_fact(
+            &payload.application_id,
+            "application.reconciled",
+            payload.occupancy.occupancy_fencing_token,
+            &fact,
+            &now.0,
+        )
+        .map_err(|_| ClientExchangeError::unavailable())?;
+    if outcome != "applied" {
+        storage
+            .note_candidate_application_outcome(&payload.application_id, outcome)
+            .map_err(|_| ClientExchangeError::unavailable())?;
+        return Ok(());
+    }
+    let strategy = match application.strategy.as_str() {
+        "fast_forward" => LocalApplyStrategy::FastForward,
+        "cherry_pick" => LocalApplyStrategy::CherryPick,
+        "merge" => LocalApplyStrategy::Merge,
+        _ => return Err(rejected_command(None)),
+    };
+    let result = json!({"result":"applied", "resultCommit":payload.result_commit,
+        "conflictArtifactRef":null})
+    .to_string();
+    if application.result_json.is_some() {
+        return if application.result_json.as_deref() == Some(result.as_str()) {
+            Ok(())
+        } else {
+            Err(rejected_command(None))
+        };
+    }
+    let settlement = LocalApplySettlement::try_new(
+        application.application_id.clone(),
+        application.local_candidate_receipt_id,
+        node_id,
+        application.repository_binding_id,
+        application.candidate_ref,
+        application.target_branch,
+        application.base_commit,
+        strategy,
+        LocalApplyResult::Applied,
+        payload.result_commit.clone(),
+        None,
+    )
+    .map_err(|_| rejected_command(None))?;
+    LocalCandidateService::new(storage)
+        .record_reconciled_apply_result(&settlement, now)
+        .map_err(|_| rejected_command(None))?;
+    storage
+        .settle_candidate_application(&application.application_id, "applied", &result)
+        .map_err(|_| rejected_command(None))?;
     Ok(())
 }
 
@@ -1910,6 +1877,7 @@ const fn storage_result(result: ApplyResult) -> LocalApplyResult {
         ApplyResult::PermissionDenied => LocalApplyResult::PermissionDenied,
         ApplyResult::Discarded => LocalApplyResult::Discarded,
         ApplyResult::Failed => LocalApplyResult::Failed,
+        ApplyResult::OutcomeUnknown => LocalApplyResult::OutcomeUnknown,
     }
 }
 
@@ -1942,7 +1910,6 @@ fn supersede_instance(
         current.platform.clone(),
         current.architecture.clone(),
         payload.client_version.clone(),
-        current.device_credential_digest.clone(),
         Some(envelope.client_instance_id.clone()),
         payload.capacity.max_concurrent_worker_sessions,
     ) else {
@@ -1962,67 +1929,6 @@ const fn presence_target(state: PresenceState) -> Option<ClientPresenceState> {
         PresenceState::Locked => Some(ClientPresenceState::Locked),
         PresenceState::PendingEnrollment | PresenceState::Revoked => None,
     }
-}
-
-fn issue_credential() -> Result<(String, String), ClientExchangeError> {
-    let mut secret = [0_u8; 32];
-    getrandom::fill(&mut secret).map_err(|_| ClientExchangeError::unavailable())?;
-    Ok((hex_encode(&secret), credential_digest(&secret)))
-}
-
-fn credential_digest(secret: &[u8]) -> String {
-    format!("sha256:{:x}", Sha256::digest(secret))
-}
-
-fn credential_digest_matches(secret: &[u8; 32], stored_digest: &str) -> bool {
-    constant_time_eq(
-        credential_digest(secret).as_bytes(),
-        stored_digest.as_bytes(),
-    )
-}
-
-fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
-    if left.len() != right.len() {
-        return false;
-    }
-    let mut difference = 0_u8;
-    for (left_byte, right_byte) in left.iter().zip(right.iter()) {
-        difference |= left_byte ^ right_byte;
-    }
-    difference == 0
-}
-
-fn decode_credential_secret(raw: &str) -> Option<[u8; 32]> {
-    let bytes = raw.as_bytes();
-    if bytes.len() != 64 {
-        return None;
-    }
-    let mut secret = [0_u8; 32];
-    for (index, slot) in secret.iter_mut().enumerate() {
-        let high = hex_nibble(bytes[index * 2])?;
-        let low = hex_nibble(bytes[index * 2 + 1])?;
-        *slot = high << 4 | low;
-    }
-    Some(secret)
-}
-
-fn hex_nibble(byte: u8) -> Option<u8> {
-    match byte {
-        b'0'..=b'9' => Some(byte - b'0'),
-        b'a'..=b'f' => Some(byte - b'a' + 10),
-        b'A'..=b'F' => Some(byte - b'A' + 10),
-        _ => None,
-    }
-}
-
-fn hex_encode(bytes: &[u8]) -> String {
-    const HEX: &[u8; 16] = b"0123456789abcdef";
-    let mut encoded = String::with_capacity(bytes.len() * 2);
-    for byte in bytes {
-        encoded.push(HEX[usize::from(byte >> 4)] as char);
-        encoded.push(HEX[usize::from(byte & 0x0f)] as char);
-    }
-    encoded
 }
 
 const IDENTITY_ALPHABET: &[u8; 32] = b"0123456789ABCDEFGHJKMNPQRSTVWXYZ";
@@ -2084,99 +1990,6 @@ mod tests {
     use winwincode_client_port::messages::ClientHelloPayload;
 
     use super::*;
-
-    #[test]
-    fn constant_time_eq_matches_only_equal_slices() {
-        assert!(constant_time_eq(b"sha256:aa", b"sha256:aa"));
-        assert!(!constant_time_eq(b"sha256:aa", b"sha256:ab"));
-        assert!(!constant_time_eq(b"sha256:aa", b"sha256:aaa"));
-        assert!(!constant_time_eq(b"", b"a"));
-    }
-
-    #[test]
-    fn credential_hex_decodes_both_cases_and_rejects_bad_shapes() {
-        let secret = [0xab_u8; 32];
-        let lower = hex_encode(&secret);
-        assert_eq!(lower.len(), 64);
-        assert_eq!(decode_credential_secret(&lower), Some(secret));
-        assert_eq!(
-            decode_credential_secret(&lower.to_uppercase()),
-            Some(secret)
-        );
-        assert_eq!(decode_credential_secret(&lower[..63]), None);
-        let mut corrupted = lower.clone();
-        corrupted.replace_range(0..1, "g");
-        assert_eq!(decode_credential_secret(&corrupted), None);
-        assert_eq!(decode_credential_secret(""), None);
-    }
-
-    #[test]
-    fn issued_credential_digest_matches_its_secret() {
-        let (material, digest) = issue_credential().expect("entropy");
-        let secret = decode_credential_secret(&material).expect("hex material");
-        assert!(digest.starts_with("sha256:"));
-        assert!(credential_digest_matches(&secret, &digest));
-        let mut other = secret;
-        other[0] ^= 1;
-        assert!(!credential_digest_matches(&other, &digest));
-    }
-
-    #[test]
-    fn worker_credential_is_delivered_only_with_its_launch_frame() {
-        let directory = std::env::temp_dir().join(format!(
-            "worker-launch-credential-{}",
-            generate_prefixed_id("wlg_").unwrap()
-        ));
-        let application =
-            ClientExchangeApplication::open(&directory, &ClientExchangeConfig::default())
-                .expect("valid application");
-        let secret = [0x42_u8; 32];
-        let material = hex_encode(&secret);
-        let digest = credential_digest(&secret);
-        application
-            .publish_worker_credential(WorkerCredentialDelivery {
-                client_node_id: "cnd_AAAAAAAAAAAAAAAAAAAAAAAAAA".to_owned(),
-                worker_launch_grant_id: "wlg_AAAAAAAAAAAAAAAAAAAAAAAAAA".to_owned(),
-                worker_session_id: "wsn_AAAAAAAAAAAAAAAAAAAAAAAAAA".to_owned(),
-                credential_digest: digest.clone(),
-                worker_credential: material.clone(),
-                expires_at: Instant("2100-01-01T00:00:00.000Z".to_owned()),
-            })
-            .expect("publish credential");
-        let launch = serde_json::json!({
-            "kind": "client.worker.launch",
-            "payload": {"launchGrant": {
-                "workerLaunchGrantId": "wlg_AAAAAAAAAAAAAAAAAAAAAAAAAA",
-                "workerSessionId": "wsn_AAAAAAAAAAAAAAAAAAAAAAAAAA",
-                "credentialDigest": digest,
-            }}
-        });
-        assert!(
-            application
-                .worker_credentials_for_frames(
-                    "cnd_AAAAAAAAAAAAAAAAAAAAAAAAAA",
-                    &[],
-                    &Instant("2026-09-12T00:00:00.000Z".to_owned()),
-                )
-                .expect("unrelated response")
-                .is_empty()
-        );
-        let delivered = application
-            .worker_credentials_for_frames(
-                "cnd_AAAAAAAAAAAAAAAAAAAAAAAAAA",
-                &[launch],
-                &Instant("2026-09-12T00:00:00.000Z".to_owned()),
-            )
-            .expect("matching response");
-        assert_eq!(delivered.len(), 1);
-        assert_eq!(delivered[0].worker_credential, material);
-        drop(application);
-        let reopened =
-            ClientExchangeApplication::open(&directory, &ClientExchangeConfig::default()).unwrap();
-        let again=reopened.worker_credentials_for_frames("cnd_AAAAAAAAAAAAAAAAAAAAAAAAAA",&[serde_json::json!({"kind":"client.worker.launch","payload":{"launchGrant":{"workerLaunchGrantId":"wlg_AAAAAAAAAAAAAAAAAAAAAAAAAA","workerSessionId":"wsn_AAAAAAAAAAAAAAAAAAAAAAAAAA","credentialDigest":digest}}})],&Instant("2026-09-12T00:00:00.000Z".into())).unwrap();
-        assert_eq!(again[0].worker_credential, material);
-        fs::remove_dir_all(directory).unwrap();
-    }
 
     #[test]
     fn generated_ids_are_canonical_crockford_or_digits() {
@@ -2278,6 +2091,7 @@ mod tests {
                     candidate_ref: "cand_1".to_owned(),
                     repository_binding_id: "rb_1".to_owned(),
                     candidate_commit: "0123456789abcdef0123456789abcdef01234567".to_owned(),
+                    base_commit: "0123456789abcdef0123456789abcdef01234567".into(),
                     local_ref_name: "refs/winwincode/candidates/cand_1".to_owned(),
                     state: winwincode_client_port::domain::LocalCandidateState::Retained,
                     created_at: "2026-01-02T12:00:00.000Z".to_owned(),
@@ -2285,7 +2099,7 @@ mod tests {
                 },
             }),
             ClientToServerMessage::CandidateApplyResult(ClientCandidateApplyResultPayload {
-                occupancy,
+                occupancy: occupancy.clone(),
                 receipt: winwincode_client_port::domain::LocalApplyReceipt {
                     local_apply_receipt_id: "lar_1".to_owned(),
                     candidate_ref: "cand_1".to_owned(),
@@ -2300,8 +2114,21 @@ mod tests {
                     revision: 1,
                 },
             }),
+            ClientToServerMessage::ApplicationReconciled(ClientApplicationReconciledPayload {
+                occupancy,
+                application_id: "lar_1".into(),
+                approval_id: "apr_1".into(),
+                original_epoch: 1,
+                repository_binding_id: "rb_1".into(),
+                candidate_ref: "cand_1".into(),
+                candidate_digest: "sha256:aa".into(),
+                base_commit: "0123456789abcdef0123456789abcdef01234567".into(),
+                target_branch: "main".into(),
+                outcome: ApplicationReconciliationOutcome::Applied,
+                result_commit: Some("0123456789abcdef0123456789abcdef01234567".into()),
+            }),
         ];
-        assert_eq!(commands.len(), 9, "the client command kinds");
+        assert_eq!(commands.len(), 10, "the client command kinds");
         for message in &commands {
             let identity = command_identity(message, "sha256:dd");
             assert_eq!(
@@ -2417,7 +2244,6 @@ mod tests {
             "aarch64-apple-darwin",
             "aarch64",
             "0.1.0",
-            None,
             Some(instance.to_owned()),
             0,
         )
@@ -2473,7 +2299,7 @@ mod tests {
     #[test]
     fn malformed_request_bodies_are_invalid_requests() {
         let directory = std::env::temp_dir().join(format!(
-            "worker-launch-credential-{}",
+            "client-exchange-{}",
             generate_prefixed_id("wlg_").unwrap()
         ));
         let application =
@@ -2482,16 +2308,16 @@ mod tests {
         let now = Instant("2026-01-02T12:00:00.000Z".to_owned());
         for body in ["", "not json", "{}", r#"{"frames":[]}"#] {
             let error = application
-                .apply(None, body.as_bytes(), &now)
+                .apply(body.as_bytes(), &now)
                 .expect_err("rejected body");
             assert!(error.is_invalid_request(), "{error}");
         }
     }
 
     #[test]
-    fn enroll_rejects_non_enroll_batches_without_a_credential() {
+    fn unknown_device_route_rejects_a_regular_exchange() {
         let directory = std::env::temp_dir().join(format!(
-            "worker-launch-credential-{}",
+            "client-exchange-{}",
             generate_prefixed_id("wlg_").unwrap()
         ));
         let application =
@@ -2500,10 +2326,11 @@ mod tests {
         let now = Instant("2026-01-02T12:00:00.000Z".to_owned());
         let body = serde_json::json!({
             "schemaVersion": CLIENT_CONTROL_PORT_SCHEMA_VERSION,
+            "clientNodeId": "cnd_00000000000000000000000001",
             "frames": [{
                 "schemaVersion": CLIENT_CONTROL_PORT_SCHEMA_VERSION,
                 "messageId": "msg_1",
-                "clientNodeId": "cnd_AAAAAAAAAAAAAAAAAAAAAAAA1",
+                "clientNodeId": "cnd_00000000000000000000000001",
                 "clientInstanceId": "cix_AAAAAAAAAAAAAAAAAAAAAAA1",
                 "sequence": 1,
                 "occurredAt": "2026-01-02T12:00:00.000Z",
@@ -2525,8 +2352,8 @@ mod tests {
         })
         .to_string();
         let error = application
-            .apply(None, body.as_bytes(), &now)
-            .expect_err("heartbeat without a credential");
+            .apply(body.as_bytes(), &now)
+            .expect_err("unknown Device");
         assert!(error.is_authentication(), "{error}");
     }
 
@@ -2555,7 +2382,6 @@ mod tests {
             "aarch64-apple-darwin",
             "aarch64",
             "1.0.0",
-            None,
             Some(instance.to_owned()),
             1,
         )
@@ -2717,7 +2543,6 @@ mod tests {
                     "aarch64-apple-darwin",
                     "aarch64",
                     "1.0.0",
-                    None,
                     Some(instance.clone()),
                     4,
                 )
@@ -2804,7 +2629,6 @@ mod tests {
                     id("wsn"),
                     id("wrk"),
                     id("wki"),
-                    format!("sha256:{}", "b".repeat(64)),
                     Some(id("psn")),
                     None,
                     Instant("2027-01-15T09:00:00.000Z".into()),

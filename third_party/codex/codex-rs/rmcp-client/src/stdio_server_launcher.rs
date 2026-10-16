@@ -225,6 +225,7 @@ const PROCESS_GROUP_TERM_GRACE_PERIOD: Duration = Duration::from_secs(2);
 #[cfg(unix)]
 struct LocalProcessTerminator {
     process_group_id: u32,
+    _lifeline: codex_utils_pty::process_group::ProcessGroupLifeline,
 }
 
 #[cfg(windows)]
@@ -291,10 +292,14 @@ impl LocalStdioServerLauncher {
             command.process_group(0);
             command
         };
-        #[cfg(windows)]
+        #[cfg(any(unix, windows))]
         let mut command = build_command();
-        #[cfg(not(windows))]
+        #[cfg(not(any(unix, windows)))]
         let command = build_command();
+        #[cfg(unix)]
+        let lifeline = codex_utils_pty::process_group::ProcessGroupLifeline::configure_command(
+            command.as_std_mut(),
+        )?;
         #[cfg(windows)]
         let job = match codex_utils_pty::JobObject::create_without_breakaway() {
             Ok(job) => {
@@ -371,7 +376,12 @@ impl LocalStdioServerLauncher {
                 }
             }),
         };
-        #[cfg(not(windows))]
+        #[cfg(unix)]
+        let terminator = process_id.map(|process_group_id| LocalProcessTerminator {
+            process_group_id,
+            _lifeline: lifeline,
+        });
+        #[cfg(not(any(unix, windows)))]
         let terminator = process_id.map(LocalProcessTerminator::new);
         let process = StdioServerProcessHandle::local(program_name.clone(), terminator);
 
@@ -401,17 +411,10 @@ impl LocalStdioServerLauncher {
 }
 
 impl LocalProcessTerminator {
-    #[cfg(not(windows))]
+    #[cfg(not(any(unix, windows)))]
     fn new(process_group_id: u32) -> Self {
-        #[cfg(unix)]
-        {
-            Self { process_group_id }
-        }
-        #[cfg(not(any(unix, windows)))]
-        {
-            let _ = process_group_id;
-            Self
-        }
+        let _ = process_group_id;
+        Self
     }
 
     #[cfg(unix)]

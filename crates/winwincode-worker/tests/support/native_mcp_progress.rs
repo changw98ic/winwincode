@@ -3,7 +3,6 @@
 use super::*;
 use std::collections::{BTreeSet, VecDeque};
 use std::convert::Infallible;
-use std::os::unix::fs::PermissionsExt;
 use std::sync::Arc;
 use std::time::{Duration, Instant as WallInstant};
 
@@ -20,8 +19,7 @@ use winwincode_execution_port::transport::{
 use winwincode_server::{
     ApiError, AuthSessionBootstrap, AuthSessionConfig, AuthenticatedPrincipal, ControlPlaneApiPort,
     EventSubscription, RemoteWorkerExchangePort, RemoteWorkerTransportError, RequestAuthenticator,
-    ServerConfig, ServerTls, SqliteAuthSessionManager, UserAccountService,
-    start_server_with_remote_worker,
+    ServerConfig, SqliteAuthSessionManager, UserAccountService, start_server_with_remote_worker,
 };
 use winwincode_worker::remote_transport::{
     RemoteWorkerPort, RemoteWorkerPortError, RemoteWorkerTransportHandle,
@@ -58,7 +56,6 @@ impl WorkerExecutionPort for ScriptedLocalModelPort {
 const MCP_SERVER: &str = "native_progress_fixture";
 const MCP_TOOL: &str = "progress_probe";
 const ORIGIN: &str = "https://client.example";
-const TOKEN: &[u8] = b"offline-native-progress-transport";
 
 #[derive(Default)]
 struct SlowQuery {
@@ -172,7 +169,7 @@ impl Boundary {
         action: &winwincode_execution_port::generated::ActionEnforcementRequestMessage,
     ) -> ExecutionPortMessage {
         let now = at("2030-01-01T00:00:02.000Z");
-        let mut receipt = ActionEnforcementReceiptMessage {
+        let receipt = ActionEnforcementReceiptMessage {
             actor: UserActor {
                 id: UserId(id("usr", 9)),
                 kind: UserActorKind::User,
@@ -191,7 +188,7 @@ impl Boundary {
             policy_kind: action.policy_kind.clone(),
             policy_mode: None,
             policy_version: None,
-            receipt_signature: digest('0'),
+
             request_id: action.request_id.clone(),
             resource: action.resource.clone(),
             schema_version: SchemaVersion::WinwincodeV1,
@@ -201,9 +198,6 @@ impl Boundary {
             subject_sha256: action.subject_sha256.clone(),
             worker_session_id: action.worker_session_id.clone(),
         };
-        ActionEnforcementIssuer::new(action_signing_key())
-            .sign(&mut receipt)
-            .unwrap();
         ExecutionPortMessage::ActionEnforcementReceiptMessage(receipt)
     }
 }
@@ -212,14 +206,34 @@ impl RemoteWorkerExchangePort for Boundary {
     fn recover_accepted_outcomes(&self) -> Result<usize, RemoteWorkerTransportError> {
         Ok(0)
     }
+    fn accounting(
+        &self,
+        _: &str,
+        _: &str,
+        _: &str,
+        _: Option<&[u8]>,
+        _: u64,
+        _: Instant,
+    ) -> Result<Vec<u8>, RemoteWorkerTransportError> {
+        Ok(serde_json::to_vec(
+            &winwincode_execution_port::accounting::PendingAccountingPage {
+                leases: Vec::new(),
+                next_offset: None,
+            },
+        )
+        .unwrap())
+    }
     fn exchange(
         &self,
-        credential: Vec<u8>,
+        _: &str,
+        worker_id: &str,
+        worker_instance_id: &str,
         body: &[u8],
         _: Instant,
     ) -> Result<Vec<u8>, RemoteWorkerTransportError> {
-        assert_eq!(credential, TOKEN);
-        let request = RemoteExchangeRequest::decode(body).expect("bounded real HTTPS exchange");
+        let request = RemoteExchangeRequest::decode(body).expect("bounded Device relay exchange");
+        assert_eq!(request.worker_id().0, worker_id);
+        assert_eq!(request.worker_instance_id().0, worker_instance_id);
         assert!(request.supports_acceptance_receipt());
         let frame = RemoteTransportAdapter::<WireCore>::decode(request.frame()).unwrap();
         let message = frame.message().clone();
@@ -327,9 +341,9 @@ fn native_config(root: &TestDirectory) -> winwincode_codex::ProductionCodexConfi
     winwincode_codex::ProductionCodexConfig::try_new(winwincode_codex::ProductionCodexOptions {
         data_directory: root.worker(),
         helper_executable: helper_executable(),
-        helper_release_manifest: helper_release_manifest(),
-        provider: PROVIDER_ID.to_owned(),
-        model: MODEL_ID.to_owned(),
+
+        provider: Some(PROVIDER_ID.to_owned()),
+        model: Some(MODEL_ID.to_owned()),
         gateway_route: ModelGatewayRoute {
             capability: "reasoning".to_owned(),
             route: "embedded-canonical-loopback".to_owned(),
@@ -345,11 +359,7 @@ fn native_config(root: &TestDirectory) -> winwincode_codex::ProductionCodexConfi
             )
             .unwrap(),
         ],
-        action_signing_key: action_signing_key(),
-        execution_envelope: winwincode_execution_port::action_gateway::ExecutionEnvelopeToken {
-            version: 1,
-            digest: digest('a'),
-        },
+
         execution_mode: winwincode_codex::ExecutionMode::React,
         observer_mode: winwincode_codex::ObserverMode::Off,
     })
@@ -402,12 +412,6 @@ pub(super) async fn run() {
     let root = TestDirectory::new("native-mcp-query-progress");
     let called = install_mcp(&root);
     let dispatch = dispatch(&root);
-    let rcgen::CertifiedKey { cert, signing_key } =
-        rcgen::generate_simple_self_signed(vec!["localhost".to_owned()]).unwrap();
-    let cert_path = root.0.join("certificate.pem");
-    let key_path = root.0.join("private-key.pem");
-    fs::write(&cert_path, cert.pem()).unwrap();
-    fs::write(&key_path, signing_key.serialize_pem()).unwrap();
     let accounts = Arc::new(UserAccountService::open(root.0.join("auth")).unwrap());
     let sessions = Arc::new(
         SqliteAuthSessionManager::open(
@@ -428,11 +432,7 @@ pub(super) async fn run() {
     let boundary = Arc::new(Boundary::default());
     let server_config = ServerConfig::new(
         "127.0.0.1:0".parse().unwrap(),
-        "https://control.example",
-        ServerTls::Pem {
-            certificate_path: cert_path,
-            private_key_path: key_path,
-        },
+        "http://control.example",
         BTreeSet::from([ORIGIN.to_owned()]),
         root.0.join("server"),
         Duration::from_secs(5),
@@ -472,9 +472,8 @@ pub(super) async fn run() {
         thread: Some(server_thread),
     };
     let address = ready.await.unwrap();
-    let origin = format!("https://localhost:{}", address.port());
+    let origin = format!("http://localhost:{}", address.port());
     let client = reqwest::Client::builder()
-        .add_root_certificate(reqwest::Certificate::from_der(cert.der().as_ref()).unwrap())
         .no_proxy()
         .timeout(Duration::from_secs(10))
         .build()
@@ -495,18 +494,49 @@ pub(super) async fn run() {
         .next()
         .unwrap()
         .to_owned();
-    let credential = root.0.join("execution-credential");
-    fs::write(&credential, TOKEN).unwrap();
-    fs::set_permissions(&credential, fs::Permissions::from_mode(0o600)).unwrap();
-    let (port, handle) = RemoteWorkerPort::open(
-        &origin,
-        cert.der().as_ref(),
-        credential,
+    let (worker_io, device_io) = std::os::unix::net::UnixStream::pair().unwrap();
+    let relay_boundary = Arc::clone(&boundary);
+    let _relay_thread = std::thread::spawn(move || {
+        use std::io::{BufRead as _, Write as _};
+        use winwincode_client_port::worker_relay::{WorkerRelayRequest, WorkerRelayResponse};
+        let mut input = std::io::BufReader::new(device_io.try_clone().unwrap());
+        let mut output = device_io;
+        loop {
+            let mut line = String::new();
+            if input.read_line(&mut line).unwrap() == 0 {
+                break;
+            }
+            let WorkerRelayRequest::Exchange { body } = serde_json::from_str(&line).unwrap() else {
+                unreachable!()
+            };
+            let body = relay_boundary
+                .exchange(
+                    "native-device",
+                    &id("wrk", 1),
+                    &id("wki", 1),
+                    body.as_bytes(),
+                    at("2030-01-01T00:00:02.000Z"),
+                )
+                .unwrap();
+            serde_json::to_writer(
+                &mut output,
+                &WorkerRelayResponse {
+                    failure: None,
+                    status: 200,
+                    body: String::from_utf8(body).unwrap(),
+                },
+            )
+            .unwrap();
+            output.write_all(b"\n").unwrap();
+            output.flush().unwrap();
+        }
+    });
+    let (port, handle) = RemoteWorkerPort::with_io(
         WorkerId(id("wrk", 1)),
         WorkerInstanceId(id("wki", 1)),
-        Duration::from_secs(5),
-    )
-    .unwrap();
+        std::io::BufReader::new(worker_io.try_clone().unwrap()),
+        worker_io,
+    );
     let adapter = winwincode_codex::ProductionCodexAdapter::open(native_config(&root)).unwrap();
     let models = RecordedPort::default();
     let mut worker = winwincode_worker::WorkerMain::new(

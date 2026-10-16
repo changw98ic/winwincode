@@ -4,18 +4,17 @@
 mod device_provider;
 
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
-use std::sync::{Arc, Condvar, Mutex};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Barrier};
 use std::time::Duration;
 
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
-use winwincode_control_plane::{ClientOccupancyService, PrivateLaunchMaterialStore};
+use winwincode_control_plane::ClientOccupancyService;
 use winwincode_domain::Instant;
 use winwincode_server::{
-    ClientExchangeApplication, ClientExchangeConfig, ClientExchangeError, ClientExchangePort,
-    ClientSessionsApplication, ClientSessionsConfig, ClientSessionsError, ClientSessionsErrorKind,
-    WorkerCredentialDelivery,
+    ClientExchangeApplication, ClientExchangeConfig, ClientExchangePort, ClientSessionsApplication,
+    ClientSessionsConfig, ClientSessionsError, ClientSessionsErrorKind,
 };
 use winwincode_storage::{
     AccessGrantIssuance, ClientNodeRegistration, ClientPresenceState, GrantPermissions,
@@ -57,7 +56,6 @@ impl Fixture {
             "aarch64-apple-darwin",
             "aarch64",
             "1.0.0",
-            None,
             Some(INSTANCE.to_owned()),
             capacity,
         )
@@ -126,14 +124,10 @@ impl Fixture {
             .record_acknowledgement(&lease.occupancy_lease_id, lease.fencing_token, None, &now)
             .expect("occupancy ack");
         storage.worker_launch_grant_ledger().expect("launch schema");
-        storage
-            .worker_session_credential_ledger()
-            .expect("credential schema");
         storage.client_downlink_outbox().expect("downlink schema");
         drop(storage);
         device_provider::stage_chat(&directory, NODE, HOLDER, 100);
         device_provider::stage_chat(&directory, NODE, HOLDER, 101);
-        PrivateLaunchMaterialStore::open(&directory).expect("private material store");
         Self { directory }
     }
 
@@ -155,7 +149,7 @@ impl Fixture {
             .expect("real exchange")
     }
 
-    fn launch_facts(&self) -> (i64, i64, Vec<(i64, Value)>) {
+    fn launch_facts(&self) -> (i64, Vec<(i64, Value)>) {
         let db = rusqlite::Connection::open(self.directory.join("control-plane.sqlite3"))
             .expect("facts connection");
         let grants = db
@@ -163,11 +157,6 @@ impl Fixture {
                 r.get(0)
             })
             .expect("grant count");
-        let credentials = db
-            .query_row("SELECT COUNT(*) FROM worker_session_credentials", [], |r| {
-                r.get(0)
-            })
-            .expect("credential count");
         let mut statement = db.prepare("SELECT sequence,frame FROM client_downlink_frames WHERE client_node_id=?1 ORDER BY sequence").expect("downlink facts");
         let frames = statement
             .query_map([NODE], |r| {
@@ -179,7 +168,7 @@ impl Fixture {
                 (sequence, serde_json::from_str(&frame).expect("frame JSON"))
             })
             .collect();
-        (grants, credentials, frames)
+        (grants, frames)
     }
 
     fn assert_coherent_publication(&self, expected: i64) {
@@ -191,9 +180,9 @@ impl Fixture {
             })
             .expect("publication count");
         let matched: i64 = db.query_row(
-            "SELECT COUNT(*) FROM worker_launch_grants g JOIN worker_session_credentials c ON c.worker_launch_grant_id=g.worker_launch_grant_id AND c.worker_session_id=g.worker_session_id AND c.worker_id=g.worker_id AND c.worker_instance_id=g.worker_instance_id AND c.credential_digest=g.credential_digest JOIN worker_launch_publications p ON p.grant_id=g.worker_launch_grant_id JOIN client_downlink_frames f ON f.client_node_id=p.client_node_id AND f.sequence=p.sequence AND f.message_id=p.message_id",
+            "SELECT COUNT(*) FROM worker_launch_grants g JOIN worker_launch_publications p ON p.grant_id=g.worker_launch_grant_id JOIN client_downlink_frames f ON f.client_node_id=p.client_node_id AND f.sequence=p.sequence AND f.message_id=p.message_id WHERE json_extract(f.frame,'$.payload.launchGrant.workerLaunchGrantId')=g.worker_launch_grant_id AND json_extract(f.frame,'$.payload.launchGrant.workerSessionId')=g.worker_session_id AND json_extract(f.frame,'$.payload.launchGrant.workerId')=g.worker_id AND json_extract(f.frame,'$.payload.launchGrant.workerInstanceId')=g.worker_instance_id",
             [], |r| r.get(0),
-        ).expect("exact grant credential frame binding");
+        ).expect("exact grant and frame binding");
         assert_eq!(publications, expected);
         assert_eq!(matched, expected);
     }
@@ -202,78 +191,6 @@ impl Fixture {
 impl Drop for Fixture {
     fn drop(&mut self) {
         let _ = std::fs::remove_dir_all(&self.directory);
-    }
-}
-
-#[derive(Default)]
-struct Gate {
-    arrivals: Mutex<usize>,
-    changed: Condvar,
-}
-
-impl Gate {
-    fn meet(&self) {
-        let mut arrivals = self.arrivals.lock().expect("gate lock");
-        *arrivals += 1;
-        self.changed.notify_all();
-        let (arrivals, _) = self
-            .changed
-            .wait_timeout_while(arrivals, Duration::from_secs(10), |arrivals| *arrivals < 2)
-            .expect("bounded gate");
-        assert_eq!(
-            *arrivals, 2,
-            "both native prepares must reach the publication boundary"
-        );
-    }
-}
-
-struct ConcurrentExchange {
-    real: ClientExchangeApplication,
-    before: Gate,
-    after: Gate,
-    publications: AtomicUsize,
-}
-
-impl ConcurrentExchange {
-    fn new(real: ClientExchangeApplication) -> Self {
-        Self {
-            real,
-            before: Gate::default(),
-            after: Gate::default(),
-            publications: AtomicUsize::new(0),
-        }
-    }
-}
-
-impl ClientExchangePort for ConcurrentExchange {
-    fn exchange(
-        &self,
-        credential: Option<Vec<u8>>,
-        body: &[u8],
-        now: Instant,
-    ) -> Result<Vec<u8>, ClientExchangeError> {
-        self.real.exchange(credential, body, now)
-    }
-
-    fn authenticate_device(
-        &self,
-        credential: &[u8],
-        node: &str,
-    ) -> Result<(), ClientExchangeError> {
-        self.real.authenticate_device(credential, node)
-    }
-
-    fn publish_worker_credential(
-        &self,
-        delivery: WorkerCredentialDelivery,
-    ) -> Result<(), ClientExchangeError> {
-        self.before.meet();
-        let result = self.real.publish_worker_credential(delivery);
-        if result.is_ok() {
-            self.publications.fetch_add(1, Ordering::SeqCst);
-        }
-        self.after.meet();
-        result
     }
 }
 
@@ -291,13 +208,17 @@ fn launch(app: &ClientSessionsApplication, body: &Value) -> Result<Value, Client
 }
 
 fn concurrent_launches(fixture: &Fixture, sessions: [u64; 2]) -> Vec<ClientSessionsError> {
-    let exchange = Arc::new(ConcurrentExchange::new(fixture.real_exchange()));
+    let gate = Barrier::new(2);
     let results = std::thread::scope(|scope| {
         let threads: Vec<_> = sessions
             .into_iter()
             .map(|session| {
-                let app = fixture.application(exchange.clone());
-                scope.spawn(move || launch(&app, &request(session)))
+                let app = fixture.application(Arc::new(fixture.real_exchange()));
+                let gate = &gate;
+                scope.spawn(move || {
+                    gate.wait();
+                    launch(&app, &request(session))
+                })
             })
             .collect();
         threads
@@ -305,11 +226,6 @@ fn concurrent_launches(fixture: &Fixture, sessions: [u64; 2]) -> Vec<ClientSessi
             .map(|thread| thread.join().expect("launch thread"))
             .collect::<Vec<_>>()
     });
-    assert_eq!(
-        exchange.publications.load(Ordering::SeqCst),
-        2,
-        "both requests published real encrypted material"
-    );
     results
         .into_iter()
         .map(|r| r.expect_err("no fake Device acknowledgement is sent"))
@@ -326,8 +242,8 @@ fn different_sessions_publish_distinct_contiguous_downlinks() {
             .all(|e| e.kind() == ClientSessionsErrorKind::LaunchAckTimeout),
         "{errors:?}"
     );
-    let (grants, credentials, frames) = fixture.launch_facts();
-    assert_eq!((grants, credentials, frames.len()), (2, 2, 2));
+    let (grants, frames) = fixture.launch_facts();
+    assert_eq!((grants, frames.len()), (2, 2));
     assert_eq!(
         frames.iter().map(|(n, _)| *n).collect::<Vec<_>>(),
         vec![1, 2]
@@ -365,8 +281,8 @@ fn concurrent_capacity_rejection_leaves_only_one_public_launch() {
         1,
         "{errors:?}"
     );
-    let (grants, credentials, frames) = fixture.launch_facts();
-    assert_eq!((grants, credentials, frames.len()), (1, 1, 1));
+    let (grants, frames) = fixture.launch_facts();
+    assert_eq!((grants, frames.len()), (1, 1));
     fixture.assert_coherent_publication(1);
 }
 
@@ -380,10 +296,10 @@ fn concurrent_same_session_retains_one_idempotent_launch_identity() {
             .all(|e| e.kind() == ClientSessionsErrorKind::LaunchAckTimeout),
         "{errors:?}"
     );
-    let (grants, credentials, frames) = fixture.launch_facts();
+    let (grants, frames) = fixture.launch_facts();
     assert_eq!(
-        (grants, credentials, frames.len()),
-        (1, 1, 1),
+        (grants, frames.len()),
+        (1, 1),
         "the same ProductSession must not mint two live Worker identities"
     );
     fixture.assert_coherent_publication(1);
@@ -403,113 +319,25 @@ fn concurrent_same_session_retains_one_idempotent_launch_identity() {
 }
 
 #[test]
-fn credential_publication_failure_keeps_safe_stage_and_no_public_grant() {
-    let fixture = Fixture::new("private-store-failure", 2);
-    let private = fixture.directory.join("private-launch-material");
-    std::fs::remove_dir_all(&private).expect("remove fixture private store");
-    std::fs::write(&private, b"adxi-fixture-secret-must-not-enter-errors")
-        .expect("obstruct private store");
+fn downlink_publication_failure_rolls_back_the_launch_and_allows_retry() {
+    let fixture = Fixture::new("publication-failure", 2);
+    let db = rusqlite::Connection::open(fixture.directory.join("control-plane.sqlite3"))
+        .expect("failure injection connection");
+    db.execute_batch("CREATE TRIGGER reject_launch_downlink BEFORE INSERT ON client_downlink_frames BEGIN SELECT RAISE(ABORT, 'fixture downlink publication failure'); END")
+        .expect("inject downlink failure");
     let app = fixture.application(Arc::new(fixture.real_exchange()));
-    let error = launch(&app, &request(100)).expect_err("real private publication fails");
-    assert_eq!(error.kind(), ClientSessionsErrorKind::Unavailable);
-    assert_eq!(
-        error.to_string(),
-        "client session launch service is unavailable"
-    );
-    assert_eq!(fixture.launch_facts(), (0, 0, Vec::new()));
-    let diagnostic = format!("{error:?}");
-    assert!(
-        !diagnostic.contains("adxi-fixture-secret")
-            && !diagnostic.contains(private.to_string_lossy().as_ref())
-    );
-    assert!(
-        diagnostic.contains("credential_publication"),
-        "unavailable launch must retain its safe internal stage: {diagnostic}"
-    );
-    assert_eq!(error.failure_stage(), Some("credential_publication"));
-    assert_eq!(error.failure_code(), Some("exchange_unavailable"));
-}
-
-struct LockedPublicationExchange {
-    real: ClientExchangeApplication,
-    directory: PathBuf,
-    held_writer: Mutex<Option<rusqlite::Connection>>,
-}
-
-impl ClientExchangePort for LockedPublicationExchange {
-    fn exchange(
-        &self,
-        credential: Option<Vec<u8>>,
-        body: &[u8],
-        now: Instant,
-    ) -> Result<Vec<u8>, ClientExchangeError> {
-        self.real.exchange(credential, body, now)
-    }
-
-    fn authenticate_device(
-        &self,
-        credential: &[u8],
-        node: &str,
-    ) -> Result<(), ClientExchangeError> {
-        self.real.authenticate_device(credential, node)
-    }
-
-    fn publish_worker_credential(
-        &self,
-        delivery: WorkerCredentialDelivery,
-    ) -> Result<(), ClientExchangeError> {
-        self.real.publish_worker_credential(delivery)?;
-        let writer = rusqlite::Connection::open(self.directory.join("control-plane.sqlite3"))
-            .expect("independent writer");
-        writer
-            .execute_batch("BEGIN IMMEDIATE")
-            .expect("hold writer before launch bundle");
-        let observer = rusqlite::Connection::open(self.directory.join("control-plane.sqlite3"))
-            .expect("lock observer");
-        observer
-            .busy_timeout(Duration::ZERO)
-            .expect("no observer retry");
-        assert!(
-            matches!(
-                observer.execute_batch("BEGIN IMMEDIATE"),
-                Err(rusqlite::Error::SqliteFailure(error, _))
-                    if error.code == rusqlite::ErrorCode::DatabaseBusy
-            ),
-            "the independent writer must actually hold SQLite admission"
-        );
-        *self.held_writer.lock().expect("writer slot") = Some(writer);
-        Ok(())
-    }
-}
-
-#[test]
-fn forced_sqlite_writer_contention_preserves_stage_and_rolls_back_launch() {
-    let fixture = Fixture::new("writer-contention", 2);
-    let exchange = Arc::new(LockedPublicationExchange {
-        real: fixture.real_exchange(),
-        directory: fixture.directory.clone(),
-        held_writer: Mutex::new(None),
-    });
-    let app = fixture.application(exchange.clone());
-    let error = launch(&app, &request(100)).expect_err("launch writer is held");
-    let writer = exchange
-        .held_writer
-        .lock()
-        .expect("writer slot")
-        .take()
-        .expect("test held the writer at the launch boundary");
-    writer
-        .execute_batch("ROLLBACK")
-        .expect("release test writer");
-    assert_eq!(fixture.launch_facts(), (0, 0, Vec::new()));
+    let error = launch(&app, &request(100)).expect_err("downlink publication fails");
+    assert_eq!(fixture.launch_facts(), (0, Vec::new()));
     assert_eq!(error.kind(), ClientSessionsErrorKind::Unavailable);
     assert_eq!(
         error.to_string(),
         "client session launch service is unavailable"
     );
     assert_eq!(error.failure_stage(), Some("launch_bundle"));
-    assert_eq!(error.failure_code(), Some("storage_adapter"));
+    assert_eq!(error.failure_code(), Some("storage_invalid_input"));
     assert!(!format!("{error:?}").contains(fixture.directory.to_string_lossy().as_ref()));
+    db.execute_batch("DROP TRIGGER reject_launch_downlink")
+        .expect("allow downlink publication");
 
     let retry = fixture.application(Arc::new(fixture.real_exchange()));
     assert_eq!(
@@ -517,7 +345,7 @@ fn forced_sqlite_writer_contention_preserves_stage_and_rolls_back_launch() {
         ClientSessionsErrorKind::LaunchAckTimeout
     );
     let facts = fixture.launch_facts();
-    assert_eq!((facts.0, facts.1, facts.2.len()), (1, 1, 1));
+    assert_eq!((facts.0, facts.1.len()), (1, 1));
     fixture.assert_coherent_publication(1);
     let reopened = fixture.application(Arc::new(fixture.real_exchange()));
     assert_eq!(

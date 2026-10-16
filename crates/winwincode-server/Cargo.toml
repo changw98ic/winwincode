@@ -11,6 +11,7 @@ include = ["src/**", "tests/**", "Cargo.toml"]
 
 [features]
 default = ["local-worker"]
+test-support = []
 local-worker = [
   "dep:winwincode-codex",
   "dep:winwincode-local",
@@ -20,20 +21,20 @@ local-worker = [
 [dependencies]
 argon2.workspace = true
 axum.workspace = true
-axum-server.workspace = true
+axum-server = { workspace = true, features = ["tls-rustls"] }
 base64.workspace = true
+codex-utils-rustls-provider = { path = "../../third_party/codex/codex-rs/utils/rustls-provider" }
+ed25519-dalek = "=2.2.0"
 futures.workspace = true
 getrandom.workspace = true
 http.workspace = true
 httpdate.workspace = true
 rusqlite.workspace = true
-rustls.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
 time = { workspace = true, features = ["parsing"] }
 tokio = { workspace = true, features = ["macros", "net", "signal"] }
-ureq = { version = "=3.1.4", default-features = false, features = ["rustls"] }
 winwincode-api.workspace = true
 winwincode-client-port = { path = "../winwincode-client-port" }
 winwincode-control-plane = { path = "../winwincode-control-plane" }
@@ -46,13 +47,13 @@ winwincode-storage.workspace = true
 winwincode-worker = { path = "../winwincode-worker", optional = true }
 
 [dev-dependencies]
+rcgen.workspace = true
+rustls.workspace = true
 winwincode-codex = { path = "../winwincode-codex", features = ["test-support"] }
 winwincode-delivery = { workspace = true, features = ["test-support"] }
-rcgen.workspace = true
 tokio = { workspace = true, features = ["io-util", "macros", "net", "signal"] }
-tokio-rustls.workspace = true
 tokio-tungstenite = { git = "https://github.com/openai-oss-forks/tokio-tungstenite", rev = "0e5b2d73aa18dd9f0a50ee9ff199d5aef7594186" }
-winwincode-device-client = { path = "../winwincode-device-client" }
+winwincode-device-client = { path = "../winwincode-device-client", features = ["test-support"] }
 winwincode-session.workspace = true
 
 [[bin]]

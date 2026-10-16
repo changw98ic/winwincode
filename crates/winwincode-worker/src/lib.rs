@@ -319,6 +319,7 @@ pub struct WorkerMain<Port, Codex> {
     driver_clock: driver_clock::DriverClock,
     sent_delivery_ids: HashSet<String>,
     outbox_flush_cursor: Option<String>,
+    outbox_retry_ids: HashSet<String>,
     recovery_sent_delivery_ids: HashSet<String>,
     recovered_delegated_routes: HashSet<String>,
     deferred_core_interaction_jobs: HashSet<String>,
@@ -340,17 +341,20 @@ where
     Port: WorkerExecutionPort,
     Codex: CodexCoreAdapter + Send + 'static,
 {
-    pub fn with_device_providers(
-        mut self,
-        directory: &std::path::Path,
-    ) -> Result<Self, winwincode_provider::DeviceProviderError> {
-        let mut models = device_model::DeviceModels::open(directory)?;
+    #[must_use]
+    pub const fn execution_port(&self) -> &Port {
+        &self.port
+    }
+
+    #[must_use]
+    pub fn with_device_providers(mut self, directory: &std::path::Path) -> Self {
+        let mut models = device_model::DeviceModels::new(directory);
         models.note_worker_instance_id(&self.config.worker_instance_id.0);
         if let Some(path) = std::env::var_os("WWC_MODEL_INTAKE_LOG") {
             models.set_intake_log(Some(std::path::PathBuf::from(path)));
         }
         self.device_models = Some(models);
-        Ok(self)
+        self
     }
 
     #[must_use]
@@ -444,6 +448,7 @@ where
             driver_clock,
             sent_delivery_ids: HashSet::new(),
             outbox_flush_cursor: None,
+            outbox_retry_ids: HashSet::new(),
             recovery_sent_delivery_ids: HashSet::new(),
             recovered_delegated_routes: HashSet::new(),
             deferred_core_interaction_jobs: HashSet::new(),
@@ -2623,6 +2628,10 @@ where
         Ok(())
     }
 
+    pub async fn stop_execution(&mut self) -> Result<(), WorkerError> {
+        self.codex.shutdown().await.map_err(|_| codex_model_error())
+    }
+
     pub async fn shutdown(&mut self, now: Instant) -> Result<WorkerShutdownReport, WorkerError> {
         if matches!(
             self.lifecycle,
@@ -2632,6 +2641,12 @@ where
                 WorkerErrorCode::InvalidLifecycle,
                 "Worker is already terminal",
             ));
+        }
+        for active in self.active.values_mut() {
+            active.lifecycle = ActiveJobLifecycle::Cancelling;
+            self.codex
+                .fence_thread(&active.codex_thread_id, &now)
+                .map_err(|_| codex_model_error())?;
         }
         let candidate_authorities = self
             .pending_candidates

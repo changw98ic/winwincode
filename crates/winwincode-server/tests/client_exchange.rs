@@ -7,8 +7,6 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
-use sha2::Digest;
-use sha2::Sha256;
 use tokio::io::AsyncReadExt;
 use tokio::io::AsyncWriteExt;
 use tokio::net::TcpStream;
@@ -30,7 +28,7 @@ use winwincode_domain::OrganizationId;
 use winwincode_server::{
     ApiError, AuthSessionBootstrap, AuthSessionConfig, AuthenticatedPrincipal,
     ClientExchangeApplication, ClientExchangeConfig, ClientExchangePort, ControlPlaneApiPort,
-    EventSubscription, RequestAuthenticator, ServerConfig, ServerTls, SqliteAuthSessionManager,
+    EventSubscription, RequestAuthenticator, ServerConfig, SqliteAuthSessionManager,
     UserAccountService, start_server_with_remote_worker,
 };
 use winwincode_storage::{
@@ -119,7 +117,6 @@ fn server_config(data_directory: &Path) -> ServerConfig {
     ServerConfig::new(
         "127.0.0.1:0".parse().expect("loopback address"),
         "http://control.example",
-        ServerTls::Disabled,
         BTreeSet::from(["https://client.example".to_owned()]),
         data_directory.to_path_buf(),
         Duration::from_secs(2),
@@ -170,14 +167,10 @@ async fn start_with_client_exchange(data_directory: &Path) -> winwincode_server:
 async fn post_exchange(
     address: std::net::SocketAddr,
     body: &str,
-    credential: Option<&str>,
 ) -> (String, Option<serde_json::Value>) {
     let mut stream = TcpStream::connect(address).await.expect("connect server");
-    let authorization = credential
-        .map(|value| format!("Authorization: Bearer {value}\r\n"))
-        .unwrap_or_default();
     let request = format!(
-        "POST /internal/v1/client/exchange HTTP/1.1\r\nHost: control.example\r\n{authorization}Content-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        "POST /internal/v1/client/exchange HTTP/1.1\r\nHost: control.example\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
         body.len()
     );
     stream
@@ -274,6 +267,7 @@ fn heartbeat_frame(node: &str, instance: &str, sequence: u64, running: u32) -> s
 fn exchange_request(frames: &[serde_json::Value], ack_sequence: u64) -> String {
     serde_json::json!({
         "schemaVersion": SCHEMA_VERSION,
+        "clientNodeId": frames.first().expect("exchange frame")["clientNodeId"],
         "frames": frames,
         "ackSequence": ack_sequence,
     })
@@ -295,33 +289,22 @@ fn cursors(data_directory: &Path, node_id: &str) -> ClientExchangeCursors {
         .expect("cursor row")
 }
 
-async fn enroll_device(address: std::net::SocketAddr) -> (String, String) {
-    let (status, body) =
-        post_exchange(address, &exchange_request(&[enroll_frame(1)], 0), None).await;
+async fn enroll_device(address: std::net::SocketAddr) -> String {
+    let (status, body) = post_exchange(address, &exchange_request(&[enroll_frame(1)], 0)).await;
     assert!(status.starts_with("HTTP/1.1 200 OK"), "{status}");
-    let body = body.expect("enrollment response body");
-    let enrollment = body.get("enrollment").expect("enrollment issuance").clone();
-    let node_id = enrollment
-        .get("clientNodeId")
-        .and_then(serde_json::Value::as_str)
-        .expect("assigned clientNodeId")
-        .to_owned();
-    let credential = enrollment
-        .get("deviceCredential")
-        .and_then(serde_json::Value::as_str)
-        .expect("issued credential")
-        .to_owned();
-    (node_id, credential)
+    body.unwrap()["enrollment"]["clientNodeId"]
+        .as_str()
+        .unwrap()
+        .to_owned()
 }
 
 #[tokio::test]
-async fn enroll_creates_a_pending_node_and_the_authenticated_hello_continues() {
+async fn enroll_creates_a_pending_node_and_hello_continues() {
     let data_directory = test_directory("client-exchange-enroll");
     let running = start_with_client_exchange(&data_directory).await;
     let address = running.local_address();
 
-    let (status, body) =
-        post_exchange(address, &exchange_request(&[enroll_frame(1)], 0), None).await;
+    let (status, body) = post_exchange(address, &exchange_request(&[enroll_frame(1)], 0)).await;
     assert!(status.starts_with("HTTP/1.1 200 OK"), "{status}");
     let body = body.expect("enrollment response body");
     assert_eq!(body.get("ackSequence"), Some(&serde_json::json!(1)));
@@ -341,30 +324,6 @@ async fn enroll_creates_a_pending_node_and_the_authenticated_hello_continues() {
         .expect("public client id");
     assert_eq!(public_client_id.len(), 10);
     assert!(public_client_id.bytes().all(|byte| byte.is_ascii_digit()));
-    let credential = enrollment
-        .get("deviceCredential")
-        .and_then(serde_json::Value::as_str)
-        .expect("credential material");
-    assert_eq!(credential.len(), 64);
-    let digest = enrollment
-        .get("deviceCredentialDigest")
-        .and_then(serde_json::Value::as_str)
-        .expect("credential digest");
-    let mut secret_bytes = [0_u8; 32];
-    for (index, slot) in secret_bytes.iter_mut().enumerate() {
-        let high = (credential.as_bytes()[index * 2] as char)
-            .to_digit(16)
-            .expect("high nibble");
-        let low = (credential.as_bytes()[index * 2 + 1] as char)
-            .to_digit(16)
-            .expect("low nibble");
-        *slot = u8::try_from(high << 4 | low).expect("byte");
-    }
-    assert_eq!(
-        digest,
-        &format!("sha256:{:x}", Sha256::digest(secret_bytes)),
-        "the digest persists exactly the sha256 of the issued material"
-    );
     assert!(enrollment.get("heartbeatIntervalMs").is_some());
     assert!(enrollment.get("downlinkFromSequence").is_none());
     assert_eq!(body["frames"], serde_json::json!([]));
@@ -388,13 +347,11 @@ async fn enroll_creates_a_pending_node_and_the_authenticated_hello_continues() {
         record.presence_state,
         ClientPresenceState::PendingEnrollment
     );
-    assert_eq!(record.device_credential_digest.as_deref(), Some(digest));
     assert_eq!(record.current_instance_id.as_deref(), Some(INSTANCE));
 
     let (status, body) = post_exchange(
         address,
         &exchange_request(&[hello_frame(node_id, INSTANCE, 2)], 0),
-        Some(credential),
     )
     .await;
     assert!(status.starts_with("HTTP/1.1 200 OK"), "{status}");
@@ -422,65 +379,37 @@ async fn enroll_creates_a_pending_node_and_the_authenticated_hello_continues() {
 }
 
 #[tokio::test]
-async fn missing_malformed_wrong_and_unknown_credentials_are_one_uniform_rejection() {
-    let data_directory = test_directory("client-exchange-auth");
-    let running = start_with_client_exchange(&data_directory).await;
+async fn unknown_client_and_mismatched_exchange_identity_are_rejected() {
+    let directory = test_directory("client-exchange-identity");
+    let running = start_with_client_exchange(&directory).await;
     let address = running.local_address();
-    let (node_id, credential) = enroll_device(address).await;
-
-    let wrong_hex: String = "ab".repeat(32);
-    let attempts = vec![
-        (
-            exchange_request(&[heartbeat_frame(&node_id, INSTANCE, 2, 0)], 0),
-            None,
-        ),
-        (
-            exchange_request(&[heartbeat_frame(&node_id, INSTANCE, 2, 0)], 0),
-            Some("not-hex"),
-        ),
-        (
-            exchange_request(&[heartbeat_frame(&node_id, INSTANCE, 2, 0)], 0),
-            Some(wrong_hex.as_str()),
-        ),
-        (
-            exchange_request(
-                &[heartbeat_frame(
-                    "cnd_CCCCCCCCCCCCCCCCCCCCCCCCCC",
-                    INSTANCE,
-                    1,
-                    0,
-                )],
-                0,
-            ),
-            Some(credential.as_str()),
-        ),
-    ];
-    let mut responses = Vec::new();
-    for (body, credential) in attempts {
-        let (status, parsed) = post_exchange(address, &body, credential).await;
-        assert!(status.starts_with("HTTP/1.1 401 Unauthorized"), "{status}");
-        assert!(parsed.is_none(), "rejections carry no detail: {status}");
-        responses.push(status);
-    }
-    assert!(
-        responses.windows(2).all(|pair| pair[0] == pair[1]),
-        "every credential failure is byte-identical and discloses nothing"
-    );
-
+    let node = enroll_device(address).await;
+    let unknown = "cnd_CCCCCCCCCCCCCCCCCCCCCCCCCC";
+    let (status, _) = post_exchange(
+        address,
+        &exchange_request(&[hello_frame(unknown, INSTANCE, 1)], 0),
+    )
+    .await;
+    assert!(status.starts_with("HTTP/1.1 401 Unauthorized"), "{status}");
+    let mut mismatched: serde_json::Value =
+        serde_json::from_str(&exchange_request(&[hello_frame(&node, INSTANCE, 2)], 0)).unwrap();
+    mismatched["clientNodeId"] = unknown.into();
+    let (status, _) = post_exchange(address, &mismatched.to_string()).await;
+    assert!(status.starts_with("HTTP/1.1 400 Bad Request"), "{status}");
+    assert_eq!(cursors(&directory, &node).client_to_server_ack_sequence, 1);
     let (status, body) = post_exchange(
         address,
-        &exchange_request(&[hello_frame(&node_id, INSTANCE, 2)], 0),
-        Some(&credential),
+        &exchange_request(&[hello_frame(&node, INSTANCE, 2)], 0),
     )
     .await;
     assert!(status.starts_with("HTTP/1.1 200 OK"), "{status}");
+    assert_eq!(body.unwrap()["ackSequence"], serde_json::json!(2));
     assert_eq!(
-        body.expect("hello body").get("ackSequence"),
-        Some(&serde_json::json!(2))
+        node_snapshot(&directory, &node).unwrap().presence_state,
+        ClientPresenceState::Online
     );
-
-    running.shutdown().await.expect("shutdown");
-    let _ = std::fs::remove_dir_all(&data_directory);
+    running.shutdown().await.unwrap();
+    let _ = std::fs::remove_dir_all(directory);
 }
 
 #[tokio::test]
@@ -488,12 +417,11 @@ async fn a_gap_answers_replay_from_sequence_and_keeps_the_cursor() {
     let data_directory = test_directory("client-exchange-gap");
     let running = start_with_client_exchange(&data_directory).await;
     let address = running.local_address();
-    let (node_id, credential) = enroll_device(address).await;
+    let node_id = enroll_device(address).await;
 
     let (status, _) = post_exchange(
         address,
         &exchange_request(&[hello_frame(&node_id, INSTANCE, 2)], 0),
-        Some(&credential),
     )
     .await;
     assert!(status.starts_with("HTTP/1.1 200 OK"), "{status}");
@@ -505,7 +433,6 @@ async fn a_gap_answers_replay_from_sequence_and_keeps_the_cursor() {
     let (status, body) = post_exchange(
         address,
         &exchange_request(&[heartbeat_frame(&node_id, INSTANCE, 4, 1)], 0),
-        Some(&credential),
     )
     .await;
     assert!(status.starts_with("HTTP/1.1 200 OK"), "{status}");
@@ -531,7 +458,6 @@ async fn a_gap_answers_replay_from_sequence_and_keeps_the_cursor() {
             ],
             0,
         ),
-        Some(&credential),
     )
     .await;
     assert!(status.starts_with("HTTP/1.1 200 OK"), "{status}");
@@ -554,12 +480,11 @@ async fn duplicate_frames_confirm_without_reexecution() {
     let data_directory = test_directory("client-exchange-duplicate");
     let running = start_with_client_exchange(&data_directory).await;
     let address = running.local_address();
-    let (node_id, credential) = enroll_device(address).await;
+    let node_id = enroll_device(address).await;
 
     let (status, _) = post_exchange(
         address,
         &exchange_request(&[hello_frame(&node_id, INSTANCE, 2)], 0),
-        Some(&credential),
     )
     .await;
     assert!(status.starts_with("HTTP/1.1 200 OK"), "{status}");
@@ -569,7 +494,6 @@ async fn duplicate_frames_confirm_without_reexecution() {
     let (status, body) = post_exchange(
         address,
         &exchange_request(&[hello_frame(&node_id, INSTANCE, 2)], 0),
-        Some(&credential),
     )
     .await;
     assert!(status.starts_with("HTTP/1.1 200 OK"), "{status}");
@@ -593,12 +517,11 @@ async fn heartbeat_updates_the_capacity_and_heartbeat_projection() {
     let data_directory = test_directory("client-exchange-heartbeat");
     let running = start_with_client_exchange(&data_directory).await;
     let address = running.local_address();
-    let (node_id, credential) = enroll_device(address).await;
+    let node_id = enroll_device(address).await;
 
     let (status, _) = post_exchange(
         address,
         &exchange_request(&[hello_frame(&node_id, INSTANCE, 2)], 0),
-        Some(&credential),
     )
     .await;
     assert!(status.starts_with("HTTP/1.1 200 OK"), "{status}");
@@ -606,7 +529,6 @@ async fn heartbeat_updates_the_capacity_and_heartbeat_projection() {
     let (status, body) = post_exchange(
         address,
         &exchange_request(&[heartbeat_frame(&node_id, INSTANCE, 3, 2)], 0),
-        Some(&credential),
     )
     .await;
     assert!(status.starts_with("HTTP/1.1 200 OK"), "{status}");
@@ -631,12 +553,11 @@ async fn a_pending_enrollment_heartbeat_is_refused() {
     let data_directory = test_directory("client-exchange-pending-heartbeat");
     let running = start_with_client_exchange(&data_directory).await;
     let address = running.local_address();
-    let (node_id, credential) = enroll_device(address).await;
+    let node_id = enroll_device(address).await;
 
     let (status, body) = post_exchange(
         address,
         &exchange_request(&[heartbeat_frame(&node_id, INSTANCE, 2, 3)], 0),
-        Some(&credential),
     )
     .await;
     assert!(status.starts_with("HTTP/1.1 200 OK"), "{status}");
@@ -657,94 +578,43 @@ async fn a_pending_enrollment_heartbeat_is_refused() {
 }
 
 #[tokio::test]
-async fn a_second_enroll_after_enrollment_is_refused() {
-    let data_directory = test_directory("client-exchange-re-enroll");
-    let running = start_with_client_exchange(&data_directory).await;
+async fn pending_enrollment_retry_reuses_identity_and_online_enrollment_is_refused() {
+    let directory = test_directory("client-exchange-enroll-retry");
+    let running = start_with_client_exchange(&directory).await;
     let address = running.local_address();
-    let (node_id, credential) = enroll_device(address).await;
-    let before = node_snapshot(&data_directory, &node_id).expect("node");
-
-    let (status, parsed) = post_exchange(
-        address,
-        &exchange_request(
-            &[frame(
-                &node_id,
-                INSTANCE,
-                1,
-                ClientToServerMessage::Enroll(Box::new(ClientEnrollPayload {
-                    command: CommandContext {
-                        expected_revision: 0,
-                        idempotency_key: "idem_enroll_retry".to_owned(),
-                    },
-                    display_name: "Cheng's MacBook".to_owned(),
-                    platform: ClientPlatformTarget::Aarch64AppleDarwin,
-                    architecture: ClientArchitecture::Aarch64,
-                    client_version: "0.1.0-alpha.1".to_owned(),
-                })),
-            )],
-            0,
-        ),
-        None,
-    )
-    .await;
-    assert!(status.starts_with("HTTP/1.1 401 Unauthorized"), "{status}");
-    assert!(parsed.is_none());
-    let after = node_snapshot(&data_directory, &node_id).expect("node");
-    assert_eq!(after.revision, before.revision);
+    let node = enroll_device(address).await;
+    let before = node_snapshot(&directory, &node).unwrap();
+    let mut retry = enroll_frame(1);
+    retry["clientNodeId"] = node.clone().into();
+    let (status, body) = post_exchange(address, &exchange_request(&[retry.clone()], 0)).await;
+    assert!(status.starts_with("HTTP/1.1 200 OK"), "{status}");
     assert_eq!(
-        after.device_credential_digest, before.device_credential_digest,
-        "no credential re-issue"
+        body.unwrap()["enrollment"]["clientNodeId"],
+        serde_json::json!(node)
     );
-
+    let retried = node_snapshot(&directory, &node).unwrap();
+    assert_eq!(retried.public_client_id, before.public_client_id);
+    assert_eq!(
+        retried.presence_state,
+        ClientPresenceState::PendingEnrollment
+    );
     let (status, _) = post_exchange(
         address,
-        &exchange_request(&[hello_frame(&node_id, INSTANCE, 2)], 0),
-        Some(&credential),
+        &exchange_request(&[hello_frame(&node, INSTANCE, 2)], 0),
     )
     .await;
     assert!(status.starts_with("HTTP/1.1 200 OK"), "{status}");
-
-    let (status, body) = post_exchange(
-        address,
-        &exchange_request(
-            &[frame(
-                &node_id,
-                INSTANCE,
-                3,
-                ClientToServerMessage::Enroll(Box::new(ClientEnrollPayload {
-                    command: CommandContext {
-                        expected_revision: 0,
-                        idempotency_key: "idem_enroll_authenticated".to_owned(),
-                    },
-                    display_name: "Cheng's MacBook".to_owned(),
-                    platform: ClientPlatformTarget::Aarch64AppleDarwin,
-                    architecture: ClientArchitecture::Aarch64,
-                    client_version: "0.1.0-alpha.1".to_owned(),
-                })),
-            )],
-            0,
-        ),
-        Some(&credential),
-    )
-    .await;
-    assert!(status.starts_with("HTTP/1.1 200 OK"), "{status}");
-    let body = body.expect("refused enroll response");
-    assert_eq!(body.get("ackSequence"), Some(&serde_json::json!(2)));
-    assert!(body.get("enrollment").is_none(), "no credential re-issue");
-    assert_eq!(
-        cursors(&data_directory, &node_id).client_to_server_ack_sequence,
-        2
-    );
-    let refused = node_snapshot(&data_directory, &node_id).expect("node");
-    assert_eq!(
-        refused.revision,
-        before.revision + 2,
-        "only the hello instance takeover and presence transition advanced"
-    );
+    let online = node_snapshot(&directory, &node).unwrap();
+    retry["sequence"] = 3.into();
+    retry["messageId"] = "msg_online_reenroll".into();
+    let (status, _) = post_exchange(address, &exchange_request(&[retry], 0)).await;
+    assert!(status.starts_with("HTTP/1.1 401 Unauthorized"), "{status}");
+    let refused = node_snapshot(&directory, &node).unwrap();
+    assert_eq!(refused.revision, online.revision);
     assert_eq!(refused.presence_state, ClientPresenceState::Online);
-
-    running.shutdown().await.expect("shutdown");
-    let _ = std::fs::remove_dir_all(&data_directory);
+    assert_eq!(cursors(&directory, &node).client_to_server_ack_sequence, 2);
+    running.shutdown().await.unwrap();
+    let _ = std::fs::remove_dir_all(directory);
 }
 
 #[tokio::test]
@@ -752,12 +622,11 @@ async fn a_restarted_instance_supersedes_the_old_one_via_hello() {
     let data_directory = test_directory("client-exchange-instance");
     let running = start_with_client_exchange(&data_directory).await;
     let address = running.local_address();
-    let (node_id, credential) = enroll_device(address).await;
+    let node_id = enroll_device(address).await;
 
     let (status, _) = post_exchange(
         address,
         &exchange_request(&[hello_frame(&node_id, INSTANCE, 2)], 0),
-        Some(&credential),
     )
     .await;
     assert!(status.starts_with("HTTP/1.1 200 OK"), "{status}");
@@ -765,7 +634,6 @@ async fn a_restarted_instance_supersedes_the_old_one_via_hello() {
     let (status, body) = post_exchange(
         address,
         &exchange_request(&[hello_frame(&node_id, RESTARTED_INSTANCE, 3)], 0),
-        Some(&credential),
     )
     .await;
     assert!(status.starts_with("HTTP/1.1 200 OK"), "{status}");
@@ -783,7 +651,6 @@ async fn a_restarted_instance_supersedes_the_old_one_via_hello() {
     let (status, body) = post_exchange(
         address,
         &exchange_request(&[heartbeat_frame(&node_id, INSTANCE, 4, 0)], 0),
-        Some(&credential),
     )
     .await;
     assert!(status.starts_with("HTTP/1.1 200 OK"), "{status}");
@@ -808,11 +675,12 @@ async fn malformed_frames_and_unknown_routes_fail_closed() {
 
     let bad_version = serde_json::json!({
         "schemaVersion": "winwincode/v0",
+        "clientNodeId": FRESH_NODE,
         "frames": [],
         "ackSequence": 0
     })
     .to_string();
-    let (status, parsed) = post_exchange(address, &bad_version, None).await;
+    let (status, parsed) = post_exchange(address, &bad_version).await;
     assert!(status.starts_with("HTTP/1.1 400 Bad Request"), "{status}");
     assert!(parsed.is_none());
 
@@ -835,7 +703,7 @@ async fn malformed_frames_and_unknown_routes_fail_closed() {
         })),
     })
     .expect("oversized frame value");
-    let (status, parsed) = post_exchange(address, &exchange_request(&[oversized], 0), None).await;
+    let (status, parsed) = post_exchange(address, &exchange_request(&[oversized], 0)).await;
     assert!(status.starts_with("HTTP/1.1 400 Bad Request"), "{status}");
     assert!(parsed.is_none());
 
@@ -854,7 +722,6 @@ async fn malformed_frames_and_unknown_routes_fail_closed() {
     let (status, _) = post_exchange(
         bare.local_address(),
         &exchange_request(&[enroll_frame(1)], 0),
-        None,
     )
     .await;
     assert!(status.starts_with("HTTP/1.1 404 Not Found"), "{status}");
@@ -866,43 +733,34 @@ async fn malformed_frames_and_unknown_routes_fail_closed() {
 
 fn direct_exchange(
     application: &ClientExchangeApplication,
-    credential: Option<&str>,
     body: &str,
 ) -> Result<serde_json::Value, winwincode_server::ClientExchangeError> {
     let response = application.exchange(
-        credential.map(|value| value.as_bytes().to_vec()),
         body.as_bytes(),
         winwincode_domain::Instant("2026-10-03T12:00:00.000Z".into()),
     )?;
     Ok(serde_json::from_slice(&response).expect("exchange JSON"))
 }
 
-fn direct_enrollment(root: &Path) -> (ClientExchangeApplication, String, String) {
-    let app = ClientExchangeApplication::open(root, &ClientExchangeConfig::default())
-        .expect("application");
-    let response =
-        direct_exchange(&app, None, &exchange_request(&[enroll_frame(1)], 0)).expect("enroll");
+fn direct_enrollment(root: &Path) -> (ClientExchangeApplication, String) {
+    let app = ClientExchangeApplication::open(root, &ClientExchangeConfig::default()).unwrap();
+    let response = direct_exchange(&app, &exchange_request(&[enroll_frame(1)], 0)).unwrap();
     let node = response["enrollment"]["clientNodeId"]
         .as_str()
-        .expect("node")
-        .to_owned();
-    let credential = response["enrollment"]["deviceCredential"]
-        .as_str()
-        .expect("credential")
+        .unwrap()
         .to_owned();
     direct_exchange(
         &app,
-        Some(&credential),
         &exchange_request(&[hello_frame(&node, INSTANCE, 2)], 0),
     )
-    .expect("hello");
-    (app, node, credential)
+    .unwrap();
+    (app, node)
 }
 
 #[test]
 fn connection_policy_write_failures_remain_retryable_and_duplicates_do_not_restore_old_policy() {
     let directory = test_directory("policy-durability");
-    let (app, node, credential) = direct_enrollment(&directory);
+    let (app, node) = direct_enrollment(&directory);
     let storage = SqliteStorage::open(&directory).unwrap();
     let connection = rusqlite::Connection::open(storage.database_path()).unwrap();
     connection
@@ -916,7 +774,7 @@ fn connection_policy_write_failures_remain_retryable_and_duplicates_do_not_resto
     locked["payload"]["acceptingConnections"] = serde_json::json!(false);
     locked["payload"]["lockState"] = serde_json::json!("locked");
     let request = exchange_request(&[locked], 0);
-    direct_exchange(&app, Some(&credential), &request).expect_err("policy was not persisted");
+    direct_exchange(&app, &request).expect_err("policy was not persisted");
     assert_eq!(cursors(&directory, &node).client_to_server_ack_sequence, 2);
     let before = node_snapshot(&directory, &node).unwrap();
     assert!(before.accepting_connections);
@@ -928,7 +786,7 @@ fn connection_policy_write_failures_remain_retryable_and_duplicates_do_not_resto
     connection
         .execute_batch("DROP TRIGGER fail_policy_write;")
         .unwrap();
-    let retried = direct_exchange(&app, Some(&credential), &request).unwrap();
+    let retried = direct_exchange(&app, &request).unwrap();
     assert_eq!(retried["ackSequence"], 3);
     let locked = node_snapshot(&directory, &node).unwrap();
     assert!(!locked.accepting_connections);
@@ -939,7 +797,6 @@ fn connection_policy_write_failures_remain_retryable_and_duplicates_do_not_resto
 
     direct_exchange(
         &app,
-        Some(&credential),
         &exchange_request(&[heartbeat_frame(&node, INSTANCE, 4, 0)], 0),
     )
     .unwrap();
@@ -949,7 +806,7 @@ fn connection_policy_write_failures_remain_retryable_and_duplicates_do_not_resto
         unlocked.lock_state,
         winwincode_storage::ClientLockState::Unlocked
     );
-    let duplicate = direct_exchange(&app, Some(&credential), &request).unwrap();
+    let duplicate = direct_exchange(&app, &request).unwrap();
     assert_eq!(duplicate["ackSequence"], 4);
     assert_eq!(node_snapshot(&directory, &node).unwrap(), unlocked);
 }
@@ -964,7 +821,7 @@ fn command_rejections_are_durable_and_cross_exchange_conflicts_never_advance_ack
         messages::ClientRepositoryUpsertPayload,
     };
     let root = test_directory("command-receipts");
-    let (app, node, credential) = direct_enrollment(&root);
+    let (app, node) = direct_enrollment(&root);
     let mut command = ClientRepositoryUpsertPayload {
         command: CommandContext {
             expected_revision: 0,
@@ -989,7 +846,7 @@ fn command_rejections_are_durable_and_cross_exchange_conflicts_never_advance_ack
         ClientToServerMessage::RepositoryUpsert(command.clone()),
     );
     assert_eq!(
-        direct_exchange(&app, Some(&credential), &exchange_request(&[first], 0)).expect("create")["ackSequence"],
+        direct_exchange(&app, &exchange_request(&[first], 0)).expect("create")["ackSequence"],
         3
     );
     drop(app);
@@ -1003,7 +860,7 @@ fn command_rejections_are_durable_and_cross_exchange_conflicts_never_advance_ack
         ClientToServerMessage::RepositoryUpsert(command.clone()),
     );
     assert!(
-        direct_exchange(&app, Some(&credential), &exchange_request(&[changed], 0))
+        direct_exchange(&app, &exchange_request(&[changed], 0))
             .expect_err("same key with changed payload")
             .is_invalid_request()
     );
@@ -1015,19 +872,14 @@ fn command_rejections_are_durable_and_cross_exchange_conflicts_never_advance_ack
         4,
         ClientToServerMessage::RepositoryUpsert(command),
     );
-    let response = direct_exchange(
-        &app,
-        Some(&credential),
-        &exchange_request(std::slice::from_ref(&stale), 0),
-    )
-    .expect("rejection is a settled business result");
+    let response = direct_exchange(&app, &exchange_request(std::slice::from_ref(&stale), 0))
+        .expect("rejection is a settled business result");
     assert_eq!(response["ackSequence"], 4);
     let result = &response["frames"][0];
     assert_eq!(result["kind"], "client.command_ack");
     assert_eq!(result["payload"]["status"], "rejected_revision_conflict");
     assert_eq!(result["payload"]["currentRevision"], 1);
-    let replay =
-        direct_exchange(&app, Some(&credential), &exchange_request(&[stale], 0)).expect("replay");
+    let replay = direct_exchange(&app, &exchange_request(&[stale], 0)).expect("replay");
     assert_eq!(
         replay["frames"], response["frames"],
         "rejection remains in the durable downlink"
@@ -1048,7 +900,7 @@ fn recovery_requires_a_fresh_complete_report_for_the_same_occupancy() {
         OccupancyLeaseState,
     };
     let root = test_directory("device-recovery");
-    let (app, node, credential) = direct_enrollment(&root);
+    let (app, node) = direct_enrollment(&root);
     let now = winwincode_domain::Instant("2026-10-03T12:00:00.000Z".into());
     let lease_id = "ocl_AAAAAAAAAAAAAAAAAAAAAAAAAA";
     let user = "usr_AAAAAAAAAAAAAAAAAAAAAAAAAA";
@@ -1108,7 +960,6 @@ fn recovery_requires_a_fresh_complete_report_for_the_same_occupancy() {
     drop(storage);
     direct_exchange(
         &app,
-        Some(&credential),
         &exchange_request(&[hello_frame(&node, INSTANCE, 3)], 0),
     )
     .expect("reconnect");
@@ -1123,7 +974,7 @@ fn recovery_requires_a_fresh_complete_report_for_the_same_occupancy() {
             }),
         );
         value["occurredAt"] = occurred_at.into();
-        direct_exchange(&app, Some(&credential), &exchange_request(&[value], 0)).expect("report");
+        direct_exchange(&app, &exchange_request(&[value], 0)).expect("report");
     };
     let state = || {
         SqliteStorage::open(&root)

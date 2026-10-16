@@ -5,7 +5,6 @@ import { join, resolve } from 'node:path'
 import test from 'node:test'
 
 import {
-  certificate,
   chromeBinary,
   closeServer,
   command,
@@ -25,10 +24,8 @@ test('real browser preserves drafts and gives safe recovery diagnostics across c
   assert.notEqual(chromePath, null, 'Chrome or Chromium is required for the Client reliability test')
   command(root, 'corepack', ['pnpm', '--filter', '@winwincode/client', 'build'])
   const directory = mkdtempSync(join(tmpdir(), 'winwincode-client-reliability-'))
-  const certificateFiles = certificate(root, directory)
   const clientServer = staticClientServer({
     root,
-    certificateFiles,
     fixturePath: 'tests/fixtures/browser-client-feature-routes.mjs',
     configuration: () => ({}),
   })
@@ -65,7 +62,7 @@ test('real browser preserves drafts and gives safe recovery diagnostics across c
     mobile: false,
   }, sessionId)
   await devtools.send('Page.navigate', {
-    url: `https://client.localhost:${String(clientPort)}/#/settings`,
+    url: `http://127.0.0.1:${String(clientPort)}/#/settings`,
   }, sessionId)
   await waitForGlobal(devtools, sessionId, 'runReliabilityScenario')
   const result = await evaluate(devtools, sessionId, 'globalThis.runReliabilityScenario()')

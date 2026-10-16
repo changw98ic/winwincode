@@ -3878,9 +3878,6 @@ fn core_chat_approval_is_recorded_for_the_owner_and_survives_replay() {
 #[test]
 #[allow(clippy::too_many_lines)]
 fn chat_action_receipt_uses_chat_authority_and_rejects_foreign_or_expired_requests() {
-    use winwincode_execution_port::action_enforcement::{
-        ActionEnforcementIssuer, ActionEnforcementSigningKey,
-    };
     let BoundSchedulerFixture {
         mut fixture,
         job,
@@ -3921,17 +3918,14 @@ fn chat_action_receipt_uses_chat_authority_and_rejects_foreign_or_expired_reques
             .status,
         winwincode_storage::LeaseWriteStatus::Accepted
     );
-    let issuer = ActionEnforcementIssuer::new(
-        ActionEnforcementSigningKey::from_bytes([11; 32]).expect("key"),
-    );
+
     let first = winwincode_control_plane::issue_action_enforcement_receipt(
         &mut fixture.storage,
-        &issuer,
         &at(55),
         &request,
     )
-    .expect("Chat tool must receive its own signed action receipt");
-    issuer.verify_signature(&first).expect("valid signature");
+    .expect("Chat tool must receive its own action receipt");
+
     assert_eq!(first.actor.id, UserId(id("usr", 1)));
     assert_eq!(first.scope, fixture.repository_scope);
     assert_eq!(first.lease, request.lease);
@@ -3949,7 +3943,6 @@ fn chat_action_receipt_uses_chat_authority_and_rejects_foreign_or_expired_reques
         assert!(
             winwincode_control_plane::issue_action_enforcement_receipt(
                 &mut fixture.storage,
-                &issuer,
                 &at(56),
                 &changed
             )
@@ -3959,7 +3952,6 @@ fn chat_action_receipt_uses_chat_authority_and_rejects_foreign_or_expired_reques
     assert!(
         winwincode_control_plane::issue_action_enforcement_receipt(
             &mut fixture.storage,
-            &issuer,
             &expired(),
             &request
         )
@@ -3968,7 +3960,6 @@ fn chat_action_receipt_uses_chat_authority_and_rejects_foreign_or_expired_reques
     let mut fixture = fixture.restart();
     let replay = winwincode_control_plane::issue_action_enforcement_receipt(
         &mut fixture.storage,
-        &issuer,
         &at(56),
         &request,
     )
@@ -3993,7 +3984,6 @@ fn chat_action_receipt_uses_chat_authority_and_rejects_foreign_or_expired_reques
     assert!(
         winwincode_control_plane::issue_action_enforcement_receipt(
             &mut fixture.storage,
-            &issuer,
             &at(57),
             &request
         )
@@ -4184,10 +4174,8 @@ fn register_authenticated_terminal_worker(
     request_seed: u64,
     second: u64,
 ) {
-    let identity = WorkerAuthenticationIdentity::TransportPrincipal {
-        issuer: "fixture-authenticated-worker".into(),
-        subject: "accounting-replay-worker".into(),
-        credential_fingerprint: Sha256Digest(format!("sha256:{}", "c".repeat(64))),
+    let identity = WorkerAuthenticationIdentity::LocalEmbedded {
+        control_plane_principal: "accounting-replay-worker".into(),
     };
     let management_scope = WorkerRegistryScope::Repository {
         organization_id: fixture.repository_scope.organization_id.clone(),
@@ -4251,13 +4239,12 @@ fn authenticated_predecessor_accounting_completion_preserves_rev1_cancelled_clea
 
 #[allow(
     clippy::too_many_lines,
-    reason = "one authenticated two-attempt fixture freezes cancellation, fails cleanup, imports a signed predecessor receipt and replays the original raw outcome"
+    reason = "one authenticated two-attempt fixture freezes cancellation, fails cleanup, imports a predecessor receipt and replays the original raw outcome"
 )]
 fn authenticated_predecessor_cancelled_cleanup_replay(control_plane_cancelled: bool) {
     use winwincode_domain::ModelExchangeId;
     use winwincode_execution_port::{
         accounting::{AttemptAccountingStatement, ProviderAccountingReceipt},
-        action_enforcement::ActionEnforcementSigningKey,
         generated::ExecutionOutcomeUsage,
     };
 
@@ -4421,10 +4408,9 @@ fn authenticated_predecessor_cancelled_cleanup_replay(control_plane_cancelled: b
     assert_eq!(frozen_usage.known_tokens, 23);
     assert_eq!(frozen_usage.runtime_millis, 25_000);
 
-    let key = ActionEnforcementSigningKey::from_bytes([9; 32]).unwrap();
     let exchange = ModelExchangeId(id("mdl", 94_109));
     let slot = format!("primary:{}", exchange.0);
-    let mut statement = AttemptAccountingStatement {
+    let statement = AttemptAccountingStatement {
         lease: original.lease.clone(),
         manifest: vec![slot.clone()],
         receipts: vec![ProviderAccountingReceipt {
@@ -4437,12 +4423,11 @@ fn authenticated_predecessor_cancelled_cleanup_replay(control_plane_cancelled: b
             tokens: Some(11),
             cost_microunits: Some(7),
         }],
-        signature: Sha256Digest(String::new()),
     };
-    statement.sign(&key).unwrap();
+
     fixture
         .storage
-        .reconcile_provider_attempt(&statement.verified(&key).unwrap(), &at(31))
+        .reconcile_provider_attempt(&statement, &at(31))
         .unwrap();
     assert!(
         !fixture
@@ -4514,9 +4499,9 @@ fn authenticated_predecessor_cancelled_cleanup_replay(control_plane_cancelled: b
 }
 
 #[test]
-fn authenticated_settled_cleanup_replays_its_frozen_source_after_signed_physical_accounting() {
+fn authenticated_settled_cleanup_replays_its_frozen_source_after_provider_accounting() {
     for complete in [false, true] {
-        settled_cleanup_replay_after_signed_physical_accounting(complete);
+        settled_cleanup_replay_after_provider_accounting(complete);
     }
 }
 
@@ -4542,14 +4527,12 @@ fn settled_physical_statement(
             known_tokens: if complete { 16 } else { 5 },
             cost_microunits: complete.then_some(9),
         }],
-        signature: Sha256Digest(String::new()),
     }
 }
 
-fn settled_cleanup_replay_after_signed_physical_accounting(complete: bool) {
-    use winwincode_execution_port::{
-        action_enforcement::ActionEnforcementSigningKey,
-        generated::{ExecutionOutcomeUsage, ExecutionOutcomeUsageAccountingStatus},
+fn settled_cleanup_replay_after_provider_accounting(complete: bool) {
+    use winwincode_execution_port::generated::{
+        ExecutionOutcomeUsage, ExecutionOutcomeUsageAccountingStatus,
     };
     let seed = 95;
     let mut fixture = Fixture::open(seed);
@@ -4586,12 +4569,12 @@ fn settled_cleanup_replay_after_signed_physical_accounting(complete: bool) {
         .unwrap();
     assert_eq!(original_source.fact.actual_tokens, 5);
     assert_eq!(original_source.fact.actual_cost_microunits, Some(7));
-    let key = ActionEnforcementSigningKey::from_bytes([7; 32]).unwrap();
-    let mut statement = settled_physical_statement(&outcome.lease, seed, complete);
-    statement.sign(&key).unwrap();
+
+    let statement = settled_physical_statement(&outcome.lease, seed, complete);
+
     fixture
         .storage
-        .reconcile_provider_attempt(&statement.verified(&key).unwrap(), &at(21))
+        .reconcile_provider_attempt(&statement, &at(21))
         .unwrap();
     connection
         .execute_batch("DROP TRIGGER fail_settled_cleanup")

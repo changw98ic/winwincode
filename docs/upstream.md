@@ -24,14 +24,16 @@ Codex 补丁顺序以 `third_party/codex.UPSTREAM.json` 的 `patchesApplied` 为
 - 上游归档 SHA-256：`0413a0e7680bcc2b6c6e998a6ad358115707317ef5d0121dcb9275e88c36121a`
 - 许可证：Apache-2.0
 
-`upstream/patches/codex/` 保存 119 个产品补丁。编号覆盖 `0001` 至 `0120`，其中没有 `0004`。`third_party/codex.UPSTREAM.json` 的 `patchesApplied` 也有 119 项。其顺序与 `upstream/sources.lock.json` 中已应用的 Codex 补丁一致。
+`upstream/patches/codex/` 保存 120 个产品补丁。编号覆盖 `0001` 至 `0121`，其中没有 `0004`。`third_party/codex.UPSTREAM.json` 的 `patchesApplied` 也有 120 项。其顺序与 `upstream/sources.lock.json` 中已应用的 Codex 补丁一致。
 
-全部组件共有 121 个补丁。另两个补丁是：
+`0121-tool-review-supervised-process-shutdown.patch` 维护受管执行关闭。它覆盖 Unix pipe、PTY 与 legacy shell 路径的进程组归属和 lifeline guardian。owner 的私有管道写端关闭时，guardian 回收同一受管工具进程组。运行约束与验收边界见 [取消与恢复](invariants.md#取消与恢复)。
+
+全部组件共有 122 个补丁。另两个补丁是：
 
 - `upstream/patches/i18n-embed-fl/0001-stable-specified-argument-order.patch`
 - `upstream/patches/rusqlite/0001-quote-savepoint-identifiers.patch`
 
-当前 121 个登记项的 `planned` 都是 `false`。`upstream/sources.lock.json` 还记录补丁目标和 `patchSha256`。需要非默认路径剥离层数时，条目记录 `stripComponents`。
+当前 122 个登记项的 `planned` 都是 `false`。`upstream/sources.lock.json` 还记录补丁目标和 `patchSha256`。需要非默认路径剥离层数时，条目记录 `stripComponents`。
 
 `crates/kernel` 是第一方代码与 Codex Core 的封装边界。它通过 `codex-core-api` 使用 `CodexThread`、`ThreadManager`、`ConfigBuilder`、`Op` 和协议类型。`crates/helper` 构建 `winwincode-kernel-helper`。该辅助进程承载 Code Mode 主机入口和受控的本地执行能力。
 
@@ -61,7 +63,7 @@ node --test \
 这些测试执行以下检查：
 
 - 比较 `upstream/sources.lock.json` 与 `third_party/codex.UPSTREAM.json` 的上游身份。
-- 比较 119 个 Codex 补丁的顺序。
+- 比较 120 个 Codex 补丁的顺序。
 - 校验已记录的补丁摘要。
 - 对各测试覆盖的原始目标文件先反向还原，再正向重放。
 - 要求重放结果与 `third_party/codex` 中的当前字节一致。

@@ -3,10 +3,10 @@
 import {
   ControlPlaneClientError,
   type ControlPlaneClientDirectory,
-  type ControlPlaneDeviceSummary,
   type ControlPlaneRequestOptions,
 } from './community-control-plane-client.js'
-import { formatInstant } from './format-instant.js'
+import { createClientsViewModel } from './clients-view-model.js'
+import { mountClientsPage } from './clients-page.js'
 import { mountPageHeader } from '@winwincode/browser-ui'
 
 export interface DevicePageOptions {
@@ -55,13 +55,18 @@ export function renderDevicePage(options: DevicePageOptions): DevicePage {
   status.textContent = '正在读取执行设备…'
 
   const body = element(document, 'div', 'wwc-device-body')
+  const clientsRoot = element(document, 'div', 'wwc-device-clients')
+  const clientsModel = createClientsViewModel({ client: options.clientDirectory })
+  const clientsPage = mountClientsPage({ root: clientsRoot, model: clientsModel })
+  clientsPage.setVisible(true)
+  let closed = false
   const retry = element(document, 'button', 'wwc-device-retry')
   retry.type = 'button'
   retry.textContent = '重试'
   retry.hidden = true
   retry.addEventListener('click', () => { void load() })
 
-  layout.append(headerRow, status, retry, body)
+  layout.append(headerRow, clientsRoot, status, retry, body)
   options.root.replaceChildren(layout)
 
   async function load(): Promise<void> {
@@ -69,9 +74,10 @@ export function renderDevicePage(options: DevicePageOptions): DevicePage {
     status.hidden = false
     status.textContent = '正在读取执行设备…'
     try {
-      const clients = await options.clientDirectory.listClients(
-        options.requestOptions?.(),
-      )
+      await clientsModel.refresh()
+      if (closed) return
+      if (clientsModel.state.devicesStatus === 'unavailable') throw new Error('Device list unavailable')
+      const clients = clientsModel.state.devices
       body.replaceChildren()
       if (clients.length === 0) {
         const hint = element(document, 'p', 'wwc-device-empty')
@@ -84,10 +90,9 @@ export function renderDevicePage(options: DevicePageOptions): DevicePage {
         return
       }
       for (const client of clients) {
-        body.append(deviceCard(client))
         const directories = element(document, 'section', 'wwc-device-directories')
         const directoriesHeading = element(document, 'h3', 'wwc-device-subheading')
-        directoriesHeading.textContent = '可访问目录'
+        directoriesHeading.textContent = `${client.displayName} · 可访问目录`
         const directoryList = element(document, 'ul', 'wwc-device-directory-list')
         const repos = await options.clientDirectory.listRepositories(
           { clientId: client.clientId },
@@ -133,25 +138,13 @@ export function renderDevicePage(options: DevicePageOptions): DevicePage {
     }
   }
 
-  function deviceCard(client: ControlPlaneDeviceSummary): HTMLElement {
-    const card = element(document, 'section', 'wwc-device-card')
-    const icon = element(document, 'span', 'wwc-device-card-icon')
-    icon.textContent = '🖥️'
-    const info = element(document, 'div', 'wwc-device-card-info')
-    const name = element(document, 'p', 'wwc-device-card-name')
-    name.textContent = client.displayName
-    const presence = element(document, 'p', 'wwc-device-card-presence')
-    presence.textContent = client.presence === 'online'
-      ? `🟢 已连接 · 最近心跳 ${formatInstant(client.lastHeartbeatAt)}`
-      : client.presence === 'offline' ? '⚪ 离线' : '🔒 已锁定'
-    info.append(name, presence)
-    card.append(icon, info)
-    return card
-  }
-
   void load()
 
   return {
-    close() {},
+    close() {
+      closed = true
+      clientsPage.close()
+      clientsModel.close()
+    },
   }
 }

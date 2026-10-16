@@ -9,14 +9,11 @@ use winwincode_domain::{
     UserActorKind, UserId, WorkRunId, WorkerId, WorkerInstanceId, WorkerSessionId, WorkspaceId,
 };
 use winwincode_execution_port::{
-    action_enforcement::{
-        ActionEnforcementIssuer, ActionEnforcementSigningKey, action_enforcement_facts,
-    },
+    action_enforcement::action_enforcement_facts,
     action_gateway::{
         ActionGatewayRejectionCode, ActiveWorkerAuthority, CodexToolExecutor,
-        DeterministicActionGate, ExecutionEnvelope, ExecutionEnvelopeToken, GateDecision,
-        GateInput, PreActionDecisionRecorder, WorkerActionAuthority, WorkerActionGateway,
-        WorkerActionRequest,
+        DeterministicActionGate, GateDecision, GateInput, PreActionDecisionRecorder,
+        WorkerActionAuthority, WorkerActionGateway, WorkerActionRequest,
     },
     action_normalizer::{
         ActionIntent, ActionObject, ActionOperation, ActionPurpose, ActionRisk, ActionScope,
@@ -107,10 +104,6 @@ fn action() -> WorkerActionRequest {
             lease: lease(),
             worker_session_id: WorkerSessionId(id("wsn", 'A')),
             session_identity: session(),
-            envelope: ExecutionEnvelopeToken {
-                version: 1,
-                digest: Sha256Digest(format!("sha256:{}", "a".repeat(64))),
-            },
         },
         intent: ActionIntent {
             object: ActionObject::ExternalResource,
@@ -139,21 +132,11 @@ fn gateway(executions: &Rc<Cell<u64>>) -> WorkerActionGateway<Policy, Gate, Jour
             worker_session_id: WorkerSessionId(id("wsn", 'A')),
             session_identity: session(),
         },
-        ExecutionEnvelope {
-            token: ExecutionEnvelopeToken {
-                version: 1,
-                digest: Sha256Digest(format!("sha256:{}", "a".repeat(64))),
-            },
-            policy: Policy,
-        },
+        Policy,
         Gate,
         Journal,
         Executor(Rc::clone(executions)),
     )
-}
-
-fn signing_key() -> ActionEnforcementSigningKey {
-    ActionEnforcementSigningKey::from_bytes([17_u8; 32]).expect("signing key")
 }
 
 fn receipt(action: &WorkerActionRequest) -> ActionEnforcementReceiptMessage {
@@ -161,8 +144,8 @@ fn receipt(action: &WorkerActionRequest) -> ActionEnforcementReceiptMessage {
         &normalize_action(&action.intent, &action.request).expect("normalization"),
     )
     .expect("action facts");
-    let issuer = ActionEnforcementIssuer::new(signing_key());
-    let mut receipt = ActionEnforcementReceiptMessage {
+
+    ActionEnforcementReceiptMessage {
         actor: UserActor {
             id: UserId(id("usr", 'A')),
             kind: UserActorKind::User,
@@ -178,7 +161,6 @@ fn receipt(action: &WorkerActionRequest) -> ActionEnforcementReceiptMessage {
         policy_kind: facts.policy_kind,
         policy_mode: None,
         policy_version: None,
-        receipt_signature: Sha256Digest(format!("sha256:{}", "0".repeat(64))),
         request_id: action.invocation_request_id.clone(),
         resource: facts.resource,
         schema_version: SchemaVersion::WinwincodeV1,
@@ -193,9 +175,7 @@ fn receipt(action: &WorkerActionRequest) -> ActionEnforcementReceiptMessage {
         session_identity: action.authority.session_identity.clone(),
         subject_sha256: facts.subject_sha256,
         worker_session_id: action.authority.worker_session_id.clone(),
-    };
-    issuer.sign(&mut receipt).expect("signed receipt");
-    receipt
+    }
 }
 
 #[test]
@@ -208,9 +188,8 @@ fn worker_executes_once_and_restart_replay_never_repeats_the_side_effect() {
     let executions = Rc::new(Cell::new(0));
     let action = action();
     let receipt = receipt(&action);
-    let mut runtime =
-        DurableWorkerActionEnforcement::open(&root, signing_key(), gateway(&executions))
-            .expect("Worker action runtime");
+    let mut runtime = DurableWorkerActionEnforcement::open(&root, gateway(&executions))
+        .expect("Worker action runtime");
     let request = runtime
         .prepare_request(
             ExecutionMessageId(id("xmsg", 'B')),
@@ -226,9 +205,8 @@ fn worker_executes_once_and_restart_replay_never_repeats_the_side_effect() {
     assert_eq!(executions.get(), 1);
     drop(runtime);
 
-    let mut restarted =
-        DurableWorkerActionEnforcement::open(&root, signing_key(), gateway(&executions))
-            .expect("Worker action runtime restart");
+    let mut restarted = DurableWorkerActionEnforcement::open(&root, gateway(&executions))
+        .expect("Worker action runtime restart");
     let replay = restarted
         .execute(&Instant(NOW.to_owned()), &action, &receipt)
         .expect_err("receipt replay must not execute");
@@ -238,14 +216,14 @@ fn worker_executes_once_and_restart_replay_never_repeats_the_side_effect() {
     );
     assert_eq!(executions.get(), 1);
 
-    let mut cross_tenant = receipt;
-    cross_tenant.scope.repository_id = RepositoryId(id("rep", 'B'));
+    let mut changed_receipt = receipt;
+    changed_receipt.scope.repository_id = RepositoryId(id("rep", 'B'));
     let foreign = restarted
-        .execute(&Instant(NOW.to_owned()), &action, &cross_tenant)
-        .expect_err("cross-tenant receipt must not execute");
+        .execute(&Instant(NOW.to_owned()), &action, &changed_receipt)
+        .expect_err("changed receipt must not execute");
     assert_eq!(
         foreign.rejection_code(),
-        Some(ActionGatewayRejectionCode::InvalidActionReceipt)
+        Some(ActionGatewayRejectionCode::ActionReceiptConflict)
     );
     assert_eq!(executions.get(), 1);
     fs::remove_dir_all(root).expect("Worker action directory release");

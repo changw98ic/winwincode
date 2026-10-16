@@ -8,6 +8,9 @@ mod production_code_mode;
 #[path = "support/z7xn_failure_diagnostics.rs"]
 mod z7xn_failure_diagnostics;
 
+#[path = "support/durable_cancel_ack.rs"]
+mod durable_cancel_ack;
+
 #[cfg(unix)]
 #[path = "support/native_mcp_progress.rs"]
 mod native_mcp_progress;
@@ -77,7 +80,6 @@ use winwincode_domain::{
 };
 use winwincode_domain::{RepositoryScope, RepositoryScopeKind, UserActor, UserActorKind};
 use winwincode_execution_port::{
-    action_enforcement::{ActionEnforcementIssuer, ActionEnforcementSigningKey},
     generated::{
         ActionEnforcementDecision, ActionEnforcementReceiptMessage,
         ActionEnforcementReceiptMessageKind, ApprovalActionOperation, ApprovalActionReasonCode,
@@ -242,6 +244,34 @@ struct DirectorySnapshot {
 
 impl DirectorySnapshot {
     fn capture(root: &Path) -> Self {
+        fn is_runtime_sandbox_alias(path: &Path, relative: &Path) -> bool {
+            if !relative.parent().is_some_and(|parent| {
+                parent == Path::new("kernel-home") || parent == Path::new("worker/kernel-home")
+            }) || !path
+                .file_name()
+                .and_then(std::ffi::OsStr::to_str)
+                .is_some_and(|name| name.starts_with(".linux-sandbox-"))
+            {
+                return false;
+            }
+            let entries = fs::read_dir(path)
+                .expect("read runtime sandbox alias directory")
+                .collect::<Result<Vec<_>, _>>()
+                .expect("collect runtime sandbox alias directory");
+            let [alias] = entries.as_slice() else {
+                return false;
+            };
+            alias.file_name() == "codex-linux-sandbox"
+                && alias
+                    .file_type()
+                    .expect("read runtime sandbox alias type")
+                    .is_symlink()
+                && fs::read_link(alias.path()).expect("read runtime sandbox alias target")
+                    == helper_executable()
+                        .canonicalize()
+                        .expect("canonical helper")
+        }
+
         fn visit(
             root: &Path,
             current: &Path,
@@ -263,6 +293,9 @@ impl DirectorySnapshot {
                     .to_path_buf();
                 let file_type = entry.file_type().expect("read snapshot entry type");
                 if file_type.is_dir() {
+                    if is_runtime_sandbox_alias(&path, &relative) {
+                        continue;
+                    }
                     directories.push((
                         relative,
                         entry
@@ -295,7 +328,10 @@ impl DirectorySnapshot {
                         metadata.permissions(),
                     ));
                 } else {
-                    panic!("durable crash snapshot contains a non-file entry");
+                    panic!(
+                        "durable crash snapshot contains a non-file entry: {}",
+                        path.display()
+                    );
                 }
             }
         }
@@ -340,6 +376,51 @@ impl DirectorySnapshot {
             fs::hard_link(root.join(original), root.join(path))
                 .expect("restore durable crash snapshot hard link");
         }
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn crash_snapshot_excludes_only_verified_runtime_sandbox_aliases() {
+    use std::os::unix::fs::symlink;
+
+    for entire_fixture in [false, true] {
+        let root = TestDirectory::new("crash-runtime-sandbox-alias");
+        let home = root.worker().join("kernel-home");
+        fs::create_dir_all(&home).expect("kernel home");
+        let alias_directory = tempfile::Builder::new()
+            .prefix(".linux-sandbox-")
+            .tempdir_in(&home)
+            .expect("private runtime alias directory");
+        let alias = alias_directory.path().join("codex-linux-sandbox");
+        let durable = root.worker().join("durable-receipt");
+        fs::write(&durable, b"retained receipt").expect("durable receipt");
+        let snapshot_root = if entire_fixture {
+            root.0.clone()
+        } else {
+            root.worker()
+        };
+        symlink(&durable, &alias).expect("untrusted alias");
+        assert!(
+            std::panic::catch_unwind(|| DirectorySnapshot::capture(&snapshot_root)).is_err(),
+            "an untrusted alias must not be omitted from a crash snapshot"
+        );
+        fs::remove_file(&alias).expect("remove untrusted alias");
+        symlink(
+            helper_executable()
+                .canonicalize()
+                .expect("canonical helper"),
+            &alias,
+        )
+        .expect("runtime sandbox alias");
+        let snapshot = DirectorySnapshot::capture(&snapshot_root);
+        drop(alias_directory);
+        snapshot.restore(&snapshot_root);
+        assert_eq!(fs::read(&durable).unwrap(), b"retained receipt");
+        assert!(
+            !alias.exists(),
+            "a runtime alias must be rebuilt after restart"
+        );
     }
 }
 
@@ -1288,11 +1369,15 @@ impl winwincode_codex::WorkerExecutionPort for RecordedPort {
 }
 
 fn helper_executable() -> PathBuf {
-    let workspace = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .and_then(Path::parent)
-        .expect("workspace root")
-        .to_path_buf();
+    if let Some(executable) = std::env::var_os("WWC_WORKER_HELPER_EXECUTABLE") {
+        return PathBuf::from(executable);
+    }
+    let workspace =
+        PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").expect("Cargo manifest directory"))
+            .parent()
+            .and_then(Path::parent)
+            .expect("workspace root")
+            .to_path_buf();
     let target = std::env::var_os("CARGO_TARGET_DIR").map_or_else(
         || workspace.join("target"),
         |value| {
@@ -1305,15 +1390,6 @@ fn helper_executable() -> PathBuf {
         },
     );
     target.join("debug/winwincode-kernel-helper")
-}
-
-fn helper_release_manifest() -> winwincode_codex::HelperReleaseManifest {
-    winwincode_codex::HelperReleaseManifest::from_test_helper(&helper_executable())
-        .expect("build test helper release manifest")
-}
-
-fn action_signing_key() -> ActionEnforcementSigningKey {
-    ActionEnforcementSigningKey::from_bytes([31_u8; 32]).expect("action signing key")
 }
 
 fn worker_config() -> winwincode_worker::WorkerConfig {
@@ -1469,20 +1545,16 @@ fn adapter_config_with_modes(
     winwincode_codex::ProductionCodexConfig::try_new(winwincode_codex::ProductionCodexOptions {
         data_directory: root.worker(),
         helper_executable: helper_executable(),
-        helper_release_manifest: helper_release_manifest(),
-        provider: PROVIDER_ID.to_owned(),
-        model: MODEL_ID.to_owned(),
+
+        provider: Some(PROVIDER_ID.to_owned()),
+        model: Some(MODEL_ID.to_owned()),
         gateway_route: ModelGatewayRoute {
             capability: "reasoning".to_owned(),
             route: "embedded-canonical-loopback".to_owned(),
         },
         registered_capabilities: worker_config().capabilities,
         discovered_capabilities: Vec::new(),
-        action_signing_key: action_signing_key(),
-        execution_envelope: winwincode_execution_port::action_gateway::ExecutionEnvelopeToken {
-            version: 1,
-            digest: Sha256Digest(format!("sha256:{}", "a".repeat(64))),
-        },
+
         execution_mode,
         observer_mode,
     })
@@ -3109,11 +3181,8 @@ fn delegated_repair_kernel_recovery_failure_is_retryable_without_an_extra_provid
     });
 }
 
-async fn register(
-    worker: &mut winwincode_worker::WorkerMain<
-        RecordedPort,
-        winwincode_codex::ProductionCodexAdapter,
-    >,
+async fn register<Port: winwincode_codex::WorkerExecutionPort>(
+    worker: &mut winwincode_worker::WorkerMain<Port, winwincode_codex::ProductionCodexAdapter>,
     port: &RecordedPort,
 ) {
     worker
@@ -3297,7 +3366,7 @@ impl<'root> GatewayDriver<'root> {
                 }
                 ExecutionPortMessage::ActionEnforcementRequestMessage(request) => {
                     let decided_at = at("2030-01-01T00:00:02.000Z");
-                    let mut receipt = ActionEnforcementReceiptMessage {
+                    let receipt = ActionEnforcementReceiptMessage {
                         actor: UserActor {
                             id: UserId(id("usr", 9)),
                             kind: UserActorKind::User,
@@ -3313,7 +3382,7 @@ impl<'root> GatewayDriver<'root> {
                         policy_kind: request.policy_kind.clone(),
                         policy_mode: None,
                         policy_version: None,
-                        receipt_signature: digest('0'),
+
                         request_id: request.request_id.clone(),
                         resource: request.resource.clone(),
                         schema_version: SchemaVersion::WinwincodeV1,
@@ -3323,9 +3392,6 @@ impl<'root> GatewayDriver<'root> {
                         subject_sha256: request.subject_sha256.clone(),
                         worker_session_id: request.worker_session_id.clone(),
                     };
-                    ActionEnforcementIssuer::new(action_signing_key())
-                        .sign(&mut receipt)
-                        .expect("sign loopback action permit");
                     action_responses.push(ExecutionPortMessage::ActionEnforcementReceiptMessage(
                         receipt,
                     ));
@@ -3965,7 +4031,7 @@ async fn run_verification_work_run(root: &TestDirectory, role: &str, command: &s
         "verification action request was not delivered",
     )
     .await;
-    let mut receipt = ActionEnforcementReceiptMessage {
+    let receipt = ActionEnforcementReceiptMessage {
         actor: UserActor {
             id: UserId(id("usr", 9)),
             kind: UserActorKind::User,
@@ -3981,7 +4047,7 @@ async fn run_verification_work_run(root: &TestDirectory, role: &str, command: &s
         policy_kind: action.policy_kind,
         policy_mode: None,
         policy_version: None,
-        receipt_signature: digest('0'),
+
         request_id: action.request_id,
         resource: action.resource,
         schema_version: SchemaVersion::WinwincodeV1,
@@ -3991,9 +4057,6 @@ async fn run_verification_work_run(root: &TestDirectory, role: &str, command: &s
         subject_sha256: action.subject_sha256,
         worker_session_id: action.worker_session_id,
     };
-    ActionEnforcementIssuer::new(action_signing_key())
-        .sign(&mut receipt)
-        .expect("sign verification action permit");
     worker
         .accept_control(
             &ExecutionPortMessage::ActionEnforcementReceiptMessage(receipt),
@@ -4634,21 +4697,6 @@ fn production_worker_kernel_gateway_loopback_and_restart_replay_are_exact() {
             } else {
                 "production-restart"
             });
-            let helper = helper_executable();
-            let output = Command::new(&helper)
-                .arg("--winwincode-helper-handshake")
-                .output()
-                .expect("execute project-owned winwincode-kernel-helper");
-            assert!(output.status.success());
-            assert!(output.stderr.is_empty());
-            assert_eq!(
-                String::from_utf8(output.stdout).expect("helper handshake is UTF-8"),
-                format!(
-                    "{{\"protocol\":\"winwincode-kernel-helper\",\"version\":1,\"packageVersion\":\"{}\"}}\n",
-                    env!("CARGO_PKG_VERSION")
-                )
-            );
-
             let dispatch = dispatch(&root);
             let first_port = RecordedPort::default();
             let adapter = winwincode_codex::ProductionCodexAdapter::open(adapter_config(&root))
@@ -6867,7 +6915,7 @@ fn shell_approval_and_action_receipt_body(renew: bool) {
             "typed action request was not delivered after approval",
         )
         .await;
-        let mut receipt = ActionEnforcementReceiptMessage {
+        let receipt = ActionEnforcementReceiptMessage {
             actor: UserActor {
                 id: UserId(id("usr", 9)),
                 kind: UserActorKind::User,
@@ -6883,7 +6931,7 @@ fn shell_approval_and_action_receipt_body(renew: bool) {
             policy_kind: action.policy_kind,
             policy_mode: None,
             policy_version: None,
-            receipt_signature: digest('0'),
+
             request_id: action.request_id,
             resource: action.resource,
             schema_version: SchemaVersion::WinwincodeV1,
@@ -6899,9 +6947,6 @@ fn shell_approval_and_action_receipt_body(renew: bool) {
             subject_sha256: action.subject_sha256,
             worker_session_id: action.worker_session_id,
         };
-        ActionEnforcementIssuer::new(action_signing_key())
-            .sign(&mut receipt)
-            .expect("sign exact action permit");
         worker
             .accept_control(
                 &ExecutionPortMessage::ActionEnforcementReceiptMessage(receipt),

@@ -11,13 +11,12 @@ use winwincode_domain::{
     WorkerId, WorkerInstanceId, WorkerSessionId, WorkspaceId,
 };
 use winwincode_execution_port::action_enforcement::{
-    ActionEnforcementIssuer, ActionEnforcementSigningKey, ActionReceiptClaim,
-    ActionReceiptUseError, ActionReceiptUseStore, action_enforcement_facts,
+    ActionReceiptClaim, ActionReceiptUseError, ActionReceiptUseStore, action_enforcement_facts,
 };
 use winwincode_execution_port::action_gateway::{
     ActionGatewayError, ActiveWorkerAuthority, CodexToolExecutor, DeterministicActionGate,
-    ExecutionEnvelope, ExecutionEnvelopeToken, GateDecision, GateInput, PreActionDecisionRecorder,
-    WorkerActionAuthority, WorkerActionGateway, WorkerActionRequest,
+    GateDecision, GateInput, PreActionDecisionRecorder, WorkerActionAuthority, WorkerActionGateway,
+    WorkerActionRequest,
 };
 use winwincode_execution_port::action_normalizer::{
     ActionIntent, ActionObject, ActionOperation, ActionPurpose, ActionRisk, ActionScope,
@@ -122,13 +121,6 @@ fn session_identity(suffix: char) -> SessionIdentity {
     }
 }
 
-fn envelope(version: u64, digit: char) -> ExecutionEnvelopeToken {
-    ExecutionEnvelopeToken {
-        version,
-        digest: Sha256Digest(format!("sha256:{}", digit.to_string().repeat(64))),
-    }
-}
-
 fn registered(features: Vec<WorkerCapabilityFeature>) -> WorkerCapabilitySet {
     WorkerCapabilitySet {
         capability_digest: Sha256Digest(format!("sha256:{}", "a".repeat(64))),
@@ -157,7 +149,7 @@ fn catalog_with(descriptor: CapabilityDescriptor) -> WorkerCapabilityCatalog {
     .unwrap()
 }
 
-fn mcp_action(envelope_token: ExecutionEnvelopeToken) -> WorkerActionRequest {
+fn mcp_action() -> WorkerActionRequest {
     let request = ToolRequest::Mcp(McpRequest {
         server: "Fixture.Server".to_owned(),
         tool: "Read_Record".to_owned(),
@@ -169,7 +161,6 @@ fn mcp_action(envelope_token: ExecutionEnvelopeToken) -> WorkerActionRequest {
             lease: lease(),
             worker_session_id: WorkerSessionId(id("wsn", 'A')),
             session_identity: session_identity('A'),
-            envelope: envelope_token,
         },
         intent: ActionIntent {
             object: ActionObject::ExternalResource,
@@ -188,14 +179,13 @@ fn mcp_action(envelope_token: ExecutionEnvelopeToken) -> WorkerActionRequest {
     }
 }
 
-fn network_action(envelope_token: ExecutionEnvelopeToken) -> WorkerActionRequest {
+fn network_action() -> WorkerActionRequest {
     WorkerActionRequest {
         invocation_request_id: RequestId(id("req", 'R')),
         authority: WorkerActionAuthority {
             lease: lease(),
             worker_session_id: WorkerSessionId(id("wsn", 'A')),
             session_identity: session_identity('A'),
-            envelope: envelope_token,
         },
         intent: ActionIntent {
             object: ActionObject::ExternalResource,
@@ -232,10 +222,7 @@ fn adapter(
     };
     let gateway = WorkerActionGateway::new(
         active,
-        ExecutionEnvelope {
-            token: envelope(1, 'b'),
-            policy: Policy,
-        },
+        Policy,
         RecordingGate {
             events: Rc::clone(events),
             decision,
@@ -250,16 +237,10 @@ fn adapter(
     WorkerCapabilityAdapter::new(catalog, grants, unmanaged_policy, gateway)
 }
 
-fn issuer() -> ActionEnforcementIssuer {
-    ActionEnforcementIssuer::new(
-        ActionEnforcementSigningKey::from_bytes([9_u8; 32]).expect("signing key"),
-    )
-}
-
 fn enforcement_receipt(action: &WorkerActionRequest) -> ActionEnforcementReceiptMessage {
     let normalization = normalize_action(&action.intent, &action.request).expect("normalization");
     let facts = action_enforcement_facts(&normalization).expect("action facts");
-    let mut receipt = ActionEnforcementReceiptMessage {
+    ActionEnforcementReceiptMessage {
         actor: UserActor {
             id: UserId(id("usr", 'A')),
             kind: UserActorKind::User,
@@ -275,7 +256,6 @@ fn enforcement_receipt(action: &WorkerActionRequest) -> ActionEnforcementReceipt
         policy_kind: facts.policy_kind,
         policy_mode: None,
         policy_version: None,
-        receipt_signature: Sha256Digest(format!("sha256:{}", "0".repeat(64))),
         request_id: action.invocation_request_id.clone(),
         resource: facts.resource,
         schema_version: SchemaVersion::WinwincodeV1,
@@ -290,9 +270,7 @@ fn enforcement_receipt(action: &WorkerActionRequest) -> ActionEnforcementReceipt
         session_identity: action.authority.session_identity.clone(),
         subject_sha256: facts.subject_sha256,
         worker_session_id: action.authority.worker_session_id.clone(),
-    };
-    issuer().sign(&mut receipt).expect("sign receipt");
-    receipt
+    }
 }
 
 struct FreshReceiptStore;
@@ -323,12 +301,7 @@ fn invoke_action(
         action,
         enforcement_receipt: &receipt,
     };
-    adapter.invoke(
-        now,
-        invocation,
-        &issuer().verifier(),
-        &mut FreshReceiptStore,
-    )
+    adapter.invoke(now, invocation, &mut FreshReceiptStore)
 }
 
 fn rejection_code(
@@ -428,11 +401,7 @@ fn authorized_mcp_invocation_uses_gate_trace_and_existing_codex_executor_in_orde
         CapabilityOrigin::MappedPluginManifest,
     ));
     let grant = catalog
-        .authorize(
-            CAPABILITY_ID,
-            WorkerSessionId(id("wsn", 'A')),
-            envelope(1, 'b'),
-        )
+        .authorize(CAPABILITY_ID, WorkerSessionId(id("wsn", 'A')))
         .unwrap();
     let events = Rc::new(RefCell::new(Vec::new()));
     let mut adapter = adapter(
@@ -442,7 +411,7 @@ fn authorized_mcp_invocation_uses_gate_trace_and_existing_codex_executor_in_orde
         GateDecision::Allow,
         &events,
     );
-    let action = mcp_action(envelope(1, 'b'));
+    let action = mcp_action();
 
     let result = invoke_action(
         &mut adapter,
@@ -464,18 +433,14 @@ fn authorized_mcp_invocation_uses_gate_trace_and_existing_codex_executor_in_orde
 }
 
 #[test]
-fn cross_session_and_stale_envelope_grants_fail_before_gate_or_executor() {
+fn cross_session_grants_fail_before_gate_or_executor() {
     let catalog = catalog_with(descriptor(
         "1.0.0",
         CapabilityHealth::Healthy,
         CapabilityOrigin::CodexCoreMcp,
     ));
     let other_session_grant = catalog
-        .authorize(
-            CAPABILITY_ID,
-            WorkerSessionId(id("wsn", 'B')),
-            envelope(1, 'b'),
-        )
+        .authorize(CAPABILITY_ID, WorkerSessionId(id("wsn", 'B')))
         .unwrap();
     let events = Rc::new(RefCell::new(Vec::new()));
     let mut adapter = adapter(
@@ -485,7 +450,7 @@ fn cross_session_and_stale_envelope_grants_fail_before_gate_or_executor() {
         GateDecision::Allow,
         &events,
     );
-    let action = mcp_action(envelope(1, 'b'));
+    let action = mcp_action();
     let error = invoke_action(
         &mut adapter,
         &Instant(NOW.to_owned()),
@@ -499,28 +464,6 @@ fn cross_session_and_stale_envelope_grants_fail_before_gate_or_executor() {
         CapabilityRejectionCode::StaleWorkerSession
     );
     assert!(events.borrow().is_empty());
-
-    let stale_envelope_grant = catalog
-        .authorize(
-            CAPABILITY_ID,
-            WorkerSessionId(id("wsn", 'A')),
-            envelope(2, 'c'),
-        )
-        .unwrap();
-    adapter.replace_grants(vec![stale_envelope_grant]);
-    let error = invoke_action(
-        &mut adapter,
-        &Instant(NOW.to_owned()),
-        &action,
-        CAPABILITY_ID,
-        "1.0.0",
-    )
-    .unwrap_err();
-    assert_eq!(
-        rejection_code(&error),
-        CapabilityRejectionCode::StaleExecutionEnvelope
-    );
-    assert!(events.borrow().is_empty());
 }
 
 #[test]
@@ -531,11 +474,7 @@ fn catalog_replacement_revokes_old_grants_until_explicit_reauthorization() {
         CapabilityOrigin::CodexCoreMcp,
     ));
     let old_grant = original
-        .authorize(
-            CAPABILITY_ID,
-            WorkerSessionId(id("wsn", 'A')),
-            envelope(1, 'b'),
-        )
+        .authorize(CAPABILITY_ID, WorkerSessionId(id("wsn", 'A')))
         .unwrap();
     let events = Rc::new(RefCell::new(Vec::new()));
     let mut adapter = adapter(
@@ -551,7 +490,7 @@ fn catalog_replacement_revokes_old_grants_until_explicit_reauthorization() {
         CapabilityOrigin::CodexCoreMcp,
     ));
     adapter.replace_catalog(replacement);
-    let action = mcp_action(envelope(1, 'b'));
+    let action = mcp_action();
 
     let error = invoke_action(
         &mut adapter,
@@ -577,13 +516,9 @@ fn unmanaged_and_degraded_capability_warns_or_is_rejected_by_policy() {
         CapabilityOrigin::Unmanaged,
     ));
     let grant = catalog
-        .authorize(
-            CAPABILITY_ID,
-            WorkerSessionId(id("wsn", 'A')),
-            envelope(1, 'b'),
-        )
+        .authorize(CAPABILITY_ID, WorkerSessionId(id("wsn", 'A')))
         .unwrap();
-    let action = mcp_action(envelope(1, 'b'));
+    let action = mcp_action();
 
     let warn_events = Rc::new(RefCell::new(Vec::new()));
     let mut warning_adapter = adapter(
@@ -641,11 +576,7 @@ fn unavailable_wrong_family_target_or_version_never_reaches_gateway() {
         CapabilityOrigin::CodexCoreMcp,
     ));
     let grant = catalog
-        .authorize(
-            CAPABILITY_ID,
-            WorkerSessionId(id("wsn", 'A')),
-            envelope(1, 'b'),
-        )
+        .authorize(CAPABILITY_ID, WorkerSessionId(id("wsn", 'A')))
         .unwrap();
     let events = Rc::new(RefCell::new(Vec::new()));
     let mut adapter = adapter(
@@ -655,7 +586,7 @@ fn unavailable_wrong_family_target_or_version_never_reaches_gateway() {
         GateDecision::Allow,
         &events,
     );
-    let action = mcp_action(envelope(1, 'b'));
+    let action = mcp_action();
 
     let unavailable = invoke_action(
         &mut adapter,
@@ -696,7 +627,7 @@ fn unavailable_wrong_family_target_or_version_never_reaches_gateway() {
         CapabilityRejectionCode::CapabilityTargetMismatch
     );
 
-    let network = network_action(envelope(1, 'b'));
+    let network = network_action();
     let error = invoke_action(
         &mut adapter,
         &Instant(NOW.to_owned()),
@@ -720,11 +651,7 @@ fn gate_denial_is_traced_and_never_reaches_codex_executor() {
         CapabilityOrigin::CodexCoreMcp,
     ));
     let grant = catalog
-        .authorize(
-            CAPABILITY_ID,
-            WorkerSessionId(id("wsn", 'A')),
-            envelope(1, 'b'),
-        )
+        .authorize(CAPABILITY_ID, WorkerSessionId(id("wsn", 'A')))
         .unwrap();
     let events = Rc::new(RefCell::new(Vec::new()));
     let mut adapter = adapter(
@@ -736,7 +663,7 @@ fn gate_denial_is_traced_and_never_reaches_codex_executor() {
         },
         &events,
     );
-    let action = mcp_action(envelope(1, 'b'));
+    let action = mcp_action();
 
     let error = invoke_action(
         &mut adapter,

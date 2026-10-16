@@ -2,8 +2,6 @@ import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
 import { randomBytes } from 'node:crypto'
 import {
-  chmodSync,
-  copyFileSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
@@ -20,11 +18,9 @@ import {
   prepareControlledRepository,
   serverTargetDirectory,
   verifyApiProductionSourceSeal,
-  writeHelperReleaseManifest,
 } from '../scripts/run-api-production-vertical.mjs'
 
 import {
-  certificate,
   chromeBinary,
   closeServer,
   command,
@@ -44,8 +40,8 @@ import { boundedRemoteObjectText } from './fixtures/bounded-browser-diagnostics.
 const root = resolve(import.meta.dirname, '..')
 const artifactDirectory = resolve(root, 'test-results/browser-chat-production')
 const expectedBrowserRule = 'Chrome DevTools Protocol over a real headless Chrome or Chromium process'
-const expectedClientRule = 'apps/client production-built modules and production CSS served from a standalone HTTPS origin with one browser-gate entry module'
-const expectedServerRule = 'winwincode-server production binary served from a separate HTTPS origin'
+const expectedClientRule = 'apps/client production-built modules and production CSS served from a standalone HTTP origin with one browser-gate entry module'
+const expectedServerRule = 'winwincode-server production binary served from a separate HTTP origin'
 const expectedAssertions = [
   'the default Client surface is Chat and mounts the canonical Chat page',
   'Chat creates one ProductSession and refreshes from its real Control Plane event stream',
@@ -255,7 +251,7 @@ function canonicalTrace({
   const network = [...new Set(requests.map(request => (
     `${request.method} ${normalizedUrl(request.url, clientOrigin, controlUrl)}`
   )))].sort()
-  const controlSocketUrl = controlUrl.replace(/^https:/u, 'wss:')
+  const controlSocketUrl = controlUrl.replace(/^http/u, 'ws')
   return {
     schemaVersion: rules.schemaVersion,
     flow: {
@@ -290,25 +286,13 @@ test('real browser runs default Chat through the production Client and Server', 
   assert.notEqual(chromePath, null, 'Chrome or Chromium is required for the real-browser product gate')
   if (process.env.WWC_BROWSER_SKIP_BUILD !== '1') {
     command(root, 'corepack', ['pnpm', '--filter', '@winwincode/client', 'build'])
-    command(root, 'cargo', [
-      'build', '-p', 'winwincode-server', '--bin', 'winwincode-server', '--locked', '--offline',
-    ])
-    command(root, 'cargo', [
-      'build', '--release', '-p', 'winwincode-kernel-helper', '--locked', '--offline',
-    ])
+    command(root, process.execPath, ['scripts/build-community.mjs'])
   }
   const targetDirectory = serverTargetDirectory(root)
   const serverBinary = resolve(targetDirectory, 'debug/winwincode-server')
   const helperExecutable = resolve(targetDirectory, 'debug/winwincode-kernel-helper')
-  const releaseHelper = resolve(targetDirectory, 'release/winwincode-kernel-helper')
-  if (process.env.WWC_BROWSER_SKIP_BUILD !== '1') {
-    assert.equal(existsSync(releaseHelper), true, `release helper is missing: ${releaseHelper}`)
-    copyFileSync(releaseHelper, helperExecutable)
-    chmodSync(helperExecutable, 0o755)
-  }
   assert.equal(existsSync(serverBinary), true, `Server binary is missing: ${serverBinary}`)
   assert.equal(existsSync(helperExecutable), true, `kernel helper is missing: ${helperExecutable}`)
-  const helperReleaseManifest = writeHelperReleaseManifest(root, helperExecutable)
   if (process.env.WWC_BROWSER_SKIP_BUILD === '1') {
     verifyApiProductionSourceSeal({
       root,
@@ -319,14 +303,11 @@ test('real browser runs default Chat through the production Client and Server', 
   const directory = mkdtempSync(join(tmpdir(), 'winwincode-browser-product-'))
   rmSync(artifactDirectory, { recursive: true, force: true })
   mkdirSync(artifactDirectory, { recursive: true })
-  const certificateFiles = certificate(root, directory)
   const proof = randomBytes(32).toString('base64url')
-  const actionSigningKeyHex = randomBytes(32).toString('hex')
   const controlledRepository = prepareControlledRepository({ fixtureDirectory: directory })
   let controlUrl = ''
   let clientServer = staticClientServer({
     root,
-    certificateFiles,
     fixturePath: 'tests/fixtures/browser-chat-client.mjs',
     configuration: () => ({
       forbiddenRequestPathPatterns: rules.forbiddenRequestPathPatterns,
@@ -335,7 +316,7 @@ test('real browser runs default Chat through the production Client and Server', 
     }),
   })
   const clientPort = await listen(clientServer)
-  const clientOrigin = `https://client.localhost:${String(clientPort)}`
+  const clientOrigin = `http://127.0.0.1:${String(clientPort)}`
   const controlPort = await freePort()
   const serverErrors = []
   let standalone = null
@@ -355,19 +336,14 @@ test('real browser runs default Chat through the production Client and Server', 
   })
   ;({ child: standalone, controlUrl } = startStandaloneServer({
     root,
-    certificateFiles,
     clientOrigin,
     controlPort,
     directory,
     proof,
     errors: serverErrors,
-    actionSigningKeyHex,
     checkoutRevision: controlledRepository.revision,
-    helperExecutable,
-    helperReleaseManifest,
     repositoryRoot: controlledRepository.repository,
     serverBinary,
-    sourceRoot: controlledRepository.sourceRoot,
   }))
   await waitForServer(controlUrl, standalone, serverErrors)
   const launched = await DevTools.launch({
@@ -444,7 +420,7 @@ test('real browser runs default Chat through the production Client and Server', 
     webSocketLeakDetected ||= event.url.includes(proof)
     forbiddenNetworkRequestDetected ||= forbiddenRequestUrl(event.url)
     unexpectedWebSocketOriginDetected ||= !event.url.startsWith(
-      controlUrl.replace(/^https:/u, 'wss:'),
+      controlUrl.replace(/^http/u, 'ws'),
     )
     webSockets.push(event.url)
   })
@@ -514,7 +490,6 @@ test('real browser runs default Chat through the production Client and Server', 
         JSON.stringify({ eventHub: eventHubDiagnostic(directory) }),
       ].join('\n')
         .replaceAll(proof, '[redacted]')
-        .replaceAll(actionSigningKeyHex, '[redacted]')
         .trim()
         .slice(-8_000)
       if (diagnostics.length > 0 && error instanceof Error) {
@@ -589,10 +564,8 @@ test('real browser runs default Chat through the production Client and Server', 
   const browserLeakScan = await proofLeakScan()
   await drainRemoteDiagnostics()
   assert.equal(Object.values(browserLeakScan).some(value => value.includes(proof)), false)
-  for (const marker of [proof, actionSigningKeyHex]) {
-    assert.equal(serverErrors.join('').includes(marker), false)
-    assert.equal(directoryContainsMarker(resolve(directory, 'server-data'), marker), false)
-  }
+  assert.equal(serverErrors.join('').includes(proof), false)
+  assert.equal(directoryContainsMarker(resolve(directory, 'server-data'), proof), false)
   assert.equal(browserDiagnosticLeakDetected, false)
   assert.equal(uncaughtExceptionCount, 0, diagnosticText(uncaughtExceptions.values()))
   assert.equal(skippedRemoteDiagnosticReads, 0, 'browser diagnostic inspection fell behind')
@@ -629,7 +602,7 @@ test('real browser runs default Chat through the production Client and Server', 
   assert.equal(forbiddenNetworkRequestDetected, false)
   assert.equal(resourceUrls.some(forbiddenRequestUrl), false)
   assert.equal(unexpectedRequestOriginDetected, false)
-  const controlSocketUrl = controlUrl.replace(/^https:/u, 'wss:')
+  const controlSocketUrl = controlUrl.replace(/^http/u, 'ws')
   assert.ok(webSockets.length > 0, 'the real Client did not open its Control Plane WebSocket')
   assert.equal(unexpectedWebSocketOriginDetected, false)
   assert.equal(webSockets.every(url => url.startsWith(controlSocketUrl)), true)

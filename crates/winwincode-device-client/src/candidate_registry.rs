@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
+use std::collections::HashSet;
 use std::fmt;
 use std::path::Path;
 use std::process::Command;
@@ -83,6 +84,7 @@ impl From<DeviceStoreError> for CandidateRegistryError {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CandidateRetention {
+    pub base_commit: String,
     pub candidate_commit: String,
     pub repository_binding_id: String,
     pub worker_session_id: String,
@@ -92,6 +94,7 @@ pub struct CandidateRetention {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CandidateLocalRefRecord {
+    pub base_commit: String,
     pub candidate_id: String,
     pub worker_session_id: String,
     pub repository_binding_id: String,
@@ -149,8 +152,8 @@ pub fn record_candidate_retention(
         .execute(
             "INSERT INTO candidate_local_refs \
              (candidate_id, worker_session_id, repository_binding_id, local_git_ref, \
-              local_state, created_at, candidate_ref, candidate_commit, retained_at) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+              local_state, created_at, candidate_ref, candidate_commit, retained_at, base_commit) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
             params![
                 candidate_id,
                 retention.worker_session_id,
@@ -161,6 +164,7 @@ pub fn record_candidate_retention(
                 retention.local_git_ref,
                 retention.candidate_commit,
                 retention.retained_at,
+                retention.base_commit,
             ],
         )
         .map_err(crate::store::sql_error)?;
@@ -184,7 +188,7 @@ pub fn candidate_local_ref(
     connection
         .query_row(
             "SELECT candidate_id, worker_session_id, repository_binding_id, local_git_ref, \
-             local_state, created_at, candidate_ref, candidate_commit, retained_at \
+             local_state, created_at, candidate_ref, candidate_commit, retained_at, base_commit \
              FROM candidate_local_refs WHERE candidate_id = ?1",
             params![candidate_id],
             row_to_candidate_record,
@@ -201,7 +205,7 @@ pub fn retained_candidates(
         .connection()?
         .prepare(
             "SELECT candidate_id, worker_session_id, repository_binding_id, local_git_ref, \
-             local_state, created_at, candidate_ref, candidate_commit, retained_at \
+             local_state, created_at, candidate_ref, candidate_commit, retained_at, base_commit \
              FROM candidate_local_refs WHERE local_state = 'retained' \
              ORDER BY candidate_id",
         )
@@ -280,6 +284,7 @@ pub(crate) fn retain_worker_candidates(
         retain_candidate(
             daemon,
             &CandidateRetention {
+                base_commit: original_candidate_base(&binding, &git)?,
                 candidate_commit: commit.to_owned(),
                 repository_binding_id: worker.repository_binding_id.clone(),
                 worker_session_id: worker.worker_session_id.clone(),
@@ -289,6 +294,167 @@ pub(crate) fn retain_worker_candidates(
         )?;
     }
     Ok(())
+}
+
+fn original_candidate_base(
+    binding: &serde_json::Value,
+    git: &impl Fn(&[&str]) -> Result<Vec<u8>, CandidateRegistryError>,
+) -> Result<String, CandidateRegistryError> {
+    if binding["schemaVersion"].as_u64() != Some(1) {
+        return Err(CandidateRegistryError::invalid(
+            "the frozen candidate has no recognized source binding",
+        ));
+    }
+    let repository = binding["repositoryId"].as_str().ok_or_else(|| {
+        CandidateRegistryError::invalid("the frozen candidate has no repository identity")
+    })?;
+    if binding["originProvenance"]["workerId"]
+        .as_str()
+        .is_none_or(str::is_empty)
+        || binding["originProvenance"]["workerInstanceId"]
+            .as_str()
+            .is_none_or(str::is_empty)
+    {
+        return Err(CandidateRegistryError::invalid(
+            "the frozen candidate has no origin provenance",
+        ));
+    }
+    let mut current = binding.clone();
+    let mut visited = HashSet::new();
+    loop {
+        let source = current["sourceCommitId"].as_str().ok_or_else(|| {
+            CandidateRegistryError::invalid("the frozen candidate has no persisted source commit")
+        })?;
+        validate_commit_sha(source, "candidate source commit")?;
+        if !visited.insert(source.to_owned()) {
+            return Err(CandidateRegistryError::invalid(
+                "the candidate source binding chain contains a cycle",
+            ));
+        }
+        let message = git(&["show", "-s", "--format=%B", source])?;
+        let previous = serde_json::from_slice::<serde_json::Value>(&message).ok();
+        let source_ref = format!("{CANDIDATE_REF_PREFIX}{source}");
+        let retained_ref = git(&["for-each-ref", "--format=%(objectname)", &source_ref])?;
+        let candidate_metadata = previous.as_ref().is_some_and(|previous| {
+            previous.get("originProvenance").is_some() || previous.get("sourceCommitId").is_some()
+        });
+        if retained_ref.is_empty() && !candidate_metadata {
+            return Ok(source.into());
+        }
+        let previous = previous.ok_or_else(|| {
+            CandidateRegistryError::invalid(
+                "a retained candidate source has corrupt binding metadata",
+            )
+        })?;
+        if previous["schemaVersion"].as_u64() != Some(1)
+            || previous["repositoryId"].as_str() != Some(repository)
+            || previous["originProvenance"]["workerId"]
+                .as_str()
+                .is_none_or(str::is_empty)
+            || previous["originProvenance"]["workerInstanceId"]
+                .as_str()
+                .is_none_or(str::is_empty)
+            || previous["sourceCommitId"].as_str().is_none()
+        {
+            return Err(CandidateRegistryError::invalid(
+                "the candidate source binding metadata is invalid",
+            ));
+        }
+        current = previous;
+    }
+}
+
+#[cfg(test)]
+mod application_base_tests {
+    use super::*;
+    use std::fs;
+
+    #[test]
+    fn real_git_two_round_rework_preserves_the_persisted_original_base() {
+        let root = std::env::temp_dir().join(format!(
+            "wwc-candidate-source-{}-{}",
+            std::process::id(),
+            time::OffsetDateTime::now_utc().unix_timestamp_nanos()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let git = |args: &[&str]| -> Result<Vec<u8>, CandidateRegistryError> {
+            let output = Command::new("git")
+                .arg("-C")
+                .arg(&root)
+                .args([
+                    "-c",
+                    "user.name=Source fixture",
+                    "-c",
+                    "user.email=source@example.test",
+                ])
+                .args(args)
+                .output()
+                .unwrap();
+            if !output.status.success() {
+                return Err(CandidateRegistryError::store(String::from_utf8_lossy(
+                    &output.stderr,
+                )));
+            }
+            Ok(output.stdout)
+        };
+        git(&["init", "-q", "--initial-branch=main"]).unwrap();
+        fs::write(root.join("source.txt"), "source\n").unwrap();
+        git(&["add", "-A"]).unwrap();
+        git(&["commit", "-q", "-m", "source fixture"]).unwrap();
+        let base = String::from_utf8(git(&["rev-parse", "HEAD"]).unwrap())
+            .unwrap()
+            .trim()
+            .to_owned();
+        let mut source = base.clone();
+        for round in 0..3 {
+            let binding = serde_json::json!({"schemaVersion":1, "repositoryId":"repo_fixture",
+                "sourceCommitId":source, "originProvenance":{"workerId":"worker_fixture", "workerInstanceId":format!("instance_{round}")}});
+            fs::write(root.join("candidate.txt"), format!("round {round}\n")).unwrap();
+            git(&["add", "-A"]).unwrap();
+            git(&["commit", "-q", "-m", &binding.to_string()]).unwrap();
+            source = String::from_utf8(git(&["rev-parse", "HEAD"]).unwrap())
+                .unwrap()
+                .trim()
+                .to_owned();
+            git(&[
+                "update-ref",
+                &format!("{CANDIDATE_REF_PREFIX}{source}"),
+                &source,
+            ])
+            .unwrap();
+            assert_eq!(original_candidate_base(&binding, &git).unwrap(), base);
+        }
+        git(&["commit", "--allow-empty", "-q", "-m", "{}"]).unwrap();
+        let corrupted = String::from_utf8(git(&["rev-parse", "HEAD"]).unwrap())
+            .unwrap()
+            .trim()
+            .to_owned();
+        git(&[
+            "update-ref",
+            &format!("{CANDIDATE_REF_PREFIX}{corrupted}"),
+            &corrupted,
+        ])
+        .unwrap();
+        let binding = serde_json::json!({"schemaVersion":1,"repositoryId":"repo_fixture", "sourceCommitId":corrupted,
+            "originProvenance":{"workerId":"worker_fixture","workerInstanceId":"instance_fixture"}});
+        assert!(original_candidate_base(&binding, &git).is_err());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn cyclic_candidate_source_metadata_is_refused() {
+        let binding = serde_json::json!({"schemaVersion":1,"repositoryId":"repo_fixture", "sourceCommitId":"a".repeat(40),
+            "originProvenance":{"workerId":"worker_fixture","workerInstanceId":"instance_fixture"}});
+        let error = original_candidate_base(&binding, &|args| {
+            Ok(if args[0] == "show" {
+                serde_json::to_vec(&binding).unwrap()
+            } else {
+                b"retained\n".to_vec()
+            })
+        })
+        .unwrap_err();
+        assert!(error.message().contains("cycle"));
+    }
 }
 
 fn deterministic_lcr_id(candidate_id: &str) -> String {
@@ -326,6 +492,7 @@ pub fn enqueue_candidate_retained(
         candidate_ref: record.candidate_ref.clone(),
         repository_binding_id: record.repository_binding_id.clone(),
         candidate_commit: record.candidate_commit.clone(),
+        base_commit: record.base_commit.clone(),
         local_ref_name: record.local_git_ref.clone(),
         state: record.local_state,
         created_at: record.retained_at.clone(),
@@ -509,6 +676,7 @@ fn read_git_ref(
 
 fn validate_retention(retention: &CandidateRetention) -> Result<(), CandidateRegistryError> {
     validate_commit_sha(&retention.candidate_commit, "candidate commit")?;
+    validate_commit_sha(&retention.base_commit, "candidate base commit")?;
     require_non_empty(
         &retention.repository_binding_id,
         "repository binding id",
@@ -536,6 +704,7 @@ fn validate_record(record: &CandidateLocalRefRecord) -> Result<(), CandidateRegi
     require_non_empty(&record.candidate_ref, "candidate ref", MAX_ID_BYTES)?;
     require_non_empty(&record.retained_at, "retained at", MAX_ID_BYTES)?;
     validate_commit_sha(&record.candidate_commit, "candidate commit")?;
+    validate_commit_sha(&record.base_commit, "candidate base commit")?;
     if record.candidate_id != record.candidate_commit {
         return Err(CandidateRegistryError::invalid(
             "candidate id must be exactly the frozen candidate commit",
@@ -558,7 +727,8 @@ fn ensure_same_candidate_facts(
         && existing.repository_binding_id == retention.repository_binding_id
         && existing.local_git_ref == retention.local_git_ref
         && existing.candidate_ref == retention.local_git_ref
-        && existing.candidate_commit == retention.candidate_commit;
+        && existing.candidate_commit == retention.candidate_commit
+        && existing.base_commit == retention.base_commit;
     if matches {
         return Ok(());
     }
@@ -575,7 +745,7 @@ fn read_candidate_row(
     connection
         .query_row(
             "SELECT candidate_id, worker_session_id, repository_binding_id, local_git_ref, \
-             local_state, created_at, candidate_ref, candidate_commit, retained_at \
+             local_state, created_at, candidate_ref, candidate_commit, retained_at, base_commit \
              FROM candidate_local_refs WHERE candidate_id = ?1",
             params![candidate_id],
             row_to_candidate_record,
@@ -596,6 +766,7 @@ fn row_to_candidate_record(row: &rusqlite::Row<'_>) -> rusqlite::Result<Candidat
         candidate_ref: row.get(6)?,
         candidate_commit: row.get(7)?,
         retained_at: row.get(8)?,
+        base_commit: row.get(9)?,
     })
 }
 

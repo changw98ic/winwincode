@@ -5,7 +5,7 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-EnvironmentFile=%h/.config/winwincode/device-client.env
+EnvironmentFile=-%h/.config/winwincode/device-client.env
 ExecStart=__WWC_BINARY__ device serve
 Restart=on-failure
 RestartSec=10

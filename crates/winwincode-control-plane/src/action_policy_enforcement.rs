@@ -8,13 +8,10 @@ use winwincode_domain::{
     RepositoryScope, RepositoryScopeKind, SchemaVersion, Sha256Digest, UserActor, UserActorKind,
     UserId,
 };
-use winwincode_execution_port::{
-    action_enforcement::ActionEnforcementIssuer,
-    generated::{
-        ActionEnforcementDecision, ActionEnforcementReceiptMessage,
-        ActionEnforcementReceiptMessageKind, ActionEnforcementRequestMessage,
-        ActionEnforcementRequestMessageKind,
-    },
+use winwincode_execution_port::generated::{
+    ActionEnforcementDecision, ActionEnforcementReceiptMessage,
+    ActionEnforcementReceiptMessageKind, ActionEnforcementRequestMessage,
+    ActionEnforcementRequestMessageKind,
 };
 use winwincode_storage::{
     NewOutboxEvent, ProductStateStorage, PublicEventActor, PublicEventScope, ReceiptIdentity,
@@ -89,7 +86,6 @@ struct ResolvedActionAuthority {
 
 pub fn issue_action_enforcement_receipt(
     storage: &mut SqliteStorage,
-    issuer: &ActionEnforcementIssuer,
     evaluated_at: &winwincode_domain::Instant,
     request: &ActionEnforcementRequestMessage,
 ) -> Result<ActionEnforcementReceiptMessage, ActionPolicyEnforcementError> {
@@ -108,19 +104,12 @@ pub fn issue_action_enforcement_receipt(
         .load_receipt(&authority.receipt_identity, &command_digest)?
         .is_some()
     {
-        return load_receipt(storage, issuer, &stream_id);
+        return load_receipt(storage, &stream_id);
     }
 
-    let receipt = build_action_receipt(
-        issuer,
-        request,
-        &authority,
-        &frozen_evaluated_at,
-        &command_digest,
-    )?;
+    let receipt = build_action_receipt(request, &authority, &frozen_evaluated_at, &command_digest);
     persist_action_receipt(
         storage,
-        issuer,
         &authority.receipt_identity,
         &command_digest,
         &stream_id,
@@ -213,13 +202,12 @@ fn resolve_action_authority(
 }
 
 fn build_action_receipt(
-    issuer: &ActionEnforcementIssuer,
     request: &ActionEnforcementRequestMessage,
     authority: &ResolvedActionAuthority,
     evaluated_at: &winwincode_domain::Instant,
     evaluation_sha256: &Sha256Digest,
-) -> Result<ActionEnforcementReceiptMessage, ActionPolicyEnforcementError> {
-    let mut receipt = ActionEnforcementReceiptMessage {
+) -> ActionEnforcementReceiptMessage {
+    ActionEnforcementReceiptMessage {
         actor: UserActor {
             id: authority.actor.clone(),
             kind: UserActorKind::User,
@@ -235,7 +223,6 @@ fn build_action_receipt(
         policy_kind: request.policy_kind.clone(),
         policy_mode: None,
         policy_version: None,
-        receipt_signature: sha256(b"unsigned"),
         request_id: request.request_id.clone(),
         resource: request.resource.clone(),
         schema_version: SchemaVersion::WinwincodeV1,
@@ -244,14 +231,11 @@ fn build_action_receipt(
         session_identity: request.session_identity.clone(),
         subject_sha256: request.subject_sha256.clone(),
         worker_session_id: request.worker_session_id.clone(),
-    };
-    issuer.sign(&mut receipt).map_err(|_| corrupt_receipt())?;
-    Ok(receipt)
+    }
 }
 
 fn persist_action_receipt(
     storage: &mut SqliteStorage,
-    issuer: &ActionEnforcementIssuer,
     receipt_identity: &ReceiptIdentity,
     command_digest: &Sha256Digest,
     stream_id: &str,
@@ -276,7 +260,7 @@ fn persist_action_receipt(
                 .load_receipt(receipt_identity, command_digest)?
                 .is_some()
             {
-                load_receipt(storage, issuer, stream_id)
+                load_receipt(storage, stream_id)
             } else {
                 Err(error.into())
             }
@@ -358,7 +342,6 @@ fn load_frozen_evaluation_time(
 
 fn load_receipt(
     storage: &dyn ProductStateStorage,
-    issuer: &ActionEnforcementIssuer,
     stream_id: &str,
 ) -> Result<ActionEnforcementReceiptMessage, ActionPolicyEnforcementError> {
     let stored = storage.load_state(stream_id)?.ok_or_else(corrupt_receipt)?;
@@ -370,9 +353,6 @@ fn load_receipt(
     if serde_json::to_vec(&receipt).map_err(|_| corrupt_receipt())? != stored.payload {
         return Err(corrupt_receipt());
     }
-    issuer
-        .verify_signature(&receipt)
-        .map_err(|_| corrupt_receipt())?;
     Ok(receipt)
 }
 

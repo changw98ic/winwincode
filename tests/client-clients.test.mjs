@@ -135,6 +135,41 @@ function directoryFixture(transport, baseOverrides = {}) {
   })
 }
 
+test('Owner pairing and permanent Device revocation use their dedicated authenticated routes', async () => {
+  const clientNodeId = 'cnd_00000000000000000000000001'
+  const requests = []
+  const directory = directoryFixture({ async fetch(input, init) {
+    requests.push({ path: String(input), init })
+    if (String(input).endsWith('/pairing')) return response(201, { schemaVersion,
+      pairingToken: 'pairing-token-fixture', expiresAt: '2099-10-15T00:00:00.000Z' })
+    return response(200, { schemaVersion, clientNodeId, revoked: true })
+  } })
+  assert.equal((await directory.createDevicePairing()).pairingToken, 'pairing-token-fixture')
+  assert.equal((await directory.revokeDevice(clientNodeId)).revoked, true)
+  assert.deepEqual(requests.map(item => item.path), [
+    'https://control.example/api/v1/devices/pairing',
+    `https://control.example/api/v1/devices/${clientNodeId}/revoke`,
+  ])
+  for (const { init } of requests) {
+    assert.equal(init.method, 'POST')
+    assert.equal(init.credentials, 'include')
+    assert.equal(init.redirect, 'error')
+    assert.deepEqual(JSON.parse(init.body), { schemaVersion })
+  }
+  await assert.rejects(directory.revokeDevice('123456789012'))
+  assert.equal(requests.length, 2, 'public Client IDs cannot revoke a Device identity')
+})
+
+test('Device management rejects malformed tokens and mismatched revocation receipts', async () => {
+  let payload = { schemaVersion, pairingToken: 'short', expiresAt: '2099-10-15T00:00:00.000Z' }
+  const directory = directoryFixture({ async fetch(input) {
+    return response(String(input).endsWith('/pairing') ? 201 : 200, payload)
+  } })
+  await assert.rejects(directory.createDevicePairing())
+  payload = { schemaVersion, clientNodeId: 'cnd_00000000000000000000000002', revoked: true }
+  await assert.rejects(directory.revokeDevice('cnd_00000000000000000000000001'))
+})
+
 test('facade exchanges grouped ID and dynamic code for the frozen fresh device list', async () => {
   const requests = []
   const directory = directoryFixture({
@@ -531,6 +566,17 @@ function clientsFixture({ devices = [device()], addError = null, now = fixedNow 
   const document = new PageDocument()
   const rootElement = new PageElement(document, 'div')
   const client = {
+    serverUrl: 'https://control.example',
+    pairingCalls: 0,
+    revokeCalls: [],
+    async createDevicePairing() {
+      this.pairingCalls += 1
+      return { schemaVersion, pairingToken: 'pairing-token-fixture', expiresAt: '2099-10-15T00:00:00.000Z' }
+    },
+    async revokeDevice(clientNodeId) {
+      this.revokeCalls.push(clientNodeId)
+      return { schemaVersion, clientNodeId, revoked: true }
+    },
     addCalls: [],
     async addClient(input) {
       this.addCalls.push({ ...input })
@@ -550,6 +596,60 @@ function clientsFixture({ devices = [device()], addError = null, now = fixedNow 
 function submitForm(rootElement) {
   findOne(rootElement, 'wwc-clients-add-form').emit('submit', { preventDefault() {} })
 }
+
+test('clients page shows expiring remote binding commands and requires explicit permanent revocation', async () => {
+  const clientNodeId = 'cnd_00000000000000000000000001'
+  const { rootElement, model, client, page } = clientsFixture({ devices: [device({ clientNodeId })] })
+  await model.refresh()
+  findOne(rootElement, 'wwc-clients-pair').emit('click')
+  await new Promise(resolvePromise => setImmediate(resolvePromise))
+  assert.equal(client.pairingCalls, 1)
+  assert.match(findOne(rootElement, 'wwc-clients-pairing-command').value,
+    /WWC_DEVICE_PAIRING_TOKEN='pairing-token-fixture' wwc device bind --server-url 'https:\/\/control.example' --ca-file \/ABS\/ca.pem\nwwc device serve/u)
+  assert.match(findOne(rootElement, 'wwc-clients-pairing-expiry').textContent, /2099/u)
+  findOne(rootElement, 'wwc-clients-card-revoke').emit('click')
+  assert.deepEqual(client.revokeCalls, [])
+  assert.equal(findOne(rootElement, 'wwc-clients-revoke-confirmation').hidden, false)
+  findOne(rootElement, 'wwc-clients-confirm-revoke').emit('click')
+  await new Promise(resolvePromise => setImmediate(resolvePromise))
+  assert.deepEqual(client.revokeCalls, [clientNodeId])
+  assert.equal(findOne(rootElement, 'wwc-clients-card-revoke').disabled, true)
+  assert.match(findOne(rootElement, 'wwc-clients-management-status').textContent, /已永久吊销/u)
+  model.reset()
+  assert.equal(findOne(rootElement, 'wwc-clients-pairing-command').value, '')
+  page.close(); model.close()
+})
+
+test('pairing state rejects late responses after reset and explains Owner authorization failures', async () => {
+  let release
+  const model = createClientsViewModel({ client: clientsClientFake({
+    async createDevicePairing() { return new Promise(resolvePromise => { release = resolvePromise }) },
+  }) })
+  const pending = model.createDevicePairing()
+  model.reset()
+  release({ schemaVersion, pairingToken: 'late-token-fixture', expiresAt: '2099-10-15T00:00:00.000Z' })
+  await pending
+  assert.equal(model.state.pairing, null)
+  model.close()
+  const denied = createClientsViewModel({ client: clientsClientFake({
+    async createDevicePairing() { throw directoryError('PERMISSION_DENIED') },
+  }) })
+  await denied.createDevicePairing()
+  assert.match(denied.state.managementMessage, /只有 Owner/u)
+  denied.close()
+})
+
+test('revocation confirmation cannot revoke a replacement Device identity after refresh', async () => {
+  const devices = [device({ clientNodeId: 'cnd_00000000000000000000000001' })]
+  const fixture = clientsFixture({ devices })
+  await fixture.model.refresh()
+  findOne(fixture.rootElement, 'wwc-clients-card-revoke').emit('click')
+  devices[0] = device({ clientNodeId: 'cnd_00000000000000000000000002' })
+  await fixture.model.refresh()
+  findOne(fixture.rootElement, 'wwc-clients-confirm-revoke').emit('click')
+  assert.deepEqual(fixture.client.revokeCalls, [])
+  fixture.page.close(); fixture.model.close()
+})
 
 test('clients page groups the ID while typing and validates shapes without a request', () => {
   const { rootElement, client } = clientsFixture()

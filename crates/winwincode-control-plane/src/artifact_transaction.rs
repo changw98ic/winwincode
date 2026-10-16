@@ -435,7 +435,7 @@ struct ArtifactSessionClaim<'a> {
 }
 
 #[derive(Clone, Copy)]
-enum ArtifactLeaseRejection {
+pub(crate) enum ArtifactLeaseRejection {
     StaleFencingToken,
     WorkerInstance,
 }
@@ -677,7 +677,7 @@ fn validate_current_binding(
     })
 }
 
-fn validate_authority(
+pub(crate) fn validate_authority(
     lease: &ExecutionLeaseStamp,
     worker_session_id: &winwincode_domain::WorkerSessionId,
     authority: &SessionBindingAuthority,

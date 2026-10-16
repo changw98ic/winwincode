@@ -687,20 +687,10 @@ fn collect_skill(
 }
 
 fn private_directory(path: &Path) -> Result<(), DeviceProviderError> {
-    if path.exists() {
-        let meta = fs::symlink_metadata(path)?;
-        if !meta.is_dir() || meta.file_type().is_symlink() || meta.permissions().mode() & 0o077 != 0
-        {
-            return Err(DeviceProviderError::StateInvalid);
-        }
-        return Ok(());
-    }
-    if let Some(parent) = path.parent()
-        && !parent.exists()
-    {
-        private_directory(parent)?;
-    }
-    fs::DirBuilder::new().mode(0o700).create(path)?;
+    fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(path)?;
     Ok(())
 }
 

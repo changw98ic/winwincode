@@ -3,13 +3,12 @@
 #[path = "support/device_provider.rs"]
 mod device_provider;
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::BTreeSet;
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::sync::Mutex;
 use std::sync::OnceLock;
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
@@ -53,7 +52,7 @@ use winwincode_server::{
     ApiError, AuthSessionBootstrap, AuthSessionConfig, AuthenticatedPrincipal,
     ClientExchangeApplication, ClientExchangeConfig, ClientExchangePort,
     ClientOccupancyApplication, ClientOccupancyConfig, ControlPlaneApiPort, EventSubscription,
-    RequestAuthenticator, ServerConfig, ServerTls, SqliteAuthSessionManager, UserAccountService,
+    RequestAuthenticator, ServerConfig, SqliteAuthSessionManager, UserAccountService,
     start_server_with_remote_worker,
 };
 use winwincode_storage::{
@@ -150,7 +149,6 @@ fn server_config(data_directory: &Path) -> ServerConfig {
     ServerConfig::new(
         "127.0.0.1:0".parse().expect("loopback address"),
         "http://control.example",
-        ServerTls::Disabled,
         BTreeSet::from([ORIGIN.to_owned()]),
         data_directory.to_path_buf(),
         Duration::from_secs(2),
@@ -445,28 +443,16 @@ fn canonical_now(offset_seconds: i64) -> Instant {
 }
 
 struct LaunchResponseMaterial {
-    credentials: Mutex<HashMap<String, String>>,
     worker_root: PathBuf,
 }
 
 impl LaunchResponseMaterial {
     fn new(worker_root: PathBuf) -> Self {
-        Self {
-            credentials: Mutex::new(HashMap::new()),
-            worker_root,
-        }
+        Self { worker_root }
     }
 }
 
 impl WorkerLaunchMaterialSource for LaunchResponseMaterial {
-    fn worker_credential(&self, credential_digest: &str) -> Option<String> {
-        self.credentials
-            .lock()
-            .expect("credential lock")
-            .get(credential_digest)
-            .cloned()
-    }
-
     fn launch_directories(
         &self,
         worker_session_id: &str,
@@ -485,7 +471,7 @@ const STUB_WORKER_BODY: &str = r#"[ "$#" -eq 2 ] || exit 64
 config="$2"
 for field in clientNodeId clientInstanceId occupancyLeaseId occupancyFencingToken \
              repositoryBindingId workerSessionId workerId workerInstanceId \
-             sourceDirectory dataDirectory serverOrigin workerCredentialPath \
+             sourceDirectory dataDirectory \
              productSessionId; do
   grep -q "\"$field\"" "$config" || exit 9
 done
@@ -778,7 +764,7 @@ async fn the_real_daemon_runs_the_full_worker_loop_over_http() {
         SupervisorConfig {
             client_node_id: node_id.clone(),
             client_instance_id: device_instance.clone(),
-            server_origin: format!("https://127.0.0.1:{}", address.port()),
+            server_origin: format!("http://{address}"),
             model_route: None,
             worker_binary_path: Some(stub_binary.clone()),
             max_concurrent_worker_sessions: 4,
@@ -877,23 +863,8 @@ async fn the_real_daemon_runs_the_full_worker_loop_over_http() {
     assert!(grant_one.consumed_at.is_some());
     assert_eq!(worker_session_one, grant_one.worker_session_id);
     assert_eq!(worker_instance_one, grant_one.worker_instance_id);
-    assert!(body.get("workerCredential").is_none());
-    let digest_one = body["credentialDigest"].as_str().expect("digest");
     let worker_data_one = worker_root.join(&worker_session_one).join("data");
     wait_for_ready_marker(&worker_root, &worker_session_one);
-    let material_one =
-        fs::read_to_string(worker_data_one.join("worker-credential")).expect("credential read");
-    assert_eq!(material_one.len(), 64);
-    let secret: Vec<u8> = (0..material_one.len())
-        .step_by(2)
-        .map(|index| u8::from_str_radix(&material_one[index..index + 2], 16).expect("hex"))
-        .collect();
-    assert_eq!(
-        digest_one,
-        &format!("sha256:{:x}", Sha256::digest(&secret)),
-        "the response material binds the grant digest"
-    );
-    assert_eq!(digest_one, grant_one.credential_digest);
     assert_eq!(
         audit_actions(&data_directory, &grant_one_id),
         vec!["issued".to_owned(), "consumed".to_owned()],
@@ -926,12 +897,6 @@ async fn the_real_daemon_runs_the_full_worker_loop_over_http() {
         file_mode(&worker_data_one.join("managed-session.json")),
         0o600
     );
-    assert_eq!(file_mode(&worker_data_one.join("worker-credential")), 0o600);
-    assert_eq!(
-        fs::read_to_string(worker_data_one.join("worker-credential")).expect("credential read"),
-        material_one,
-        "the one-time material crossed to the credential file"
-    );
     let config: Value = serde_json::from_str(
         &fs::read_to_string(worker_data_one.join("managed-session.json")).expect("config read"),
     )
@@ -947,10 +912,6 @@ async fn the_real_daemon_runs_the_full_worker_loop_over_http() {
     assert_eq!(config["workerSessionId"], json!(worker_session_one));
     assert_eq!(config["workerId"], json!(grant_one.worker_id));
     assert_eq!(config["workerInstanceId"], json!(worker_instance_one));
-    assert_eq!(
-        config["workerCredentialPath"],
-        json!(worker_data_one.join("worker-credential").to_str().unwrap())
-    );
     assert_eq!(config["productSessionId"], json!(body["productSessionId"]));
     assert_eq!(config["workRunId"], json!(body["workRunId"]));
 
@@ -1051,28 +1012,8 @@ async fn the_real_daemon_runs_the_full_worker_loop_over_http() {
         .as_str()
         .expect("session id")
         .to_owned();
-    assert!(body.get("workerCredential").is_none());
-    let digest_two = body["credentialDigest"].as_str().expect("digest");
-    assert_ne!(digest_two, grant_one.credential_digest);
-    let worker_data_two = worker_root.join(&worker_session_two).join("data");
+    assert_ne!(worker_session_two, worker_session_one);
     wait_for_ready_marker(&worker_root, &worker_session_two);
-    let material_two = fs::read_to_string(worker_data_two.join("worker-credential"))
-        .expect("second credential read");
-    assert_eq!(
-        digest_two,
-        &format!(
-            "sha256:{:x}",
-            Sha256::digest(
-                (0..material_two.len())
-                    .step_by(2)
-                    .map(
-                        |index| u8::from_str_radix(&material_two[index..index + 2], 16)
-                            .expect("hex")
-                    )
-                    .collect::<Vec<_>>()
-            )
-        ),
-    );
     assert_eq!(daemon.status().worker_launches_accepted, 2);
     let record_two = supervisor
         .worker_process(&worker_session_two)

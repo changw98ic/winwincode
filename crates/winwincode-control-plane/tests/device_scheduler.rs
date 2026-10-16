@@ -48,8 +48,6 @@ const T2: &str = "2026-01-01T00:02:00.000Z";
 const T3: &str = "2026-01-01T00:03:00.000Z";
 const GRANT_EXPIRES: &str = "2026-01-01T01:00:00.000Z";
 
-const DIGEST: &str = "sha256:00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff";
-
 #[derive(Clone)]
 struct Fixture {
     directory: PathBuf,
@@ -74,7 +72,6 @@ fn seed_fixture(seed: u64, holder: &str, capacity: u32, confirmed: bool) -> Fixt
             "aarch64-apple-darwin",
             "aarch64",
             "1.2.3",
-            None,
             Some(instance.clone()),
             capacity,
         )
@@ -186,7 +183,6 @@ fn scheduling_request(seed: u64, fixture: &Fixture) -> DeviceWorkerSchedulingReq
         id("wsn", seed + 8),
         id("wrk", seed + 9),
         id("wki", seed + 10),
-        DIGEST,
         Some(id("ps", seed + 11)),
         Some(id("wrn", seed + 12)),
         instant(GRANT_EXPIRES),
@@ -207,7 +203,6 @@ fn scheduling_request_for(
         id("wsn", seed + 8),
         id("wrk", seed + 9),
         id("wki", seed + 10),
-        DIGEST,
         Some(id("ps", seed + 11)),
         Some(id("wrn", seed + 12)),
         instant(GRANT_EXPIRES),
@@ -243,7 +238,6 @@ fn seed_orphan_grant(
         worker_session.to_owned(),
         worker.to_owned(),
         worker_instance.to_owned(),
-        DIGEST,
         None,
         None,
         instant(GRANT_EXPIRES),
@@ -400,7 +394,6 @@ fn a_non_holder_and_an_unreachable_client_are_refused() {
         id("wsn", seed + 68),
         id("wrk", seed + 69),
         id("wki", seed + 70),
-        DIGEST,
         None,
         None,
         instant(GRANT_EXPIRES),
@@ -430,7 +423,6 @@ fn foreign_unauthorized_and_unknown_bindings_are_refused_uniformly() {
         id("wsn", seed + 28),
         id("wrk", seed + 29),
         id("wki", seed + 30),
-        DIGEST,
         None,
         None,
         instant(GRANT_EXPIRES),
@@ -471,7 +463,6 @@ fn foreign_unauthorized_and_unknown_bindings_are_refused_uniformly() {
         id("wsn", seed + 68),
         id("wrk", seed + 69),
         id("wki", seed + 70),
-        DIGEST,
         None,
         None,
         instant(GRANT_EXPIRES),
@@ -643,7 +634,6 @@ fn replaying_one_request_identity_returns_the_original_receipt() {
         id("wsn", seed + 48),
         id("wrk", seed + 49),
         id("wki", seed + 50),
-        DIGEST,
         None,
         None,
         instant(GRANT_EXPIRES),
@@ -766,7 +756,6 @@ fn scheduling_request_rejects_a_historical_stage_as_workrun() {
         id("wsn", 901),
         id("wrk", 901),
         id("wki", 901),
-        DIGEST,
         Some(id("ps", 901)),
         Some(id("run", 901)),
         instant(GRANT_EXPIRES),

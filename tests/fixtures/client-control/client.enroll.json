@@ -14,7 +14,6 @@
     "platform": "darwin",
     "architecture": "arm64",
     "clientVersion": "1.0.0-demo.0",
-    "deviceCredentialDigest": "sha256:9c1d2e3f9c1d2e3f9c1d2e3f9c1d2e3f9c1d2e3f9c1d2e3f9c1d2e3f9c1d2e3f",
     "maxConcurrentWorkerSessions": 2
   }
 }

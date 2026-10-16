@@ -92,9 +92,6 @@
             }
           ]
         },
-        "receiptSignature": {
-          "$ref": "#/$defs/Sha256Digest"
-        },
         "requestId": {
           "$ref": "#/$defs/RequestId"
         },
@@ -142,8 +139,7 @@
         "policyMode",
         "policyVersion",
         "evaluationSha256",
-        "evaluatedAt",
-        "receiptSignature"
+        "evaluatedAt"
       ],
       "title": "action.enforcement_receipt",
       "type": "object",
@@ -336,6 +332,20 @@
     },
     "ApiTokenId": {
       "pattern": "^tok_[0-9A-HJKMNP-TV-Z]{26}$",
+      "type": "string"
+    },
+    "ApplicationCandidateDigest": {
+      "description": "SHA-256 of the canonical repository binding, base commit and content-addressed candidate commit tuple.",
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "ApplicationReconciliationOutcome": {
+      "description": "Observed result of an interrupted application under its current recovery authorization.",
+      "enum": [
+        "applied",
+        "not_started",
+        "outcome_unknown"
+      ],
       "type": "string"
     },
     "AppliedFileOperation": {
@@ -1465,6 +1475,51 @@
         "candidateTree"
       ],
       "type": "object"
+    },
+    "CandidateApplicationProjection": {
+      "additionalProperties": false,
+      "description": "Persistent application and approval identity with the exact original target used for explicit recovery.",
+      "properties": {
+        "applicationId": {
+          "$ref": "#/$defs/LocalApplyReceiptId"
+        },
+        "approvalId": {
+          "$ref": "#/$defs/IdempotencyKey"
+        },
+        "baseCommit": {
+          "$ref": "#/$defs/GitCommitSha"
+        },
+        "candidateDigest": {
+          "$ref": "#/$defs/ApplicationCandidateDigest"
+        },
+        "status": {
+          "$ref": "#/$defs/CandidateApplicationStatus"
+        },
+        "targetBranch": {
+          "$ref": "#/$defs/GitRefName"
+        }
+      },
+      "required": [
+        "applicationId",
+        "approvalId",
+        "baseCommit",
+        "candidateDigest",
+        "targetBranch",
+        "status"
+      ],
+      "type": "object"
+    },
+    "CandidateApplicationStatus": {
+      "description": "Durable application status exposed to the Device owner. awaiting_retry requires an explicit retry; blocked retains an unknown Git outcome.",
+      "enum": [
+        "applying",
+        "applied",
+        "stale",
+        "awaiting_retry",
+        "blocked",
+        "failed"
+      ],
+      "type": "string"
     },
     "CandidateAvailability": {
       "description": "Authoritative candidate Git retention state. Released candidates retain display facts only.",
@@ -3383,6 +3438,110 @@
       "title": "ClientAccessGrantState",
       "type": "string"
     },
+    "ClientApplicationReconciledMessage": {
+      "additionalProperties": false,
+      "description": "Reports Git reconciliation of an original application under current occupancy authorization. Historical evidence alone does not authorize a write.",
+      "properties": {
+        "applicationId": {
+          "$ref": "#/$defs/LocalApplyReceiptId"
+        },
+        "approvalId": {
+          "$ref": "#/$defs/IdempotencyKey"
+        },
+        "baseCommit": {
+          "$ref": "#/$defs/GitCommitSha"
+        },
+        "candidateDigest": {
+          "$ref": "#/$defs/ApplicationCandidateDigest"
+        },
+        "candidateRef": {
+          "$ref": "#/$defs/CandidateRef"
+        },
+        "clientInstanceId": {
+          "$ref": "#/$defs/ClientInstanceId"
+        },
+        "clientNodeId": {
+          "$ref": "#/$defs/ClientNodeId"
+        },
+        "expectedRevision": {
+          "$ref": "#/$defs/Revision"
+        },
+        "idempotencyKey": {
+          "$ref": "#/$defs/IdempotencyKey"
+        },
+        "kind": {
+          "const": "client.application.reconciled"
+        },
+        "messageId": {
+          "$ref": "#/$defs/ClientControlMessageId"
+        },
+        "occupancyFencingToken": {
+          "$ref": "#/$defs/OccupancyFencingToken"
+        },
+        "occupancyLeaseId": {
+          "$ref": "#/$defs/ClientOccupancyLeaseId"
+        },
+        "occurredAt": {
+          "$ref": "#/$defs/Instant"
+        },
+        "originalEpoch": {
+          "$ref": "#/$defs/OccupancyFencingToken"
+        },
+        "outcome": {
+          "$ref": "#/$defs/ApplicationReconciliationOutcome"
+        },
+        "repositoryBindingId": {
+          "$ref": "#/$defs/RepositoryBindingId"
+        },
+        "resultCommit": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/GitCommitSha"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "schemaVersion": {
+          "$ref": "#/$defs/SchemaVersion"
+        },
+        "sequence": {
+          "$ref": "#/$defs/ClientExchangeSequence"
+        },
+        "targetBranch": {
+          "$ref": "#/$defs/GitRefName"
+        }
+      },
+      "required": [
+        "kind",
+        "schemaVersion",
+        "messageId",
+        "clientNodeId",
+        "clientInstanceId",
+        "sequence",
+        "occurredAt",
+        "occupancyLeaseId",
+        "occupancyFencingToken",
+        "expectedRevision",
+        "idempotencyKey",
+        "applicationId",
+        "approvalId",
+        "originalEpoch",
+        "repositoryBindingId",
+        "candidateRef",
+        "candidateDigest",
+        "baseCommit",
+        "targetBranch",
+        "outcome",
+        "resultCommit"
+      ],
+      "title": "client.application.reconciled",
+      "type": "object",
+      "x-authority": "candidate-write",
+      "x-direction": "client-to-control-plane",
+      "x-message-class": "command"
+    },
     "ClientArchitecture": {
       "description": "Machine architecture of the reporting Device Client.",
       "enum": [
@@ -3396,6 +3555,15 @@
       "additionalProperties": false,
       "description": "Applies a retained candidate onto its target branch; the Device Client verifies the candidate ref, expected HEAD, working-tree policy, fencing, and permissions before writing and answers with client.candidate.apply_result.",
       "properties": {
+        "applicationId": {
+          "$ref": "#/$defs/LocalApplyReceiptId"
+        },
+        "approvalId": {
+          "$ref": "#/$defs/IdempotencyKey"
+        },
+        "candidateDigest": {
+          "$ref": "#/$defs/ApplicationCandidateDigest"
+        },
         "candidateRef": {
           "$ref": "#/$defs/CandidateRef"
         },
@@ -3428,6 +3596,9 @@
         },
         "occurredAt": {
           "$ref": "#/$defs/Instant"
+        },
+        "reconciledRetry": {
+          "type": "boolean"
         },
         "repositoryBindingId": {
           "$ref": "#/$defs/RepositoryBindingId"
@@ -3465,7 +3636,11 @@
         "strategy",
         "requesterUserId",
         "expectedRevision",
-        "idempotencyKey"
+        "idempotencyKey",
+        "applicationId",
+        "approvalId",
+        "candidateDigest",
+        "reconciledRetry"
       ],
       "title": "client.candidate.apply",
       "type": "object",
@@ -3961,6 +4136,9 @@
         },
         {
           "$ref": "#/$defs/ClientManagedAppStatusMessage"
+        },
+        {
+          "$ref": "#/$defs/ClientApplicationReconciledMessage"
         }
       ],
       "title": "ClientControlMessage"
@@ -4003,7 +4181,8 @@
         "client.repository.register",
         "client.repository.registered",
         "client.managed_app.command",
-        "client.managed_app.status"
+        "client.managed_app.status",
+        "client.application.reconciled"
       ],
       "title": "ClientControlMessageKind",
       "type": "string"
@@ -4016,7 +4195,7 @@
     },
     "ClientEnrollMessage": {
       "additionalProperties": false,
-      "description": "First contact of one Device Client identity; creates the ClientNode in pending_enrollment. Device credential provisioning stays outside this contract.",
+      "description": "First contact of one Device Client identity; creates the ClientNode in pending_enrollment.",
       "properties": {
         "architecture": {
           "$ref": "#/$defs/ClientArchitecture"
@@ -4508,9 +4687,6 @@
         "currentInstanceId": {
           "$ref": "#/$defs/ClientInstanceId"
         },
-        "deviceCredentialDigest": {
-          "$ref": "#/$defs/Sha256Digest"
-        },
         "displayName": {
           "$ref": "#/$defs/ClientDisplayName"
         },
@@ -4550,7 +4726,6 @@
         "platform",
         "architecture",
         "clientVersion",
-        "deviceCredentialDigest",
         "currentInstanceId",
         "presenceState",
         "acceptingConnections",
@@ -13043,6 +13218,161 @@
       ],
       "type": "object"
     },
+    "DeviceAuthErrorResponse": {
+      "additionalProperties": false,
+      "description": "Machine-readable device authentication, revocation or binding error.",
+      "properties": {
+        "code": {
+          "maxLength": 100,
+          "minLength": 1,
+          "type": "string"
+        },
+        "schemaVersion": {
+          "$ref": "#/$defs/SchemaVersion"
+        }
+      },
+      "required": [
+        "schemaVersion",
+        "code"
+      ],
+      "type": "object"
+    },
+    "DeviceBindingIntent": {
+      "additionalProperties": false,
+      "description": "Stable binding intent retained by the Device before its first binding request.",
+      "properties": {
+        "architecture": {
+          "$ref": "#/$defs/ClientArchitecture"
+        },
+        "clientVersion": {
+          "$ref": "#/$defs/ClientVersion"
+        },
+        "displayName": {
+          "$ref": "#/$defs/ClientDisplayName"
+        },
+        "platform": {
+          "$ref": "#/$defs/ClientPlatformTarget"
+        }
+      },
+      "required": [
+        "displayName",
+        "platform",
+        "architecture",
+        "clientVersion"
+      ],
+      "type": "object"
+    },
+    "DeviceBindRequest": {
+      "additionalProperties": false,
+      "description": "The same request ID, public key and intent recover the original binding after response loss. The request requires proof of possession of that key.",
+      "properties": {
+        "intent": {
+          "$ref": "#/$defs/DeviceBindingIntent"
+        },
+        "pairingToken": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "publicKey": {
+          "pattern": "^[A-Za-z0-9+/]{43}$",
+          "type": "string"
+        },
+        "requestId": {
+          "$ref": "#/$defs/IdempotencyKey"
+        },
+        "schemaVersion": {
+          "$ref": "#/$defs/SchemaVersion"
+        }
+      },
+      "required": [
+        "schemaVersion",
+        "requestId",
+        "pairingToken",
+        "publicKey",
+        "intent"
+      ],
+      "type": "object"
+    },
+    "DeviceBindResponse": {
+      "additionalProperties": false,
+      "description": "Persisted result of the atomic pairing-token consumption and device binding.",
+      "properties": {
+        "boundAt": {
+          "$ref": "#/$defs/Instant"
+        },
+        "clientNodeId": {
+          "$ref": "#/$defs/ClientNodeId"
+        },
+        "ownerUserId": {
+          "$ref": "#/$defs/UserId"
+        },
+        "publicClientId": {
+          "$ref": "#/$defs/PublicClientId"
+        },
+        "requestId": {
+          "$ref": "#/$defs/IdempotencyKey"
+        },
+        "schemaVersion": {
+          "$ref": "#/$defs/SchemaVersion"
+        }
+      },
+      "required": [
+        "schemaVersion",
+        "requestId",
+        "clientNodeId",
+        "publicClientId",
+        "ownerUserId",
+        "boundAt"
+      ],
+      "type": "object"
+    },
+    "DeviceChallengeRequest": {
+      "additionalProperties": false,
+      "description": "Requests a single-use challenge for an Ed25519 device public key encoded in standard Base64 without padding.",
+      "properties": {
+        "publicKey": {
+          "pattern": "^[A-Za-z0-9+/]{43}$",
+          "type": "string"
+        },
+        "schemaVersion": {
+          "$ref": "#/$defs/SchemaVersion"
+        }
+      },
+      "required": [
+        "schemaVersion",
+        "publicKey"
+      ],
+      "type": "object"
+    },
+    "DeviceChallengeResponse": {
+      "additionalProperties": false,
+      "description": "Single-use challenge bound to the requesting public key and expiration.",
+      "properties": {
+        "challenge": {
+          "maxLength": 200,
+          "minLength": 1,
+          "type": "string"
+        },
+        "challengeId": {
+          "maxLength": 200,
+          "minLength": 1,
+          "type": "string"
+        },
+        "expiresAt": {
+          "$ref": "#/$defs/Instant"
+        },
+        "schemaVersion": {
+          "$ref": "#/$defs/SchemaVersion"
+        }
+      },
+      "required": [
+        "schemaVersion",
+        "challengeId",
+        "challenge",
+        "expiresAt"
+      ],
+      "type": "object"
+    },
     "DeviceConfigurationEnvelope": {
       "additionalProperties": false,
       "properties": {
@@ -13340,6 +13670,42 @@
       },
       "type": "object"
     },
+    "DevicePairingRequest": {
+      "additionalProperties": false,
+      "description": "Creates a short-lived pairing token for the authenticated Owner.",
+      "properties": {
+        "schemaVersion": {
+          "$ref": "#/$defs/SchemaVersion"
+        }
+      },
+      "required": [
+        "schemaVersion"
+      ],
+      "type": "object"
+    },
+    "DevicePairingResponse": {
+      "additionalProperties": false,
+      "description": "Pairing material is used for initial binding only.",
+      "properties": {
+        "expiresAt": {
+          "$ref": "#/$defs/Instant"
+        },
+        "pairingToken": {
+          "maxLength": 200,
+          "minLength": 8,
+          "type": "string"
+        },
+        "schemaVersion": {
+          "$ref": "#/$defs/SchemaVersion"
+        }
+      },
+      "required": [
+        "schemaVersion",
+        "pairingToken",
+        "expiresAt"
+      ],
+      "type": "object"
+    },
     "DeviceProviderConfig": {
       "additionalProperties": false,
       "not": {
@@ -13605,6 +13971,40 @@
         "text"
       ],
       "type": "string"
+    },
+    "DeviceRevokeRequest": {
+      "additionalProperties": false,
+      "description": "Revokes a device for the authenticated Owner.",
+      "properties": {
+        "schemaVersion": {
+          "$ref": "#/$defs/SchemaVersion"
+        }
+      },
+      "required": [
+        "schemaVersion"
+      ],
+      "type": "object"
+    },
+    "DeviceRevokeResponse": {
+      "additionalProperties": false,
+      "description": "Confirms permanent revocation of this binding and invalidation of its active authorization.",
+      "properties": {
+        "clientNodeId": {
+          "$ref": "#/$defs/ClientNodeId"
+        },
+        "revoked": {
+          "type": "boolean"
+        },
+        "schemaVersion": {
+          "$ref": "#/$defs/SchemaVersion"
+        }
+      },
+      "required": [
+        "schemaVersion",
+        "clientNodeId",
+        "revoked"
+      ],
+      "type": "object"
     },
     "DiagnosticBaseline": {
       "additionalProperties": false,
@@ -16508,7 +16908,8 @@
         "candidate_missing",
         "permission_denied",
         "discarded",
-        "failed"
+        "failed",
+        "outcome_unknown"
       ],
       "title": "LocalApplyResult",
       "type": "string"
@@ -16526,8 +16927,11 @@
     },
     "LocalCandidateReceipt": {
       "additionalProperties": false,
-      "description": "Client-issued proof that a candidate commit is frozen under a stable local git ref before worktree cleanup. Ownership: Device Client issued, Control Plane audited.",
+      "description": "Client-issued proof that a candidate commit and its original repository base are retained under a stable local git ref before worktree cleanup. Ownership: Device Client issued, Control Plane audited.",
       "properties": {
+        "baseCommit": {
+          "$ref": "#/$defs/GitCommitSha"
+        },
         "candidateCommit": {
           "$ref": "#/$defs/GitCommitSha"
         },
@@ -16558,6 +16962,7 @@
         "candidateRef",
         "repositoryBindingId",
         "candidateCommit",
+        "baseCommit",
         "localRefName",
         "state",
         "createdAt",
@@ -27688,10 +28093,6 @@
         "clientNodeId": {
           "$ref": "#/$defs/ClientNodeId"
         },
-        "credentialDigest": {
-          "$ref": "#/$defs/Sha256Digest",
-          "description": "Digest of the short-lived worker session credential. Credential material itself never crosses this contract."
-        },
         "expiresAt": {
           "$ref": "#/$defs/Instant"
         },
@@ -27748,7 +28149,6 @@
         "workerSessionId",
         "workerId",
         "workerInstanceId",
-        "credentialDigest",
         "expiresAt",
         "state",
         "revision"
@@ -28966,11 +29366,12 @@
     "https://schemas.winwincode.dev/winwincode/v1/client-control.schema.json",
     "https://schemas.winwincode.dev/winwincode/v1/control-plane-events.schema.json",
     "https://schemas.winwincode.dev/winwincode/v1/control-plane-http.schema.json",
+    "https://schemas.winwincode.dev/winwincode/v1/device-auth.schema.json",
     "https://schemas.winwincode.dev/winwincode/v1/device-provider.schema.json",
     "https://schemas.winwincode.dev/winwincode/v1/domain.schema.json",
     "https://schemas.winwincode.dev/winwincode/v1/execution-port.schema.json"
   ],
-  "x-source-digest": "sha256:1e06b28cb674b7876feb747b3645d3ea2dc28b9b16f4df046610d508317db636",
+  "x-source-digest": "sha256:ecc17e988fb38cacd824d14278112fb11696e1d058116dee25242ea9a088e1e0",
   "x-winwincode-client-metadata": {
     "http": {
       "authentication": {

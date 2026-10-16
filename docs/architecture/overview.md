@@ -34,15 +34,16 @@ flowchart LR
     Server -->|"WebSocket events"| Browser
     Server --> CP
     CP --> DB
-    Server <-->|"ClientControlPort HTTP exchange"| Device
+    Server <-->|"ClientControlPort HTTP/HTTPS exchange"| Device
     Device -->|"launch and supervise"| Worker
-    Server <-->|"ExecutionPort HTTP exchange"| Worker
+    Server <-->|"Worker HTTP/HTTPS relay"| Device
+    Device <-->|"stdin/stdout JSON-lines"| Worker
     Local --> CP
     Local -->|"in-process ExecutionPort"| Worker
     Worker --> Provider
     Worker --> Kernel
     Kernel --> Codex
-    Kernel -->|"signed helper process"| Helper
+    Kernel -->|"helper process"| Helper
     Device --> DB
     Worker --> DB
 ```
@@ -57,7 +58,7 @@ Client 通过 `packages/control-plane-client/src/index.ts` 和 `apps/client/src/
 
 `crates/winwincode-api/src/generated.rs` 定义公共 HTTP 和 WebSocket 类型。`crates/winwincode-server/src/server.rs::router` 绑定路由。`crates/winwincode-server/src/application.rs` 把传输请求交给 Control Plane 服务。
 
-Server 对浏览器来源、会话和请求体大小做边界检查。远程 Worker 通道要求 TLS。远程预览在非回环地址上也要求 TLS。具体安全约束见 [安全模型](../security-model.md)。
+Server 对浏览器来源、会话和请求体大小做边界检查。本机 Server 默认使用回环 HTTP。远程部署使用对外 HTTPS，并由 Server 直接终止 TLS 或显式配置受保护的 loopback TLS 代理。Worker 通过父 Device 转发 ExecutionPort 请求。具体安全约束见 [安全模型](../security-model.md)。
 
 ## Control Plane 与 ExecutionPort
 
@@ -65,13 +66,13 @@ Server 对浏览器来源、会话和请求体大小做边界检查。远程 Wor
 
 ExecutionPort 是 Control Plane 与 Worker 之间的类型化协议。协议类型位于 `crates/winwincode-execution-port/src/generated.rs`。`crates/winwincode-control-plane/src/execution_port_service.rs::ExecutionPortService` 处理注册、心跳、租约、派发结果、运行时消息和动作授权。
 
-组合库与远程执行使用同一组 `ExecutionPortMessage`：
+同进程组合与 Device 监管的 Worker 使用同一组 `ExecutionPortMessage`：
 
 - 同进程组合由 `crates/winwincode-local/src/lib.rs::LocalLauncher` 启动双方。`LocalExecutionPortHandle` 在进程内转发消息。
-- 远程模式由 Server 的 `/internal/v1/execution-port/exchange` 提供有认证的 HTTP 交换。`crates/winwincode-server/src/remote_worker_transport.rs::ProductionRemoteWorkerExchange` 连接远程传输和 `RemoteWorkerPoolAdapter`。
+- Device 使用 `/internal/v1/client/worker-exchange` 转发子 Worker 的 ExecutionPort 和用量对账请求。`crates/winwincode-server/src/remote_worker_transport.rs::ProductionRemoteWorkerExchange` 核对 Device 归属和执行身份，并连接 `RemoteWorkerPoolAdapter`。
 - Worker 使用 `crates/winwincode-worker/src/lib.rs::WorkerMain` 管理注册、租约、工作区、取消、运行时事件和终态回执。
 
-当前生产 Server 入口通过 `run_composed_server` 调用 `run_remote_composition`，提供远程执行和 Device 交换端点。它不读取 `WWC_SERVER_WORKER_MODE`。同进程组合库的存在不代表生产入口可以通过该变量切换模式。实际启动配置见 [部署指南](../operations/deploy.md)。
+当前生产 Server 入口通过 `run_composed_server` 调用 `run_remote_composition`，提供 Device 交换和 Worker 转发端点。实际启动配置见 [部署指南](../operations/deploy.md)。
 
 ExecutionPort 使用持久出站消息和确认游标。传输失败不会直接抹掉已接受的产品状态。Server 会恢复已经接受但尚未完成清理的结果。
 
@@ -81,7 +82,19 @@ ExecutionPort 使用持久出站消息和确认游标。传输失败不会直接
 
 设备 Client 保存设备身份、连接游标、仓库路径映射、占用状态和 Worker 进程状态。它还能接收 Worker 启动、停止、Provider 配置、扩展配置和仓库注册命令。
 
-Provider 的具体执行位置在 Worker。远程模式把 Worker 放在独立执行机器上。Device Client 可以监管设备上的 Worker。本地模式把 Worker 与 Control Plane 放在同一进程。`crates/winwincode-worker/src/device_model.rs::DeviceModels` 接收 `ModelOpenMessage`。它打开 `crates/winwincode-provider/src/device_store.rs::DeviceProviderStore`，再执行模型请求。`crates/winwincode-provider/src/provider_https_sse.rs::HttpsSseProviderAdapter` 负责 HTTPS/SSE Provider 调用和流转换。
+远程 Device 先通过 Owner 配对令牌绑定 Ed25519 公钥。它在请求前保存私钥、Server URL 和稳定绑定请求。Server 原子保存绑定回执。重启和成功响应丢失后的重试复用同一身份。Device 签名覆盖控制 HTTP、Worker HTTP 中继和 preview WSS upgrade。Worker 与 Device 使用后者创建并独占的 stdio 管道。远程配置和首次 Owner 初始化见 [部署指南](../operations/deploy.md#远程-server-与-device)。
+
+本机启动和执行链路如下。参数来源见[部署指南](../operations/deploy.md#接入-device-client)。
+
+1. `crates/winwincode-server/src/main.rs::load_production_startup` 读取默认配置。`run_composed_server` 打开本机 HTTP 服务。
+2. `apps/client/src/runtime-config.ts` 给浏览器提供 Server 地址。HTTP 请求和 WebSocket 事件连接使用同一个 origin。
+3. `crates/winwincode-cli/src/cli.rs::run_device_service_action` 启动 `crates/winwincode-device-client/src/service.rs::run_device_service`。`DeviceDaemon::tick` 完成登记，并交换设备消息。
+4. 浏览器创建执行会话后，`crates/winwincode-server/src/client_sessions.rs::ClientSessionsApplication::launch` 下发 Worker 启动消息。Device 根据仓库绑定取出本机路径。
+5. `crates/winwincode-device-client/src/supervisor.rs::SessionSupervisor::spawn` 写入会话配置，启动 `winwincode-worker --managed-session <配置路径>`，并接管其 stdin、stdout 和 stderr。
+6. `crates/winwincode-worker/src/main.rs::run_managed` 启动 Worker。`crates/winwincode-worker/src/remote_transport.rs::DeviceRelay::request` 把执行消息写入 stdout。Device 的 `SessionSupervisor::start_worker_relay` 转发 HTTP 请求，并把响应写回 Worker 的 stdin。stderr 用于诊断日志。
+7. Worker 收到任务后解析模型配置。`crates/winwincode-worker/src/main.rs::production_codex` 已在启动时将 helper 路径传给 Adapter 和 Kernel。实际工具调用启动该程序。
+
+Provider 的具体执行位置在 Worker。默认部署中，Server、Web、Device 和 Worker 位于同一台机器。Device 启动并监管 Worker 子进程。组合库还支持把 Worker 与 Control Plane 放在同一进程。`crates/winwincode-worker/src/device_model.rs::DeviceModels` 接收 `ModelOpenMessage`。它在实际模型调用时打开 `crates/winwincode-provider/src/device_store.rs::DeviceProviderStore`，再执行模型请求。`crates/winwincode-provider/src/provider_https_sse.rs::HttpsSseProviderAdapter` 负责 HTTPS/SSE Provider 调用和流转换。
 
 Server 不直接持有设备 Provider 密钥。`crates/winwincode-server/src/device_providers.rs` 把加密配置写入设备下行队列。设备 Client 应用配置，并把快照和回执上报。模型输出以 `ModelChunkMessage` 经 ExecutionPort 返回 Worker 和 Control Plane。
 
@@ -109,7 +122,7 @@ Publication 是受策略约束的外部副作用。`crates/winwincode-publicatio
 
 Control Plane 使用 `crates/winwincode-storage/src/lib.rs::SqliteStorage`。默认数据库位于 Server 数据目录。打开数据库时启用外键、WAL 和 `synchronous=FULL`。该存储覆盖产品状态、事务回执、事件 outbox、执行队列、租约、Worker 注册、设备绑定、候选产物和 Publication。
 
-设备 Client 使用 `crates/winwincode-device-client/src/store.rs::DeviceStore`。它使用独立 SQLite 数据库。它保存设备身份、上下行游标、仓库映射、占用镜像和 Worker 进程记录。
+设备 Client 使用 `crates/winwincode-device-client/src/store.rs::DeviceStore`。它使用独立 SQLite 数据库。它保存设备身份、远程绑定、上下行游标、仓库映射、占用镜像、Worker 进程记录和候选应用 journal。Server 当前 schema 为 `8`，Device 当前 schema 为 `11`。
 
 Provider 使用 `DeviceProviderStore` 保存设备侧 Provider 配置、调用回执和模型交换。`winwincode-codex` 也维护 Worker 侧执行状态。各数据库通过协议和回执协调，不共享内存事务。
 
@@ -121,13 +134,15 @@ Provider 使用 `DeviceProviderStore` 保存设备侧 Provider 配置、调用�
 
 Provider 的 HTTPS/SSE 请求使用这一传输层。设备 Client 和 Worker 也复用失败分类。请求取消会关闭已登记的套接字，从而中止阻塞 I/O。
 
+Device 的持久队列负责远程控制交换重试。单次 HTTP 执行器保留 `Retry-After`，Worker 中继把结构化 `NetworkFailure` 传回调用方。每条请求路径由登记的单一责任方决定退避。Device 认证的首次 401 只刷新一次挑战；永久认证失败和吊销进入停机路径。
+
 前端请求使用 `packages/network-request`。`scripts/generate-network-policy.mjs` 从 `schema/winwincode/network-request-policy.json` 生成 `packages/network-request/src/policy.generated.mjs`。Rust 网络层与前端请求层分别实现各自的传输接口。
 
 执行中的网络动作还受 ExecutionPort 动作策略约束。`crates/winwincode-execution-port/src/action_normalizer.rs` 把网络、Shell、文件、Git 和 MCP 请求规范化。`WorkerActionGateway` 要求有效执行租约和动作授权回执。网络失败策略不能替代权限检查。
 
 ## 第一方 crate 依赖
 
-下图只显示工作区内当前产品 crate 的 Cargo normal 依赖。箭头表示左侧 crate 依赖右侧 crate。可选 normal 依赖也包含在图中。第三方依赖和未接入当前产品运行路径的 crate 不在图中。
+下图只显示工作区内当前产品 crate 的 Cargo normal 依赖。箭头表示左侧 crate 依赖右侧 crate。可选 normal 依赖也包含在图中。第三方依赖不在图中。
 
 ```mermaid
 flowchart LR

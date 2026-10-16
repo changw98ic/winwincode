@@ -1,8 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
-// Production acceptance uses explicit freshly sealed binaries.
 import assert from 'node:assert/strict'
-import { execFileSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import { globSync, mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -10,6 +8,7 @@ import { join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import { isDeepStrictEqual } from 'node:util'
 import test from 'node:test'
+import { pauseManagedProcess } from './fixtures/managed-process-pause.mjs'
 import { runApiProductionVertical, waitForDeviceWorkerRegistered } from '../scripts/run-api-production-vertical.mjs'
 import { deterministicDeviceProvider, waitFor } from '../scripts/device-production-fixture.mjs'
 import { readDeviceExecutionReceipts } from '../scripts/export-device-candidate.mjs'
@@ -57,15 +56,6 @@ function driveReceipts(database, jobId) {
     .map(row => ({ ...row, receipt: JSON.parse(row.response_json) }))
 }
 
-function transportState(probe, message) {
-  const hash = createHash('sha256').update(`${probe.workerId}:${probe.workerInstanceId}:${message.messageId}`).digest('hex')
-  const database = openDatabase(probe.networkJournalPath)
-  try {
-    const row = database.prepare('SELECT state_json FROM network_queue_state WHERE operation_hash=?').get(hash)
-    return { hash, state: row ? JSON.parse(row.state_json) : null,
-      attempts: database.prepare('SELECT * FROM network_request_attempts WHERE operation_hash=? ORDER BY sequence').all(hash) }
-  } finally { database.close() }
-}
 
 function assertClaimPeriod(database, receipt) {
   const records = database.prepare(`SELECT response_json FROM execution_lease_request_receipts
@@ -119,21 +109,13 @@ test('Chat reoffers its original committed dispatch receipt after a Server crash
           BEGIN SELECT RAISE(ABORT,'hold actual pre-dispatch Worker heartbeat'); END`)
         const previousSequence = database.prepare('SELECT heartbeat_sequence FROM execution_workers WHERE worker_id=?')
           .get(probe.workerId).heartbeat_sequence
-        const originalHeartbeat = await waitFor(() => {
+        const originalHeartbeat = await pauseManagedProcess(probe.pid, () => {
           const pending = readRetainedWorkerHeartbeats(probe.dataDirectory, probe.workerId, probe.workerInstanceId)
             .find(value => value.message.heartbeatSequence === previousSequence + 1)
-          if (!pending || pending.delivery.acknowledgementRequired !== 1) return false
-          const before = transportState(probe, pending.message)
-          if (!before.state || before.state.in_flight || before.attempts.at(-1)?.outcome !== 'failed') return false
-          process.kill(probe.pid, 'SIGSTOP')
-          paused = probe.pid
-          const state = execFileSync('ps', ['-p', String(probe.pid), '-o', 'stat='], { encoding: 'utf8' }).trim()
-          const after = transportState(probe, pending.message)
-          if (state.startsWith('T') && after.state && !after.state.in_flight && after.attempts.at(-1)?.outcome === 'failed') return pending
-          process.kill(probe.pid, 'SIGCONT')
-          paused = null
-          return false
-        }, 'the actual Worker is stopped in its original failed heartbeat quiet backoff window', 30_000, 10)
+          return pending?.delivery.acknowledgementRequired === 1 ? pending : false
+        }, { timeoutMillis: 30_000 })
+        paused = probe.pid
+        await new Promise(resolve => setTimeout(resolve, 10_100))
         assert.deepEqual(originalHeartbeat.message.activeLeases, [])
         assert.equal(originalHeartbeat.message.capacity.runningJobs, 0)
         assert.ok(originalHeartbeat.message.capacity.availableSlots > 0)
@@ -151,7 +133,6 @@ test('Chat reoffers its original committed dispatch receipt after a Server crash
         assert.equal(database.prepare('SELECT COUNT(*) AS n FROM execution_leases WHERE job_id=?').get(queued.job_id).n, 0)
         database.exec('DROP TRIGGER hold_dispatch_prepare_heartbeat')
         const forwarded = await probe.postRetainedMessage(originalHeartbeat.bytes, {
-          ca: readFileSync(join(directory, 'fixture-cert.pem')),
         })
         assert.equal(forwarded.status, 200)
         assert.equal(forwarded.frameAccepted, true)

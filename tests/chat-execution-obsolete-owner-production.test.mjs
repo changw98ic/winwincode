@@ -1,7 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
 
-// Uses official Device-observed process death and successor recovery.
-// A revoked old credential is never replaced or bypassed to reach CP ingress.
 import assert from 'node:assert/strict'
 import { execFileSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
@@ -13,7 +11,7 @@ import test from 'node:test'
 import { isDeepStrictEqual } from 'node:util'
 import { runApiProductionVertical } from '../scripts/run-api-production-vertical.mjs'
 import { deterministicDeviceProvider, waitFor } from '../scripts/device-production-fixture.mjs'
-import { assertSuccessfulRetainedCommands, readRetainedCoreCommandResults,
+import { assertSuccessfulRetainedCommands, completedCommandScript, readRetainedCoreCommandResults,
   readRetainedOutcomes, readRetainedRuntime, readWorkerTransport,
   runtimeLedgerSnapshot } from './fixtures/chat-execution-transport-probe.mjs'
 
@@ -67,10 +65,10 @@ function businessSnapshot(database, productSessionId, jobId) {
 }
 
 function assertObsoleteWorkerRejected(response) {
-  assert.equal(response.status, 401, 'an exited Worker must lose all transport access')
-  assert.equal(response.rejectionBoundary, 'http-authentication')
+  assert.equal(response.status, 400, 'the Device relay rejects the replaced Worker instance')
+  assert.equal(response.rejectionBoundary, 'control-plane-worker-instance')
   assert.equal(response.acknowledgement, null, 'an obsolete Worker receives no business receipt')
-  return 'http-authentication'
+  return 'control-plane-worker-instance'
 }
 
 function assertReplacementTerminal(database, oldAuthority, oldFacts, successorGrantId) {
@@ -129,8 +127,6 @@ function assertAcceptedTerminalLeasePeriod(database, lease, authority, currentLe
   const expiry = Date.parse(period.expires_at)
   const currentExpiry = Date.parse(currentLease.expires_at)
   assert.ok(Number.isFinite(expiry) && Number.isFinite(currentExpiry) && currentExpiry >= expiry)
-  // Renewal preserves the original pending bytes. Match the complete original
-  // period to the Registry's immutable accepted receipt, including payload.
   const accepted = database.prepare(`SELECT operation,request_id,response_json FROM execution_lease_request_receipts
     WHERE job_id=? AND operation IN ('claim','renew') AND json_extract(response_json,'$.status')='accepted'
       AND json_extract(response_json,'$.lease.expires_at')=?`).all(lease.jobId, lease.expiresAt)
@@ -162,7 +158,7 @@ for (const kind of ['runtime', 'outcome']) {
       directory, restart: false, repeat: false, includeStrongFlow: false, ...sealedBinaries(),
       serverEnvironment: { WWC_SERVER_EXECUTION_LEASE_SECONDS: '30' },
       deviceProvider: { ...deterministicDeviceProvider(), responseGateMarkers: [marker], nativeCellScripts: {
-        'native-cell-A': 'const command=ALL_TOOLS.find(tool=>tool.name.endsWith("exec_command")); if(!command) throw new Error("command tool missing"); for(let index=0;index<16;index++) { const result=await tools[command.name]({cmd:"true",yield_time_ms:1000}); if(result.exit_code!==0) throw new Error("original command did not exit successfully"); await new Promise(resolve=>setTimeout(resolve,100)); } text("original retained owner calls completed");',
+        'native-cell-A': completedCommandScript('true', 16),
       } },
       scenario: { async run({ api, modelRoute, devicePath }) {
         const database = new DatabaseSync(join(directory, 'server-data/control-plane.sqlite3'))
@@ -183,9 +179,7 @@ for (const kind of ['runtime', 'outcome']) {
           const oldFacts = database.prepare('SELECT * FROM device_execution_current_facts WHERE job_id=?').get(job.job_id)
           const probe = readWorkerTransport(devicePath.deviceData, oldAuthority)
           assert.equal(Number(execFileSync('ps', ['-p', String(probe.pid), '-o', 'pgid='], { encoding: 'utf8' }).trim()), probe.pid)
-          const ca = readFileSync(join(directory, 'fixture-cert.pem'))
-          // The duplicate receipt has its own genuinely accepted source. The
-          // new rejected frame must not be confused with this existing fact.
+
           const acceptedOriginal = await waitFor(() => readRetainedRuntime(devicePath.deviceData, job.job_id)
             .find(value => value.message.lease.attempt === 1 && value.sequence <= value.ack_sequence),
           'one original runtime frame already has its real Worker business ACK', 60_000)
@@ -208,13 +202,8 @@ for (const kind of ['runtime', 'outcome']) {
           assert.notEqual(newOriginal.message.messageId, acceptedOriginal.message.messageId)
           assert.equal(database.prepare('SELECT 1 FROM product_state WHERE stream_id=?')
             .get(`execution-outcome:${job.job_id}:1`), undefined)
-          // Kill the actual Device-supervised process group. No fake process
-          // exit, registry, grant, lease or replacement fact is written here.
           process.kill(-probe.pid, 'SIGKILL')
           paused = null
-          // SIGKILL requests death; it does not synchronously prove that the
-          // original process stopped writing. Freeze the zero-write baseline
-          // only after the actual Device supervisor retained its exit receipt.
           await waitFor(() => database.prepare('SELECT 1 FROM worker_launch_grant_exits WHERE worker_launch_grant_id=?')
             .get(oldFacts.worker_launch_grant_id), 'the Device supervisor observes the original process death', 60_000)
           const oldAfterDeath = originalAttemptSnapshot(devicePath.deviceData, job.job_id)
@@ -295,8 +284,6 @@ for (const kind of ['runtime', 'outcome']) {
             assert.equal(usage.tokens ?? null, null)
             assert.equal(usage.costMicrounits ?? null, null)
           }
-          process.kill(successorProbe.pid, 'SIGSTOP')
-          paused = successorProbe.pid
           const before = businessSnapshot(database, productSessionId, job.job_id)
           const predecessorTerminal = assertReplacementTerminal(database, oldAuthority, oldFacts, replacement.successor_grant_id)
           assert.equal(before.sessionJobs.length, 1)
@@ -305,9 +292,9 @@ for (const kind of ['runtime', 'outcome']) {
           assertSuccessfulRetainedCommands(successorCommandsBefore, 16)
           const successorRolloutBefore = readFileSync(successorCoreBefore.run.rolloutPath)
           const httpCount = devicePath.modelServer.requests.length
-          const exactReceipt = await probe.postRetainedMessage(acceptedOriginal.bytes, { ca })
+          const exactReceipt = await probe.postRetainedMessage(acceptedOriginal.bytes)
           const duplicateBoundary = assertObsoleteWorkerRejected(exactReceipt)
-          const rejected = await probe.postRetainedMessage(newOriginal.bytes, { ca })
+          const rejected = await probe.postRetainedMessage(newOriginal.bytes)
           const newWriteBoundary = assertObsoleteWorkerRejected(rejected)
           assert.deepEqual(businessSnapshot(database, productSessionId, job.job_id), before)
           assert.deepEqual(originalAttemptSnapshot(devicePath.deviceData, job.job_id), oldAfterDeath)
@@ -315,8 +302,6 @@ for (const kind of ['runtime', 'outcome']) {
           assert.deepEqual(assertReplacementTerminal(database, oldAuthority, oldFacts, replacement.successor_grant_id), predecessorTerminal)
           const heartbeat = database.prepare('SELECT heartbeat_sequence FROM execution_workers WHERE worker_id=?')
             .get(successorProbe.workerId)
-          process.kill(successorProbe.pid, 'SIGCONT')
-          paused = null
           const successorPostProbe = await waitFor(() => {
             const current = database.prepare('SELECT worker_instance_id,heartbeat_sequence FROM execution_workers WHERE worker_id=?')
               .get(successorProbe.workerId)
@@ -330,8 +315,6 @@ for (const kind of ['runtime', 'outcome']) {
             assert.equal(exit.worker_instance_id, successorProbe.workerInstanceId)
             assert.equal(exit.worker_session_id, successorProbe.launchWorkerSessionId)
             assert.ok(Date.parse(exit.observed_at) >= Date.parse(settled.terminal.terminal_at))
-            // A managed Worker drains and exits after its terminal ACK. The
-            // trusted actual exit is also a complete post-probe observation.
             return { kind: 'process-exit', observedAt: exit.observed_at }
           }, 'the actual successor resumes formal heartbeats or completes its acknowledged managed execution', 30_000)
           assert.deepEqual(businessSnapshot(database, productSessionId, job.job_id), before)

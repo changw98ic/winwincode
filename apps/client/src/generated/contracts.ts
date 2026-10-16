@@ -125,7 +125,6 @@ export type ActionEnforcementReceiptMessage = {
   readonly "policyKind": ActionPolicyKind
   readonly "policyMode": ActionPolicyMode | null
   readonly "policyVersion": ActionPolicyVersionReference | null
-  readonly "receiptSignature": Sha256Digest
   readonly "requestId": RequestId
   readonly "resource": string
   readonly "schemaVersion": SchemaVersion
@@ -186,6 +185,14 @@ export type ActorId = UserId | ServiceAccountId | SystemActorId
 export type AgentIdentityId = string & { readonly __brand: "AgentIdentityId" }
 
 export type ApiTokenId = string & { readonly __brand: "ApiTokenId" }
+
+export type ApplicationCandidateDigest = string
+
+export enum ApplicationReconciliationOutcome {
+  Applied = "applied",
+  NotStarted = "not_started",
+  OutcomeUnknown = "outcome_unknown",
+}
 
 export enum AppliedFileOperation {
   Create = "create",
@@ -505,6 +512,24 @@ export type Candidate = {
   readonly "workContractId": WorkContractId
   readonly "workItemId": WorkItemId
   readonly "workRunId": WorkRunId
+}
+
+export type CandidateApplicationProjection = {
+  readonly "applicationId": LocalApplyReceiptId
+  readonly "approvalId": IdempotencyKey
+  readonly "baseCommit": GitCommitSha
+  readonly "candidateDigest": ApplicationCandidateDigest
+  readonly "status": CandidateApplicationStatus
+  readonly "targetBranch": GitRefName
+}
+
+export enum CandidateApplicationStatus {
+  Applying = "applying",
+  Applied = "applied",
+  Stale = "stale",
+  AwaitingRetry = "awaiting_retry",
+  Blocked = "blocked",
+  Failed = "failed",
 }
 
 export enum CandidateAvailability {
@@ -1031,12 +1056,39 @@ export enum ClientAccessGrantState {
   Expired = "expired",
 }
 
+export type ClientApplicationReconciledMessage = {
+  readonly "applicationId": LocalApplyReceiptId
+  readonly "approvalId": IdempotencyKey
+  readonly "baseCommit": GitCommitSha
+  readonly "candidateDigest": ApplicationCandidateDigest
+  readonly "candidateRef": CandidateRef
+  readonly "clientInstanceId": ClientInstanceId
+  readonly "clientNodeId": ClientNodeId
+  readonly "expectedRevision": Revision
+  readonly "idempotencyKey": IdempotencyKey
+  readonly "kind": "client.application.reconciled"
+  readonly "messageId": ClientControlMessageId
+  readonly "occupancyFencingToken": OccupancyFencingToken
+  readonly "occupancyLeaseId": ClientOccupancyLeaseId
+  readonly "occurredAt": Instant
+  readonly "originalEpoch": OccupancyFencingToken
+  readonly "outcome": ApplicationReconciliationOutcome
+  readonly "repositoryBindingId": RepositoryBindingId
+  readonly "resultCommit": GitCommitSha | null
+  readonly "schemaVersion": SchemaVersion
+  readonly "sequence": ClientExchangeSequence
+  readonly "targetBranch": GitRefName
+}
+
 export enum ClientArchitecture {
   Aarch64 = "aarch64",
   X8664 = "x86_64",
 }
 
 export type ClientCandidateApplyMessage = {
+  readonly "applicationId": LocalApplyReceiptId
+  readonly "approvalId": IdempotencyKey
+  readonly "candidateDigest": ApplicationCandidateDigest
   readonly "candidateRef": CandidateRef
   readonly "clientInstanceId": ClientInstanceId
   readonly "clientNodeId": ClientNodeId
@@ -1048,6 +1100,7 @@ export type ClientCandidateApplyMessage = {
   readonly "occupancyFencingToken": OccupancyFencingToken
   readonly "occupancyLeaseId": ClientOccupancyLeaseId
   readonly "occurredAt": Instant
+  readonly "reconciledRetry": boolean
   readonly "repositoryBindingId": RepositoryBindingId
   readonly "requesterUserId": UserId
   readonly "schemaVersion": SchemaVersion
@@ -1168,7 +1221,7 @@ export enum ClientControlErrorCode {
   InternalError = "INTERNAL_ERROR",
 }
 
-export type ClientControlMessage = ClientEnrollMessage | ClientHelloMessage | ClientHeartbeatMessage | ClientConnectCodePublishedMessage | ClientOccupancyAckMessage | ClientOccupancyRejectedMessage | ClientRepositoryUpsertMessage | ClientRepositoryRemovedMessage | ClientRepositoryStatusMessage | ClientWorkerLaunchAckMessage | ClientWorkerStateMessage | ClientWorkerReconcileMessage | ClientCandidateRetainedMessage | ClientCandidateApplyResultMessage | ClientCommandAckMessage | ClientOccupancyOfferMessage | ClientOccupancyReleaseMessage | ClientOccupancyForceFenceMessage | ClientRepositoryRescanMessage | ClientWorkerLaunchMessage | ClientWorkerStopMessage | ClientCandidateApplyMessage | ClientLockMessage | ClientProviderReportMessage | ClientProviderApplyMessage | ClientExtensionReportMessage | ClientExtensionApplyMessage | ClientRepositoryRegisterMessage | ClientRepositoryRegisteredMessage | ClientManagedAppCommandMessage | ClientManagedAppStatusMessage
+export type ClientControlMessage = ClientEnrollMessage | ClientHelloMessage | ClientHeartbeatMessage | ClientConnectCodePublishedMessage | ClientOccupancyAckMessage | ClientOccupancyRejectedMessage | ClientRepositoryUpsertMessage | ClientRepositoryRemovedMessage | ClientRepositoryStatusMessage | ClientWorkerLaunchAckMessage | ClientWorkerStateMessage | ClientWorkerReconcileMessage | ClientCandidateRetainedMessage | ClientCandidateApplyResultMessage | ClientCommandAckMessage | ClientOccupancyOfferMessage | ClientOccupancyReleaseMessage | ClientOccupancyForceFenceMessage | ClientRepositoryRescanMessage | ClientWorkerLaunchMessage | ClientWorkerStopMessage | ClientCandidateApplyMessage | ClientLockMessage | ClientProviderReportMessage | ClientProviderApplyMessage | ClientExtensionReportMessage | ClientExtensionApplyMessage | ClientRepositoryRegisterMessage | ClientRepositoryRegisteredMessage | ClientManagedAppCommandMessage | ClientManagedAppStatusMessage | ClientApplicationReconciledMessage
 
 export type ClientControlMessageId = string & { readonly __brand: "ClientControlMessageId" }
 
@@ -1204,6 +1257,7 @@ export enum ClientControlMessageKind {
   ClientRepositoryRegistered = "client.repository.registered",
   ClientManagedAppCommand = "client.managed_app.command",
   ClientManagedAppStatus = "client.managed_app.status",
+  ClientApplicationReconciled = "client.application.reconciled",
 }
 
 export type ClientDisplayName = string
@@ -1331,7 +1385,6 @@ export type ClientNode = {
   readonly "clientVersion": ClientVersion
   readonly "createdAt": Instant
   readonly "currentInstanceId": ClientInstanceId
-  readonly "deviceCredentialDigest": Sha256Digest
   readonly "displayName": ClientDisplayName
   readonly "lastHeartbeatAt": Instant
   readonly "lockState": ClientLockState
@@ -3547,6 +3600,47 @@ export type DeliveryVerdictProjection = {
   readonly "unresolvedFindings": ReadonlyArray<string>
 }
 
+export type DeviceAuthErrorResponse = {
+  readonly "code": string
+  readonly "schemaVersion": SchemaVersion
+}
+
+export type DeviceBindingIntent = {
+  readonly "architecture": ClientArchitecture
+  readonly "clientVersion": ClientVersion
+  readonly "displayName": ClientDisplayName
+  readonly "platform": ClientPlatformTarget
+}
+
+export type DeviceBindRequest = {
+  readonly "intent": DeviceBindingIntent
+  readonly "pairingToken": string
+  readonly "publicKey": string
+  readonly "requestId": IdempotencyKey
+  readonly "schemaVersion": SchemaVersion
+}
+
+export type DeviceBindResponse = {
+  readonly "boundAt": Instant
+  readonly "clientNodeId": ClientNodeId
+  readonly "ownerUserId": UserId
+  readonly "publicClientId": PublicClientId
+  readonly "requestId": IdempotencyKey
+  readonly "schemaVersion": SchemaVersion
+}
+
+export type DeviceChallengeRequest = {
+  readonly "publicKey": string
+  readonly "schemaVersion": SchemaVersion
+}
+
+export type DeviceChallengeResponse = {
+  readonly "challenge": string
+  readonly "challengeId": string
+  readonly "expiresAt": Instant
+  readonly "schemaVersion": SchemaVersion
+}
+
 export type DeviceConfigurationEnvelope = {
   readonly "ciphertext": string
   readonly "clientNodeId": string
@@ -3626,6 +3720,16 @@ export type DeviceModelRouteParameters = {
   readonly "productSessionId"?: ProductSessionId
 }
 
+export type DevicePairingRequest = {
+  readonly "schemaVersion": SchemaVersion
+}
+
+export type DevicePairingResponse = {
+  readonly "expiresAt": Instant
+  readonly "pairingToken": string
+  readonly "schemaVersion": SchemaVersion
+}
+
 export type DeviceProviderConfig = {
   readonly "displayName": string
   readonly "enabled": boolean
@@ -3695,6 +3799,16 @@ export enum DeviceResponsesStructuredOutput {
   JsonSchema = "json_schema",
   JsonObject = "json_object",
   Text = "text",
+}
+
+export type DeviceRevokeRequest = {
+  readonly "schemaVersion": SchemaVersion
+}
+
+export type DeviceRevokeResponse = {
+  readonly "clientNodeId": ClientNodeId
+  readonly "revoked": boolean
+  readonly "schemaVersion": SchemaVersion
 }
 
 export type DiagnosticBaseline = {
@@ -4459,6 +4573,7 @@ export enum LocalApplyResult {
   PermissionDenied = "permission_denied",
   Discarded = "discarded",
   Failed = "failed",
+  OutcomeUnknown = "outcome_unknown",
 }
 
 export enum LocalApplyStrategy {
@@ -4469,6 +4584,7 @@ export enum LocalApplyStrategy {
 }
 
 export type LocalCandidateReceipt = {
+  readonly "baseCommit": GitCommitSha
   readonly "candidateCommit": GitCommitSha
   readonly "candidateRef": CandidateRef
   readonly "createdAt": Instant
@@ -7387,7 +7503,6 @@ export enum WorkerLaunchAckStatus {
 export type WorkerLaunchGrant = {
   readonly "clientInstanceId": ClientInstanceId
   readonly "clientNodeId": ClientNodeId
-  readonly "credentialDigest": Sha256Digest
   readonly "expiresAt": Instant
   readonly "occupancyFencingToken": OccupancyFencingToken
   readonly "occupancyLeaseId": ClientOccupancyLeaseId

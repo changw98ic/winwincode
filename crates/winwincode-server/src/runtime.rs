@@ -851,59 +851,29 @@ impl RepositoryRuntimeScheduler {
         &self,
         state: &mut ApplicationState,
         now: &Instant,
-    ) -> Result<bool, RuntimeSupervisorError> {
-        let queued = state
+    ) -> Result<Option<ExecutionJobId>, RuntimeSupervisorError> {
+        let candidate = state
             .storage
             .repository_scheduler()
             .map_err(|error| {
                 debug_scheduler_error("open repository scheduler", &error);
                 scheduler_failure()
             })?
-            .list_jobs(&self.scope, &[ExecutionJobState::Queued])
+            .ready_job_for_worker(
+                &self.scope,
+                &self.worker_id,
+                &self.worker_instance_id,
+                self.worker_pool_id.0 != winwincode_control_plane::STRONGFLOW_DEVICE_WORKER_POOL_ID,
+            )
             .map_err(|error| {
-                debug_scheduler_error("list queued jobs", &error);
+                debug_scheduler_error("select queued Job for admission", &error);
                 scheduler_failure()
             })?;
-        let mut matching_head = None;
-        for record in &queued {
-            let device_facts = {
-                let ledger = state
-                    .storage
-                    .device_execution_binding_ledger()
-                    .map_err(|error| {
-                        debug_scheduler_error("open device execution binding ledger", &error);
-                        scheduler_failure()
-                    })?;
-                ledger.facts(record.job_id.0.as_str()).map_err(|error| {
-                    debug_scheduler_error("read device execution facts", &error);
-                    scheduler_failure()
-                })?
-            };
-            let matches = match device_facts {
-                None => {
-                    let job: ExecutionJob = serde_json::from_slice(&record.dispatch_payload)
-                        .map_err(|_| scheduler_failure())?;
-                    job.work_input
-                        .as_ref()
-                        .is_none_or(|input| input.device_target.is_none())
-                        && self.worker_pool_id.0
-                            != winwincode_control_plane::STRONGFLOW_DEVICE_WORKER_POOL_ID
-                }
-                Some(facts) => {
-                    facts.worker_id == self.worker_id.0
-                        && facts.worker_instance_id == self.worker_instance_id.0
-                }
-            };
-            if matches {
-                matching_head = Some(record);
-                break;
-            }
-        }
-        let Some(record) = matching_head else {
-            return Ok(true);
+        let Some(record) = candidate else {
+            return Ok(None);
         };
         let admission_ready = self
-            .ensure_admission(&mut state.storage, record, now)
+            .ensure_admission(&mut state.storage, &record, now)
             .inspect_err(|error| debug_scheduler_error("ensure admission", error))?;
         if !admission_ready {
             self.hub
@@ -913,7 +883,7 @@ impl RepositoryRuntimeScheduler {
                     scheduler_failure()
                 })?;
         }
-        Ok(admission_ready)
+        Ok(admission_ready.then_some(record.job_id))
     }
 
     fn reconcile_cancel_routes_once(&mut self, state: &mut ApplicationState) {
@@ -1037,7 +1007,7 @@ impl RepositoryRuntimeScheduler {
         state: &mut ApplicationState,
         now: &Instant,
         execution_port: &dyn RuntimeControlOutbound,
-        admission_ready: bool,
+        admitted_job_id: Option<&ExecutionJobId>,
         authenticated_remote: bool,
     ) -> Result<(), RuntimeSupervisorError> {
         let expires_at = add_millis(now, self.lease_duration_millis).ok_or_else(|| {
@@ -1067,11 +1037,10 @@ impl RepositoryRuntimeScheduler {
         // must still reoffer an original same-instance dispatch whose slot was
         // already reserved before the Worker accepted it. Storage distinguishes
         // that receipt recovery from a new claim or replacement attempt.
-        let new_claim_allowed =
-            admission_ready && self.ensure_worker_capacity(&mut state.storage)?;
+        let new_claim_allowed = self.ensure_worker_capacity(&mut state.storage)?;
         let mut scheduler = RepositoryExecutionScheduler::new(&mut state.storage);
         let dispatch = scheduler
-            .claim_next_with_capacity(
+            .claim_admitted_next_with_capacity(
                 &RepositorySchedulerClaimRequest {
                     scope: self.scope.clone(),
                     request_id,
@@ -1082,6 +1051,7 @@ impl RepositoryRuntimeScheduler {
                     expires_at,
                 },
                 new_claim_allowed,
+                admitted_job_id,
             )
             .map_err(|error| {
                 debug_scheduler_error("claim next job", &error);
@@ -1194,6 +1164,7 @@ impl RepositoryRuntimeScheduler {
             )
         })?;
         self.retire_terminal_pending(&mut state.storage, now)?;
+        self.prune_worker_authorities(&mut state.storage, now)?;
         self.refresh_worker_authorities(&mut state.storage)?;
         for message_id in confirmed {
             state
@@ -1259,12 +1230,12 @@ impl RepositoryRuntimeScheduler {
         )?;
         self.refresh_admission_identity(&mut state.storage);
         self.prune_worker_authorities(&mut state.storage, now)?;
-        let admission_ready = self.ensure_queued_admission(state, now)?;
+        let admitted_job_id = self.ensure_queued_admission(state, now)?;
         self.dispatch_scheduler_messages(
             state,
             now,
             execution_port,
-            admission_ready,
+            admitted_job_id.as_ref(),
             authenticated_remote,
         )?;
         self.retire_terminal_pending(&mut state.storage, now)?;
@@ -2851,6 +2822,42 @@ mod tests {
             "repositoryId":test_scope().repository_id
         }))
         .expect("scope");
+        storage
+            .execution_queue()
+            .expect("queue")
+            .submit(&winwincode_storage::ExecutionJobSubmission {
+                scope: test_scope(),
+                job_id: lease.job_id.clone(),
+                request_id: request_id(200),
+                payload_digest: lease.payload_digest.clone(),
+                dispatch_payload: b"{}".to_vec(),
+                attempt: 1,
+                dependencies: Vec::new(),
+                work_run_id: None,
+                submitted_at: at(1),
+            })
+            .expect("queue Job");
+        for (index, (from, to)) in [
+            (ExecutionJobState::Queued, ExecutionJobState::Leased),
+            (ExecutionJobState::Leased, ExecutionJobState::Running),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            storage
+                .execution_queue()
+                .expect("queue")
+                .transition(&winwincode_storage::ExecutionJobTransitionRequest {
+                    scope: test_scope(),
+                    job_id: lease.job_id.clone(),
+                    request_id: request_id(201 + index),
+                    expected_revision: u64::try_from(index + 1).expect("revision"),
+                    from,
+                    to,
+                    occurred_at: at(2),
+                })
+                .expect("active queue Job");
+        }
         let application = StandaloneControlPlaneApplication::new(
             winwincode_control_plane::ControlPlane::start_local(
                 winwincode_control_plane::ControlPlaneConfig::local(&root),
@@ -2911,7 +2918,296 @@ mod tests {
             "driver retries confirmed cleanup without another transport ACK"
         );
         assert!(scheduler.pending_interaction_acknowledgements.is_empty());
+        assert_eq!(scheduler.active_worker_authorities.len(), 1);
+        {
+            let mut guard = scheduler.state.lock().expect("state");
+            let state = guard.as_mut().expect("application state");
+            state
+                .storage
+                .execution_queue()
+                .expect("queue")
+                .transition(&winwincode_storage::ExecutionJobTransitionRequest {
+                    scope: test_scope(),
+                    job_id: lease.job_id.clone(),
+                    request_id: request_id(203),
+                    expected_revision: 3,
+                    from: ExecutionJobState::Running,
+                    to: ExecutionJobState::Failed,
+                    occurred_at: at(12),
+                })
+                .expect("Server terminal");
+            state
+                .storage
+                .worker_session_slots()
+                .expect("slots")
+                .close(&winwincode_storage::WorkerSlotCloseRequest {
+                    authority: renewed.slot.clone(),
+                    request_id: request_id(204),
+                    expected_revision: 1,
+                    outcome: winwincode_storage::WorkerSlotState::Failed,
+                    closed_at: at(12),
+                })
+                .expect("terminal slot");
+        }
+        fault
+            .execute(
+                "UPDATE execution_leases SET expires_at=?1 WHERE job_id=?2",
+                rusqlite::params![at(12).0, lease.job_id.0],
+            )
+            .expect("shortened revoked lease");
+        scheduler
+            .acknowledge_remote(
+                &at(12),
+                &WorkerId(format!("wrk_{}", "B".repeat(26))),
+                &WorkerInstanceId(format!("wki_{}", "B".repeat(26))),
+                &[],
+            )
+            .expect("another Worker can acknowledge after the old Job terminates");
+        assert!(scheduler.active_worker_authorities.is_empty());
         drop(fault);
+        drop(application);
+        drop(scheduler);
+        std::fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
+    fn device_facts_arriving_after_admission_wait_for_the_next_poll() {
+        assert_late_device_admission(false, false);
+    }
+
+    #[test]
+    fn late_earlier_device_job_cannot_replace_the_admitted_job() {
+        assert_late_device_admission(true, false);
+    }
+
+    #[test]
+    fn blocked_device_job_does_not_preempt_the_ready_admission() {
+        assert_late_device_admission(true, true);
+    }
+
+    #[allow(clippy::too_many_lines)]
+    fn assert_late_device_admission(has_admitted_head: bool, blocked_earlier: bool) {
+        use winwincode_domain::ExecutionMessageId;
+        use winwincode_storage::{
+            EXECUTION_PROTOCOL_VERSION, ExecutionJobSubmission, WorkerAuthenticationIdentity,
+            WorkerPlatform, WorkerRegistrationRequest,
+        };
+
+        let root = unique_directory("late-device-admission");
+        let mut storage = SqliteStorage::open(&root).expect("storage");
+        let owner = create_active_owner(&mut storage);
+        let mut scheduler = scheduler_with_user(owner.clone(), &root);
+        scheduler.worker_pool_id =
+            WorkerPoolId(winwincode_control_plane::STRONGFLOW_DEVICE_WORKER_POOL_ID.to_owned());
+        let now = fixed_instant("2026-09-06T12:00:00.000Z");
+        let scope = test_scope();
+        let (mut record, mut job) = queued_job_record(&scope);
+        record.attempt = 1;
+        job.attempt = 1;
+        job.payload_digest = Sha256Digest(format!("sha256:{}", "a".repeat(64)));
+        record.payload_digest = job.payload_digest.clone();
+        record.dispatch_payload = serde_json::to_vec(&job).expect("job bytes");
+        if blocked_earlier {
+            record.dependencies = vec![ExecutionJobId(format!("job_{}", "D".repeat(26)))];
+        }
+        let mut records = vec![record.clone()];
+        if has_admitted_head {
+            let mut later = record.clone();
+            later.job_id = ExecutionJobId(format!("job_{}", "C".repeat(26)));
+            later.dependencies.clear();
+            later.submission_request_id = RequestId(format!("req_{}", "C".repeat(26)));
+            later.submitted_at = fixed_instant("2026-09-06T00:00:01.000Z");
+            let mut later_job = job.clone();
+            later_job.job_id = later.job_id.clone();
+            later.dispatch_payload = serde_json::to_vec(&later_job).expect("later Job bytes");
+            records.push(later);
+        }
+        if blocked_earlier {
+            let mut dependency = record.clone();
+            dependency.job_id = record.dependencies[0].clone();
+            dependency.submission_request_id = RequestId(format!("req_{}", "D".repeat(26)));
+            dependency.dependencies.clear();
+            let mut dependency_job = job.clone();
+            dependency_job.job_id = dependency.job_id.clone();
+            dependency.dispatch_payload =
+                serde_json::to_vec(&dependency_job).expect("dependency bytes");
+            records.push(dependency);
+        }
+        for candidate in records.iter().rev() {
+            storage
+                .execution_queue()
+                .expect("queue")
+                .submit(&ExecutionJobSubmission {
+                    scope: scope.clone(),
+                    job_id: candidate.job_id.clone(),
+                    request_id: candidate.submission_request_id.clone(),
+                    payload_digest: candidate.payload_digest.clone(),
+                    dispatch_payload: candidate.dispatch_payload.clone(),
+                    attempt: candidate.attempt,
+                    dependencies: candidate.dependencies.clone(),
+                    work_run_id: None,
+                    submitted_at: candidate.submitted_at.clone(),
+                })
+                .expect("queued Job");
+        }
+        storage
+            .execution_registry()
+            .expect("registry")
+            .register_worker(&WorkerRegistrationRequest {
+                worker_id: scheduler.worker_id.clone(),
+                worker_instance_id: scheduler.worker_instance_id.clone(),
+                authentication_identity: WorkerAuthenticationIdentity::LocalEmbedded {
+                    control_plane_principal: "late-device-fixture".to_owned(),
+                },
+                protocol_version: EXECUTION_PROTOCOL_VERSION.to_owned(),
+                platform: WorkerPlatform::Aarch64AppleDarwin,
+                capabilities: vec!["codex".to_owned()],
+                capability_digest: record.payload_digest.clone(),
+                security_zone: "local".to_owned(),
+                max_slots: 1,
+                message_id: ExecutionMessageId(fixed_id("xmsg_")),
+                request_id: RequestId(format!("req_{}", "B".repeat(26))),
+                started_at: record.submitted_at.clone(),
+                sent_at: now.clone(),
+            })
+            .expect("Worker");
+        for candidate in &records {
+            let (admission_job, limited) =
+                execution_admission_job(candidate).expect("admission Job");
+            let mut admission = storage.execution_admission().expect("admission");
+            scheduler
+                .configure_admission_policies(&mut admission, &scope, limited.is_some())
+                .expect("policies");
+            scheduler
+                .reserve_admission(&mut admission, candidate, &admission_job)
+                .expect("reservation")
+                .expect("queued reservation");
+        }
+        let repository_scope = serde_json::from_value(serde_json::json!({
+            "kind":"repository", "organizationId":scope.organization_id,
+            "workspaceId":scope.workspace_id, "projectId":scope.project_id,
+            "repositoryId":scope.repository_id
+        }))
+        .expect("repository scope");
+        let application = StandaloneControlPlaneApplication::new(
+            winwincode_control_plane::ControlPlane::start_local(
+                winwincode_control_plane::ControlPlaneConfig::local(&root),
+                Box::new(Publisher),
+            )
+            .expect("control plane"),
+            storage,
+            DurableWorkerInteractionOutbound::new(
+                SqliteStorage::open(&root).expect("outbound storage"),
+                winwincode_storage::WorkerOutboundQueueConfig::default(),
+            )
+            .expect("outbound"),
+            scheduler.hub.clone(),
+            winwincode_control_plane::ProductSessionExecutionConfig::try_new(
+                repository_scope,
+                "fixture-revision",
+                "codex-chat",
+                Some(3600),
+                1_073_741_824,
+            )
+            .expect("execution config"),
+        )
+        .expect("application");
+        scheduler.state = application.shared_runtime_state();
+        {
+            let state_handle = scheduler.state.clone();
+            let mut guard = state_handle.lock().expect("state");
+            let state = guard.as_mut().expect("application state");
+            state
+                .storage
+                .device_execution_binding_ledger()
+                .expect("Device facts schema");
+            let facts =
+                rusqlite::Connection::open(state.storage.database_path()).expect("facts writer");
+            let commit_facts = |job_id: &ExecutionJobId| {
+                facts.execute(
+                "INSERT INTO device_execution_reservation_facts VALUES (?1,?2,?3,?4,?5,?6,1,?7,?8,?9,?10,NULL,NULL,?11,1,NULL)",
+                rusqlite::params![
+                    job_id.0, fixed_id("cnd_"), fixed_id("cix_"), owner.0,
+                    fixed_id("rbd_"), fixed_id("ocl_"), fixed_id("wlg_"), fixed_id("wsn_"),
+                    scheduler.worker_id.0, scheduler.worker_instance_id.0, now.0,
+                ],
+            ).expect("Device facts commit")
+            };
+            if has_admitted_head {
+                commit_facts(&records[1].job_id);
+            }
+            if blocked_earlier {
+                commit_facts(&record.job_id);
+            }
+            let ready = scheduler
+                .ensure_queued_admission(state, &now)
+                .expect("preflight before the earlier Device facts");
+            if !blocked_earlier {
+                commit_facts(&record.job_id);
+            }
+            scheduler
+                .dispatch_scheduler_messages(state, &now, &NoControls, ready.as_ref(), false)
+                .expect("a late Device binding defers dispatch without faulting");
+            assert!(
+                state
+                    .storage
+                    .execution_registry()
+                    .expect("registry")
+                    .load_lease(&record.job_id)
+                    .expect("lease lookup")
+                    .is_none()
+            );
+            if has_admitted_head {
+                assert!(
+                    state
+                        .storage
+                        .execution_registry()
+                        .expect("registry")
+                        .load_lease(&records[1].job_id)
+                        .expect("admitted lease")
+                        .is_some()
+                );
+                assert_eq!(
+                    state
+                        .storage
+                        .execution_admission()
+                        .expect("admission")
+                        .load_reservation_by_job(&record.job_id)
+                        .expect("waiting reservation")
+                        .expect("reservation")
+                        .state,
+                    ExecutionReservationState::Queued
+                );
+            } else {
+                let ready = scheduler
+                    .ensure_queued_admission(state, &now)
+                    .expect("next preflight");
+                assert!(ready.is_some());
+                scheduler
+                    .dispatch_scheduler_messages(state, &now, &NoControls, ready.as_ref(), false)
+                    .expect("the next poll dispatches the admitted Job");
+                assert_eq!(
+                    state
+                        .storage
+                        .execution_admission()
+                        .expect("admission")
+                        .load_reservation_by_job(&record.job_id)
+                        .expect("reservation lookup")
+                        .expect("reservation")
+                        .state,
+                    ExecutionReservationState::Running
+                );
+                assert!(
+                    state
+                        .storage
+                        .execution_registry()
+                        .expect("registry")
+                        .load_lease(&record.job_id)
+                        .expect("lease lookup")
+                        .is_some()
+                );
+            }
+        }
         drop(application);
         drop(scheduler);
         std::fs::remove_dir_all(root).expect("cleanup");

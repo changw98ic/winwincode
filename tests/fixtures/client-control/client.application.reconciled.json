@@ -1,0 +1,25 @@
+{
+  "schemaVersion": "winwincode/v1",
+  "messageId": "cmsg_00000000000000000000000034",
+  "clientNodeId": "cnd_00000000000000000000000001",
+  "clientInstanceId": "cix_00000000000000000000000002",
+  "sequence": 930,
+  "occurredAt": "2026-09-01T09:38:00.000Z",
+  "kind": "client.application.reconciled",
+  "expectedRevision": 18,
+  "idempotencyKey": "idem-application-reconcile-0001",
+  "occupancyLeaseId": "ocl_00000000000000000000000002",
+  "occupancyFencingToken": "4",
+  "payload": {
+    "applicationId": "lar_00000000000000000000000001",
+    "approvalId": "idem-candidate-approval-0001",
+    "originalEpoch": "3",
+    "repositoryBindingId": "rbd_00000000000000000000000001",
+    "candidateRef": "refs/winwincode/candidates/demo-1",
+    "candidateDigest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "baseCommit": "a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0",
+    "targetBranch": "main",
+    "outcome": "applied",
+    "resultCommit": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+  }
+}

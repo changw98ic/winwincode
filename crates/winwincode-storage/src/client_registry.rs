@@ -25,7 +25,6 @@ CREATE TABLE IF NOT EXISTS client_nodes (
         'x86_64-unknown-linux-gnu')),
     architecture TEXT NOT NULL CHECK (architecture IN ('aarch64', 'x86_64')),
     client_version TEXT NOT NULL,
-    device_credential_digest TEXT,
     current_instance_id TEXT,
     presence_state TEXT NOT NULL DEFAULT 'pending_enrollment'
         CHECK (presence_state IN (
@@ -64,7 +63,6 @@ CREATE TABLE IF NOT EXISTS client_exchange_commands (
     completed INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (client_node_id, idempotency_key)
 );
-DROP TABLE IF EXISTS client_credential_rotations;
 ";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -153,7 +151,6 @@ pub struct ClientNodeRegistration {
     platform: String,
     architecture: String,
     client_version: String,
-    device_credential_digest: Option<String>,
     current_instance_id: Option<String>,
     max_concurrent_worker_sessions: u32,
 }
@@ -167,7 +164,6 @@ impl ClientNodeRegistration {
         platform: impl Into<String>,
         architecture: impl Into<String>,
         client_version: impl Into<String>,
-        device_credential_digest: Option<String>,
         current_instance_id: Option<String>,
         max_concurrent_worker_sessions: u32,
     ) -> Result<Self, ClientRegistryError> {
@@ -178,7 +174,6 @@ impl ClientNodeRegistration {
             platform: platform.into(),
             architecture: architecture.into(),
             client_version: client_version.into(),
-            device_credential_digest,
             current_instance_id,
             max_concurrent_worker_sessions,
         };
@@ -216,9 +211,6 @@ impl ClientNodeRegistration {
             ));
         }
         validate_client_version(&self.client_version)?;
-        if let Some(digest) = &self.device_credential_digest {
-            validate_sha256_digest(digest)?;
-        }
         if let Some(instance_id) = &self.current_instance_id {
             validate_client_instance_id(instance_id)?;
         }
@@ -262,11 +254,6 @@ impl ClientNodeRegistration {
     }
 
     #[must_use]
-    pub fn device_credential_digest(&self) -> Option<&str> {
-        self.device_credential_digest.as_deref()
-    }
-
-    #[must_use]
     pub fn current_instance_id(&self) -> Option<&str> {
         self.current_instance_id.as_deref()
     }
@@ -285,7 +272,6 @@ pub struct ClientNodeRecord {
     pub platform: String,
     pub architecture: String,
     pub client_version: String,
-    pub device_credential_digest: Option<String>,
     pub current_instance_id: Option<String>,
     pub presence_state: ClientPresenceState,
     pub accepting_connections: bool,
@@ -850,12 +836,12 @@ fn insert_enrolled_client_node(
         .execute(
             "INSERT INTO client_nodes
              (client_node_id, public_client_id, display_name, platform, architecture,
-              client_version, device_credential_digest, current_instance_id,
+              client_version, current_instance_id,
               presence_state, accepting_connections, lock_state,
               max_concurrent_worker_sessions, reported_running_worker_sessions,
               last_heartbeat_at, created_at, revision)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 'pending_enrollment', 1,
-                     'unlocked', ?9, 0, NULL, ?10, 1)",
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'pending_enrollment', 1,
+                     'unlocked', ?8, 0, NULL, ?9, 1)",
             params![
                 registration.client_node_id(),
                 registration.public_client_id(),
@@ -863,7 +849,6 @@ fn insert_enrolled_client_node(
                 registration.platform(),
                 registration.architecture(),
                 registration.client_version(),
-                registration.device_credential_digest(),
                 registration.current_instance_id(),
                 sql_integer(u64::from(registration.max_concurrent_worker_sessions()))?,
                 now.0,
@@ -916,18 +901,17 @@ fn refresh_client_node_projection(
         .execute(
             "UPDATE client_nodes
              SET display_name = ?2, platform = ?3, architecture = ?4,
-                 client_version = ?5, device_credential_digest = ?6,
-                 current_instance_id = ?7,
-                 max_concurrent_worker_sessions = ?8,
+                 client_version = ?5,
+                 current_instance_id = ?6,
+                 max_concurrent_worker_sessions = ?7,
                  revision = revision + 1
-             WHERE client_node_id = ?1 AND revision = ?9",
+             WHERE client_node_id = ?1 AND revision = ?8",
             params![
                 registration.client_node_id(),
                 registration.display_name(),
                 registration.platform(),
                 registration.architecture(),
                 registration.client_version(),
-                registration.device_credential_digest(),
                 registration.current_instance_id(),
                 sql_integer(u64::from(registration.max_concurrent_worker_sessions()))?,
                 sql_integer(record.revision)?,
@@ -966,7 +950,7 @@ fn load_client_node(
     connection
         .query_row(
             "SELECT client_node_id, public_client_id, display_name, platform, architecture,
-                    client_version, device_credential_digest, current_instance_id,
+                    client_version, current_instance_id,
                     presence_state, accepting_connections, lock_state,
                     max_concurrent_worker_sessions, reported_running_worker_sessions,
                     last_heartbeat_at, created_at, revision
@@ -981,15 +965,14 @@ fn load_client_node(
                     row.get::<_, String>(4)?,
                     row.get::<_, String>(5)?,
                     row.get::<_, Option<String>>(6)?,
-                    row.get::<_, Option<String>>(7)?,
-                    row.get::<_, String>(8)?,
-                    row.get::<_, i64>(9)?,
-                    row.get::<_, String>(10)?,
+                    row.get::<_, String>(7)?,
+                    row.get::<_, i64>(8)?,
+                    row.get::<_, String>(9)?,
+                    row.get::<_, i64>(10)?,
                     row.get::<_, i64>(11)?,
-                    row.get::<_, i64>(12)?,
-                    row.get::<_, Option<String>>(13)?,
-                    row.get::<_, String>(14)?,
-                    row.get::<_, i64>(15)?,
+                    row.get::<_, Option<String>>(12)?,
+                    row.get::<_, String>(13)?,
+                    row.get::<_, i64>(14)?,
                 ))
             },
         )
@@ -1009,7 +992,6 @@ fn client_node_record_from_row(
         String,
         String,
         Option<String>,
-        Option<String>,
         String,
         i64,
         String,
@@ -1027,7 +1009,6 @@ fn client_node_record_from_row(
         platform,
         architecture,
         client_version,
-        device_credential_digest,
         current_instance_id,
         presence_state,
         accepting_connections,
@@ -1061,7 +1042,6 @@ fn client_node_record_from_row(
         platform,
         architecture,
         client_version,
-        device_credential_digest,
         current_instance_id,
         presence_state,
         accepting_connections,
@@ -1129,7 +1109,6 @@ fn validate_schema(connection: &rusqlite::Connection) -> Result<(), ClientRegist
             "platform",
             "architecture",
             "client_version",
-            "device_credential_digest",
             "current_instance_id",
             "presence_state",
             "accepting_connections",
@@ -1269,23 +1248,6 @@ fn validate_client_version(value: &str) -> Result<(), ClientRegistryError> {
             }
         }
         None => Ok(()),
-    }
-}
-
-fn validate_sha256_digest(value: &str) -> Result<(), ClientRegistryError> {
-    let canonical = value.strip_prefix("sha256:").is_some_and(|hex| {
-        hex.len() == 64
-            && hex
-                .bytes()
-                .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
-    });
-    if canonical {
-        Ok(())
-    } else {
-        Err(error(
-            ClientRegistryErrorKind::InvalidInput,
-            "device credential digest is not canonical SHA-256",
-        ))
     }
 }
 

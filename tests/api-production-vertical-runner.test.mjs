@@ -10,6 +10,7 @@ import {
 } from 'node:fs'
 import { resolve } from 'node:path'
 import { tmpdir } from 'node:os'
+import { DatabaseSync } from 'node:sqlite'
 import test from 'node:test'
 import { projectSourceDigest } from '../scripts/product-build-contract.mjs'
 import { loadDeviceAgentTask } from '../scripts/device-agent-task.mjs'
@@ -24,14 +25,44 @@ import {
   workItemCreatePayload,
   verifyApiProductionSourceSeal,
   writeApiProductionSourceSeal,
-  writeHelperReleaseManifest,
   runApiProductionVertical,
   waitForDeviceWorkerRegistered,
+  assertDeviceRuntimeWorker,
 } from '../scripts/run-api-production-vertical.mjs'
 
 const root = resolve(import.meta.dirname, '..')
 const runnerPath = resolve(root, 'scripts/run-api-production-vertical.mjs')
 const browserGatePath = resolve(root, 'tests/browser-chat-production.test.mjs')
+
+test('Device runtime evidence binds its canonical execution identity to the original physical Worker and durable terminal', () => {
+  const directory = mkdtempSync(resolve(tmpdir(), 'wwc-runtime-worker-proof-'))
+  const serverDatabase = resolve(directory, 'server.sqlite3')
+  const database = new DatabaseSync(serverDatabase)
+  database.exec(`CREATE TABLE scheduler_execution_jobs(job_id TEXT,product_session_id TEXT,state TEXT);
+    CREATE TABLE execution_dispatch_authorities(job_id TEXT,worker_id TEXT,worker_instance_id TEXT,
+      worker_session_id TEXT,lease_id TEXT,attempt INTEGER,fencing_token TEXT);
+    INSERT INTO scheduler_execution_jobs VALUES('job-fixture','session-fixture','running');
+    INSERT INTO execution_dispatch_authorities VALUES('job-fixture','worker-fixture','instance-fixture',
+      'canonical-execution-session','lease-fixture',1,'7')`)
+  const worker = { workerSessionId: 'physical-process-session', workerId: 'worker-fixture', workerInstanceId: 'instance-fixture' }
+  const runtime = { executionJobId: 'job-fixture', productSessionId: 'session-fixture',
+    workerSessionId: 'canonical-execution-session', leaseId: 'lease-fixture', attempt: 1, fencingToken: '7' }
+  const inspect = (changes = {}, processChanges = {}) => assertDeviceRuntimeWorker({ serverDatabase,
+    runtime: { ...runtime, ...changes }, worker: { ...worker, ...processChanges } })
+  try {
+    assert.equal(inspect(), null)
+    database.exec("UPDATE scheduler_execution_jobs SET state='completed'")
+    const proof = inspect()
+    assert.equal(proof.processWorkerSessionId, worker.workerSessionId)
+    assert.equal(proof.executionWorkerSessionId, runtime.workerSessionId)
+    for (const changes of [{ executionJobId: 'other-job' }, { productSessionId: 'other-session' },
+      { workerSessionId: worker.workerSessionId }, { leaseId: 'other-lease' }, { attempt: 2 }, { fencingToken: '8' }]) {
+      assert.throws(() => inspect(changes))
+    }
+    assert.throws(() => inspect({}, { workerId: 'other-worker' }))
+    assert.throws(() => inspect({}, { workerInstanceId: 'other-instance' }))
+  } finally { database.close(); rmSync(directory, { recursive: true, force: true }) }
+})
 
 test('registration reads the exact Worker beyond a full historical first page', async () => {
   const historical = Array.from({ length: 201 }, (_, index) => ({ id: `old-${index}`, state: 'drained' }))
@@ -482,10 +513,9 @@ test('API production vertical is a direct generated HTTP runner', async () => {
   assert.match(source, /writeApiProductionSourceSeal/u)
   assert.match(source, /verifyApiProductionSourceSeal/u)
   assert.match(source, /trackedDiffSha256/u)
-  assert.match(source, /helperReleaseManifestMode/u)
   assert.match(source, /source seal missing or invalid/u)
   assert.match(source, /IP\.1 = 127\.0\.0\.1/u)
-  assert.match(source, /WWC_WORKER_SERVER_ORIGIN: controlUrl/u)
+  assert.doesNotMatch(source, /WWC_WORKER_SERVER_ORIGIN/u)
   assert.doesNotMatch(source, /controlUrl\.replace\('127\.0\.0\.1'/u)
   assert.match(source, /export async function runApiProductionVertical/u)
   assert.doesNotMatch(source, /approveSolutionResolution/u)
@@ -528,9 +558,8 @@ test('source seal binds the Device Worker and CLI binaries', () => {
       writeFileSync(path, '#!/bin/sh\nexit 0\n')
       chmodSync(path, 0o755)
     }
-    const helperReleaseManifest = writeHelperReleaseManifest(root, helperExecutable)
-    const sealed = writeApiProductionSourceSeal({ root, serverBinary, helperExecutable,
-      helperReleaseManifest })
+      const sealed = writeApiProductionSourceSeal({ root, serverBinary, helperExecutable,
+    })
     assert.equal(sealed.seal.workerBinaryPath, 'winwincode-worker')
     assert.equal(sealed.seal.cliBinaryPath, 'wwc')
     verifyApiProductionSourceSeal({ root, serverBinary, helperExecutable })
@@ -544,7 +573,7 @@ test('source seal binds the Device Worker and CLI binaries', () => {
   } finally { rmSync(target, { recursive: true, force: true }) }
 })
 
-test('source seal rejects a changed helper build script at the same Git HEAD', t => {
+test('source seal rejects changed build and Device lifecycle scripts at the same Git HEAD', t => {
   const directory = mkdtempSync(resolve(tmpdir(), 'winwincode-api-build-source-seal-'))
   t.after(() => rmSync(directory, { recursive: true, force: true }))
   const sourceRoot = resolve(directory, 'source')
@@ -555,7 +584,7 @@ test('source seal rejects a changed helper build script at the same Git HEAD', t
   writeFileSync(resolve(sourceRoot, 'package.json'), JSON.stringify({ version: '0.1.0' }))
   writeFileSync(resolve(sourceRoot, 'Cargo.toml'), '[workspace.package]\nversion = "0.1.0"\n')
   writeFileSync(resolve(sourceRoot, 'crates/helper/src/main.rs'), 'fn main() {}\n')
-  for (const name of ['run-api-production-vertical.mjs', 'product-build-contract.mjs', 'compact-kernel-helper.mjs']) {
+  for (const name of ['run-api-production-vertical.mjs', 'product-build-contract.mjs', 'build-community.mjs', 'device-production-fixture.mjs']) {
     writeFileSync(resolve(sourceRoot, 'scripts', name), '// build input\n')
   }
   const git = (...args) => execFileSync('git', ['-C', sourceRoot, ...args], { encoding: 'utf8' }).trim()
@@ -572,12 +601,20 @@ test('source seal rejects a changed helper build script at the same Git HEAD', t
   const serverBinary = resolve(binaryRoot, 'winwincode-server')
   const helperExecutable = resolve(binaryRoot, 'winwincode-kernel-helper')
   const options = { root: sourceRoot, serverBinary, helperExecutable }
-  writeApiProductionSourceSeal({ ...options,
-    helperReleaseManifest: writeHelperReleaseManifest(sourceRoot, helperExecutable) })
+  writeApiProductionSourceSeal(options)
   verifyApiProductionSourceSeal(options)
-  writeFileSync(resolve(sourceRoot, 'scripts/compact-kernel-helper.mjs'), '// changed build input\n')
-  assert.equal(git('rev-parse', 'HEAD'), head)
-  assert.throws(() => verifyApiProductionSourceSeal(options), /source seal is stale/u)
+  for (const script of ['build-community.mjs', 'device-production-fixture.mjs']) {
+    const path = resolve(sourceRoot, 'scripts', script)
+    const original = readFileSync(path)
+    writeFileSync(path, 'process.exitCode = 1\n')
+    assert.equal(git('rev-parse', 'HEAD'), head)
+    assert.throws(() => verifyApiProductionSourceSeal(options), /source seal is stale/u)
+    writeFileSync(path, original)
+    chmodSync(path, 0o755)
+    assert.throws(() => verifyApiProductionSourceSeal(options), /tracked diff is stale/u)
+    chmodSync(path, 0o644)
+    verifyApiProductionSourceSeal(options)
+  }
 })
 
 test('browser skip-build verifies the production source seal before replacing artifacts', () => {
@@ -776,7 +813,7 @@ test('source seal rejects changes in every locally patched Cargo dependency', t 
   writeFileSync(resolve(sourceRoot, 'package.json'), JSON.stringify({ version: '0.1.0' }))
   writeFileSync(resolve(sourceRoot, 'Cargo.toml'), '[workspace.package]\nversion = "0.1.0"\n[patch.crates-io]\nrusqlite = { path = "upstream/vendor/rusqlite-0.39.0" }\ni18n-embed-fl = { path = "upstream/vendor/i18n-embed-fl-0.9.4" }\n')
   writeFileSync(resolve(sourceRoot, 'crates/helper/src/main.rs'), 'fn main() {}\n')
-  for (const name of ['run-api-production-vertical.mjs', 'product-build-contract.mjs', 'compact-kernel-helper.mjs']) {
+  for (const name of ['run-api-production-vertical.mjs', 'product-build-contract.mjs', 'build-community.mjs', 'device-production-fixture.mjs']) {
     writeFileSync(resolve(sourceRoot, 'scripts', name), '// build input\n')
   }
   const dependencies = ['rusqlite-0.39.0', 'i18n-embed-fl-0.9.4']
@@ -800,7 +837,7 @@ test('source seal rejects changes in every locally patched Cargo dependency', t 
   const helperExecutable = resolve(binaryRoot, 'winwincode-kernel-helper')
   const options = { root: sourceRoot, serverBinary, helperExecutable }
   const sealed = writeApiProductionSourceSeal({ ...options,
-    helperReleaseManifest: writeHelperReleaseManifest(sourceRoot, helperExecutable) })
+  })
   const originalDigest = projectSourceDigest(sourceRoot)
   verifyApiProductionSourceSeal(options)
   for (const dependency of dependencies) {

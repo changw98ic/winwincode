@@ -10,7 +10,7 @@ use winwincode_domain::{
     WorkerSessionId,
 };
 use winwincode_execution_port::action_gateway::{
-    ExecutionEnvelope, ExecutionEnvelopeToken, GateDecision, GateInput, PreActionDecisionRecorder,
+    GateDecision, GateInput, PreActionDecisionRecorder,
 };
 use winwincode_execution_port::action_normalizer::{
     ActionIntent, ActionObject, ActionOperation, ActionPurpose, ActionRisk, ActionScope,
@@ -32,7 +32,7 @@ use winwincode_execution_port::runtime_trace_outbox::{
     RuntimeTracePayload, RuntimeTraceRetention, SecretSafeTraceSummary, StageTraceState,
     ToolTraceOutcome, TraceGateOutcome, WorkerArtifactCache, WorkerArtifactDraft,
     WorkerArtifactReferenceError, WorkerRuntimeTraceOutbox, WorkerRuntimeTraceState,
-    persist_artifact_reference, traced_envelope_token,
+    persist_artifact_reference,
 };
 
 const NOW: &str = "2027-01-15T08:00:02.000Z";
@@ -309,15 +309,9 @@ fn large_content_goes_to_the_existing_artifact_cache_and_trace_rows_hold_only_re
     );
 }
 
-fn action_trace_fixture() -> (ExecutionEnvelope<()>, ActionIntent, ObservedAction) {
+fn action_trace_fixture() -> ((), ActionIntent, ObservedAction) {
     (
-        ExecutionEnvelope {
-            token: ExecutionEnvelopeToken {
-                version: 3,
-                digest: Sha256Digest(format!("sha256:{}", "a".repeat(64))),
-            },
-            policy: (),
-        },
+        (),
         ActionIntent {
             object: ActionObject::ProductionCode,
             operation: ActionOperation::Modify,
@@ -345,11 +339,11 @@ fn action_trace_fixture() -> (ExecutionEnvelope<()>, ActionIntent, ObservedActio
 
 #[test]
 fn stage_action_gate_tool_candidate_and_runtime_facts_remain_typed_and_ordered() {
-    let (envelope, intent, observed) = action_trace_fixture();
+    let (policy, intent, observed) = action_trace_fixture();
     let action_draft = RuntimeTraceDraft::gateway_action(
         trace_identity(2, 'B'),
         &GateInput {
-            envelope: &envelope,
+            policy: &policy,
             intent: &intent,
             observed: &observed,
         },
@@ -358,7 +352,7 @@ fn stage_action_gate_tool_candidate_and_runtime_facts_remain_typed_and_ordered()
     let gate_draft = RuntimeTraceDraft::gateway_decision(
         trace_identity(3, 'C'),
         &GateInput {
-            envelope: &envelope,
+            policy: &policy,
             intent: &intent,
             observed: &observed,
         },
@@ -366,8 +360,13 @@ fn stage_action_gate_tool_candidate_and_runtime_facts_remain_typed_and_ordered()
     )
     .expect("gate draft");
     assert_eq!(
-        traced_envelope_token(&gate_draft.fact),
-        Some(envelope.token.clone())
+        serde_json::to_value(&gate_draft.fact).expect("gate fact"),
+        serde_json::json!({
+            "kind": "gate",
+            "source": "file",
+            "operation": "modify",
+            "decision": "allow"
+        })
     );
 
     let facts = vec![
@@ -664,13 +663,7 @@ impl RuntimeTraceIdentitySource for FixtureIdentities {
 
 #[test]
 fn the_concrete_gateway_journal_durably_retains_the_decision() {
-    let envelope = ExecutionEnvelope {
-        token: ExecutionEnvelopeToken {
-            version: 4,
-            digest: Sha256Digest(format!("sha256:{}", "c".repeat(64))),
-        },
-        policy: (),
-    };
+    let policy = ();
     let intent = ActionIntent {
         object: ActionObject::ExternalResource,
         operation: ActionOperation::Execute,
@@ -705,7 +698,7 @@ fn the_concrete_gateway_journal_durably_retains_the_decision() {
     journal
         .record(
             GateInput {
-                envelope: &envelope,
+                policy: &policy,
                 intent: &intent,
                 observed: &observed,
             },
@@ -717,7 +710,7 @@ fn the_concrete_gateway_journal_durably_retains_the_decision() {
     journal
         .record_post_action(
             GateInput {
-                envelope: &envelope,
+                policy: &policy,
                 intent: &intent,
                 observed: &observed,
             },

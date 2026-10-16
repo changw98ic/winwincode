@@ -51,7 +51,7 @@ impl EventPublisher for HubPublisher {
     }
 }
 
-struct FixedClock;
+struct FixedClock(Instant);
 
 impl StandaloneApplicationClock for FixedClock {
     fn now_millis(&self) -> u64 {
@@ -59,7 +59,7 @@ impl StandaloneApplicationClock for FixedClock {
     }
 
     fn now_instant(&self) -> Instant {
-        Instant("2027-01-15T08:00:00.000Z".to_owned())
+        self.0.clone()
     }
 }
 
@@ -189,7 +189,11 @@ fn compose_application_with_runtime(
     root: &Path,
     runtime: Option<i64>,
 ) -> StandaloneControlPlaneApplication {
-    compose_application_with_clock(root, runtime, Arc::new(FixedClock))
+    compose_application_with_clock(
+        root,
+        runtime,
+        Arc::new(FixedClock(Instant("2027-01-15T08:00:00.000Z".into()))),
+    )
 }
 
 fn compose_application_with_clock(
@@ -252,7 +256,6 @@ fn work_run_device_fixture(
             "aarch64-apple-darwin",
             "aarch64",
             "1.2.3",
-            None,
             Some(instance.clone()),
             4,
         )
@@ -381,7 +384,6 @@ fn work_run_anchor(
         worker_session_id.clone(),
         worker_id.clone(),
         worker_instance_id.clone(),
-        "sha256:00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff",
         Some(product_session_id.to_owned()),
         Some(winwincode_domain::WorkRunId(work_run_id.to_owned())),
         instant("2100-01-01T00:00:00.000Z"),
@@ -421,12 +423,29 @@ fn settle_launch(root: &Path, anchor: &AnchorLaunch, lease_id: &str, token: u64)
 }
 
 #[test]
-fn existing_worker_authentication_survives_device_recovery_but_not_release() {
-    use winwincode_control_plane::{RemoteWorkerAuthenticator, RemoteWorkerCredential};
-    use winwincode_server::{WorkerSessionCredentialService, WorkerSessionRemoteAuthenticator};
-    use winwincode_storage::WorkerRegistryScope;
+#[allow(clippy::too_many_lines)]
+fn existing_worker_route_survives_device_recovery_but_not_release() {
+    use winwincode_execution_port::{
+        generated::{ExecutionPortMessage, WorkerRegisterMessage},
+        transport::{
+            ExecutionPortCore, FrameDirection, RemoteExchangeRequest, RemoteTransportAdapter,
+            TypedFrame,
+        },
+    };
+    use winwincode_server::{
+        ProductionRemoteWorkerExchange, RemoteWorkerExchangePort, RepositoryRuntimeScheduler,
+    };
+    struct Core;
+    impl ExecutionPortCore for Core {
+        type Output = Vec<ExecutionPortMessage>;
+        type Error = std::convert::Infallible;
+        fn accept(&mut self, _: &ExecutionPortMessage) -> Result<Self::Output, Self::Error> {
+            Ok(vec![])
+        }
+    }
     for consumed in [false, true] {
-        let root = temporary_root("recovery-authentication");
+        let root = temporary_root("recovery-worker-route");
+        initialize_repository(&root.join("repository"));
         let user = canonical_id("usr", 71);
         let (node, instance, lease_id, token, binding) = work_run_device_fixture(&root, 710, &user);
         let anchor = work_run_anchor(
@@ -445,22 +464,59 @@ fn existing_worker_authentication_survives_device_recovery_but_not_release() {
             settle_launch(&root, &anchor, &lease_id, token);
         }
         let now = instant("2026-09-04T12:03:00.000Z");
-        let material = winwincode_server::issue_credential_material().unwrap();
-        let mut storage = SqliteStorage::open(&root).unwrap();
-        WorkerSessionCredentialService::new(&mut storage)
-            .issue_for_launch(
-                &anchor.worker_session_id,
+        let application = compose_application(&root);
+        let scheduler = RepositoryRuntimeScheduler::from_application(
+            &application,
+            api_scope(),
+            WorkerId(anchor.worker_id.clone()),
+            WorkerInstanceId(anchor.worker_instance_id.clone()),
+            "recovery-route",
+            std::time::Duration::from_secs(30),
+        )
+        .unwrap();
+        let exchange = ProductionRemoteWorkerExchange::new(&root, api_scope(), scheduler, Core)
+            .with_clock(Arc::new(FixedClock(now.clone())));
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../tests/fixtures/contracts/execution-port.valid.json"
+        ))
+        .unwrap();
+        let mut registration: WorkerRegisterMessage = serde_json::from_value(
+            fixture["messages"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|m| m["kind"] == "worker.register")
+                .unwrap()
+                .clone(),
+        )
+        .unwrap();
+        registration.worker_id = WorkerId(anchor.worker_id.clone());
+        registration.worker_instance_id = WorkerInstanceId(anchor.worker_instance_id.clone());
+        let frame = TypedFrame::new(
+            FrameDirection::WorkerToControlPlane,
+            ExecutionPortMessage::WorkerRegisterMessage(registration),
+        )
+        .unwrap();
+        let request = RemoteExchangeRequest::new(
+            WorkerId(anchor.worker_id.clone()),
+            WorkerInstanceId(anchor.worker_instance_id.clone()),
+            vec![],
+            RemoteTransportAdapter::<Core>::encode(&frame).unwrap(),
+        )
+        .unwrap()
+        .encode()
+        .unwrap();
+        let send = || {
+            exchange.exchange(
+                &node,
                 &anchor.worker_id,
                 &anchor.worker_instance_id,
-                &anchor.worker_launch_grant_id,
-                material.credential_digest(),
-                &now,
+                &request,
+                now.clone(),
             )
-            .unwrap();
-        let auth =
-            WorkerSessionRemoteAuthenticator::new(&root, WorkerRegistryScope::local_default());
-        let proof = RemoteWorkerCredential::new(material.material().as_bytes().to_vec()).unwrap();
-        let principal = auth.authenticate(&proof, &now).unwrap();
+        };
+        send().unwrap();
+        let mut storage = SqliteStorage::open(&root).unwrap();
         storage
             .client_node_registry()
             .unwrap()
@@ -471,28 +527,16 @@ fn existing_worker_authentication_survives_device_recovery_but_not_release() {
             .unwrap()
             .mark_recovery_pending(&lease_id, &instant("2026-09-04T12:05:00.000Z"), &now)
             .unwrap();
-        if consumed {
-            auth.authenticate(&proof, &now)
-                .expect("temporary Device loss must preserve the exact launched Worker");
-            auth.ensure_active(&principal, &now)
-                .expect("existing Worker can report and renew during recovery");
-        } else {
-            assert!(
-                auth.authenticate(&proof, &now).is_err(),
-                "recovery cannot authorize an unconsumed launch"
-            );
-            assert!(auth.ensure_active(&principal, &now).is_err());
-        }
+        assert_eq!(send().is_ok(), consumed);
         storage
             .client_occupancy_ledger()
             .unwrap()
             .force_release(&lease_id, &instant("2026-09-04T12:06:00.000Z"))
             .unwrap();
-        assert!(
-            auth.authenticate(&proof, &instant("2026-09-04T12:06:01.000Z"))
-                .is_err()
-        );
+        assert!(send().is_err());
+        drop(exchange);
         drop(storage);
+        drop(application);
         std::fs::remove_dir_all(root).unwrap();
     }
 }
@@ -1010,6 +1054,3 @@ fn the_work_run_dispatch_replays_exactly_without_new_facts() {
     application.shutdown().expect("shutdown");
     let _ = std::fs::remove_dir_all(&root);
 }
-
-#[path = "support/recovery_credential_renewal.rs"]
-mod recovery_credential_renewal;

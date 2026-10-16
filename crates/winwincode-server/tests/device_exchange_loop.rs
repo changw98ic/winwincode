@@ -21,7 +21,7 @@ use winwincode_domain::OrganizationId;
 use winwincode_server::{
     ApiError, AuthSessionBootstrap, AuthSessionConfig, AuthenticatedPrincipal,
     ClientExchangeApplication, ClientExchangeConfig, ClientExchangePort, ControlPlaneApiPort,
-    EventSubscription, RequestAuthenticator, ServerConfig, ServerTls, SqliteAuthSessionManager,
+    EventSubscription, RequestAuthenticator, ServerConfig, SqliteAuthSessionManager,
     UserAccountService, start_server_with_remote_worker,
 };
 use winwincode_storage::{
@@ -156,7 +156,6 @@ fn server_config(data_directory: &Path) -> ServerConfig {
     ServerConfig::new(
         "127.0.0.1:0".parse().expect("loopback address"),
         "http://control.example",
-        ServerTls::Disabled,
         BTreeSet::from(["https://client.example".to_owned()]),
         data_directory.to_path_buf(),
         Duration::from_secs(2),
@@ -230,11 +229,7 @@ impl LoopTransport {
 }
 
 impl ExchangeTransport for LoopTransport {
-    fn exchange(
-        &self,
-        credential: Option<&str>,
-        request_bytes: &[u8],
-    ) -> Result<Vec<u8>, ExchangeTransportError> {
+    fn exchange(&self, request_bytes: &[u8]) -> Result<Vec<u8>, ExchangeTransportError> {
         if self.outage_remaining.load(Ordering::SeqCst) > 0 {
             self.outage_remaining.fetch_sub(1, Ordering::SeqCst);
             return Err(ExchangeTransportError::new(
@@ -257,7 +252,7 @@ impl ExchangeTransport for LoopTransport {
             body = serde_json::to_vec(&request)
                 .map_err(|error| ExchangeTransportError::new(format!("staged drop: {error}")))?;
         }
-        self.http.exchange(credential, &body)
+        self.http.exchange(&body)
     }
 }
 
@@ -375,9 +370,6 @@ async fn enrollment_response_survives_restart_before_the_first_downlink_command(
     ));
     assert!(daemon.is_enrolled());
     let node = daemon.client_node_id().to_owned();
-    let digest = node_snapshot(&data_directory, &node)
-        .device_credential_digest
-        .unwrap();
     assert_eq!(
         cursors(&data_directory, &node).server_to_client_ack_sequence,
         0
@@ -395,7 +387,6 @@ async fn enrollment_response_survives_restart_before_the_first_downlink_command(
     let restarted =
         ensure_device_identity(&mut store, &seed(), "2026-09-04T00:00:01.000Z").unwrap();
     assert_eq!(restarted.identity().client_node_id(), node);
-    assert_eq!(restarted.credential().digest(), digest);
     let mut daemon = DeviceDaemon::start(config, store, transport, &restarted).unwrap();
     let command = ServerToClientEnvelope {
         schema_version: "winwincode/v1".into(),
@@ -443,7 +434,7 @@ async fn enrollment_response_survives_restart_before_the_first_downlink_command(
     assert_eq!(
         daemon.client_node_id(),
         node,
-        "the saved credential resumes directly"
+        "the saved Device identity resumes directly"
     );
     daemon.into_store().close().unwrap();
     running.shutdown().await.unwrap();
@@ -522,10 +513,6 @@ async fn run_exchange_lifecycle_over_http(
         record.current_instance_id.as_deref(),
         Some(first_identity.current_instance_id())
     );
-    let issued_digest = record
-        .device_credential_digest
-        .clone()
-        .expect("the enrollment issues a persisted credential digest");
     let adopted_public_client_id = record.public_client_id.clone();
     let profile = daemon
         .store_mut()
@@ -669,11 +656,6 @@ async fn run_exchange_lifecycle_over_http(
         adopted_public_client_id.len(),
         10,
         "the issued publicClientId is the canonical 10-digit form"
-    );
-    assert_eq!(
-        second_identity.credential().digest(),
-        issued_digest,
-        "the issued Device Credential survives the restart"
     );
     assert_ne!(
         second_identity.current_instance_id(),

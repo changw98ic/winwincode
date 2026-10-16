@@ -646,6 +646,23 @@ pub const CODEX_PATCH_SET: &[&str] = &[
     "upstream/patches/codex/0102-exact-input-call-routing.patch",
     "upstream/patches/codex/0103-private-input-recovery-store.patch",
     "upstream/patches/codex/0104-input-recovery-dispatch-and-pages.patch",
+    "upstream/patches/codex/0105-host-model-retry-semantics.patch",
+    "upstream/patches/codex/0106-required-tool-fact-storage-fatal.patch",
+    "upstream/patches/codex/0107-terminal-core-error-rollout.patch",
+    "upstream/patches/codex/0108-mcp-timeout-and-test-runtime.patch",
+    "upstream/patches/codex/0109-execution-terminal-cause-and-drain.patch",
+    "upstream/patches/codex/0110-model-authority-expiry-cause.patch",
+    "upstream/patches/codex/0111-tool-call-request-result-pairs.patch",
+    "upstream/patches/codex/0112-tool-review-handoff-receipt-order.patch",
+    "upstream/patches/codex/0113-tool-review-shutdown-owner-release.patch",
+    "upstream/patches/codex/0114-tool-review-call-pair-regressions.patch",
+    "upstream/patches/codex/0115-app-server-internal-error-schema.patch",
+    "upstream/patches/codex/0116-tool-review-output-result-reference.patch",
+    "upstream/patches/codex/0117-shared-tool-fatal-storage.patch",
+    "upstream/patches/codex/0118-guardian-transcript-test-registration.patch",
+    "upstream/patches/codex/0119-native-fixture-transport-lifecycle.patch",
+    "upstream/patches/codex/0120-native-fixture-network-isolation.patch",
+    "upstream/patches/codex/0121-tool-review-supervised-process-shutdown.patch",
 ];
 
 const ROLE_SESSION_POLICY_SCHEMA_VERSION: u32 = 2;
@@ -989,6 +1006,25 @@ pub struct Kernel {
     host_action_approvals: bool,
     runtime: Arc<Mutex<Option<Arc<Runtime>>>>,
     closed: AtomicBool,
+    #[cfg(target_os = "linux")]
+    _linux_sandbox_alias: Option<tempfile::TempDir>,
+}
+
+#[cfg(any(target_os = "linux", all(test, unix)))]
+fn install_linux_sandbox_alias(
+    home: &Path,
+    executable: &Path,
+) -> KernelResult<(PathBuf, tempfile::TempDir)> {
+    let install = || -> std::io::Result<_> {
+        let executable = std::path::absolute(executable)?;
+        let directory = tempfile::Builder::new()
+            .prefix(".linux-sandbox-")
+            .tempdir_in(home.canonicalize()?)?;
+        let alias = directory.path().join("codex-linux-sandbox");
+        std::os::unix::fs::symlink(executable, &alias)?;
+        Ok((alias, directory))
+    };
+    install().map_err(|error| KernelFailure::new("LINUX_SANDBOX_ALIAS_FAILED", error.to_string()))
 }
 
 impl Kernel {
@@ -997,50 +1033,6 @@ impl Kernel {
         model_port: Arc<dyn ModelPort>,
         action_gate: Arc<dyn KernelActionGate>,
     ) -> KernelResult<Self> {
-        if !options.home.is_absolute() {
-            return Err(KernelFailure::new(
-                "INVALID_HOME",
-                format!("kernel home must be absolute: {}", options.home.display()),
-            ));
-        }
-        if !options.helper_executable.is_absolute() {
-            return Err(KernelFailure::new(
-                "INVALID_HELPER_PATH",
-                format!(
-                    "kernel helper path must be absolute: {}",
-                    options.helper_executable.display()
-                ),
-            ));
-        }
-        let helper_metadata =
-            std::fs::symlink_metadata(&options.helper_executable).map_err(|_| {
-                KernelFailure::new(
-                    "HELPER_NOT_FOUND",
-                    format!(
-                        "kernel helper executable does not exist: {}",
-                        options.helper_executable.display()
-                    ),
-                )
-            })?;
-        if helper_metadata.file_type().is_symlink() || !helper_metadata.is_file() {
-            return Err(KernelFailure::new(
-                "HELPER_NOT_FOUND",
-                format!(
-                    "kernel helper executable does not exist: {}",
-                    options.helper_executable.display()
-                ),
-            ));
-        }
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt as _;
-            if helper_metadata.permissions().mode() & 0o111 == 0 {
-                return Err(KernelFailure::new(
-                    "HELPER_NOT_EXECUTABLE",
-                    "kernel helper executable is not executable",
-                ));
-            }
-        }
         options.event_capacity = options
             .event_capacity
             .clamp(MIN_EVENT_CAPACITY, MAX_EVENT_CAPACITY);
@@ -1056,12 +1048,16 @@ impl Kernel {
                 format!("{}: {error}", options.home.display()),
             )
         })?;
-        restrict_private_tree(&options.home).map_err(|_| {
-            KernelFailure::new(
-                "HOME_PERMISSION_FAILED",
-                "kernel home permissions could not be restricted",
-            )
-        })?;
+        #[cfg(target_os = "linux")]
+        let linux_sandbox_alias = options
+            .linux_sandbox_executable
+            .as_ref()
+            .map(|executable| install_linux_sandbox_alias(&options.home, executable))
+            .transpose()?;
+        #[cfg(target_os = "linux")]
+        if let Some((alias, _directory)) = &linux_sandbox_alias {
+            options.linux_sandbox_executable = Some(alias.clone());
+        }
         Ok(Self {
             options,
             model_port,
@@ -1069,6 +1065,8 @@ impl Kernel {
             host_action_approvals: false,
             runtime: Arc::new(Mutex::new(None)),
             closed: AtomicBool::new(false),
+            #[cfg(target_os = "linux")]
+            _linux_sandbox_alias: linux_sandbox_alias.map(|(_alias, directory)| directory),
         })
     }
 
@@ -1092,15 +1090,6 @@ impl Kernel {
     #[must_use]
     pub fn is_closed(&self) -> bool {
         self.closed.load(Ordering::Acquire)
-    }
-
-    pub fn enforce_private_permissions(&self) -> KernelResult<()> {
-        restrict_private_tree(&self.options.home).map_err(|_| {
-            KernelFailure::new(
-                "HOME_PERMISSION_FAILED",
-                "kernel runtime permissions could not be restricted",
-            )
-        })
     }
 
     fn runtime(&self) -> BoxFuture<'_, KernelResult<Arc<Runtime>>> {
@@ -1249,12 +1238,6 @@ impl Kernel {
                     host: Arc::clone(&self.action_gate),
                 })),
             );
-            restrict_private_tree(&self.options.home).map_err(|_| {
-                KernelFailure::new(
-                    "HOME_PERMISSION_FAILED",
-                    "kernel runtime permissions could not be restricted",
-                )
-            })?;
             Ok(Arc::new(Runtime {
                 manager,
                 auth_manager,
@@ -1583,13 +1566,11 @@ impl Kernel {
             }
             let runtime = self.runtime().await?;
             let session = self.session(&runtime, session_id).await?;
-            self.enforce_private_permissions()?;
             let submission = session
                 .thread
                 .start_or_steer_turn(user_text_request(text, &options))
                 .await
                 .map_err(|error| KernelFailure::new("TURN_SUBMIT_FAILED", error.to_string()))?;
-            self.enforce_private_permissions()?;
             Ok(submission_info(submission))
         })
         .await
@@ -1611,7 +1592,6 @@ impl Kernel {
             }
             let runtime = self.runtime().await?;
             let session = self.session(&runtime, session_id).await?;
-            self.enforce_private_permissions()?;
             let durable = session
                 .thread
                 .inspect_durable_turn(&turn_id)
@@ -1622,7 +1602,7 @@ impl Kernel {
                         "durable turn history lookup failed",
                     )
                 })?;
-            let result = match durable {
+            match durable {
                 DurableTurnInspection::Completed(terminal) => {
                     Ok(ExactTurnReconciliation::Completed(terminal))
                 }
@@ -1655,9 +1635,7 @@ impl Kernel {
                     })?;
                     Ok(exact_turn_submission(submission, recovered))
                 }
-            };
-            self.enforce_private_permissions()?;
-            result
+            }
         })
         .await
     }
@@ -1678,13 +1656,11 @@ impl Kernel {
             }
             let runtime = self.runtime().await?;
             let session = self.session(&runtime, session_id).await?;
-            self.enforce_private_permissions()?;
             let submission = session
                 .thread
                 .steer_turn(user_text_request(text, &options), expected_turn_id)
                 .await
                 .map_err(|error| KernelFailure::new("TURN_STEER_FAILED", error.to_string()))?;
-            self.enforce_private_permissions()?;
             Ok(steer_info(submission))
         })
         .await
@@ -1694,16 +1670,11 @@ impl Kernel {
         Self::guard(async {
             let runtime = self.runtime().await?;
             let session = self.session(&runtime, session_id).await?;
-            self.enforce_private_permissions()?;
             session
                 .thread
                 .submit(Op::Interrupt)
                 .await
                 .map_err(|error| KernelFailure::new("INTERRUPT_FAILED", error.to_string()))
-                .and_then(|result| {
-                    self.enforce_private_permissions()?;
-                    Ok(result)
-                })
         })
         .await
     }
@@ -1714,16 +1685,11 @@ impl Kernel {
             let operation = codex_approval_operation(response)?;
             let runtime = self.runtime().await?;
             let session = self.session(&runtime, &session_id).await?;
-            self.enforce_private_permissions()?;
             session
                 .thread
                 .submit(operation)
                 .await
                 .map_err(|error| KernelFailure::new("APPROVAL_SUBMIT_FAILED", error.to_string()))
-                .and_then(|result| {
-                    self.enforce_private_permissions()?;
-                    Ok(result)
-                })
         })
         .await
     }
@@ -1747,7 +1713,6 @@ impl Kernel {
             }
             let runtime = self.runtime().await?;
             let session = self.session(&runtime, session_id).await?;
-            self.enforce_private_permissions()?;
             session
                 .thread
                 .submit(Op::UserInputAnswer {
@@ -1762,10 +1727,6 @@ impl Kernel {
                         "embedded Codex input response submission failed",
                     )
                 })
-                .and_then(|result| {
-                    self.enforce_private_permissions()?;
-                    Ok(result)
-                })
         })
         .await
     }
@@ -1776,7 +1737,6 @@ impl Kernel {
         timeout: Option<Duration>,
     ) -> KernelResult<EventPoll> {
         Self::guard(async {
-            self.enforce_private_permissions()?;
             let runtime = self.runtime().await?;
             let Some(session) = runtime.sessions.read().await.get(session_id).cloned() else {
                 return Ok(EventPoll::Closed);
@@ -1794,7 +1754,6 @@ impl Kernel {
                 }),
             };
             drop(events);
-            self.enforce_private_permissions()?;
             result
         })
         .await
@@ -1844,7 +1803,6 @@ impl Kernel {
                 let _ = runtime.manager.remove_thread(&thread_id).await;
             }
             join_event_task(&session).await;
-            self.enforce_private_permissions()?;
             Ok(())
         })
         .await
@@ -1886,7 +1844,6 @@ impl Kernel {
             if let Some(state_db) = &runtime.state_db {
                 state_db.close().await;
             }
-            self.enforce_private_permissions()?;
             Ok(ShutdownInfo {
                 completed: report
                     .completed
@@ -1919,12 +1876,6 @@ impl Kernel {
             .thread
             .rollout_path()
             .map(|path| path.to_string_lossy().into_owned());
-        restrict_private_tree(&self.options.home).map_err(|_| {
-            KernelFailure::new(
-                "HOME_PERMISSION_FAILED",
-                "kernel rollout permissions could not be restricted",
-            )
-        })?;
         let (event_tx, event_rx) = mpsc::channel(self.options.event_capacity);
         let (stop, stop_rx) = watch::channel(false);
         let thread = Arc::clone(&new_thread.thread);
@@ -2008,7 +1959,6 @@ impl Kernel {
         }
         let runtime = Arc::clone(&self.runtime);
         let timeout = self.options.shutdown_timeout;
-        let home = self.options.home.clone();
         Some(Box::pin(async move {
             let Some(runtime) = runtime.lock().await.take() else {
                 return;
@@ -2030,36 +1980,8 @@ impl Kernel {
             if let Some(state_db) = &runtime.state_db {
                 state_db.close().await;
             }
-            let _ = restrict_private_tree(&home);
         }))
     }
-}
-
-#[cfg(unix)]
-fn restrict_private_tree(root: &Path) -> std::io::Result<()> {
-    use std::os::unix::fs::PermissionsExt as _;
-
-    let metadata = std::fs::symlink_metadata(root)?;
-    if metadata.file_type().is_symlink() {
-        return Err(std::io::Error::other("private runtime path is a symlink"));
-    }
-    if metadata.is_dir() {
-        std::fs::set_permissions(root, std::fs::Permissions::from_mode(0o700))?;
-        for entry in std::fs::read_dir(root)? {
-            restrict_private_tree(&entry?.path())?;
-        }
-    } else if metadata.is_file() {
-        let mode = 0o600 | (metadata.permissions().mode() & 0o100);
-        std::fs::set_permissions(root, std::fs::Permissions::from_mode(mode))?;
-    } else {
-        return Err(std::io::Error::other("private runtime path is not a file"));
-    }
-    Ok(())
-}
-
-#[cfg(not(unix))]
-fn restrict_private_tree(_root: &Path) -> std::io::Result<()> {
-    Ok(())
 }
 
 #[must_use]
@@ -2574,7 +2496,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn kernel_home_and_preexisting_state_are_restricted() {
+    fn kernel_preserves_existing_home_and_file_permissions() {
         use std::os::unix::fs::PermissionsExt as _;
 
         let home = std::env::temp_dir().join(format!(
@@ -2608,7 +2530,7 @@ mod tests {
                 .permissions()
                 .mode()
                 & 0o777,
-            0o700
+            0o777
         );
         assert_eq!(
             std::fs::metadata(&state)
@@ -2616,7 +2538,7 @@ mod tests {
                 .permissions()
                 .mode()
                 & 0o777,
-            0o600
+            0o666
         );
         assert_eq!(
             std::fs::metadata(&script)
@@ -2624,7 +2546,7 @@ mod tests {
                 .permissions()
                 .mode()
                 & 0o777,
-            0o700
+            0o755
         );
         drop(kernel);
         std::fs::remove_dir_all(home).expect("remove kernel home");
@@ -2734,6 +2656,23 @@ mod tests {
         "upstream/patches/codex/0102-exact-input-call-routing.patch",
         "upstream/patches/codex/0103-private-input-recovery-store.patch",
         "upstream/patches/codex/0104-input-recovery-dispatch-and-pages.patch",
+        "upstream/patches/codex/0105-host-model-retry-semantics.patch",
+        "upstream/patches/codex/0106-required-tool-fact-storage-fatal.patch",
+        "upstream/patches/codex/0107-terminal-core-error-rollout.patch",
+        "upstream/patches/codex/0108-mcp-timeout-and-test-runtime.patch",
+        "upstream/patches/codex/0109-execution-terminal-cause-and-drain.patch",
+        "upstream/patches/codex/0110-model-authority-expiry-cause.patch",
+        "upstream/patches/codex/0111-tool-call-request-result-pairs.patch",
+        "upstream/patches/codex/0112-tool-review-handoff-receipt-order.patch",
+        "upstream/patches/codex/0113-tool-review-shutdown-owner-release.patch",
+        "upstream/patches/codex/0114-tool-review-call-pair-regressions.patch",
+        "upstream/patches/codex/0115-app-server-internal-error-schema.patch",
+        "upstream/patches/codex/0116-tool-review-output-result-reference.patch",
+        "upstream/patches/codex/0117-shared-tool-fatal-storage.patch",
+        "upstream/patches/codex/0118-guardian-transcript-test-registration.patch",
+        "upstream/patches/codex/0119-native-fixture-transport-lifecycle.patch",
+        "upstream/patches/codex/0120-native-fixture-network-isolation.patch",
+        "upstream/patches/codex/0121-tool-review-supervised-process-shutdown.patch",
     ];
 
     #[test]
@@ -2773,6 +2712,127 @@ mod tests {
         } else {
             assert_eq!(options.linux_sandbox_executable, None);
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn linux_sandbox_alias_defers_helper_availability_until_execution() {
+        let root = tempfile::tempdir().unwrap();
+        let helper = root.path().join("missing-helper");
+        let (alias, _directory) = super::install_linux_sandbox_alias(root.path(), &helper).unwrap();
+        assert!(!helper.exists());
+        assert_eq!(std::fs::read_link(&alias).unwrap(), helper);
+        assert_eq!(
+            std::process::Command::new(&alias)
+                .output()
+                .unwrap_err()
+                .kind(),
+            std::io::ErrorKind::NotFound
+        );
+        std::os::unix::fs::symlink(std::env::current_exe().unwrap(), &helper).unwrap();
+        assert!(
+            std::process::Command::new(&alias)
+                .arg("--list")
+                .output()
+                .unwrap()
+                .status
+                .success()
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn kernel_linux_sandbox_alias_survives_legacy_bwrap_reentry() {
+        use std::os::unix::fs::PermissionsExt as _;
+        use std::os::unix::process::CommandExt as _;
+        use std::process::Command;
+
+        let root = tempfile::tempdir().unwrap();
+        let helper = std::env::var_os("WWC_WORKER_HELPER_EXECUTABLE").map_or_else(
+            || {
+                std::env::current_exe()
+                    .unwrap()
+                    .parent()
+                    .unwrap()
+                    .parent()
+                    .unwrap()
+                    .join("winwincode-kernel-helper")
+            },
+            std::path::PathBuf::from,
+        );
+        let bwrap = Command::new("/bin/sh")
+            .args(["-c", "command -v bwrap"])
+            .output()
+            .unwrap();
+        assert!(bwrap.status.success(), "system bwrap is required");
+        let bwrap = String::from_utf8(bwrap.stdout).unwrap().trim().to_owned();
+        let help = Command::new(&bwrap).arg("--help").output().unwrap();
+        let help = format!(
+            "{}{}",
+            String::from_utf8_lossy(&help.stdout),
+            String::from_utf8_lossy(&help.stderr)
+        );
+        let kernel = Kernel::new(
+            KernelOptions::new(root.path().join("home"), helper.clone()),
+            Arc::new(UnusedModelPort),
+            Arc::new(RejectingKernelActionGate),
+        )
+        .unwrap();
+        let alias = kernel.options.linux_sandbox_executable.clone().unwrap();
+        assert!(alias.is_absolute());
+        assert_eq!(
+            alias.canonicalize().unwrap(),
+            helper.canonicalize().unwrap()
+        );
+        let quote = |value: &str| format!("'{}'", value.replace('\'', "'\\''"));
+        let profile = serde_json::to_string(&PermissionProfile::read_only()).unwrap();
+        for supports_argv0 in [false, true] {
+            if supports_argv0 && !help.contains("--argv0") {
+                continue;
+            }
+            let path = root.path().join(format!("bwrap-{supports_argv0}"));
+            std::fs::create_dir(&path).unwrap();
+            let log = path.join("calls");
+            let options = if supports_argv0 { " --argv0" } else { "" };
+            let shim = path.join("bwrap");
+            std::fs::write(
+                &shim,
+                format!(
+                    "#!/bin/sh\nif [ \"$1\" = --help ]; then printf '%s\\n' '--as-pid-1 --perms{options}'; exit 0; fi\nprintf '%s\\n' \"$*\" >> {}\nexec {} \"$@\"\n",
+                    quote(log.to_str().unwrap()),
+                    quote(&bwrap),
+                ),
+            )
+            .unwrap();
+            std::fs::set_permissions(&shim, std::fs::Permissions::from_mode(0o755)).unwrap();
+            let argv0 = if alias.file_name().unwrap() == "codex-linux-sandbox" {
+                alias.as_os_str()
+            } else {
+                std::ffi::OsStr::new("codex-linux-sandbox")
+            };
+            let output = Command::new(&alias)
+                .arg0(argv0)
+                .arg("--sandbox-policy-cwd")
+                .arg(root.path())
+                .arg("--permission-profile")
+                .arg(&profile)
+                .args(["--no-proc", "--", "/bin/echo", "sandbox-reentry"])
+                .env("PATH", &path)
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "argv0={supports_argv0}: {output:?}"
+            );
+            assert_eq!(output.stdout, b"sandbox-reentry\n");
+            assert_eq!(
+                std::fs::read_to_string(log).unwrap().contains("--argv0"),
+                supports_argv0
+            );
+        }
+        assert_eq!(alias.file_name().unwrap(), "codex-linux-sandbox");
+        drop(kernel);
+        assert!(!alias.exists());
     }
 
     #[test]

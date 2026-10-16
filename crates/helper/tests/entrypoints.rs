@@ -12,7 +12,10 @@ fn apply_patch_aliases_accept_stdin_and_argument_patches() {
             let filename = format!("{alias}-{stdin}");
             let patch =
                 format!("*** Begin Patch\n*** Add File: {filename}\n+applied\n*** End Patch\n");
-            let mut command = Command::new(env!("CARGO_BIN_EXE_winwincode-kernel-helper"));
+            let mut command = Command::new(
+                std::env::var_os("CARGO_BIN_EXE_winwincode-kernel-helper")
+                    .expect("Cargo binary path"),
+            );
             command
                 .arg0(alias)
                 .current_dir(&root)
@@ -41,20 +44,12 @@ fn apply_patch_aliases_accept_stdin_and_argument_patches() {
             );
         }
     }
-    let handshake = Command::new(env!("CARGO_BIN_EXE_winwincode-kernel-helper"))
-        .arg("--winwincode-helper-handshake")
-        .output()
-        .unwrap();
-    assert!(handshake.status.success());
-    assert!(
-        String::from_utf8(handshake.stdout)
-            .unwrap()
-            .contains("winwincode-kernel-helper")
-    );
-    let host = Command::new(env!("CARGO_BIN_EXE_winwincode-kernel-helper"))
-        .stdin(Stdio::null())
-        .output()
-        .unwrap();
+    let host = Command::new(
+        std::env::var_os("CARGO_BIN_EXE_winwincode-kernel-helper").expect("Cargo binary path"),
+    )
+    .stdin(Stdio::null())
+    .output()
+    .unwrap();
     assert!(host.status.success(), "{host:?}");
     std::fs::remove_dir_all(root).unwrap();
 }

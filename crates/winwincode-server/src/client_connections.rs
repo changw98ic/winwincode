@@ -285,6 +285,7 @@ impl ClientConnectionsApplication {
                 .is_some()
             {
                 ensure_repository_grants(&mut storage, &node.client_node_id, user_id)?;
+
                 return directory_json(&mut storage, user_id);
             }
         }
@@ -371,6 +372,7 @@ impl ClientConnectionsApplication {
                     }),
                 )?;
                 ensure_repository_grants(&mut storage, &node.client_node_id, user_id)?;
+
                 directory_json(&mut storage, user_id)
             }
             Err(error) => match error.kind() {
@@ -390,6 +392,7 @@ impl ClientConnectionsApplication {
                         .is_some()
                     {
                         ensure_repository_grants(&mut storage, &node.client_node_id, user_id)?;
+
                         directory_json(&mut storage, user_id)
                     } else {
                         Err(ClientConnectionsError::new(
@@ -539,10 +542,9 @@ fn directory_json(
             .active_grants_for_user(user_id)
             .map_err(|_| ClientConnectionsError::unavailable())?
     };
-    let mut registry = ClientRegistryService::new(storage);
     let mut clients = Vec::with_capacity(grants.len());
     for grant in grants {
-        let record = registry
+        let record = ClientRegistryService::new(storage)
             .snapshot(&grant.client_node_id)
             .map_err(|_| ClientConnectionsError::unavailable())?;
         if let Some(record) = record
@@ -551,7 +553,14 @@ fn directory_json(
                 ClientPresenceState::PendingEnrollment | ClientPresenceState::Revoked
             )
         {
-            clients.push(device_summary(&record));
+            let mut summary = device_summary(&record);
+            if storage
+                .device_identity_owned_by(&record.client_node_id, user_id)
+                .map_err(|_| ClientConnectionsError::unavailable())?
+            {
+                summary["clientNodeId"] = json!(record.client_node_id);
+            }
+            clients.push(summary);
         }
     }
     Ok(json!({
@@ -653,7 +662,7 @@ mod tests {
             platform: "aarch64-apple-darwin".to_owned(),
             architecture: "aarch64".to_owned(),
             client_version: "0.1.0-alpha.1".to_owned(),
-            device_credential_digest: Some("sha256:aa".to_owned()),
+
             current_instance_id: Some("cix_A1A1A1A1A1A1A1A1A1A1A1A1A1".to_owned()),
             presence_state: ClientPresenceState::Online,
             accepting_connections: true,

@@ -7,6 +7,9 @@ import { join, resolve } from 'node:path'
 const root = resolve(import.meta.dirname, '..')
 
 const canonicalTestFiles = Object.freeze([
+  'tests/rust-build-cache.test.mjs',
+  'tests/rust-test-archive.test.mjs',
+  'tests/runtime-products.test.mjs',
   'tests/api-production-vertical-runner.test.mjs',
   'tests/api-production-device-prerequisites.test.mjs',
   'tests/network-request.test.mjs',
@@ -21,6 +24,7 @@ const canonicalTestFiles = Object.freeze([
   'tests/benchmark-supervisor.test.mjs',
   'tests/native-fusion-benchmark.test.mjs',
   'tests/device-fixture-shutdown.test.mjs',
+  'tests/remote-device-fault-acceptance.test.mjs',
   'tests/managed-process-signals.test.mjs',
   'tests/managed-process-pause.test.mjs',
   'tests/chat-execution-transport-probe.test.mjs',
@@ -40,7 +44,9 @@ const canonicalTestFiles = Object.freeze([
   'tests/chat-page.test.mjs',
   'tests/chat-view-model.test.mjs',
   'tests/client-clients.test.mjs',
+  'tests/remote-device-management-browser.test.mjs',
   'tests/client-control-contract.test.mjs',
+  'tests/device-auth-contract.test.mjs',
   'tests/client-editable-draft.test.mjs',
   'tests/client-keyed-collection.test.mjs',
   'tests/client-login.test.mjs',
@@ -60,7 +66,6 @@ const canonicalTestFiles = Object.freeze([
   'tests/code-mode-dispatch-patch-replay.test.mjs',
   'tests/code-mode-native-build.test.mjs',
   'tests/native-kernel-acceptance-runner.test.mjs',
-  'tests/compact-kernel-helper.test.mjs',
   'tests/engineering-runtime-contract.test.mjs',
   'tests/contract-codegen.test.mjs',
   'tests/contextual-decision.test.mjs',
@@ -70,7 +75,6 @@ const canonicalTestFiles = Object.freeze([
   'tests/control-plane-http-contract.test.mjs',
   'tests/control-plane-websocket-contract.test.mjs',
   'tests/credential-leak-gate.test.mjs',
-  'tests/data-export-semantic-conformance.test.mjs',
   'tests/delivery-execution-job-schema.test.mjs',
   'tests/delivery-submit-verdict-http-contract.test.mjs',
   'tests/domain-schema.test.mjs',

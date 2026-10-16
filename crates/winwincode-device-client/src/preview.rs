@@ -11,7 +11,7 @@ use std::time::{Duration, Instant};
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64;
 use futures::{SinkExt as _, StreamExt as _};
-use http::header::{AUTHORIZATION, HeaderName, HeaderValue};
+use http::header::{HeaderName, HeaderValue};
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 use tokio::net::TcpStream;
 use tokio_tungstenite::tungstenite::Message;
@@ -138,29 +138,22 @@ impl AuthorizedPreviewSourceRegistry {
 pub struct PreviewTunnelClient {
     endpoint: String,
     client_node_id: String,
-    device_credential: String,
     registry: AuthorizedPreviewSourceRegistry,
-    tls_connector: Option<Arc<rustls::ClientConfig>>,
+    auth: Option<crate::remote_auth::DeviceRemoteAuth>,
 }
 
 impl PreviewTunnelClient {
     pub fn new(
         endpoint: impl Into<String>,
         client_node_id: impl Into<String>,
-        device_credential: impl Into<String>,
         sources: impl IntoIterator<Item = AuthorizedPreviewSource>,
     ) -> Result<Self, PreviewTunnelError> {
         let endpoint = endpoint.into();
-        if !(endpoint.starts_with("ws://") || endpoint.starts_with("wss://")) {
-            return Err(PreviewTunnelError::new(
-                "preview tunnel endpoint must use ws:// or wss://",
-            ));
-        }
+        validate_preview_endpoint(&endpoint)?;
         let client_node_id = client_node_id.into();
-        let device_credential = device_credential.into();
-        if !portable_identifier(&client_node_id) || device_credential.is_empty() {
+        if !portable_identifier(&client_node_id) {
             return Err(PreviewTunnelError::new(
-                "preview tunnel identity or credential is invalid",
+                "preview tunnel identity is invalid",
             ));
         }
         let mut indexed = BTreeMap::new();
@@ -180,7 +173,7 @@ impl PreviewTunnelClient {
         Ok(Self {
             endpoint,
             client_node_id,
-            device_credential,
+            auth: None,
             registry: {
                 let registry = AuthorizedPreviewSourceRegistry::default();
                 for source in indexed.into_values() {
@@ -188,71 +181,83 @@ impl PreviewTunnelClient {
                 }
                 registry
             },
-            tls_connector: None,
         })
     }
 
     pub fn with_registry(
         endpoint: impl Into<String>,
         client_node_id: impl Into<String>,
-        device_credential: impl Into<String>,
         registry: AuthorizedPreviewSourceRegistry,
-    ) -> Result<Self, PreviewTunnelError> {
-        Self::with_registry_and_tls_root_der(
-            endpoint,
-            client_node_id,
-            device_credential,
-            registry,
-            None,
-        )
-    }
-
-    pub fn with_registry_and_tls_root_der(
-        endpoint: impl Into<String>,
-        client_node_id: impl Into<String>,
-        device_credential: impl Into<String>,
-        registry: AuthorizedPreviewSourceRegistry,
-        tls_root_der: Option<Vec<u8>>,
     ) -> Result<Self, PreviewTunnelError> {
         let endpoint = endpoint.into();
-        if !(endpoint.starts_with("ws://") || endpoint.starts_with("wss://")) {
-            return Err(PreviewTunnelError::new(
-                "preview tunnel endpoint must use ws:// or wss://",
-            ));
-        }
+        validate_preview_endpoint(&endpoint)?;
         let client_node_id = client_node_id.into();
-        let device_credential = device_credential.into();
-        if !portable_identifier(&client_node_id) || device_credential.is_empty() {
+        if !portable_identifier(&client_node_id) {
             return Err(PreviewTunnelError::new(
-                "preview tunnel identity or credential is invalid",
+                "preview tunnel identity is invalid",
             ));
         }
-        let tls_connector = tls_root_der.map(build_tls_connector).transpose()?;
         Ok(Self {
             endpoint,
             client_node_id,
-            device_credential,
             registry,
-            tls_connector,
+            auth: None,
         })
+    }
+
+    #[must_use]
+    pub fn with_device_auth(mut self, auth: crate::remote_auth::DeviceRemoteAuth) -> Self {
+        self.auth = Some(auth);
+        self
     }
 
     pub async fn run_once(&self) -> Result<(), PreviewTunnelError> {
         self.run_once_with_stop(None).await
     }
 
+    #[allow(clippy::too_many_lines)]
     async fn run_once_with_stop(
         &self,
         stop: Option<&AtomicBool>,
     ) -> Result<(), PreviewTunnelError> {
-        let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
         if self.registry.is_empty() {
             return Err(PreviewTunnelError::new(
                 "preview tunnel has no authorized sources",
             ));
         }
-        let request = self.websocket_request()?;
-        let connector = self.tls_connector.clone().map(Connector::Rustls);
+        let mut request = self.websocket_request()?;
+        let connector = if let Some(auth) = &self.auth {
+            let auth = auth.clone();
+            let path = request
+                .uri()
+                .path_and_query()
+                .map_or("/", http::uri::PathAndQuery::as_str)
+                .to_owned();
+            let headers = tokio::task::spawn_blocking(move || {
+                auth.authorization_headers("GET", &path, &[], IO_TIMEOUT, &|| true)
+            })
+            .await
+            .map_err(|_| PreviewTunnelError::new("preview authorization failed"))?
+            .map_err(|error| PreviewTunnelError::network(error.network_failure()))?;
+            for (name, value) in headers {
+                request.headers_mut().insert(
+                    HeaderName::from_bytes(name.as_bytes()).map_err(|_| {
+                        PreviewTunnelError::new("preview authorization header invalid")
+                    })?,
+                    HeaderValue::from_str(&value).map_err(|_| {
+                        PreviewTunnelError::new("preview authorization header invalid")
+                    })?,
+                );
+            }
+            if auth_roots(self.auth.as_ref()).is_empty() {
+                None
+            } else {
+                Some(preview_tls_connector(auth_roots(self.auth.as_ref()))?)
+            }
+        } else {
+            None
+        };
+        let _ = rustls::crypto::ring::default_provider().install_default();
         let connect = tokio::time::timeout(
             IO_TIMEOUT,
             connect_async_tls_with_config(request, None, false, connector),
@@ -348,11 +353,6 @@ impl PreviewTunnelClient {
             .into_client_request()
             .map_err(|_| PreviewTunnelError::new("preview tunnel request is invalid"))?;
         request.headers_mut().insert(
-            AUTHORIZATION,
-            HeaderValue::from_str(&format!("Bearer {}", self.device_credential))
-                .map_err(|_| PreviewTunnelError::new("preview tunnel credential is invalid"))?,
-        );
-        request.headers_mut().insert(
             "x-winwincode-client-node-id",
             HeaderValue::from_str(&self.client_node_id)
                 .map_err(|_| PreviewTunnelError::new("preview tunnel node id is invalid"))?,
@@ -419,26 +419,20 @@ impl PreviewTunnelSupervisor {
     pub fn start(
         endpoint: impl Into<String>,
         client_node_id: impl Into<String>,
-        device_credential: impl Into<String>,
         registry: AuthorizedPreviewSourceRegistry,
     ) -> Result<Self, PreviewTunnelError> {
-        Self::start_with_tls_root_der(endpoint, client_node_id, device_credential, registry, None)
+        Self::start_with_auth(endpoint, client_node_id, registry, None)
     }
 
-    pub fn start_with_tls_root_der(
+    pub fn start_with_auth(
         endpoint: impl Into<String>,
         client_node_id: impl Into<String>,
-        device_credential: impl Into<String>,
         registry: AuthorizedPreviewSourceRegistry,
-        tls_root_der: Option<Vec<u8>>,
+        auth: Option<crate::remote_auth::DeviceRemoteAuth>,
     ) -> Result<Self, PreviewTunnelError> {
-        let client = PreviewTunnelClient::with_registry_and_tls_root_der(
-            endpoint,
-            client_node_id,
-            device_credential,
-            registry.clone(),
-            tls_root_der,
-        )?;
+        let mut client =
+            PreviewTunnelClient::with_registry(endpoint, client_node_id, registry.clone())?;
+        client.auth = auth;
         let stop = Arc::new(AtomicBool::new(false));
         let thread_stop = Arc::clone(&stop);
         let thread = thread::Builder::new()
@@ -539,25 +533,15 @@ fn sleep_with_stop(stop: &AtomicBool, duration: Duration) {
     }
 }
 
-fn build_tls_connector(root_der: Vec<u8>) -> Result<Arc<rustls::ClientConfig>, PreviewTunnelError> {
-    let mut roots = rustls::RootCertStore::empty();
-    roots
-        .add(rustls::pki_types::CertificateDer::from(root_der))
-        .map_err(|_| PreviewTunnelError::new("preview tunnel TLS root is invalid"))?;
-    let provider = rustls::crypto::aws_lc_rs::default_provider();
-    let config = rustls::ClientConfig::builder_with_provider(Arc::new(provider))
-        .with_safe_default_protocol_versions()
-        .map_err(|_| PreviewTunnelError::new("preview tunnel TLS config is invalid"))?
-        .with_root_certificates(roots)
-        .with_no_client_auth();
-    Ok(Arc::new(config))
-}
-
 fn preview_retry_delay(
     failure: winwincode_network::NetworkFailure,
     attempt: &mut u32,
     connections: &mut u32,
 ) -> Option<Duration> {
+    if failure.http_status == Some(401) && *attempt == 1 {
+        *attempt += 1;
+        return Some(Duration::ZERO);
+    }
     let disconnected = failure.acceptance == winwincode_network::Acceptance::NotSent
         && matches!(
             failure.kind,
@@ -847,6 +831,41 @@ fn decode_chunked(mut body: &[u8]) -> Result<Vec<u8>, PreviewTunnelError> {
     }
 }
 
+fn validate_preview_endpoint(endpoint: &str) -> Result<(), PreviewTunnelError> {
+    let http_endpoint = if let Some(rest) = endpoint.strip_prefix("wss://") {
+        format!("https://{rest}")
+    } else if let Some(rest) = endpoint.strip_prefix("ws://") {
+        format!("http://{rest}")
+    } else {
+        return Err(PreviewTunnelError::new(
+            "preview tunnel requires wss:// or loopback ws://",
+        ));
+    };
+    crate::http::validate_endpoint(&http_endpoint)
+        .map_err(|_| PreviewTunnelError::new("preview tunnel requires wss:// or loopback ws://"))
+}
+
+fn auth_roots(auth: Option<&crate::remote_auth::DeviceRemoteAuth>) -> &[Vec<u8>] {
+    auth.map_or(&[], crate::remote_auth::DeviceRemoteAuth::ca_roots)
+}
+
+fn preview_tls_connector(roots: &[Vec<u8>]) -> Result<Connector, PreviewTunnelError> {
+    let mut store = rustls::RootCertStore::empty();
+    for root in roots {
+        store
+            .add(rustls::pki_types::CertificateDer::from(root.clone()))
+            .map_err(|_| PreviewTunnelError::new("preview CA root is invalid"))?;
+    }
+    let config = rustls::ClientConfig::builder_with_provider(Arc::new(
+        rustls::crypto::ring::default_provider(),
+    ))
+    .with_safe_default_protocol_versions()
+    .map_err(|_| PreviewTunnelError::new("preview TLS configuration is invalid"))?
+    .with_root_certificates(store)
+    .with_no_client_auth();
+    Ok(Connector::Rustls(Arc::new(config)))
+}
+
 fn safe_forward_header(header: &PreviewHeader) -> bool {
     let Ok(name) = HeaderName::from_bytes(header.name.as_bytes()) else {
         return false;
@@ -1029,6 +1048,29 @@ mod tests {
     }
 
     #[test]
+    fn authentication_refreshes_one_challenge_and_revocation_stops() {
+        let mut attempt = 1;
+        let mut connections = 0;
+        let expired = winwincode_network::NetworkFailure::http(401, None);
+        assert_eq!(
+            preview_retry_delay(expired, &mut attempt, &mut connections),
+            Some(Duration::ZERO)
+        );
+        assert_eq!(
+            preview_retry_delay(expired, &mut attempt, &mut connections),
+            None
+        );
+        assert_eq!(
+            preview_retry_delay(
+                winwincode_network::NetworkFailure::http(403, None),
+                &mut attempt,
+                &mut connections
+            ),
+            None
+        );
+    }
+
+    #[test]
     fn only_one_exact_loopback_service_can_be_authorized() {
         assert!(
             AuthorizedPreviewSource::new(descriptor(), "127.0.0.1:4173".parse().unwrap()).is_ok()
@@ -1075,13 +1117,9 @@ mod tests {
         registry.insert(source);
         assert_eq!(registry.snapshot().len(), 1);
 
-        let client = PreviewTunnelClient::with_registry(
-            "ws://127.0.0.1:1",
-            "cnd_demo",
-            "device-secret",
-            registry.clone(),
-        )
-        .expect("client");
+        let client =
+            PreviewTunnelClient::with_registry("ws://127.0.0.1:1", "cnd_demo", registry.clone())
+                .expect("client");
         let response = tokio::runtime::Runtime::new()
             .expect("runtime")
             .block_on(client.forward(ServerPreviewFrame::HttpRequest {
@@ -1145,13 +1183,9 @@ mod tests {
             AuthorizedPreviewSource::new(descriptor(), "127.0.0.1:4173".parse().expect("socket"))
                 .expect("source"),
         );
-        let supervisor = PreviewTunnelSupervisor::start(
-            format!("ws://{address}"),
-            "cnd_demo",
-            "device-secret",
-            registry.clone(),
-        )
-        .expect("supervisor");
+        let supervisor =
+            PreviewTunnelSupervisor::start(format!("ws://{address}"), "cnd_demo", registry.clone())
+                .expect("supervisor");
 
         let second = PreviewSourceDescriptor {
             source_id: "pvs_second".to_owned(),
@@ -1261,14 +1295,13 @@ mod tests {
         let tunnel = PreviewTunnelClient::new(
             format!("ws://{tunnel_address}/internal/v1/preview/tunnel"),
             "cnd_demo",
-            "device-secret",
             [source],
         )
         .unwrap();
         let backend = async move {
             let (stream, _) = tunnel_listener.accept().await.unwrap();
             let mut socket = accept_hdr_async(stream, |request: &Request, response: Response| {
-                assert_eq!(request.headers()[AUTHORIZATION], "Bearer device-secret");
+                assert!(!request.headers().contains_key("authorization"));
                 assert_eq!(request.headers()["x-winwincode-client-node-id"], "cnd_demo");
                 Ok(response)
             })
@@ -1310,70 +1343,5 @@ mod tests {
             runtime.block_on(futures::future::join(tunnel.run_once(), backend));
         client_result.unwrap();
         source_server.join().unwrap();
-    }
-
-    #[test]
-    fn custom_tls_root_connects_to_wss_tunnel() {
-        use rcgen::generate_simple_self_signed;
-        use tokio_rustls::TlsAcceptor;
-        use tokio_tungstenite::accept_async;
-
-        let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
-        let rcgen::CertifiedKey { cert, signing_key } =
-            generate_simple_self_signed(vec!["localhost".to_owned()]).expect("certificate");
-        let server_config = rustls::ServerConfig::builder()
-            .with_no_client_auth()
-            .with_single_cert(
-                vec![cert.der().clone()],
-                rustls::pki_types::PrivateKeyDer::Pkcs8(
-                    rustls::pki_types::PrivatePkcs8KeyDer::from(signing_key.serialize_der()),
-                ),
-            )
-            .expect("server TLS config");
-
-        let runtime = tokio::runtime::Runtime::new().expect("runtime");
-        let listener = runtime
-            .block_on(tokio::net::TcpListener::bind("127.0.0.1:0"))
-            .expect("listener");
-        let address = listener.local_addr().expect("address");
-        let source = AuthorizedPreviewSource::new(
-            descriptor(),
-            "127.0.0.1:4173".parse().expect("source socket"),
-        )
-        .expect("source");
-        let registry = AuthorizedPreviewSourceRegistry::default();
-        registry.insert(source);
-        let client = PreviewTunnelClient::with_registry_and_tls_root_der(
-            format!(
-                "wss://localhost:{}/internal/v1/preview/tunnel",
-                address.port()
-            ),
-            "cnd_demo",
-            "device-secret",
-            registry,
-            Some(cert.der().to_vec()),
-        )
-        .expect("client");
-
-        let backend = async move {
-            let (stream, _) = listener.accept().await.expect("accept");
-            let stream = TlsAcceptor::from(Arc::new(server_config))
-                .accept(stream)
-                .await
-                .expect("TLS handshake");
-            let mut socket = accept_async(stream).await.expect("websocket");
-            let Some(Ok(Message::Text(register))) = socket.next().await else {
-                panic!("expected registration");
-            };
-            assert!(matches!(
-                serde_json::from_str::<DevicePreviewFrame>(&register).expect("register frame"),
-                DevicePreviewFrame::Register { .. }
-            ));
-            socket.close(None).await.expect("close");
-        };
-
-        let (client_result, ()) =
-            runtime.block_on(futures::future::join(client.run_once(), backend));
-        client_result.expect("custom root WSS connection");
     }
 }

@@ -261,7 +261,6 @@ mod tests {
             "aarch64-apple-darwin",
             "aarch64",
             "1.2.3",
-            None,
             Some(format!("cix_{}", suffix(seed + 40))),
             4,
         )
@@ -422,7 +421,6 @@ mod tests {
             format!("wsn_{}", suffix(seed + 50)),
             format!("wrk_{}", suffix(seed + 51)),
             format!("wki_{}", suffix(seed + 52)),
-            "sha256:00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff",
             Some(product_session_id.to_owned()),
             Some(WorkRunId(format!("wrn_{}", suffix(seed + 53)))),
             instant("2026-01-01T00:10:00.000Z"),

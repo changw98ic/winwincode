@@ -73,11 +73,7 @@ impl LocalTransport {
 }
 
 impl ExchangeTransport for LocalTransport {
-    fn exchange(
-        &self,
-        _credential: Option<&str>,
-        request: &[u8],
-    ) -> Result<Vec<u8>, ExchangeTransportError> {
+    fn exchange(&self, request: &[u8]) -> Result<Vec<u8>, ExchangeTransportError> {
         let value: serde_json::Value = serde_json::from_slice(request).unwrap();
         let ack = value["frames"]
             .as_array()
@@ -103,7 +99,6 @@ impl ExchangeTransport for LocalTransport {
             replay_from_sequence: None,
             frames,
             enrollment: None,
-            worker_credentials: Vec::new(),
         })
         .unwrap())
     }
@@ -163,7 +158,7 @@ fn supervisor(path: &Path, binary: Option<PathBuf>) -> SessionSupervisor {
         SupervisorConfig {
             client_node_id: "cnd_00000000000000000000000001".to_owned(),
             client_instance_id: "cix_00000000000000000000000001".to_owned(),
-            server_origin: "https://127.0.0.1:1".to_owned(),
+            server_origin: "http://127.0.0.1:1".to_owned(),
             model_route: None,
             worker_binary_path: binary,
             max_concurrent_worker_sessions: 8,
@@ -323,7 +318,6 @@ fn sc05_five_owned_term_ignoring_workers_block_actual_device_tick() {
                 worker_instance_id: &instance,
                 occupancy_lease_id: LEASE,
                 occupancy_fencing_token: 1,
-                worker_credential_token: "offline-fixture-credential",
                 repository_binding_id: "rbn_fixture",
                 launch_grant_id: "wlg_fixture",
                 product_session_id: None,
@@ -821,7 +815,7 @@ fn downlink_raw_duplicate_budget_preserves_suffix_gap_zero_and_replay() {
     };
     let owned = frame(1);
     assert_eq!(
-        match daemon.ingest_downlink(std::slice::from_ref(&owned), &[]) {
+        match daemon.ingest_downlink(std::slice::from_ref(&owned)) {
             Ok(accepted) => accepted,
             Err(ref error) => panic!(
                 "valid downlink fixture must be accepted: {}",
@@ -833,7 +827,7 @@ fn downlink_raw_duplicate_budget_preserves_suffix_gap_zero_and_replay() {
     let mut duplicates = vec![owned; 64];
     duplicates.push(serde_json::json!({"invalid": "deferred suffix"}));
     assert_eq!(
-        match daemon.ingest_downlink(&duplicates, &[]) {
+        match daemon.ingest_downlink(&duplicates) {
             Ok(accepted) => accepted,
             Err(ref error) => panic!(
                 "valid downlink fixture must be accepted: {}",
@@ -843,11 +837,11 @@ fn downlink_raw_duplicate_budget_preserves_suffix_gap_zero_and_replay() {
         0
     );
     assert_eq!(daemon.downlink.ack_sequence(), 1);
-    assert!(daemon.ingest_downlink(&[frame(3)], &[]).is_err());
-    assert!(daemon.ingest_downlink(&[frame(0)], &[]).is_err());
+    assert!(daemon.ingest_downlink(&[frame(3)]).is_err());
+    assert!(daemon.ingest_downlink(&[frame(0)]).is_err());
     assert_eq!(daemon.downlink.ack_sequence(), 1);
     assert_eq!(
-        match daemon.ingest_downlink(&[frame(2)], &[]) {
+        match daemon.ingest_downlink(&[frame(2)]) {
             Ok(accepted) => accepted,
             Err(ref error) => panic!(
                 "valid downlink fixture must be accepted: {}",
@@ -857,7 +851,7 @@ fn downlink_raw_duplicate_budget_preserves_suffix_gap_zero_and_replay() {
         1
     );
     assert_eq!(
-        match daemon.ingest_downlink(&[frame(2)], &[]) {
+        match daemon.ingest_downlink(&[frame(2)]) {
             Ok(accepted) => accepted,
             Err(ref error) => panic!(
                 "valid downlink fixture must be accepted: {}",

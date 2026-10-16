@@ -641,7 +641,24 @@ test('OpenAPI 3.1 exposes one browser-session route and the canonical business r
       description: 'Short-window, write-only browser bootstrap proof accepted only by session creation.',
     },
   })
-  assert.deepEqual(generatedOpenApi.components.securitySchemes, openapi.securitySchemes)
+  assert.deepEqual(generatedOpenApi.components.securitySchemes, {
+    ...openapi.securitySchemes,
+    devicePublicKey: {
+      type: 'apiKey',
+      in: 'header',
+      name: 'x-winwincode-device-public-key',
+    },
+    deviceChallengeId: {
+      type: 'apiKey',
+      in: 'header',
+      name: 'x-winwincode-device-challenge-id',
+    },
+    deviceSignature: {
+      type: 'apiKey',
+      in: 'header',
+      name: 'x-winwincode-device-signature',
+    },
+  })
   assert.deepEqual(Object.keys(openapi.paths), [
     '/api/v1/auth/session',
     '/api/v1/commands',

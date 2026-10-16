@@ -1,0 +1,1178 @@
+diff --git a/codex-rs/core/src/session/handlers.rs b/codex-rs/core/src/session/handlers.rs
+--- a/codex-rs/core/src/session/handlers.rs
++++ b/codex-rs/core/src/session/handlers.rs
+@@ -398,6 +398,10 @@
+ 
+ async fn shutdown_session_runtime(sess: &Arc<Session>) {
+     crate::tools::ExecutionFacts::seal(sess);
++    let (_, code_mode_result) = tokio::join!(
++        sess.services.unified_exec_manager.shutdown(),
++        sess.services.code_mode_service.shutdown(),
++    );
+     if let Some(startup_prewarm) = sess.take_session_startup_prewarm().await {
+         startup_prewarm.abort().await;
+     }
+@@ -410,7 +414,6 @@
+         .unified_exec_manager
+         .terminate_all_processes()
+         .await;
+-    let code_mode_result = sess.services.code_mode_service.shutdown().await;
+     crate::tools::ExecutionFacts::finish_shutdown(sess, code_mode_result).await;
+     sess.stop_mcp_prewarm_worker().await;
+     {
+diff --git a/codex-rs/core/src/unified_exec/mod.rs b/codex-rs/core/src/unified_exec/mod.rs
+--- a/codex-rs/core/src/unified_exec/mod.rs
++++ b/codex-rs/core/src/unified_exec/mod.rs
+@@ -138,12 +138,15 @@
+ #[derive(Default)]
+ pub(crate) struct ProcessStore {
+     processes: HashMap<i32, ProcessEntry>,
++    starting_processes: HashMap<i32, Arc<UnifiedExecProcess>>,
+     reserved_process_ids: HashSet<i32>,
++    closed: bool,
+ }
+ 
+ impl ProcessStore {
+     fn remove(&mut self, process_id: i32) -> Option<ProcessEntry> {
+         self.reserved_process_ids.remove(&process_id);
++        self.starting_processes.remove(&process_id);
+         self.processes.remove(&process_id)
+     }
+ }
+diff --git a/codex-rs/core/src/unified_exec/process_manager.rs b/codex-rs/core/src/unified_exec/process_manager.rs
+--- a/codex-rs/core/src/unified_exec/process_manager.rs
++++ b/codex-rs/core/src/unified_exec/process_manager.rs
+@@ -461,6 +461,12 @@
+         request: ExecCommandRequest,
+         context: &UnifiedExecContext,
+     ) -> Result<ExecCommandToolOutput, UnifiedExecError> {
++        if self.process_store.lock().await.closed {
++            self.release_process_id(request.process_id).await;
++            return Err(UnifiedExecError::create_process(
++                "execution session is shutting down".to_string(),
++            ));
++        }
+         let cwd = request.cwd.clone();
+         let process = self
+             .open_session_with_sandbox(&request, cwd.clone(), context)
+@@ -478,6 +484,19 @@
+             metrics_sidecar,
+         } = attempt;
+         let process = Arc::new(process);
++        {
++            let mut store = self.process_store.lock().await;
++            if store.closed {
++                process.terminate();
++                store.reserved_process_ids.remove(&request.process_id);
++                return Err(UnifiedExecError::create_process(
++                    "execution session is shutting down".to_string(),
++                ));
++            }
++            store
++                .starting_processes
++                .insert(request.process_id, Arc::clone(&process));
++        }
+         let network_denial_monitor = deferred_network_approval.as_ref().map(|deferred| {
+             terminate_process_on_network_denial(
+                 Arc::clone(&process),
+@@ -1023,15 +1042,20 @@
+         };
+         let pruned_entry = {
+             let mut store = self.process_store.lock().await;
+-            let pruned_entry = Self::prune_processes_if_needed(&mut store);
+-            store.processes.insert(process_id, entry);
+-            pruned_entry
++            store.starting_processes.remove(&process_id);
++            if store.closed {
++                Some(entry)
++            } else {
++                let pruned_entry = Self::prune_processes_if_needed(&mut store);
++                store.processes.insert(process_id, entry);
++                pruned_entry
++            }
+         };
+         // prune_processes_if_needed runs while holding process_store; do async
+         // network-approval cleanup only after dropping that lock.
+         if let Some(pruned_entry) = pruned_entry {
++            pruned_entry.process.terminate();
+             unregister_network_approval_for_entry(&pruned_entry).await;
+-            pruned_entry.process.terminate();
+         }
+ 
+         spawn_exit_watcher(
+@@ -1520,20 +1544,39 @@
+     }
+ 
+     pub(crate) async fn terminate_all_processes(&self) {
+-        let entries: Vec<ProcessEntry> = {
++        self.close_processes(false).await;
++    }
++
++    pub(crate) async fn shutdown(&self) {
++        self.close_processes(true).await;
++    }
++
++    async fn close_processes(&self, closed: bool) {
++        let (entries, starting): (Vec<ProcessEntry>, Vec<Arc<UnifiedExecProcess>>) = {
+             let mut processes = self.process_store.lock().await;
++            processes.closed |= closed;
+             let entries: Vec<ProcessEntry> = processes
+                 .processes
+                 .drain()
+                 .map(|(_, entry)| entry)
+                 .collect();
+             processes.reserved_process_ids.clear();
+-            entries
+-        };
+-
++            let starting = processes
++                .starting_processes
++                .drain()
++                .map(|(_, process)| process)
++                .collect();
++            (entries, starting)
++        };
++        for process in starting {
++            process.terminate();
++        }
++
++        for entry in &entries {
++            entry.process.terminate();
++        }
+         for entry in entries {
+             unregister_network_approval_for_entry(&entry).await;
+-            entry.process.terminate();
+         }
+     }
+ 
+diff --git a/codex-rs/core/src/unified_exec/mod_tests.rs b/codex-rs/core/src/unified_exec/mod_tests.rs
+--- a/codex-rs/core/src/unified_exec/mod_tests.rs
++++ b/codex-rs/core/src/unified_exec/mod_tests.rs
+@@ -351,6 +351,74 @@
+ }
+ 
+ #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
++async fn shutdown_stops_registered_and_starting_independent_process_groups() -> anyhow::Result<()> {
++    for starting in [false, true] {
++        let (session, turn) = test_session_and_turn().await;
++        let manager = &session.services.unified_exec_manager;
++        let response = exec_command(&session, &turn, "echo $$; sleep 60", 250, None).await?;
++        let process_id = response.process_id.expect("live unified exec process");
++        let mut raw_output = response.raw_output;
++        let output_deadline = Instant::now() + Duration::from_secs(3);
++        while raw_output.is_empty() {
++            assert!(
++                Instant::now() < output_deadline,
++                "shell did not report its PID"
++            );
++            raw_output.extend(write_stdin(&session, process_id, "", 250).await?.raw_output);
++        }
++        let pid: u32 = String::from_utf8_lossy(&raw_output)
++            .split_whitespace()
++            .next()
++            .expect("shell PID")
++            .parse()?;
++        let output = std::process::Command::new("/bin/ps")
++            .args(["-o", "pgid=", "-p", &pid.to_string()])
++            .output()?;
++        assert_eq!(
++            String::from_utf8(output.stdout)?.trim().parse::<u32>()?,
++            pid
++        );
++        let process = {
++            let mut store = manager.process_store.lock().await;
++            let process = Arc::clone(&store.processes[&process_id].process);
++            if starting {
++                store.processes.remove(&process_id);
++                store
++                    .starting_processes
++                    .insert(process_id, Arc::clone(&process));
++            }
++            process
++        };
++        manager.shutdown().await;
++        let deadline = Instant::now() + Duration::from_secs(3);
++        loop {
++            let output = std::process::Command::new("/bin/ps")
++                .args(["-axo", "pgid=,stat="])
++                .output()?;
++            let group = pid.to_string();
++            let stopped = String::from_utf8_lossy(&output.stdout).lines().all(|line| {
++                let mut fields = line.split_whitespace();
++                fields.next() != Some(group.as_str())
++                    || fields.next().is_none_or(|state| state.starts_with('Z'))
++            });
++            if stopped && process.has_exited() {
++                break;
++            }
++            assert!(
++                Instant::now() < deadline,
++                "shutdown left process group {pid} alive"
++            );
++            tokio::time::sleep(Duration::from_millis(20)).await;
++        }
++        let store = manager.process_store.lock().await;
++        assert!(store.closed);
++        assert!(store.processes.is_empty());
++        assert!(store.starting_processes.is_empty());
++    }
++    Ok(())
++}
++
++#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+ async fn unified_exec_persists_across_requests() -> anyhow::Result<()> {
+     skip_if_sandbox!(Ok(()));
+ 
+diff --git a/codex-rs/core/src/spawn.rs b/codex-rs/core/src/spawn.rs
+--- a/codex-rs/core/src/spawn.rs
++++ b/codex-rs/core/src/spawn.rs
+@@ -49,7 +49,15 @@
+     pub env: HashMap<String, String>,
+ }
+ 
+-pub(crate) async fn spawn_child_async(request: SpawnChildRequest<'_>) -> std::io::Result<Child> {
++pub(crate) struct SpawnedChild {
++    pub child: Child,
++    #[cfg(unix)]
++    pub _lifeline: Option<std::os::unix::net::UnixStream>,
++}
++
++pub(crate) async fn spawn_child_async(
++    request: SpawnChildRequest<'_>,
++) -> std::io::Result<SpawnedChild> {
+     let SpawnChildRequest {
+         program,
+         args,
+@@ -92,6 +100,12 @@
+     // to also be terminated.
+ 
+     #[cfg(unix)]
++    let lifeline = matches!(stdio_policy, StdioPolicy::RedirectForShellTool)
++        .then(codex_utils_pty::process_group::ProcessGroupLifeline::new)
++        .transpose()?;
++    #[cfg(unix)]
++    let lifeline_fds = lifeline.as_ref().map(|lifeline| lifeline.child_fds());
++    #[cfg(unix)]
+     unsafe {
+         let detach_from_tty = matches!(stdio_policy, StdioPolicy::RedirectForShellTool);
+         #[cfg(target_os = "linux")]
+@@ -99,6 +113,9 @@
+         cmd.pre_exec(move || {
+             if detach_from_tty {
+                 codex_utils_pty::process_group::detach_from_tty()?;
++            }
++            if let Some(fds) = lifeline_fds {
++                codex_utils_pty::process_group::guard_process_group_lifetime(fds)?;
+             }
+ 
+             // This relies on prctl(2), so it only works on Linux.
+@@ -133,5 +150,9 @@
+         }
+     }
+ 
+-    cmd.kill_on_drop(true).spawn()
++    Ok(SpawnedChild {
++        child: cmd.kill_on_drop(true).spawn()?,
++        #[cfg(unix)]
++        _lifeline: lifeline.map(|lifeline| lifeline.into_writer()),
++    })
+ }
+diff --git a/codex-rs/core/src/exec.rs b/codex-rs/core/src/exec.rs
+--- a/codex-rs/core/src/exec.rs
++++ b/codex-rs/core/src/exec.rs
+@@ -921,7 +921,11 @@
+         ))
+     })?;
+     let arg0_ref = arg0.as_deref();
+-    let child = spawn_child_async(SpawnChildRequest {
++    let crate::spawn::SpawnedChild {
++        child,
++        #[cfg(unix)]
++        _lifeline,
++    } = spawn_child_async(SpawnChildRequest {
+         program: PathBuf::from(program),
+         args: args.into(),
+         arg0: arg0_ref,
+diff --git a/codex-rs/utils/pty/src/process_group.rs b/codex-rs/utils/pty/src/process_group.rs
+--- a/codex-rs/utils/pty/src/process_group.rs
++++ b/codex-rs/utils/pty/src/process_group.rs
+@@ -19,6 +19,245 @@
+ 
+ use tokio::process::Child;
+ 
++#[cfg(unix)]
++pub struct ProcessGroupLifeline {
++    reader: std::os::unix::net::UnixStream,
++    writer: std::os::unix::net::UnixStream,
++    descriptor_limit: libc::c_int,
++}
++
++#[cfg(unix)]
++impl ProcessGroupLifeline {
++    /// Configure a single-use command and retain this owner through its child lifetime.
++    pub fn configure_command(command: &mut std::process::Command) -> io::Result<Self> {
++        use std::os::unix::process::CommandExt;
++        let lifeline = Self::new()?;
++        let fds = lifeline.child_fds();
++        unsafe {
++            command.pre_exec(move || {
++                detach_from_tty()?;
++                guard_process_group_lifetime(fds)
++            });
++        }
++        Ok(lifeline)
++    }
++
++    pub fn new() -> io::Result<Self> {
++        use std::os::fd::AsRawFd;
++        use std::os::fd::FromRawFd;
++        let (reader, writer) = std::os::unix::net::UnixStream::pair()?;
++        let above_stdio = |stream: std::os::unix::net::UnixStream| {
++            let fd = unsafe { libc::fcntl(stream.as_raw_fd(), libc::F_DUPFD_CLOEXEC, 3) };
++            if fd == -1 {
++                Err(io::Error::last_os_error())
++            } else {
++                Ok(unsafe { std::os::unix::net::UnixStream::from_raw_fd(fd) })
++            }
++        };
++        let reader = above_stdio(reader)?;
++        let writer = above_stdio(writer)?;
++        let mut limit = libc::rlimit {
++            rlim_cur: 0,
++            rlim_max: 0,
++        };
++        if unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &raw mut limit) } == -1 {
++            return Err(io::Error::last_os_error());
++        }
++        let mut descriptor_limit = limit.rlim_cur.min(libc::c_int::MAX as _) as libc::c_int;
++        // Existing descriptors can exceed a subsequently lowered soft limit.
++        // Collect this bound before fork; no allocation or directory I/O is
++        // allowed in the guardian's post-fork branch.
++        for entry in std::fs::read_dir("/dev/fd")? {
++            if let Some(fd) = entry?
++                .file_name()
++                .to_str()
++                .and_then(|name| name.parse::<libc::c_int>().ok())
++            {
++                descriptor_limit = descriptor_limit.max(fd.saturating_add(1));
++            }
++        }
++        Ok(Self {
++            reader,
++            writer,
++            descriptor_limit,
++        })
++    }
++
++    pub fn child_fds(&self) -> (libc::c_int, libc::c_int, libc::c_int) {
++        use std::os::fd::AsRawFd;
++        (
++            self.reader.as_raw_fd(),
++            self.writer.as_raw_fd(),
++            self.descriptor_limit,
++        )
++    }
++
++    pub fn into_writer(self) -> std::os::unix::net::UnixStream {
++        self.writer
++    }
++}
++
++#[cfg(target_os = "macos")]
++fn close_guardian_descriptors(ready_writer: libc::c_int) -> io::Result<()> {
++    let mut descriptors = [libc::proc_fdinfo {
++        proc_fd: 0,
++        proc_fdtype: 0,
++    }; 1024];
++    loop {
++        let bytes = unsafe {
++            libc::proc_pidinfo(
++                libc::getpid(),
++                libc::PROC_PIDLISTFDS,
++                0,
++                descriptors.as_mut_ptr().cast(),
++                std::mem::size_of_val(&descriptors) as libc::c_int,
++            )
++        };
++        if bytes <= 0
++            || bytes as usize > std::mem::size_of_val(&descriptors)
++            || !(bytes as usize).is_multiple_of(std::mem::size_of::<libc::proc_fdinfo>())
++        {
++            return Err(io::Error::from_raw_os_error(libc::EIO));
++        }
++        let count = bytes as usize / std::mem::size_of::<libc::proc_fdinfo>();
++        let mut closed_any = false;
++        for descriptor in descriptors.iter().take(count) {
++            let fd = descriptor.proc_fd;
++            if fd == libc::STDIN_FILENO || fd == ready_writer {
++                continue;
++            }
++            if fd < 0 {
++                return Err(io::Error::from_raw_os_error(libc::EIO));
++            }
++            loop {
++                if unsafe { libc::close(fd) } == 0 {
++                    break;
++                }
++                let error = io::Error::last_os_error();
++                match error.raw_os_error() {
++                    Some(libc::EINTR) => continue,
++                    Some(libc::EBADF) => break,
++                    _ => return Err(error),
++                }
++            }
++            closed_any = true;
++        }
++        if !closed_any {
++            return Ok(());
++        }
++    }
++}
++
++/// Install after setsid and before exec. The owner alone retains the writer.
++/// Double-fork so a shell's `wait` cannot wait for its own lifetime guardian.
++#[cfg(unix)]
++pub fn guard_process_group_lifetime(
++    (reader, writer, descriptor_limit): (libc::c_int, libc::c_int, libc::c_int),
++) -> io::Result<()> {
++    // All work after fork must remain async-signal-safe, including closing the
++    // CLOEXEC error pipe that std::process::spawn is waiting to see close.
++    unsafe {
++        libc::close(writer);
++        let mut ready = [-1; 2];
++        if libc::pipe(ready.as_mut_ptr()) == -1 {
++            return Err(io::Error::last_os_error());
++        }
++        let intermediate = libc::fork();
++        if intermediate == -1 {
++            libc::close(ready[0]);
++            libc::close(ready[1]);
++            return Err(io::Error::last_os_error());
++        }
++        if intermediate == 0 {
++            let guardian = libc::fork();
++            if guardian != 0 {
++                libc::close(ready[1]);
++                let mut byte = 0u8;
++                let mut count;
++                loop {
++                    count = libc::read(ready[0], (&raw mut byte).cast(), 1);
++                    if count != -1
++                        || io::Error::last_os_error().kind() != io::ErrorKind::Interrupted
++                    {
++                        break;
++                    }
++                }
++                libc::_exit(if guardian != -1 && count == 1 { 0 } else { 1 });
++            }
++            libc::close(ready[0]);
++            for signal in [libc::SIGHUP, libc::SIGINT, libc::SIGQUIT, libc::SIGTERM] {
++                libc::signal(signal, libc::SIG_IGN);
++            }
++            if libc::dup2(reader, libc::STDIN_FILENO) == -1 {
++                libc::killpg(0, libc::SIGKILL);
++                libc::_exit(1);
++            }
++            #[cfg(target_os = "macos")]
++            {
++                let _ = descriptor_limit;
++                if close_guardian_descriptors(ready[1]).is_err() {
++                    libc::close(ready[1]);
++                    libc::_exit(1);
++                }
++            }
++            #[cfg(not(target_os = "macos"))]
++            {
++                #[cfg(target_os = "linux")]
++                let closed =
++                    libc::syscall(libc::SYS_close_range, 1u32, (ready[1] - 1) as u32, 0u32) == 0
++                        && libc::syscall(
++                            libc::SYS_close_range,
++                            (ready[1] + 1) as u32,
++                            u32::MAX,
++                            0u32,
++                        ) == 0;
++                #[cfg(not(target_os = "linux"))]
++                let closed = false;
++                if !closed {
++                    for fd in 1..descriptor_limit {
++                        if fd != ready[1] {
++                            libc::close(fd);
++                        }
++                    }
++                }
++            }
++            let mut byte = 0u8;
++            if libc::write(ready[1], (&raw const byte).cast(), 1) != 1 {
++                libc::killpg(0, libc::SIGKILL);
++                libc::_exit(1);
++            }
++            libc::close(ready[1]);
++            loop {
++                let count = libc::read(libc::STDIN_FILENO, (&raw mut byte).cast(), 1);
++                if count == -1 && io::Error::last_os_error().kind() == io::ErrorKind::Interrupted {
++                    continue;
++                }
++                if count <= 0 {
++                    libc::killpg(0, libc::SIGKILL);
++                    libc::_exit(1);
++                }
++            }
++        }
++        libc::close(ready[0]);
++        libc::close(ready[1]);
++        let mut status = 0;
++        loop {
++            if libc::waitpid(intermediate, &raw mut status, 0) >= 0 {
++                break;
++            }
++            let error = io::Error::last_os_error();
++            if error.kind() != io::ErrorKind::Interrupted {
++                return Err(error);
++            }
++        }
++        libc::close(reader);
++        if status != 0 {
++            return Err(io::Error::from_raw_os_error(libc::EIO));
++        }
++    }
++    Ok(())
++}
++
+ #[cfg(target_os = "linux")]
+ /// Ensure the child receives SIGTERM when the original parent dies.
+ ///
+diff --git a/codex-rs/utils/pty/src/pipe.rs b/codex-rs/utils/pty/src/pipe.rs
+--- a/codex-rs/utils/pty/src/pipe.rs
++++ b/codex-rs/utils/pty/src/pipe.rs
+@@ -37,6 +37,8 @@
+     windows: WindowsChildTerminator,
+     #[cfg(unix)]
+     process_group_id: u32,
++    #[cfg(unix)]
++    _lifeline: std::os::unix::net::UnixStream,
+ }
+ 
+ impl ChildTerminator for PipeChildTerminator {
+@@ -156,11 +158,16 @@
+     #[cfg(unix)]
+     let inherited_fds = inherited_fds.to_vec();
+     #[cfg(unix)]
++    let lifeline = crate::process_group::ProcessGroupLifeline::new()?;
++    #[cfg(unix)]
++    let lifeline_fds = lifeline.child_fds();
++    #[cfg(unix)]
+     unsafe {
+         command.pre_exec(move || {
+             crate::process_group::detach_from_tty()?;
+             #[cfg(target_os = "linux")]
+             crate::process_group::set_parent_death_signal(parent_pid)?;
++            crate::process_group::guard_process_group_lifetime(lifeline_fds)?;
+             crate::pty::close_inherited_fds_except(&inherited_fds);
+             Ok(())
+         });
+@@ -305,6 +312,8 @@
+             windows: windows_terminator,
+             #[cfg(unix)]
+             process_group_id,
++            #[cfg(unix)]
++            _lifeline: lifeline.into_writer(),
+         }),
+         reader_handle,
+         reader_abort_handles,
+diff --git a/codex-rs/utils/pty/src/pty.rs b/codex-rs/utils/pty/src/pty.rs
+--- a/codex-rs/utils/pty/src/pty.rs
++++ b/codex-rs/utils/pty/src/pty.rs
+@@ -21,8 +21,9 @@
+ use std::time::Duration;
+ 
+ use anyhow::Result;
++#[cfg(not(unix))]
+ use portable_pty::CommandBuilder;
+-#[cfg(not(windows))]
++#[cfg(not(any(unix, windows)))]
+ use portable_pty::native_pty_system;
+ use tokio::sync::mpsc;
+ use tokio::sync::oneshot;
+@@ -50,12 +51,14 @@
+     true
+ }
+ 
++#[cfg(not(unix))]
+ struct PtyChildTerminator {
+     killer: Box<dyn portable_pty::ChildKiller + Send + Sync>,
+     #[cfg(unix)]
+     process_group_id: Option<u32>,
+ }
+ 
++#[cfg(not(unix))]
+ impl ChildTerminator for PtyChildTerminator {
+     fn signal(&mut self, signal: ProcessSignal) -> std::io::Result<()> {
+         match signal {
+@@ -93,6 +96,7 @@
+ #[cfg(unix)]
+ struct RawPidTerminator {
+     process_group_id: u32,
++    _lifeline: std::os::unix::net::UnixStream,
+ }
+ 
+ #[cfg(unix)]
+@@ -106,10 +110,18 @@
+     }
+ 
+     fn kill(&mut self) -> std::io::Result<()> {
+-        crate::process_group::kill_process_group(self.process_group_id)
+-    }
+-}
+-
++        #[cfg(target_os = "macos")]
++        {
++            crate::process_group::kill_process_group_with_member_fallback(self.process_group_id)
++        }
++        #[cfg(not(target_os = "macos"))]
++        {
++            crate::process_group::kill_process_group(self.process_group_id)
++        }
++    }
++}
++
++#[cfg(not(unix))]
+ fn platform_native_pty_system() -> Box<dyn portable_pty::PtySystem + Send> {
+     #[cfg(windows)]
+     {
+@@ -141,14 +153,16 @@
+     let _ = inherited_fds;
+ 
+     #[cfg(unix)]
+-    if !inherited_fds.is_empty() {
++    {
+         return spawn_process_preserving_fds(program, args, cwd, env, arg0, size, inherited_fds)
+             .await;
+     }
+ 
++    #[cfg(not(unix))]
+     spawn_process_portable(program, args, cwd, env, arg0, size).await
+ }
+ 
++#[cfg(not(unix))]
+ async fn spawn_process_portable(
+     program: &str,
+     args: &[String],
+@@ -300,6 +314,8 @@
+     let stdout = slave.try_clone()?;
+     let stderr = slave.try_clone()?;
+     let inherited_fds = inherited_fds.to_vec();
++    let lifeline = crate::process_group::ProcessGroupLifeline::new()?;
++    let lifeline_fds = lifeline.child_fds();
+ 
+     unsafe {
+         command
+@@ -325,6 +341,8 @@
+                     return Err(std::io::Error::last_os_error());
+                 }
+ 
++                crate::process_group::guard_process_group_lifetime(lifeline_fds)?;
++
+                 // stdin now refers to the PTY slave, so make that fd the
+                 // controlling terminal for the child's new session. stdout and
+                 // stderr point at clones of the same slave device.
+@@ -404,7 +422,10 @@
+ 
+     let handle = ProcessHandle::new(
+         writer_tx,
+-        Box::new(RawPidTerminator { process_group_id }),
++        Box::new(RawPidTerminator {
++            process_group_id,
++            _lifeline: lifeline.into_writer(),
++        }),
+         reader_handle,
+         Vec::new(),
+         writer_handle,
+diff --git a/codex-rs/utils/pty/src/process.rs b/codex-rs/utils/pty/src/process.rs
+--- a/codex-rs/utils/pty/src/process.rs
++++ b/codex-rs/utils/pty/src/process.rs
+@@ -8,6 +8,7 @@
+ use std::sync::atomic::AtomicBool;
+ 
+ use anyhow::anyhow;
++#[cfg(not(unix))]
+ use portable_pty::MasterPty;
+ use portable_pty::PtySize;
+ use portable_pty::SlavePty;
+@@ -84,6 +85,7 @@
+ impl<T: Send + ?Sized> PtyHandleKeepAlive for T {}
+ 
+ pub(crate) enum PtyMasterHandle {
++    #[cfg(not(unix))]
+     Resizable(Box<dyn MasterPty + Send>),
+     #[cfg(unix)]
+     Opaque {
+@@ -191,6 +193,7 @@
+                 .map_err(|_| anyhow!("failed to lock PTY handles"))?;
+             if let Some(handles) = handles.as_ref() {
+                 return match &handles._master {
++                    #[cfg(not(unix))]
+                     PtyMasterHandle::Resizable(master) => master.resize(size.into()),
+                     #[cfg(unix)]
+                     PtyMasterHandle::Opaque { raw_fd, .. } => resize_raw_pty(*raw_fd, size),
+diff --git a/codex-rs/utils/pty/src/tests.rs b/codex-rs/utils/pty/src/tests.rs
+--- a/codex-rs/utils/pty/src/tests.rs
++++ b/codex-rs/utils/pty/src/tests.rs
+@@ -279,6 +279,253 @@
+ }
+ 
+ #[cfg(unix)]
++#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
++async fn lifeline_crash_owner_fixture() -> anyhow::Result<()> {
++    let Some(marker) = std::env::var_os("CODEX_TEST_LIFELINE_MARKER") else {
++        return Ok(());
++    };
++    if std::env::var_os("CODEX_TEST_LIFELINE_CLOSE_STDIO").is_some() {
++        for fd in 0..3 {
++            unsafe { libc::close(fd) };
++        }
++    }
++    let args = vec![
++        "-c".to_string(),
++        "trap '' HUP TERM; sleep 60 & printf '%s %s' \"$$\" \"$!\" > \"$1\"; wait".to_string(),
++        "lifeline-fixture".to_string(),
++        marker.to_string_lossy().into_owned(),
++    ];
++    let env = std::env::vars().collect();
++    let spawned = if std::env::var_os("CODEX_TEST_LIFELINE_PTY").is_some() {
++        spawn_pty_process(
++            "/bin/sh",
++            &args,
++            Path::new("."),
++            &env,
++            &None,
++            TerminalSize::default(),
++            &[],
++        )
++        .await?
++    } else {
++        spawn_pipe_process("/bin/sh", &args, Path::new("."), &env, &None, &[]).await?
++    };
++    std::hint::black_box(&spawned);
++    tokio::time::sleep(tokio::time::Duration::from_secs(60)).await;
++    anyhow::bail!("owner fixture was not killed")
++}
++
++#[cfg(target_os = "macos")]
++#[test]
++fn guardian_descriptor_fixture() -> anyhow::Result<()> {
++    use std::fs::File;
++    use std::io::Read;
++    use std::os::fd::FromRawFd;
++    use std::time::{Duration, Instant};
++
++    let Ok(case) = std::env::var("CODEX_TEST_GUARDIAN_DESCRIPTORS") else {
++        return Ok(());
++    };
++    let mut limit = libc::rlimit {
++        rlim_cur: 0,
++        rlim_max: 0,
++    };
++    anyhow::ensure!(unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &raw mut limit) } == 0);
++    let mut set_limit = |desired: libc::rlim_t| -> anyhow::Result<()> {
++        limit.rlim_cur = desired.min(limit.rlim_max);
++        anyhow::ensure!(unsafe { libc::setrlimit(libc::RLIMIT_NOFILE, &raw const limit) } == 0);
++        Ok(())
++    };
++    if case == "cost" {
++        let spawn = || -> anyhow::Result<Duration> {
++            let mut command = std::process::Command::new("/usr/bin/true");
++            let lifeline =
++                crate::process_group::ProcessGroupLifeline::configure_command(&mut command)?;
++            let started = Instant::now();
++            let mut child = command.spawn()?;
++            let elapsed = started.elapsed();
++            anyhow::ensure!(child.wait()?.success());
++            drop(lifeline);
++            Ok(elapsed)
++        };
++        set_limit(1024)?;
++        let low = spawn()?;
++        set_limit(16_777_216)?;
++        let high = spawn()?;
++        println!("guardian spawn low={low:?} high={high:?}");
++        anyhow::ensure!(
++            high < low + Duration::from_secs(1),
++            "empty FD range increased startup by {:?}",
++            high.saturating_sub(low)
++        );
++        return Ok(());
++    }
++    anyhow::ensure!(case == "late-pipes");
++    set_limit(8192)?;
++    let mut command = std::process::Command::new("/bin/sleep");
++    command.arg("60");
++    let lifeline = crate::process_group::ProcessGroupLifeline::configure_command(&mut command)?;
++    let mut readers = Vec::new();
++    let mut writers = Vec::new();
++    for _ in 0..1200 {
++        let mut fds = [-1; 2];
++        anyhow::ensure!(unsafe { libc::pipe(fds.as_mut_ptr()) } == 0);
++        for fd in fds {
++            anyhow::ensure!(unsafe { libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC) } == 0);
++        }
++        anyhow::ensure!(unsafe { libc::fcntl(fds[0], libc::F_SETFL, libc::O_NONBLOCK) } == 0);
++        readers.push(unsafe { File::from_raw_fd(fds[0]) });
++        writers.push(unsafe { File::from_raw_fd(fds[1]) });
++    }
++    struct Child(std::process::Child);
++    impl Drop for Child {
++        fn drop(&mut self) {
++            let _ = self.0.kill();
++            let _ = self.0.wait();
++        }
++    }
++    let mut child = Child(command.spawn()?);
++    drop(writers);
++    let mut byte = [0];
++    let deadline = Instant::now() + Duration::from_secs(1);
++    for reader in &mut readers {
++        loop {
++            match reader.read(&mut byte) {
++                Ok(0) => break,
++                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
++                    anyhow::ensure!(
++                        Instant::now() < deadline,
++                        "guardian retained a late CLOEXEC writer"
++                    );
++                    std::thread::sleep(Duration::from_millis(1));
++                }
++                result => anyhow::bail!("unexpected pipe result: {result:?}"),
++            }
++        }
++    }
++    anyhow::ensure!(
++        child.0.try_wait()?.is_none(),
++        "guarded child must remain alive during EOF checks"
++    );
++    drop(child);
++    drop(lifeline);
++    Ok(())
++}
++
++#[cfg(target_os = "macos")]
++fn run_guardian_descriptor_fixture(case: &str) -> anyhow::Result<()> {
++    let output = std::process::Command::new(std::env::current_exe()?)
++        .args([
++            "--exact",
++            "tests::guardian_descriptor_fixture",
++            "--nocapture",
++            "--test-threads=1",
++        ])
++        .env("CODEX_TEST_GUARDIAN_DESCRIPTORS", case)
++        .output()?;
++    anyhow::ensure!(
++        output.status.success(),
++        "fixture failed: {}{}",
++        String::from_utf8_lossy(&output.stdout),
++        String::from_utf8_lossy(&output.stderr)
++    );
++    eprint!("{}", String::from_utf8_lossy(&output.stdout));
++    Ok(())
++}
++
++#[cfg(target_os = "macos")]
++#[test]
++fn guarded_spawn_does_not_scan_empty_descriptor_ranges() -> anyhow::Result<()> {
++    run_guardian_descriptor_fixture("cost")
++}
++
++#[cfg(target_os = "macos")]
++#[test]
++fn guarded_spawn_closes_late_cloexec_descriptors_across_batches() -> anyhow::Result<()> {
++    run_guardian_descriptor_fixture("late-pipes")
++}
++
++#[cfg(unix)]
++#[test]
++fn owner_sigkill_stops_pipe_and_pty_tool_groups() -> anyhow::Result<()> {
++    struct Owner(std::process::Child, Vec<i32>);
++    impl Drop for Owner {
++        fn drop(&mut self) {
++            let _ = self.0.kill();
++            let _ = self.0.wait();
++            for pid in &self.1 {
++                unsafe { libc::kill(*pid, libc::SIGKILL) };
++            }
++        }
++    }
++    for (pty, closed_stdio) in [(false, false), (true, false), (false, true), (true, true)] {
++        let marker = std::env::temp_dir().join(format!(
++            "codex-lifeline-{}-{pty}-{closed_stdio}",
++            std::process::id()
++        ));
++        let _ = std::fs::remove_file(&marker);
++        let mut command = std::process::Command::new(std::env::current_exe()?);
++        command
++            .args([
++                "--exact",
++                "tests::lifeline_crash_owner_fixture",
++                "--nocapture",
++            ])
++            .env("CODEX_TEST_LIFELINE_MARKER", &marker)
++            .stdout(std::process::Stdio::null());
++        if pty {
++            command.env("CODEX_TEST_LIFELINE_PTY", "1");
++        } else {
++            command.env_remove("CODEX_TEST_LIFELINE_PTY");
++        }
++        if closed_stdio {
++            command.env("CODEX_TEST_LIFELINE_CLOSE_STDIO", "1");
++        } else {
++            command.env_remove("CODEX_TEST_LIFELINE_CLOSE_STDIO");
++        }
++        let mut owner = Owner(command.spawn()?, Vec::new());
++        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
++        loop {
++            if let Ok(contents) = std::fs::read_to_string(&marker) {
++                owner.1 = contents
++                    .split_whitespace()
++                    .map(str::parse)
++                    .collect::<Result<_, _>>()?;
++                if owner.1.len() == 2 {
++                    break;
++                }
++            }
++            anyhow::ensure!(
++                owner.0.try_wait()?.is_none(),
++                "tool owner exited before starting the tool"
++            );
++            anyhow::ensure!(std::time::Instant::now() < deadline, "tool did not start");
++            std::thread::sleep(std::time::Duration::from_millis(10));
++        }
++        assert_eq!(unsafe { libc::getpgid(owner.1[0]) }, owner.1[0]);
++        assert_eq!(unsafe { libc::getpgid(owner.1[1]) }, owner.1[0]);
++        assert!(owner.1.iter().all(|pid| process_exists(*pid).unwrap()));
++        owner.0.kill()?;
++        owner.0.wait()?;
++        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
++        loop {
++            if owner.1.iter().all(|pid| !process_exists(*pid).unwrap()) {
++                break;
++            }
++            anyhow::ensure!(
++                std::time::Instant::now() < deadline,
++                "tool group survived owner SIGKILL: {:?}",
++                owner.1
++            );
++            std::thread::sleep(std::time::Duration::from_millis(10));
++        }
++        std::fs::remove_file(marker)?;
++        owner.1.clear();
++    }
++    Ok(())
++}
++
++#[cfg(unix)]
+ async fn wait_for_marker_pid(
+     output_rx: &mut tokio::sync::broadcast::Receiver<Vec<u8>>,
+     marker: &str,
+diff --git a/codex-rs/core/src/shell_snapshot.rs b/codex-rs/core/src/shell_snapshot.rs
+--- a/codex-rs/core/src/shell_snapshot.rs
++++ b/codex-rs/core/src/shell_snapshot.rs
+@@ -289,14 +289,11 @@
+     handler.args(&args[1..]);
+     handler.stdin(Stdio::null());
+     handler.current_dir(cwd);
++    handler.kill_on_drop(true);
+     #[cfg(unix)]
+-    unsafe {
+-        handler.pre_exec(|| {
+-            codex_utils_pty::process_group::detach_from_tty()?;
+-            Ok(())
+-        });
+-    }
+-    handler.kill_on_drop(true);
++    let _lifeline = codex_utils_pty::process_group::ProcessGroupLifeline::configure_command(
++        handler.as_std_mut(),
++    )?;
+     let output = timeout(snapshot_timeout, handler.output())
+         .await
+         .map_err(|_| anyhow!("Snapshot command timed out for {shell_name}"))?
+diff --git a/codex-rs/hooks/src/engine/command_runner.rs b/codex-rs/hooks/src/engine/command_runner.rs
+--- a/codex-rs/hooks/src/engine/command_runner.rs
++++ b/codex-rs/hooks/src/engine/command_runner.rs
+@@ -227,7 +227,15 @@
+         },
+         None => command.spawn(),
+     };
+-    #[cfg(not(windows))]
++    #[cfg(unix)]
++    let (child, _lifeline) =
++        match codex_utils_pty::process_group::ProcessGroupLifeline::configure_command(
++            command.as_std_mut(),
++        ) {
++            Ok(lifeline) => (command.spawn(), Some(lifeline)),
++            Err(error) => (Err(error), None),
++        };
++    #[cfg(not(any(unix, windows)))]
+     let child = command.spawn();
+ 
+     let mut child = match child {
+diff --git a/codex-rs/rmcp-client/src/stdio_server_launcher.rs b/codex-rs/rmcp-client/src/stdio_server_launcher.rs
+--- a/codex-rs/rmcp-client/src/stdio_server_launcher.rs
++++ b/codex-rs/rmcp-client/src/stdio_server_launcher.rs
+@@ -225,6 +225,7 @@
+ #[cfg(unix)]
+ struct LocalProcessTerminator {
+     process_group_id: u32,
++    _lifeline: codex_utils_pty::process_group::ProcessGroupLifeline,
+ }
+ 
+ #[cfg(windows)]
+@@ -291,10 +292,14 @@
+             command.process_group(0);
+             command
+         };
+-        #[cfg(windows)]
++        #[cfg(any(unix, windows))]
+         let mut command = build_command();
+-        #[cfg(not(windows))]
++        #[cfg(not(any(unix, windows)))]
+         let command = build_command();
++        #[cfg(unix)]
++        let lifeline = codex_utils_pty::process_group::ProcessGroupLifeline::configure_command(
++            command.as_std_mut(),
++        )?;
+         #[cfg(windows)]
+         let job = match codex_utils_pty::JobObject::create_without_breakaway() {
+             Ok(job) => {
+@@ -371,7 +376,12 @@
+                 }
+             }),
+         };
+-        #[cfg(not(windows))]
++        #[cfg(unix)]
++        let terminator = process_id.map(|process_group_id| LocalProcessTerminator {
++            process_group_id,
++            _lifeline: lifeline,
++        });
++        #[cfg(not(any(unix, windows)))]
+         let terminator = process_id.map(LocalProcessTerminator::new);
+         let process = StdioServerProcessHandle::local(program_name.clone(), terminator);
+ 
+@@ -401,17 +411,10 @@
+ }
+ 
+ impl LocalProcessTerminator {
+-    #[cfg(not(windows))]
++    #[cfg(not(any(unix, windows)))]
+     fn new(process_group_id: u32) -> Self {
+-        #[cfg(unix)]
+-        {
+-            Self { process_group_id }
+-        }
+-        #[cfg(not(any(unix, windows)))]
+-        {
+-            let _ = process_group_id;
+-            Self
+-        }
++        let _ = process_group_id;
++        Self
+     }
+ 
+     #[cfg(unix)]
+diff --git a/codex-rs/rmcp-client/src/http_headers.rs b/codex-rs/rmcp-client/src/http_headers.rs
+--- a/codex-rs/rmcp-client/src/http_headers.rs
++++ b/codex-rs/rmcp-client/src/http_headers.rs
+@@ -56,6 +56,8 @@
+ struct HelperProcess {
+     child: Child,
+     #[cfg(unix)]
++    _lifeline: codex_utils_pty::process_group::ProcessGroupLifeline,
++    #[cfg(unix)]
+     process_group_id: u32,
+     #[cfg(windows)]
+     job: codex_utils_pty::JobObject,
+@@ -294,6 +296,10 @@
+         .envs(create_env_for_mcp_server(/*extra_env*/ None, &[])?)
+         .kill_on_drop(true);
+ 
++    #[cfg(unix)]
++    let lifeline = codex_utils_pty::process_group::ProcessGroupLifeline::configure_command(
++        process.as_std_mut(),
++    )?;
+     #[cfg(windows)]
+     let (child, job) = {
+         let job = codex_utils_pty::JobObject::create_without_breakaway()
+@@ -308,6 +314,8 @@
+         .spawn()
+         .map_err(|error| anyhow!("MCP HTTP headers helper failed to start: {error}"))?;
+     let mut process = HelperProcess {
++        #[cfg(unix)]
++        _lifeline: lifeline,
+         #[cfg(unix)]
+         process_group_id: child
+             .id()
+diff --git a/codex-rs/git-utils/src/git_process.rs b/codex-rs/git-utils/src/git_process.rs
+--- a/codex-rs/git-utils/src/git_process.rs
++++ b/codex-rs/git-utils/src/git_process.rs
+@@ -12,6 +12,8 @@
+ use tokio::time::timeout;
+ 
+ struct KillGitProcessTreeOnDrop {
++    #[cfg(unix)]
++    _lifeline: codex_utils_pty::process_group::ProcessGroupLifeline,
+     #[cfg(unix)]
+     process_id: u32,
+     #[cfg(windows)]
+@@ -34,6 +36,11 @@
+     #[cfg(unix)]
+     command.process_group(0);
+     command.kill_on_drop(true);
++    #[cfg(unix)]
++    let lifeline = codex_utils_pty::process_group::ProcessGroupLifeline::configure_command(
++        command.as_std_mut(),
++    )
++    .ok()?;
+ 
+     command
+         .stdin(Stdio::null())
+@@ -55,6 +62,8 @@
+     let child = command.spawn().ok()?;
+ 
+     let process_tree = KillGitProcessTreeOnDrop {
++        #[cfg(unix)]
++        _lifeline: lifeline,
+         #[cfg(unix)]
+         process_id: child.id()?,
+         #[cfg(windows)]
+diff --git a/codex-rs/core/tests/suite/tools.rs b/codex-rs/core/tests/suite/tools.rs
+index 4c882269..2a0ba458 100644
+--- a/codex-rs/core/tests/suite/tools.rs
++++ b/codex-rs/core/tests/suite/tools.rs
+@@ -909,8 +909,10 @@ async fn unified_exec_spec_toggle_end_to_end() -> Result<()> {
+     Ok(())
+ }
+ 
++#[test_case("sleep 1"; "empty_stdout")]
++#[test_case("yes line | head -n 400; sleep 1"; "stdout_command")]
+ #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+-async fn shell_command_timeout_includes_timeout_prefix_and_metadata() -> Result<()> {
++async fn shell_command_timeout_includes_timeout_prefix_and_metadata(command: &str) -> Result<()> {
+     skip_if_no_network!(Ok(()));
+ 
+     let server = start_mock_server().await;
+@@ -920,7 +922,7 @@ async fn shell_command_timeout_includes_timeout_prefix_and_metadata() -> Result<
+     let call_id = "shell-command-timeout";
+     let timeout_ms = 50u64;
+     let args = json!({
+-        "command": "yes line | head -n 400; sleep 1",
++        "command": command,
+         "login": false,
+         "timeout_ms": timeout_ms,
+     });
+@@ -979,7 +981,7 @@ async fn shell_command_timeout_includes_timeout_prefix_and_metadata() -> Result<
+             .trim_end_matches('\n')
+             .to_string();
+ 
+-        let shell_output_pattern = r"(?s)^Exit code: 124\nWall time: [0-9]+(?:\.[0-9]+)? seconds\nOutput:\ncommand timed out after [0-9]+ milliseconds\n(?:.*)?$";
++        let shell_output_pattern = r"(?s)^Exit code: 124\nWall time: [0-9]+(?:\.[0-9]+)? seconds\nOutput:\ncommand timed out after [0-9]+ milliseconds(?:\n.*)?$";
+         if Regex::new(shell_output_pattern)
+             .expect("shell timeout output regex should compile")
+             .is_match(&normalized_output)

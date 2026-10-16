@@ -4,7 +4,7 @@ set -euo pipefail
 
 source /etc/os-release
 case "${VERSION_CODENAME}" in
-  noble|bookworm) ;;
+  jammy|noble|bookworm) ;;
   *) printf 'Unsupported Code Mode build distribution: %s\n' "${VERSION_CODENAME}" >&2; exit 1 ;;
 esac
 case "$(uname -m)" in

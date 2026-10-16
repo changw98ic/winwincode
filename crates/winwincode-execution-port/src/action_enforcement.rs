@@ -26,164 +26,69 @@ use crate::{
 
 const POLICY_SUBJECT_NAMESPACE: &[u8] = b"winwincode.action-policy-enforcement-subject.v1";
 const POLICY_CONDITION_NAMESPACE: &[u8] = b"winwincode.action-policy-enforcement-condition.v1";
-const RECEIPT_SIGNATURE_NAMESPACE: &[u8] = b"winwincode.action-enforcement-receipt-signature.v1";
 const RECEIPT_USE_SCHEMA_VERSION: &str = "winwincode.action-enforcement-use.v1";
 
-#[derive(Clone, Eq, PartialEq)]
-pub struct ActionEnforcementSigningKey([u8; 32]);
-
-impl ActionEnforcementSigningKey {
-    #[must_use]
-    pub fn accounting_query_token(&self) -> Sha256Digest {
-        self.accounting_signature(b"pending-attempt-query.v1")
+pub fn validate_action_receipt(
+    action: &WorkerActionRequest,
+    receipt: &ActionEnforcementReceiptMessage,
+) -> Result<ActionNormalization, ActionEnforcementError> {
+    if receipt.decision != ActionEnforcementDecision::Permit {
+        return Err(ActionEnforcementError::ReceiptMismatch);
     }
-    pub(crate) fn accounting_signature(&self, bytes: &[u8]) -> Sha256Digest {
-        Sha256Digest(format!(
-            "sha256:{}",
-            hex(&hmac_sha256_in_domain(
-                &self.0,
-                b"winwincode.attempt-provider-accounting.v1",
-                bytes
-            ))
-        ))
-    }
-    pub fn from_bytes(bytes: [u8; 32]) -> Result<Self, ActionEnforcementError> {
-        if bytes.iter().all(|byte| *byte == 0) {
-            return Err(ActionEnforcementError::InvalidKey);
-        }
-        Ok(Self(bytes))
-    }
-
-    #[must_use]
-    pub const fn into_verifier(self) -> ActionEnforcementVerifier {
-        ActionEnforcementVerifier(self)
-    }
+    validate_action_receipt_outcome(action, receipt)
 }
 
-#[derive(Clone)]
-pub struct ActionEnforcementIssuer(ActionEnforcementSigningKey);
-
-impl ActionEnforcementIssuer {
-    #[must_use]
-    pub const fn new(key: ActionEnforcementSigningKey) -> Self {
-        Self(key)
-    }
-
-    pub fn sign(
-        &self,
-        receipt: &mut ActionEnforcementReceiptMessage,
-    ) -> Result<(), ActionEnforcementError> {
-        receipt.receipt_signature = receipt_signature(&self.0, receipt)?;
-        Ok(())
-    }
-
-    #[must_use]
-    pub fn verifier(&self) -> ActionEnforcementVerifier {
-        ActionEnforcementVerifier(self.0.clone())
-    }
-
-    pub fn verify_signature(
-        &self,
-        receipt: &ActionEnforcementReceiptMessage,
-    ) -> Result<(), ActionEnforcementError> {
-        let expected = receipt_signature(&self.0, receipt)?;
-        if constant_time_eq(
-            expected.0.as_bytes(),
-            receipt.receipt_signature.0.as_bytes(),
-        ) {
-            Ok(())
-        } else {
-            Err(ActionEnforcementError::InvalidSignature)
-        }
-    }
+pub fn validate_action_receipt_outcome(
+    action: &WorkerActionRequest,
+    receipt: &ActionEnforcementReceiptMessage,
+) -> Result<ActionNormalization, ActionEnforcementError> {
+    validate_action_receipt_outcome_with_current_lease(action, receipt, &action.authority.lease)
 }
 
-#[derive(Clone)]
-pub struct ActionEnforcementVerifier(ActionEnforcementSigningKey);
-
-impl ActionEnforcementVerifier {
-    /// Verifies the complete original receipt without granting live authority.
-    /// Historical cleanup still requires an independently durable use proof.
-    /// Rejects altered receipt bytes or an invalid original signature.
-    pub fn verify_signature(
-        &self,
-        receipt: &ActionEnforcementReceiptMessage,
-    ) -> Result<(), ActionEnforcementError> {
-        ActionEnforcementIssuer::new(self.0.clone()).verify_signature(receipt)
+pub fn validate_action_receipt_outcome_with_current_lease(
+    action: &WorkerActionRequest,
+    receipt: &ActionEnforcementReceiptMessage,
+    current_lease: &ExecutionLeaseStamp,
+) -> Result<ActionNormalization, ActionEnforcementError> {
+    if !crate::execution_identity::retained_lease_matches_current(
+        &action.authority.lease,
+        current_lease,
+    ) {
+        return Err(ActionEnforcementError::ReceiptMismatch);
     }
-
-    pub fn verify(
-        &self,
-        action: &WorkerActionRequest,
-        receipt: &ActionEnforcementReceiptMessage,
-    ) -> Result<ActionNormalization, ActionEnforcementError> {
-        if receipt.decision != ActionEnforcementDecision::Permit {
-            return Err(ActionEnforcementError::ReceiptMismatch);
-        }
-        self.verify_outcome(action, receipt)
+    let normalization = normalize_action(&action.intent, &action.request)
+        .map_err(|_| ActionEnforcementError::InvalidAction)?;
+    if !normalization.comparison.matches {
+        return Err(ActionEnforcementError::InvalidAction);
     }
-
-    pub fn verify_outcome(
-        &self,
-        action: &WorkerActionRequest,
-        receipt: &ActionEnforcementReceiptMessage,
-    ) -> Result<ActionNormalization, ActionEnforcementError> {
-        self.verify_outcome_with_current_lease(action, receipt, &action.authority.lease)
+    let facts = action_enforcement_facts(&normalization)?;
+    if receipt.kind != ActionEnforcementReceiptMessageKind::ActionEnforcementReceipt
+        || receipt.schema_version != SchemaVersion::WinwincodeV1
+        || receipt.request_id != action.invocation_request_id
+        || receipt.job_id != action.authority.lease.job_id
+        || receipt.lease != action.authority.lease
+        || receipt.worker_session_id != action.authority.worker_session_id
+        || receipt.session_identity != action.authority.session_identity
+        || receipt.policy_kind != facts.policy_kind
+        || receipt.resource != facts.resource
+        || receipt.subject_sha256 != facts.subject_sha256
+        || receipt.matched_condition_sha256 != facts.matched_condition_sha256
+        || receipt.sent_at != receipt.evaluated_at
+        || !crate::execution_identity::canonical_instant(&receipt.evaluated_at)
+        || receipt.evaluated_at.0 < current_lease.issued_at.0
+        || receipt.evaluated_at.0 >= current_lease.expires_at.0
+        || !canonical_id(&receipt.message_id.0, "xmsg_")
+        || !canonical_id(&receipt.request_id.0, "req_")
+        || receipt.actor.kind != winwincode_domain::UserActorKind::User
+        || receipt.scope.kind != winwincode_domain::RepositoryScopeKind::Repository
+        || !canonical_id(&receipt.actor.id.0, "usr_")
+        || !canonical_repository_scope(receipt)
+        || !valid_policy_reference(receipt)
+        || !digest(&receipt.evaluation_sha256.0)
+    {
+        return Err(ActionEnforcementError::ReceiptMismatch);
     }
-
-    pub fn verify_outcome_with_current_lease(
-        &self,
-        action: &WorkerActionRequest,
-        receipt: &ActionEnforcementReceiptMessage,
-        current_lease: &ExecutionLeaseStamp,
-    ) -> Result<ActionNormalization, ActionEnforcementError> {
-        if !crate::execution_identity::retained_lease_matches_current(
-            &action.authority.lease,
-            current_lease,
-        ) {
-            return Err(ActionEnforcementError::ReceiptMismatch);
-        }
-        let normalization = normalize_action(&action.intent, &action.request)
-            .map_err(|_| ActionEnforcementError::InvalidAction)?;
-        if !normalization.comparison.matches {
-            return Err(ActionEnforcementError::InvalidAction);
-        }
-        let facts = action_enforcement_facts(&normalization)?;
-        if receipt.kind != ActionEnforcementReceiptMessageKind::ActionEnforcementReceipt
-            || receipt.schema_version != SchemaVersion::WinwincodeV1
-            || receipt.request_id != action.invocation_request_id
-            || receipt.job_id != action.authority.lease.job_id
-            || receipt.lease != action.authority.lease
-            || receipt.worker_session_id != action.authority.worker_session_id
-            || receipt.session_identity != action.authority.session_identity
-            || receipt.policy_kind != facts.policy_kind
-            || receipt.resource != facts.resource
-            || receipt.subject_sha256 != facts.subject_sha256
-            || receipt.matched_condition_sha256 != facts.matched_condition_sha256
-            || receipt.sent_at != receipt.evaluated_at
-            || !crate::execution_identity::canonical_instant(&receipt.evaluated_at)
-            || receipt.evaluated_at.0 < current_lease.issued_at.0
-            || receipt.evaluated_at.0 >= current_lease.expires_at.0
-            || !canonical_id(&receipt.message_id.0, "xmsg_")
-            || !canonical_id(&receipt.request_id.0, "req_")
-            || receipt.actor.kind != winwincode_domain::UserActorKind::User
-            || receipt.scope.kind != winwincode_domain::RepositoryScopeKind::Repository
-            || !canonical_id(&receipt.actor.id.0, "usr_")
-            || !canonical_repository_scope(receipt)
-            || !valid_policy_reference(receipt)
-            || !digest(&receipt.evaluation_sha256.0)
-        {
-            return Err(ActionEnforcementError::ReceiptMismatch);
-        }
-        let expected = receipt_signature(&self.0, receipt)?;
-        if !constant_time_eq(
-            expected.0.as_bytes(),
-            receipt.receipt_signature.0.as_bytes(),
-        ) {
-            return Err(ActionEnforcementError::InvalidSignature);
-        }
-        Ok(normalization)
-    }
+    Ok(normalization)
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -313,15 +218,11 @@ impl FileActionReceiptUseStore {
         Ok(Self { directory })
     }
 
-    /// Reads whether this exact signed invocation was already durably claimed.
-    /// This method cannot create a claim or change file permissions.
-    /// Returns `Conflict` for changed or non-canonical proof and `Storage` for
-    /// unavailable durable state. The caller must verify the full signature.
     pub fn has_consumed(
         &self,
         receipt: &ActionEnforcementReceiptMessage,
     ) -> Result<bool, ActionReceiptUseError> {
-        if !canonical_id(&receipt.request_id.0, "req_") || !digest(&receipt.receipt_signature.0) {
+        if !canonical_id(&receipt.request_id.0, "req_") {
             return Err(ActionReceiptUseError::Conflict);
         }
         let key = format!("{:x}.json", Sha256::digest(receipt.request_id.0.as_bytes()));
@@ -336,7 +237,7 @@ impl FileActionReceiptUseStore {
         if canonical != bytes
             || decoded.schema_version != RECEIPT_USE_SCHEMA_VERSION
             || decoded.request_id != receipt.request_id
-            || decoded.receipt_signature != receipt.receipt_signature
+            || decoded.receipt != *receipt
         {
             return Err(ActionReceiptUseError::Conflict);
         }
@@ -349,7 +250,7 @@ impl FileActionReceiptUseStore {
 struct StoredReceiptUse {
     schema_version: String,
     request_id: RequestId,
-    receipt_signature: Sha256Digest,
+    receipt: ActionEnforcementReceiptMessage,
 }
 
 impl ActionReceiptUseStore for FileActionReceiptUseStore {
@@ -357,7 +258,7 @@ impl ActionReceiptUseStore for FileActionReceiptUseStore {
         &mut self,
         receipt: &ActionEnforcementReceiptMessage,
     ) -> Result<ActionReceiptClaim, ActionReceiptUseError> {
-        if !canonical_id(&receipt.request_id.0, "req_") || !digest(&receipt.receipt_signature.0) {
+        if !canonical_id(&receipt.request_id.0, "req_") {
             return Err(ActionReceiptUseError::Conflict);
         }
         let key = format!("{:x}.json", Sha256::digest(receipt.request_id.0.as_bytes()));
@@ -365,7 +266,7 @@ impl ActionReceiptUseStore for FileActionReceiptUseStore {
         let stored = StoredReceiptUse {
             schema_version: RECEIPT_USE_SCHEMA_VERSION.to_owned(),
             request_id: receipt.request_id.clone(),
-            receipt_signature: receipt.receipt_signature.clone(),
+            receipt: receipt.clone(),
         };
         let bytes = serde_json::to_vec(&stored).map_err(|_| ActionReceiptUseError::Storage)?;
         let mut options = OpenOptions::new();
@@ -399,7 +300,7 @@ impl ActionReceiptUseStore for FileActionReceiptUseStore {
                 {
                     return Err(ActionReceiptUseError::Conflict);
                 }
-                if decoded.receipt_signature != receipt.receipt_signature {
+                if decoded.receipt != *receipt {
                     return Err(ActionReceiptUseError::Conflict);
                 }
                 Ok(ActionReceiptClaim::AlreadyConsumed)
@@ -450,68 +351,22 @@ impl std::error::Error for ActionReceiptUseError {}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ActionEnforcementError {
-    InvalidKey,
     InvalidAction,
     ReceiptMismatch,
-    InvalidSignature,
     Encoding,
 }
 
 impl fmt::Display for ActionEnforcementError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str(match self {
-            Self::InvalidKey => "action enforcement signing key is invalid",
             Self::InvalidAction => "action enforcement input is invalid",
             Self::ReceiptMismatch => "action enforcement receipt does not match the action",
-            Self::InvalidSignature => "action enforcement receipt signature is invalid",
             Self::Encoding => "action enforcement receipt encoding failed",
         })
     }
 }
 
 impl std::error::Error for ActionEnforcementError {}
-
-fn receipt_signature(
-    key: &ActionEnforcementSigningKey,
-    receipt: &ActionEnforcementReceiptMessage,
-) -> Result<Sha256Digest, ActionEnforcementError> {
-    let mut unsigned = receipt.clone();
-    unsigned.receipt_signature = Sha256Digest("sha256:".to_owned() + &"0".repeat(64));
-    let bytes = serde_json::to_vec(&unsigned).map_err(|_| ActionEnforcementError::Encoding)?;
-    Ok(Sha256Digest(format!(
-        "sha256:{}",
-        hex(&hmac_sha256(&key.0, &bytes))
-    )))
-}
-
-fn hmac_sha256(key: &[u8], value: &[u8]) -> [u8; 32] {
-    hmac_sha256_in_domain(key, RECEIPT_SIGNATURE_NAMESPACE, value)
-}
-
-fn hmac_sha256_in_domain(key: &[u8], namespace: &[u8], value: &[u8]) -> [u8; 32] {
-    let mut block = [0_u8; 64];
-    if key.len() > block.len() {
-        block[..32].copy_from_slice(&Sha256::digest(key));
-    } else {
-        block[..key.len()].copy_from_slice(key);
-    }
-    let mut inner_pad = [0x36_u8; 64];
-    let mut outer_pad = [0x5c_u8; 64];
-    for (index, byte) in block.iter().enumerate() {
-        inner_pad[index] ^= byte;
-        outer_pad[index] ^= byte;
-    }
-    let inner = Sha256::new()
-        .chain_update(inner_pad)
-        .chain_update(namespace)
-        .chain_update(value)
-        .finalize();
-    Sha256::new()
-        .chain_update(outer_pad)
-        .chain_update(inner)
-        .finalize()
-        .into()
-}
 
 fn namespaced_digest(namespace: &[u8], value: &[u8]) -> Sha256Digest {
     Sha256Digest(format!(
@@ -521,28 +376,6 @@ fn namespaced_digest(namespace: &[u8], value: &[u8]) -> Sha256Digest {
             .chain_update(value)
             .finalize()
     ))
-}
-
-fn hex(bytes: &[u8]) -> String {
-    const HEX: &[u8; 16] = b"0123456789abcdef";
-    let mut value = String::with_capacity(bytes.len() * 2);
-    for byte in bytes {
-        value.push(char::from(HEX[usize::from(byte >> 4)]));
-        value.push(char::from(HEX[usize::from(byte & 0x0f)]));
-    }
-    value
-}
-
-fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
-    if left.len() != right.len() {
-        return false;
-    }
-    left.iter()
-        .zip(right)
-        .fold(0_u8, |difference, (left, right)| {
-            difference | (left ^ right)
-        })
-        == 0
 }
 
 fn valid_policy_reference(receipt: &ActionEnforcementReceiptMessage) -> bool {

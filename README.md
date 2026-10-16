@@ -6,23 +6,35 @@ WinWinCode 是可自托管的 AI 编程工具。你在浏览器中提交任务�
 - **StrongFlow**：将需求、方案、执行、评审和验证组织成交付流程。
 - **候选改动**：查看任务产生的代码差异、验证证据和交付状态。
 
-## 安装与使用
+## 构建与使用
 
-从 [GitHub Releases](https://github.com/changw98ic/winwincode/releases) 下载发布包。支持 macOS 和 GNU Linux 的 ARM64、x64。
+在源码仓库执行：
 
-按 [部署指南](docs/operations/deploy.md) 完成以下步骤：
+```sh
+corepack pnpm install --frozen-lockfile
+corepack pnpm build
+```
 
-1. 配置并启动 Server 和浏览器界面。
-2. 在执行设备上启动 Device Client，绑定本地仓库。
-3. 在浏览器中连接设备并配置模型。
+构建产出 `wwc`、Server、Worker、内核辅助进程和浏览器界面。环境要求见[从源码构建](docs/operations/deploy.md#从源码构建)。
 
-这些步骤可以建立 Device 连接。当前发布包仍缺少 managed Worker 的完整生产装配来源。完成该缺口前，不应把 Device 已连接视为 Chat 或 StrongFlow 任务已经可以执行。具体缺口见[接入 Device Client](docs/operations/deploy.md#接入-device-client)。
+在三个终端分别启动：
 
-0.2.0 的新库 password 初始化流程尚未接通。首次部署请使用指南中的本机回环 `local-open` 配置。
+```sh
+./target/debug/winwincode-server
+node deploy/serve-client.mjs
+./target/debug/wwc device serve
+```
 
-## 从源码构建
+访问 `http://127.0.0.1:8080`。生成设备连接码并注册仓库：
 
-环境、工具链和完整构建步骤见 [部署指南](docs/operations/deploy.md#从源码构建)。
+```sh
+./target/debug/wwc device refresh-code
+./target/debug/wwc repo add /absolute/path/to/repository
+```
+
+在浏览器设备页提交连接码，在设置页配置模型，然后提交任务。Server 默认监听 `http://127.0.0.1:8443`。产品数据默认保存在 `$HOME/.winwincode`。
+
+发布包和 Docker Compose 的使用步骤见[部署指南](docs/operations/deploy.md)。发布包支持 macOS 和 GNU Linux 的 ARM64、x64，下载入口是 [GitHub Releases](https://github.com/changw98ic/winwincode/releases)。
 
 ## 文档
 

@@ -15,14 +15,13 @@ use tool_runtime_contract::ToolRuntimeContract;
 use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 use std::fmt;
 use std::fs::OpenOptions;
-use std::io::{Read as _, Write as _};
+use std::io::Read as _;
 use std::path::{Component, Path, PathBuf};
-use std::process::Stdio;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::Duration;
 
 #[cfg(unix)]
-use std::os::unix::fs::{OpenOptionsExt as _, PermissionsExt as _};
+use std::os::unix::fs::OpenOptionsExt as _;
 
 use crate::candidate_artifact_outbox::{
     CandidateArtifactAckOutcome, CandidateArtifactAuthority, CandidateArtifactOutbox,
@@ -58,8 +57,7 @@ use winwincode_domain::{
     SchemaVersion, SessionIdentity, Sha256Digest, WorkerId, WorkerInstanceId, WorkspaceRevision,
 };
 use winwincode_execution_port::{
-    action_enforcement::ActionEnforcementSigningKey,
-    action_gateway::{ExecutionEnvelopeToken, PostActionHook, PostActionOutcome},
+    action_gateway::{PostActionHook, PostActionOutcome},
     action_normalizer::{ActionOperation, ActionSource},
     agent_config::{
         AgentJevContextSettings, AgentProfileSettings, AgentSessionConfigSnapshot,
@@ -110,7 +108,6 @@ use winwincode_execution_port::execution_identity::{
 
 use crate::action_bridge::{ActionBridgeError, ExecutionPortActionGate};
 use crate::failure_diagnostic::{CodexFailureDiagnostic, CodexFailureStage};
-use crate::helper_release::{HELPER_RELEASE_BINARY_MODE, HelperReleaseManifest, MAX_HELPER_BYTES};
 use crate::model_bridge::{
     BridgeError, ExecutionPortModelBridge, ModelRunBinding, SharedAuthoritySource,
 };
@@ -172,14 +169,11 @@ impl From<ProductionCodexError> for StageCompletionFailure {
 pub struct ProductionCodexOptions {
     pub data_directory: PathBuf,
     pub helper_executable: PathBuf,
-    pub helper_release_manifest: HelperReleaseManifest,
-    pub provider: String,
-    pub model: String,
+    pub provider: Option<String>,
+    pub model: Option<String>,
     pub gateway_route: ModelGatewayRoute,
     pub registered_capabilities: WorkerCapabilitySet,
     pub discovered_capabilities: Vec<CapabilityDescriptor>,
-    pub action_signing_key: ActionEnforcementSigningKey,
-    pub execution_envelope: ExecutionEnvelopeToken,
     pub execution_mode: ExecutionMode,
     pub observer_mode: ObserverMode,
 }
@@ -189,10 +183,8 @@ pub struct ProductionCodexConfig {
     data_directory: PathBuf,
     kernel_home: PathBuf,
     helper_executable: PathBuf,
-    helper_bytes: Arc<[u8]>,
-    helper_release_manifest: HelperReleaseManifest,
-    provider: String,
-    model: String,
+    provider: Option<String>,
+    model: Option<String>,
     reasoning: Option<codex_protocol::openai_models::ReasoningEffort>,
     fusion: Option<winwincode_execution_port::agent_config::AgentFusionSettings>,
     jev_context: Option<AgentJevContextSettings>,
@@ -202,8 +194,6 @@ pub struct ProductionCodexConfig {
     gateway_route: ModelGatewayRoute,
     registered_capabilities: WorkerCapabilitySet,
     discovered_capabilities: Vec<CapabilityDescriptor>,
-    action_signing_key: ActionEnforcementSigningKey,
-    execution_envelope: ExecutionEnvelopeToken,
     execution_mode: ExecutionMode,
     observer_mode: ObserverMode,
     event_poll_timeout: Duration,
@@ -260,16 +250,6 @@ pub enum ProductionFormatRepairFault {
 
 impl ProductionCodexConfig {
     pub fn try_new(options: ProductionCodexOptions) -> Result<Self, ProductionCodexError> {
-        Self::try_new_with_helper(options, project_helper_checked)
-    }
-
-    fn try_new_with_helper(
-        options: ProductionCodexOptions,
-        resolve_helper: impl FnOnce(
-            &Path,
-            &HelperReleaseManifest,
-        ) -> Result<Arc<[u8]>, ProductionCodexError>,
-    ) -> Result<Self, ProductionCodexError> {
         released_production_execution_mode_required(options.execution_mode)?;
         for (valid, code) in [
             (
@@ -281,10 +261,13 @@ impl ProductionCodexConfig {
                 "HELPER_PATH_INVALID",
             ),
             (
-                valid_route_token(&options.provider),
+                options.provider.as_deref().is_none_or(valid_route_token),
                 "MODEL_PROVIDER_INVALID",
             ),
-            (valid_route_token(&options.model), "MODEL_ID_INVALID"),
+            (
+                options.model.as_deref().is_none_or(valid_route_token),
+                "MODEL_ID_INVALID",
+            ),
             (
                 valid_route_token(&options.gateway_route.route),
                 "MODEL_GATEWAY_ROUTE_INVALID",
@@ -293,21 +276,11 @@ impl ProductionCodexConfig {
                 valid_route_token(&options.gateway_route.capability),
                 "MODEL_GATEWAY_CAPABILITY_INVALID",
             ),
-            (
-                options.execution_envelope.version > 0,
-                "EXECUTION_ENVELOPE_VERSION_INVALID",
-            ),
-            (
-                valid_sha256_digest(&options.execution_envelope.digest.0),
-                "EXECUTION_ENVELOPE_DIGEST_INVALID",
-            ),
         ] {
             if !valid {
                 return Err(configuration_failure(code));
             }
         }
-        let helper_bytes =
-            resolve_helper(&options.helper_executable, &options.helper_release_manifest)?;
         WorkerCapabilityCatalog::discover(
             &options.registered_capabilities,
             options.discovered_capabilities.clone(),
@@ -323,8 +296,6 @@ impl ProductionCodexConfig {
             data_directory: options.data_directory,
             kernel_home,
             helper_executable: options.helper_executable,
-            helper_bytes,
-            helper_release_manifest: options.helper_release_manifest,
             provider: options.provider,
             model: options.model,
             reasoning: None,
@@ -336,8 +307,6 @@ impl ProductionCodexConfig {
             gateway_route: options.gateway_route,
             registered_capabilities: options.registered_capabilities,
             discovered_capabilities: options.discovered_capabilities,
-            action_signing_key: options.action_signing_key,
-            execution_envelope: options.execution_envelope,
             execution_mode: options.execution_mode,
             observer_mode: options.observer_mode,
             event_poll_timeout: Duration::from_millis(DEFAULT_EVENT_POLL_MILLIS),
@@ -543,18 +512,11 @@ pub struct ProductionCodexAdapter {
 }
 
 impl ProductionCodexAdapter {
-    pub fn open(mut config: ProductionCodexConfig) -> Result<Self, ProductionCodexError> {
-        ensure_private_directory(&config.data_directory)
+    pub fn open(config: ProductionCodexConfig) -> Result<Self, ProductionCodexError> {
+        std::fs::create_dir_all(&config.data_directory)
             .map_err(|_| unavailable().at_bootstrap_stage("CODEX_DATA_ROOT_UNAVAILABLE"))?;
-        ensure_private_directory(&config.kernel_home)
+        std::fs::create_dir_all(&config.kernel_home)
             .map_err(|_| unavailable().at_bootstrap_stage("KERNEL_HOME_UNAVAILABLE"))?;
-        config.helper_executable = seal_helper(
-            &config.helper_executable,
-            Some(config.helper_bytes.as_ref()),
-            &config.data_directory,
-            &config.helper_release_manifest,
-        )
-        .map_err(|error| error.at_bootstrap_stage("HELPER_INSTALLATION_FAILED"))?;
         let capability_catalog = WorkerCapabilityCatalog::discover(
             &config.registered_capabilities,
             config.discovered_capabilities.clone(),
@@ -581,8 +543,6 @@ impl ProductionCodexAdapter {
             ExecutionPortActionGate::open(
                 &config.data_directory,
                 capability_catalog.clone(),
-                config.execution_envelope.clone(),
-                config.action_signing_key.clone(),
                 bridge.authority(),
             )
             .map_err(|_| unavailable())?,
@@ -592,13 +552,6 @@ impl ProductionCodexAdapter {
             .map_err(map_bridge_error)?;
         let kernel_options =
             KernelOptions::new(config.kernel_home.clone(), config.helper_executable.clone());
-        #[cfg(target_os = "linux")]
-        let kernel_options = {
-            let mut options = kernel_options;
-            options.linux_sandbox_executable =
-                Some(install_linux_sandbox_alias(&config.helper_executable)?);
-            options
-        };
         let kernel = Arc::new(
             Kernel::new(kernel_options, bridge.model_port(), action_gate.clone())
                 .map_err(|error| {
@@ -4371,9 +4324,7 @@ impl CodexCoreAdapter for ProductionCodexAdapter {
             .update_now(now)
             .map_err(map_bridge_error)?;
         self.expire_retained_interactions(now)?;
-        self.kernel
-            .enforce_private_permissions()
-            .map_err(|_| kernel_error())
+        Ok(())
     }
 
     fn renew_lease(
@@ -5416,17 +5367,12 @@ impl CodexCoreAdapter for ProductionCodexAdapter {
         {
             return Err(conflict());
         }
-        self.action_gate
-            .verify_receipt_signature(receipt)
-            .map_err(map_action_receipt_error)?;
         let message = ExecutionPortMessage::ActionEnforcementReceiptMessage(receipt.clone());
         if self
             .outbox
             .has_applied_response(&message)
             .map_err(map_store_error)?
         {
-            // Existing proof consumes only the original transport frame. It
-            // cannot claim another permit or wake an unrelated Core waiter.
             return Ok(());
         }
         if self
@@ -5434,9 +5380,6 @@ impl CodexCoreAdapter for ProductionCodexAdapter {
             .has_consumed_receipt(receipt)
             .map_err(map_action_receipt_error)?
         {
-            // The side-effect claim was durable before a crash, while the
-            // transport proof was not. Verify only that original claim and
-            // signature; never wake another waiter or extend live authority.
             return self
                 .outbox
                 .record_applied_response(&message)
@@ -5504,6 +5447,15 @@ impl CodexCoreAdapter for ProductionCodexAdapter {
     ) -> Result<Vec<DurableExecutionDelivery>, Self::Error> {
         self.outbox
             .pending_batch(after_delivery, limit)
+            .map_err(map_store_error)
+    }
+
+    fn pending_execution_delivery(
+        &mut self,
+        delivery_id: &str,
+    ) -> Result<Option<DurableExecutionDelivery>, Self::Error> {
+        self.outbox
+            .pending_delivery(delivery_id)
             .map_err(map_store_error)
     }
 
@@ -6969,14 +6921,18 @@ fn production_agent_session_config(
             fusion: config.fusion.clone(),
             jev_context: config.jev_context.clone(),
             jev_judge: config.jev_judge.clone(),
-            provider: job.model_selection.as_ref().map_or_else(
-                || config.provider.clone(),
-                |selection| selection.provider_id.clone(),
-            ),
-            model: job.model_selection.as_ref().map_or_else(
-                || config.model.clone(),
-                |selection| selection.model_id.clone(),
-            ),
+            provider: job
+                .model_selection
+                .as_ref()
+                .map(|selection| selection.provider_id.clone())
+                .or_else(|| config.provider.clone())
+                .ok_or_else(invalid_job)?,
+            model: job
+                .model_selection
+                .as_ref()
+                .map(|selection| selection.model_id.clone())
+                .or_else(|| config.model.clone())
+                .ok_or_else(invalid_job)?,
             reasoning: config
                 .reasoning
                 .as_ref()
@@ -7689,491 +7645,6 @@ fn valid_route_token(value: &str) -> bool {
         })
 }
 
-fn valid_sha256_digest(value: &str) -> bool {
-    value.len() == 71
-        && value.starts_with("sha256:")
-        && value[7..].bytes().all(|byte| byte.is_ascii_hexdigit())
-}
-
-const SEALED_HELPER_DIRECTORY: &str = "helper-installation";
-const SEALED_HELPER_NAME: &str = "winwincode-kernel-helper";
-
-#[cfg(unix)]
-static HELPER_VALIDATIONS: Mutex<Vec<String>> = Mutex::new(Vec::new());
-
-#[cfg(all(unix, any(target_os = "linux", test)))]
-fn install_linux_sandbox_alias(helper: &Path) -> Result<PathBuf, ProductionCodexError> {
-    use std::os::unix::fs::MetadataExt as _;
-
-    let alias = helper.with_file_name("codex-linux-sandbox");
-    if let Err(error) = std::fs::hard_link(helper, &alias)
-        && error.kind() != std::io::ErrorKind::AlreadyExists
-    {
-        return Err(unavailable());
-    }
-    let source = std::fs::symlink_metadata(helper).map_err(|_| invalid_configuration())?;
-    let linked = std::fs::symlink_metadata(&alias).map_err(|_| invalid_configuration())?;
-    if !source.is_file()
-        || !linked.is_file()
-        || (source.dev(), source.ino()) != (linked.dev(), linked.ino())
-    {
-        return Err(invalid_configuration());
-    }
-    Ok(alias)
-}
-
-#[cfg(test)]
-fn project_helper(path: &Path, manifest: &HelperReleaseManifest) -> Option<Arc<[u8]>> {
-    project_helper_checked(path, manifest).ok()
-}
-
-fn project_helper_checked(
-    path: &Path,
-    manifest: &HelperReleaseManifest,
-) -> Result<Arc<[u8]>, ProductionCodexError> {
-    let current_executable = std::env::current_exe()
-        .and_then(|path| path.canonicalize())
-        .map_err(|_| configuration_failure("HELPER_HOST_IDENTITY_UNAVAILABLE"))?;
-    let current_directory = current_executable
-        .parent()
-        .ok_or_else(|| configuration_failure("HELPER_HOST_RELEASE_UNAVAILABLE"))?;
-    let release_directory =
-        if current_directory.file_name().and_then(|name| name.to_str()) == Some("deps") {
-            current_directory.parent().unwrap_or(current_directory)
-        } else {
-            current_directory
-        };
-    project_helper_in_release_checked(path, manifest, release_directory)
-}
-
-#[cfg(test)]
-fn project_helper_in_release(
-    path: &Path,
-    manifest: &HelperReleaseManifest,
-    release_directory: &Path,
-) -> Option<Arc<[u8]>> {
-    project_helper_in_release_checked(path, manifest, release_directory).ok()
-}
-
-fn project_helper_in_release_checked(
-    path: &Path,
-    manifest: &HelperReleaseManifest,
-    release_directory: &Path,
-) -> Result<Arc<[u8]>, ProductionCodexError> {
-    let metadata = std::fs::symlink_metadata(path)
-        .map_err(|_| configuration_failure("HELPER_IMAGE_METADATA_UNAVAILABLE"))?;
-    if metadata.file_type().is_symlink() || !metadata.is_file() {
-        return Err(configuration_failure("HELPER_IMAGE_NOT_REGULAR"));
-    }
-    let canonical_path = path
-        .canonicalize()
-        .map_err(|_| configuration_failure("HELPER_IMAGE_PATH_UNAVAILABLE"))?;
-    if manifest.path().parent() != Some(release_directory)
-        || canonical_path.parent() != Some(release_directory)
-        || !canonical_path.is_file()
-        || canonical_path.file_name().and_then(|name| name.to_str()) != Some(manifest.binary_path())
-    {
-        return Err(configuration_failure("HELPER_RELEASE_LAYOUT_MISMATCH"));
-    }
-    #[cfg(unix)]
-    {
-        let expected = format!(
-            "{{\"protocol\":\"winwincode-kernel-helper\",\"version\":1,\"packageVersion\":\"{}\"}}\n",
-            env!("CARGO_PKG_VERSION")
-        );
-        let identity = format!(
-            "{{\"protocol\":\"winwincode-kernel-helper\",\"version\":1,\"packageVersion\":\"{}\",\"sourceSha256\":\"{}\"}}\n",
-            env!("CARGO_PKG_VERSION"),
-            env!("WINWINCODE_HELPER_SOURCE_SHA256")
-        );
-        validate_helper_image_checked(
-            &canonical_path,
-            manifest,
-            HELPER_RELEASE_BINARY_MODE,
-            expected.as_bytes(),
-            identity.as_bytes(),
-        )
-    }
-    #[cfg(not(unix))]
-    {
-        Err(configuration_failure("HELPER_PLATFORM_UNSUPPORTED"))
-    }
-}
-
-fn seal_helper(
-    source: &Path,
-    validated_source: Option<&[u8]>,
-    data_directory: &Path,
-    manifest: &HelperReleaseManifest,
-) -> Result<PathBuf, ProductionCodexError> {
-    let destination_directory = data_directory.join(SEALED_HELPER_DIRECTORY);
-    ensure_private_directory(&destination_directory).map_err(|_| unavailable())?;
-    let destination = destination_directory.join(SEALED_HELPER_NAME);
-    if std::fs::symlink_metadata(&destination).is_ok() {
-        let valid = validate_sealed_helper(&destination, manifest)
-            || (repair_sealed_helper_permissions(&destination, manifest)
-                && validate_sealed_helper(&destination, manifest));
-        return valid
-            .then_some(destination)
-            .ok_or_else(invalid_configuration);
-    }
-
-    let source_bytes;
-    let bytes = if let Some(bytes) = validated_source {
-        bytes
-    } else {
-        source_bytes = read_helper_bytes(source).map_err(|_| invalid_configuration())?;
-        &source_bytes
-    };
-    if source.file_name().and_then(|name| name.to_str()) != Some(manifest.binary_path()) {
-        return Err(invalid_configuration());
-    }
-    #[cfg(unix)]
-    if validated_source.is_none()
-        && source.metadata().map_or(true, |metadata| {
-            metadata.permissions().mode() & 0o777 != manifest.binary_mode()
-        })
-    {
-        return Err(invalid_configuration());
-    }
-    if helper_digest(bytes) != manifest.binary_digest().0 {
-        return Err(invalid_configuration());
-    }
-    let temporary = destination_directory.join(format!(".{SEALED_HELPER_NAME}.{}", Uuid::now_v7()));
-    let mut file = OpenOptions::new();
-    file.create_new(true).write(true);
-    #[cfg(unix)]
-    file.mode(0o700);
-    let mut file = file.open(&temporary).map_err(|_| unavailable())?;
-    file.write_all(bytes).map_err(|_| unavailable())?;
-    file.sync_all().map_err(|_| unavailable())?;
-    drop(file);
-    #[cfg(unix)]
-    std::fs::set_permissions(&temporary, std::fs::Permissions::from_mode(0o700))
-        .map_err(|_| unavailable())?;
-    if let Err(error) = std::fs::rename(&temporary, &destination) {
-        let _ = std::fs::remove_file(&temporary);
-        if error.kind() != std::io::ErrorKind::AlreadyExists {
-            return Err(unavailable());
-        }
-    }
-    sync_directory(&destination_directory).map_err(|_| unavailable())?;
-    validate_sealed_helper(&destination, manifest)
-        .then_some(destination)
-        .ok_or_else(invalid_configuration)
-}
-
-#[cfg(unix)]
-fn repair_sealed_helper_permissions(path: &Path, manifest: &HelperReleaseManifest) -> bool {
-    let Ok(metadata) = std::fs::symlink_metadata(path) else {
-        return false;
-    };
-    if metadata.file_type().is_symlink()
-        || !metadata.is_file()
-        || read_helper_bytes(path)
-            .ok()
-            .is_none_or(|bytes| helper_digest(&bytes) != manifest.binary_digest().0)
-    {
-        return false;
-    }
-    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700)).is_ok()
-}
-
-#[cfg(not(unix))]
-fn repair_sealed_helper_permissions(_path: &Path, _manifest: &HelperReleaseManifest) -> bool {
-    false
-}
-
-fn validate_sealed_helper(path: &Path, manifest: &HelperReleaseManifest) -> bool {
-    #[cfg(unix)]
-    {
-        let expected = format!(
-            "{{\"protocol\":\"winwincode-kernel-helper\",\"version\":1,\"packageVersion\":\"{}\"}}\n",
-            env!("CARGO_PKG_VERSION")
-        );
-        let identity = format!(
-            "{{\"protocol\":\"winwincode-kernel-helper\",\"version\":1,\"packageVersion\":\"{}\",\"sourceSha256\":\"{}\"}}\n",
-            env!("CARGO_PKG_VERSION"),
-            env!("WINWINCODE_HELPER_SOURCE_SHA256")
-        );
-        validate_helper_image(
-            path,
-            manifest,
-            0o700,
-            expected.as_bytes(),
-            identity.as_bytes(),
-        )
-        .is_some()
-    }
-    #[cfg(not(unix))]
-    {
-        false
-    }
-}
-
-fn read_helper_bytes(path: &Path) -> std::io::Result<Vec<u8>> {
-    let metadata = std::fs::symlink_metadata(path)?;
-    if metadata.file_type().is_symlink() || !metadata.is_file() || metadata.len() > MAX_HELPER_BYTES
-    {
-        return Err(std::io::Error::other("helper is not a regular file"));
-    }
-    let mut options = OpenOptions::new();
-    options.read(true);
-    #[cfg(unix)]
-    options.custom_flags(if cfg!(target_os = "macos") {
-        0x100
-    } else {
-        0x20_000
-    });
-    let mut file = options.open(path)?;
-    let opened_metadata = file.metadata()?;
-    if !opened_metadata.is_file() {
-        return Err(std::io::Error::other("helper is not a regular file"));
-    }
-    let mut bytes = Vec::new();
-    file.read_to_end(&mut bytes)?;
-    if bytes.len() as u64 > MAX_HELPER_BYTES {
-        return Err(std::io::Error::other("helper is too large"));
-    }
-    Ok(bytes)
-}
-
-fn helper_digest(bytes: &[u8]) -> String {
-    format!("sha256:{:x}", Sha256::digest(bytes))
-}
-
-fn ensure_private_directory(path: &Path) -> std::io::Result<()> {
-    match std::fs::symlink_metadata(path) {
-        Ok(metadata) => {
-            if metadata.file_type().is_symlink() || !metadata.is_dir() {
-                return Err(std::io::Error::other(
-                    "helper installation directory is not private",
-                ));
-            }
-        }
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            std::fs::create_dir_all(path)?;
-        }
-        Err(error) => return Err(error),
-    }
-    let metadata = std::fs::symlink_metadata(path)?;
-    if metadata.file_type().is_symlink() || !metadata.is_dir() {
-        return Err(std::io::Error::other(
-            "helper installation directory is not private",
-        ));
-    }
-    restrict_directory(path)
-}
-
-#[cfg(unix)]
-fn restrict_directory(path: &Path) -> std::io::Result<()> {
-    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))
-}
-
-#[cfg(not(unix))]
-fn restrict_directory(_path: &Path) -> std::io::Result<()> {
-    Ok(())
-}
-
-#[cfg(unix)]
-fn sync_directory(path: &Path) -> std::io::Result<()> {
-    std::fs::File::open(path)?.sync_all()
-}
-
-#[cfg(not(unix))]
-fn sync_directory(_path: &Path) -> std::io::Result<()> {
-    Ok(())
-}
-
-#[cfg(all(unix, test))]
-fn bounded_helper_handshake(path: &Path, expected: &[u8]) -> bool {
-    bounded_helper_probe(path, "--winwincode-helper-handshake", expected)
-}
-
-#[cfg(unix)]
-fn validate_helper_image(
-    path: &Path,
-    manifest: &HelperReleaseManifest,
-    required_mode: u32,
-    handshake: &[u8],
-    identity: &[u8],
-) -> Option<Arc<[u8]>> {
-    validate_helper_image_checked(path, manifest, required_mode, handshake, identity).ok()
-}
-
-#[cfg(unix)]
-fn validate_helper_image_checked(
-    path: &Path,
-    manifest: &HelperReleaseManifest,
-    required_mode: u32,
-    handshake: &[u8],
-    identity: &[u8],
-) -> Result<Arc<[u8]>, ProductionCodexError> {
-    let bytes =
-        read_helper_bytes(path).map_err(|_| configuration_failure("HELPER_IMAGE_READ_FAILED"))?;
-    if helper_digest(&bytes) != manifest.binary_digest().0 {
-        return Err(configuration_failure("HELPER_IMAGE_DIGEST_MISMATCH"));
-    }
-    if !path.metadata().is_ok_and(|metadata| {
-        metadata.permissions().mode() & 0o777 == required_mode
-            && manifest.binary_mode() == HELPER_RELEASE_BINARY_MODE
-    }) {
-        return Err(configuration_failure("HELPER_IMAGE_MODE_MISMATCH"));
-    }
-    let validation_key = format!(
-        "{}\0{}\0{}",
-        manifest.binary_digest().0,
-        manifest.package_version(),
-        manifest.source_sha256()
-    );
-    let mut validated = HELPER_VALIDATIONS
-        .lock()
-        .map_err(|_| configuration_failure("HELPER_VALIDATION_LOCK_UNAVAILABLE"))?;
-    if validated.contains(&validation_key) {
-        return Ok(bytes.into());
-    }
-    for (argument, expected, code) in [
-        (
-            "--winwincode-helper-handshake",
-            handshake,
-            "HELPER_HANDSHAKE_FAILED",
-        ),
-        (
-            "--winwincode-helper-identity",
-            identity,
-            "HELPER_IDENTITY_FAILED",
-        ),
-    ] {
-        if !bounded_helper_probe(path, argument, expected) {
-            std::thread::yield_now();
-            if !bounded_helper_probe(path, argument, expected) {
-                return Err(configuration_failure(code));
-            }
-        }
-    }
-    if validated.len() >= 32 {
-        validated.remove(0);
-    }
-    validated.push(validation_key);
-    Ok(bytes.into())
-}
-
-#[cfg(unix)]
-fn bounded_helper_probe(path: &Path, argument: &str, expected: &[u8]) -> bool {
-    use std::os::fd::OwnedFd;
-    use std::os::unix::net::UnixStream;
-    use std::os::unix::process::CommandExt as _;
-
-    const OUTPUT_LIMIT: u64 = 4096;
-    const TIMEOUT: Duration = Duration::from_secs(30);
-    const CLEANUP_TIMEOUT: Duration = Duration::from_secs(1);
-
-    let Ok((stdout, helper_stdout)) = UnixStream::pair() else {
-        return false;
-    };
-    let Ok((stderr, helper_stderr)) = UnixStream::pair() else {
-        return false;
-    };
-    let output_deadline = std::time::Instant::now() + TIMEOUT + CLEANUP_TIMEOUT;
-
-    let mut command = std::process::Command::new(path);
-    command
-        .arg(argument)
-        .stdin(Stdio::null())
-        .stdout(Stdio::from(OwnedFd::from(helper_stdout)))
-        .stderr(Stdio::from(OwnedFd::from(helper_stderr)))
-        .process_group(0);
-    let Ok(mut child) = command.spawn() else {
-        return false;
-    };
-    drop(command);
-    let stdout = std::thread::spawn(move || {
-        read_bounded_helper_output(stdout, OUTPUT_LIMIT, output_deadline)
-    });
-    let stderr = std::thread::spawn(move || {
-        read_bounded_helper_output(stderr, OUTPUT_LIMIT, output_deadline)
-    });
-    let started = std::time::Instant::now();
-    let status = loop {
-        match child.try_wait() {
-            Ok(Some(status)) => break Some(status),
-            Ok(None) if started.elapsed() < TIMEOUT => {
-                std::thread::sleep(Duration::from_millis(10));
-            }
-            Ok(None) | Err(_) => {
-                break None;
-            }
-        }
-    };
-    if !terminate_helper_process_group(&mut child, CLEANUP_TIMEOUT) {
-        return false;
-    }
-    let Ok(Ok(stdout)) = stdout.join() else {
-        return false;
-    };
-    let Ok(Ok(stderr)) = stderr.join() else {
-        return false;
-    };
-    status.is_some_and(|status| status.success()) && stderr.is_empty() && stdout == expected
-}
-
-#[cfg(unix)]
-fn read_bounded_helper_output(
-    mut output: std::os::unix::net::UnixStream,
-    limit: u64,
-    deadline: std::time::Instant,
-) -> std::io::Result<Vec<u8>> {
-    const READ_TIMEOUT: Duration = Duration::from_millis(25);
-
-    output.set_read_timeout(Some(READ_TIMEOUT))?;
-    let mut bytes = Vec::new();
-    let mut chunk = [0_u8; 1024];
-    while std::time::Instant::now() < deadline && bytes.len() as u64 <= limit {
-        let remaining = usize::try_from(limit + 1 - bytes.len() as u64)
-            .unwrap_or(chunk.len())
-            .min(chunk.len());
-        match output.read(&mut chunk[..remaining]) {
-            Ok(0) => return Ok(bytes),
-            Ok(count) => bytes.extend_from_slice(&chunk[..count]),
-            Err(error)
-                if matches!(
-                    error.kind(),
-                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
-                ) => {}
-            Err(error) => return Err(error),
-        }
-    }
-    if bytes.len() as u64 > limit {
-        Ok(bytes)
-    } else {
-        Err(std::io::Error::new(
-            std::io::ErrorKind::TimedOut,
-            "helper output did not close before the deadline",
-        ))
-    }
-}
-
-#[cfg(unix)]
-fn terminate_helper_process_group(child: &mut std::process::Child, timeout: Duration) -> bool {
-    let _ = std::process::Command::new("/bin/kill")
-        .args(["-KILL", "--", &format!("-{}", child.id())])
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status();
-    let _ = child.kill();
-    let deadline = std::time::Instant::now() + timeout;
-    loop {
-        match child.try_wait() {
-            Ok(Some(_)) => return true,
-            Ok(None) if std::time::Instant::now() < deadline => {
-                std::thread::sleep(Duration::from_millis(10));
-            }
-            Ok(None) | Err(_) => return false,
-        }
-    }
-}
-
 fn decode_kernel_event(payload_json: &str) -> Result<CodexEvent, ProductionCodexError> {
     serde_json::from_str(payload_json).map_err(|_| kernel_error())
 }
@@ -8343,27 +7814,23 @@ mod tests {
     include!("device_primary_accounting_tests.rs");
     include!("runtime_start_delivery_tests.rs");
     use super::{
-        AdapterStore, ExecutionMode, HELPER_RELEASE_BINARY_MODE, MAX_HELPER_BYTES,
-        ModelLeaseAuthority, ModelRunBinding, ProductionCodexAdapter, ProductionCodexConfig,
-        ProductionCodexErrorKind, ProductionCodexOptions, RepositoryRulePack, RoleExecutionMode,
-        RoleSessionPolicy, StoredRun, StoredRunPhase, TurnSubmissionOptions,
-        allocate_interactive_input_choice_identities, bounded_helper_handshake,
-        decode_kernel_event, delegated_budget_stop, delegated_budget_stopped_counters,
-        delegated_change_batch_event, interactive_input_choice_replay_keys,
-        load_repository_rule_pack, load_stored_run, migrate_stored_run_role_policies_v1_to_v2,
-        performance_execution_mode, performance_execution_mode_for_role, project_helper,
-        project_interactive_input_choices, read_helper_bytes,
-        released_production_execution_mode_required, role_session_policy, seal_helper,
+        AdapterStore, ExecutionMode, ModelLeaseAuthority, ModelRunBinding, ProductionCodexAdapter,
+        ProductionCodexConfig, ProductionCodexErrorKind, ProductionCodexOptions,
+        RepositoryRulePack, RoleExecutionMode, RoleSessionPolicy, StoredRun, StoredRunPhase,
+        TurnSubmissionOptions, allocate_interactive_input_choice_identities, decode_kernel_event,
+        delegated_budget_stop, delegated_budget_stopped_counters, delegated_change_batch_event,
+        interactive_input_choice_replay_keys, load_repository_rule_pack, load_stored_run,
+        migrate_stored_run_role_policies_v1_to_v2, performance_execution_mode,
+        performance_execution_mode_for_role, project_interactive_input_choices,
+        released_production_execution_mode_required, role_session_policy,
         sealed_benchmark_mcp_server, sealed_job_role_execution_mode, submission_input_digest,
-        terminate_helper_process_group, turn_submission_options, validate_delegated_patch,
-        validate_delegated_patch_path, validate_helper_image, validate_sealed_helper,
+        turn_submission_options, validate_delegated_patch, validate_delegated_patch_path,
         validate_stored_batch_intent,
     };
     use super::{
         ApprovalActionCategory, ApprovalActionReasonCode, StoredApprovalOperationKind,
         mcp_approval_detail, patch_approval_detail,
     };
-    use crate::helper_release::HelperReleaseManifest;
     use crate::model_port_client::ModelLeaseAuthoritySource as _;
     use crate::{CodexCoreAdapter, CodexPoll, CodexRunKey, CodexThreadStart};
     use codex_protocol::protocol::{
@@ -8392,8 +7859,6 @@ mod tests {
         WorkRunInput, WorkerCapabilityFeature, WorkerCapabilitySet, WorkerCapabilitySetPlatform,
     };
     use winwincode_execution_port::{
-        action_enforcement::ActionEnforcementSigningKey,
-        action_gateway::ExecutionEnvelopeToken,
         generated::{
             ArtifactAckMessage, ArtifactAckMessageKind, ArtifactKind, ArtifactReference,
             ExecutionPortMessage, LeaseWriteStatus, ModelGatewayRoute,
@@ -8770,7 +8235,7 @@ mod tests {
                 capability: "model".into(),
                 route: "loopback".into(),
             },
-            "fixture-provider".into(),
+            Some("fixture-provider".into()),
             SharedAuthoritySource::default(),
         );
         assert_eq!(
@@ -9096,26 +8561,6 @@ mod tests {
     }
 
     #[cfg(unix)]
-    fn helper_fixture(root: &std::path::Path) -> PathBuf {
-        use std::os::unix::fs::PermissionsExt as _;
-
-        let helper = root.join("winwincode-kernel-helper");
-        std::fs::write(
-            &helper,
-            format!(
-                "#!/bin/sh\ncase \"$1\" in\n  --winwincode-helper-handshake) printf '%s\\n' '{{\"protocol\":\"winwincode-kernel-helper\",\"version\":1,\"packageVersion\":\"{}\"}}' ;;\n  --winwincode-helper-identity) printf '%s\\n' '{{\"protocol\":\"winwincode-kernel-helper\",\"version\":1,\"packageVersion\":\"{}\",\"sourceSha256\":\"{}\"}}' ;;\n  *) exit 2 ;;\nesac\n",
-                env!("CARGO_PKG_VERSION"),
-                env!("CARGO_PKG_VERSION"),
-                env!("WINWINCODE_HELPER_SOURCE_SHA256"),
-            ),
-        )
-        .expect("write helper fixture");
-        std::fs::set_permissions(&helper, std::fs::Permissions::from_mode(0o755))
-            .expect("make helper fixture executable");
-        helper
-    }
-
-    #[cfg(unix)]
     #[test]
     fn successful_retry_preserves_unknown_usage_through_terminal_restart() {
         use super::{
@@ -9361,8 +8806,6 @@ mod tests {
             .parent()
             .unwrap()
             .join("winwincode-kernel-helper");
-        config.helper_bytes = Arc::from(std::fs::read(&helper).unwrap());
-        config.helper_release_manifest = HelperReleaseManifest::from_test_helper(&helper).unwrap();
         config.helper_executable = helper;
         let mut adapter = ProductionCodexAdapter::open(config).unwrap();
         let home = adapter.config.kernel_home.canonicalize().unwrap();
@@ -9411,12 +8854,6 @@ mod tests {
         let mut options = KernelOptions::new(home, adapter.config.helper_executable.clone());
         assert_eq!(options.shutdown_timeout, Duration::from_secs(5));
         options.shutdown_timeout = Duration::from_secs(1);
-        #[cfg(target_os = "linux")]
-        {
-            options.linux_sandbox_executable = Some(
-                super::install_linux_sandbox_alias(&adapter.config.helper_executable).unwrap(),
-            );
-        }
         adapter.kernel = Arc::new(
             Kernel::new(
                 options,
@@ -10236,13 +9673,15 @@ mod tests {
         reason = "a consumed signed decision, missing outbox proof, replacement and restart reproduce one crash window"
     )]
     async fn consumed_action_claim_crash_window(permitted: bool) {
-        use winwincode_execution_port::action_enforcement::{
-            ActionEnforcementIssuer, FileActionReceiptUseStore,
-        };
+        use winwincode_execution_port::action_enforcement::FileActionReceiptUseStore;
         use winwincode_execution_port::generated::ActionEnforcementDecision;
         use winwincode_kernel::{KernelActionGate as _, KernelActionPayload, KernelActionRequest};
 
-        let root = test_root("action-claim-before-transport-proof");
+        let root = test_root(if permitted {
+            "action-permit-claim-before-transport-proof"
+        } else {
+            "action-reject-claim-before-transport-proof"
+        });
         let config = diagnostic_adapter_config(&root);
         let mut adapter = ProductionCodexAdapter::open(config.clone()).unwrap();
         let original = crate::action_bridge::tests::binding();
@@ -10291,9 +9730,6 @@ mod tests {
         } else {
             ActionEnforcementDecision::Reject
         };
-        ActionEnforcementIssuer::new(config.action_signing_key.clone())
-            .sign(&mut receipt)
-            .unwrap();
         let receipt_directory = config.data_directory.join("action-enforcement-receipts");
         let saved_directory = config
             .data_directory
@@ -10318,19 +9754,6 @@ mod tests {
         );
         std::fs::remove_file(&receipt_directory).unwrap();
         std::fs::rename(&saved_directory, &receipt_directory).unwrap();
-        let mut invalid_signature = receipt.clone();
-        invalid_signature.receipt_signature.0 = format!("sha256:{}", "f".repeat(64));
-        let failure = adapter
-            .accept_action_receipt(&invalid_signature, &now)
-            .await
-            .unwrap_err();
-        assert_eq!(failure.kind(), ProductionCodexErrorKind::Authority);
-        assert!(!adapter.durable_state_unavailable(&failure));
-        assert!(!adapter.outbox.has_applied_response(&message).unwrap());
-        assert!(
-            !task.is_finished(),
-            "a forged receipt cannot resolve the original Core waiter"
-        );
         adapter.action_gate.accept_receipt(&receipt, &now).unwrap();
         let authorization = task.await.unwrap();
         if permitted {
@@ -10388,7 +9811,7 @@ mod tests {
         };
         assert_ne!(replacement_request.request_id, receipt.request_id);
         let received_at = Instant("2030-01-02T00:00:00.000Z".into());
-        for change in 0..9 {
+        for change in 0..8 {
             let mut changed = receipt.clone();
             match change {
                 0 => {
@@ -10407,8 +9830,7 @@ mod tests {
                 }
                 5 => changed.lease.expires_at.0 = "2030-01-01T02:00:00.000Z".into(),
                 6 => changed.session_identity.codex_thread_id.0 = format!("cdx_{}", "Z".repeat(26)),
-                7 => changed.resource.push_str("changed"),
-                _ => changed.receipt_signature.0 = format!("sha256:{}", "f".repeat(64)),
+                _ => changed.resource.push_str("changed"),
             }
             assert!(
                 adapter
@@ -10490,17 +9912,12 @@ mod tests {
         let root = test_root("historical-action");
         let adapter = ProductionCodexAdapter::open(diagnostic_adapter_config(&root)).unwrap();
         let original = interaction_fixture_message("action.enforcement_request");
-        let ExecutionPortMessage::ActionEnforcementReceiptMessage(mut signed) =
+        let ExecutionPortMessage::ActionEnforcementReceiptMessage(receipt) =
             interaction_fixture_message("action.enforcement_receipt")
         else {
             panic!("action receipt fixture");
         };
-        winwincode_execution_port::action_enforcement::ActionEnforcementIssuer::new(
-            adapter.config.action_signing_key.clone(),
-        )
-        .sign(&mut signed)
-        .unwrap();
-        let response = ExecutionPortMessage::ActionEnforcementReceiptMessage(signed);
+        let response = ExecutionPortMessage::ActionEnforcementReceiptMessage(receipt);
         adapter.outbox.retain(&original).unwrap();
         assert!(!adapter.outbox.has_applied_response(&response).unwrap());
         adapter.outbox.record_applied_response(&response).unwrap();
@@ -10541,7 +9958,7 @@ mod tests {
                 .accept_action_receipt(&changed, &received_at)
                 .await
                 .is_err(),
-            "same signature cannot change the accepted decision"
+            "a completed receipt cannot change the accepted decision"
         );
         changed = receipt.clone();
         changed.request_id.0 = "req_00000000000000000000000999".into();
@@ -11804,57 +11221,29 @@ mod tests {
     pub(super) fn diagnostic_adapter_config(root: &std::path::Path) -> ProductionCodexConfig {
         use std::os::unix::fs::PermissionsExt as _;
 
-        std::fs::create_dir_all(root).expect("create diagnostic adapter root");
-        let release_directory = root.join("test-release");
-        std::fs::create_dir_all(&release_directory).expect("create isolated test release");
-        let release_directory = release_directory
-            .canonicalize()
-            .expect("canonical test release");
-        let helper = release_directory.join("winwincode-kernel-helper");
-        std::fs::write(
-            &helper,
-            format!(
-                "#!/bin/sh\ncase \"$1\" in\n  --winwincode-helper-handshake) printf '%s\\n' '{{\"protocol\":\"winwincode-kernel-helper\",\"version\":1,\"packageVersion\":\"{}\"}}' ;;\n  --winwincode-helper-identity) printf '%s\\n' '{{\"protocol\":\"winwincode-kernel-helper\",\"version\":1,\"packageVersion\":\"{}\",\"sourceSha256\":\"{}\"}}' ;;\n  *) exit 2 ;;\nesac\n",
-                env!("CARGO_PKG_VERSION"),
-                env!("CARGO_PKG_VERSION"),
-                env!("WINWINCODE_HELPER_SOURCE_SHA256"),
-            ),
-        )
-        .expect("write diagnostic helper");
-        std::fs::set_permissions(&helper, std::fs::Permissions::from_mode(0o755))
-            .expect("make diagnostic helper executable");
-        ProductionCodexConfig::try_new_with_helper(
-            ProductionCodexOptions {
-                data_directory: root.join("runtime"),
-                helper_executable: helper.clone(),
-                helper_release_manifest: HelperReleaseManifest::from_test_helper(&helper)
-                    .expect("build diagnostic helper manifest"),
-                provider: "fixture-provider".to_owned(),
-                model: "fixture-model".to_owned(),
-                gateway_route: ModelGatewayRoute {
-                    capability: "reasoning".to_owned(),
-                    route: "embedded-canonical-loopback".to_owned(),
-                },
-                registered_capabilities: WorkerCapabilitySet {
-                    capability_digest: Sha256Digest(format!("sha256:{}", "a".repeat(64))),
-                    features: vec![WorkerCapabilityFeature::Sandbox],
-                    max_concurrent_jobs: 1,
-                    platform: WorkerCapabilitySetPlatform::Aarch64AppleDarwin,
-                },
-                discovered_capabilities: Vec::new(),
-                action_signing_key: ActionEnforcementSigningKey::from_bytes([31_u8; 32])
-                    .expect("diagnostic signing key"),
-                execution_envelope: ExecutionEnvelopeToken {
-                    version: 1,
-                    digest: Sha256Digest(format!("sha256:{}", "a".repeat(64))),
-                },
-                execution_mode: ExecutionMode::React,
-                observer_mode: ObserverMode::Off,
+        std::fs::create_dir_all(root).unwrap();
+        let helper = root.join("test-helper");
+        std::fs::write(&helper, "#!/bin/sh\nexit 2\n").unwrap();
+        std::fs::set_permissions(&helper, std::fs::Permissions::from_mode(0o755)).unwrap();
+        ProductionCodexConfig::try_new(ProductionCodexOptions {
+            data_directory: root.join("runtime"),
+            helper_executable: root.join("test-helper"),
+            provider: Some("fixture-provider".to_owned()),
+            model: Some("fixture-model".to_owned()),
+            gateway_route: ModelGatewayRoute {
+                capability: "reasoning".to_owned(),
+                route: "embedded-canonical-loopback".to_owned(),
             },
-            |path, manifest| {
-                super::project_helper_in_release_checked(path, manifest, &release_directory)
+            registered_capabilities: WorkerCapabilitySet {
+                capability_digest: Sha256Digest(format!("sha256:{}", "a".repeat(64))),
+                features: vec![WorkerCapabilityFeature::Sandbox],
+                max_concurrent_jobs: 1,
+                platform: WorkerCapabilitySetPlatform::Aarch64AppleDarwin,
             },
-        )
+            discovered_capabilities: Vec::new(),
+            execution_mode: ExecutionMode::React,
+            observer_mode: ObserverMode::Off,
+        })
         .expect("validate diagnostic adapter config")
     }
 
@@ -12092,54 +11481,33 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn diagnostic_helpers_are_isolated_without_changing_production_installation() {
-        use std::os::unix::fs::PermissionsExt as _;
-        let executable = std::env::current_exe().unwrap();
-        let release = executable.parent().unwrap().parent().unwrap();
-        let installed = [
-            release.join("winwincode-kernel-helper"),
-            release.join("winwincode-kernel-helper.release.json"),
-        ];
-        let snapshot = |path: &PathBuf| {
-            std::fs::read(path)
-                .ok()
-                .map(|bytes| (bytes, std::fs::metadata(path).unwrap().permissions().mode()))
-        };
-        let before = installed.each_ref().map(snapshot);
-        let roots = [
-            test_root("diagnostic-isolation-a"),
-            test_root("diagnostic-isolation-b"),
-        ];
-        std::thread::scope(|scope| {
-            for root in &roots {
-                scope.spawn(move || {
-                    let config = diagnostic_adapter_config(root);
-                    assert!(
-                        config
-                            .helper_executable
-                            .starts_with(root.canonicalize().unwrap())
-                    );
-                    assert!(
-                        project_helper(&config.helper_executable, &config.helper_release_manifest)
-                            .is_none(),
-                        "a test fixture must not qualify as a production installation"
-                    );
-                    let manifest = config.helper_release_manifest.clone();
-                    let helper = config.helper_executable.clone();
-                    std::fs::write(&helper, b"corrupted fixture").unwrap();
-                    assert!(
-                        super::project_helper_in_release(
-                            &helper,
-                            &manifest,
-                            helper.parent().unwrap()
-                        )
-                        .is_none()
-                    );
-                    std::fs::remove_dir_all(root).unwrap();
-                });
-            }
-        });
-        assert_eq!(installed.each_ref().map(snapshot), before);
+    fn adapter_uses_the_configured_helper_without_startup_execution() {
+        use std::os::unix::fs::{PermissionsExt as _, symlink};
+
+        let root = test_root("configured-helper");
+        std::fs::create_dir_all(&root).unwrap();
+        let helper = root.join("custom-helper");
+        let marker = root.join("helper-started");
+        std::fs::write(
+            &helper,
+            format!("#!/bin/sh\ntouch '{}'\nexit 0\n", marker.display()),
+        )
+        .unwrap();
+        std::fs::set_permissions(&helper, std::fs::Permissions::from_mode(0o751)).unwrap();
+        let alias = root.join("helper-link");
+        symlink(&helper, &alias).unwrap();
+        let mut config = diagnostic_adapter_config(&root);
+        config.helper_executable = alias.clone();
+        let adapter = ProductionCodexAdapter::open(config).unwrap();
+        assert_eq!(adapter.config.helper_executable, alias);
+        assert!(!marker.exists());
+        assert!(!root.join("runtime/helper-installation").exists());
+        assert_eq!(
+            std::fs::metadata(&helper).unwrap().permissions().mode() & 0o777,
+            0o751
+        );
+        drop(adapter);
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     fn frozen_fusion_candidate(workspace: &std::path::Path) -> (String, WorkspaceRevision) {
@@ -12356,6 +11724,32 @@ mod tests {
             adapter.runs[&key].record.terminal,
             Some(super::StoredTerminal::Cancelled { .. })
         ));
+        drop(adapter);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn task_model_selection_works_without_worker_provider_defaults() {
+        let root = test_root("task-model-selection");
+        let mut config = diagnostic_adapter_config(&root);
+        config.provider = None;
+        config.model = None;
+        let worker = WorkerId("wrk_00000000000000000000000001".to_owned());
+        let mut job = executor_job();
+        assert!(super::production_agent_session_config(&config, &worker, &job, None).is_err());
+        job.model_selection = Some(
+            winwincode_execution_port::generated::ExecutionModelSelection {
+                provider_id: "task-provider".into(),
+                model_id: "task-model".into(),
+            },
+        );
+        let snapshot =
+            super::production_agent_session_config(&config, &worker, &job, None).unwrap();
+        assert_eq!(snapshot.profile.source.settings.provider, "task-provider");
+        assert_eq!(snapshot.profile.source.settings.model, "task-model");
+        let adapter = ProductionCodexAdapter::open(config).unwrap();
+        assert_eq!(adapter.config.provider, None);
+        assert_eq!(adapter.config.model, None);
         drop(adapter);
         std::fs::remove_dir_all(root).unwrap();
     }
@@ -13589,28 +12983,6 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn oversized_helper_is_rejected_before_reading_or_sealing() {
-        use std::fs::OpenOptions;
-        use std::os::unix::fs::PermissionsExt as _;
-
-        let root = test_root("oversized");
-        std::fs::create_dir_all(&root).expect("create oversized helper fixture");
-        let helper = root.join("winwincode-kernel-helper");
-        let file = OpenOptions::new()
-            .create_new(true)
-            .write(true)
-            .open(&helper)
-            .expect("create oversized helper");
-        file.set_len(MAX_HELPER_BYTES + 1)
-            .expect("sparsely extend oversized helper");
-        std::fs::set_permissions(&helper, std::fs::Permissions::from_mode(0o755))
-            .expect("make oversized helper executable");
-        assert!(read_helper_bytes(&helper).is_err());
-        std::fs::remove_dir_all(root).expect("remove oversized helper fixture");
-    }
-
-    #[cfg(unix)]
-    #[test]
     fn repository_rule_pack_is_read_once_without_following_symlinks() {
         let root = test_root("repository-rule-pack");
         let workspace = root.join("workspace");
@@ -13749,38 +13121,6 @@ mod tests {
         assert!(load_stored_run(&restarted, "run-fixture").is_err());
         drop(restarted);
         std::fs::remove_dir_all(root).expect("remove migration fixture");
-    }
-
-    #[cfg(unix)]
-    fn process_is_running(process_id: u32) -> bool {
-        // Minimal Linux container init processes can retain a killed orphan
-        // as a zombie. kill -0 reports its PID, although it cannot run or keep
-        // inherited pipes open. A live descendant still fails this assertion.
-        #[cfg(target_os = "linux")]
-        if std::fs::read_to_string(format!("/proc/{process_id}/stat"))
-            .ok()
-            .and_then(|stat| stat.rsplit_once(')').map(|(_, tail)| tail.to_owned()))
-            .and_then(|tail| tail.split_whitespace().next().map(str::to_owned))
-            .is_some_and(|state| state == "Z")
-        {
-            return false;
-        }
-        std::process::Command::new("/bin/kill")
-            .args(["-0", "--", &process_id.to_string()])
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .status()
-            .is_ok_and(|status| status.success())
-    }
-
-    #[cfg(unix)]
-    fn assert_process_stops(process_id: u32) {
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(1);
-        while process_is_running(process_id) && std::time::Instant::now() < deadline {
-            std::thread::sleep(std::time::Duration::from_millis(10));
-        }
-        assert!(!process_is_running(process_id));
     }
 
     #[test]
@@ -14343,484 +13683,5 @@ mod tests {
         let error = interactive_input_choice_replay_keys(&question)
             .expect_err("completely indistinguishable options must fail closed");
         assert_eq!(error.kind(), ProductionCodexErrorKind::Conflict);
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn forged_public_handshake_outside_release_layout_is_rejected() {
-        use std::os::unix::fs::PermissionsExt as _;
-
-        let root =
-            std::env::temp_dir().join(format!("winwincode-renamed-helper-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&root);
-        std::fs::create_dir_all(&root).expect("create helper fixture");
-        let helper = root.join("winwincode-kernel-helper");
-        std::fs::write(
-            &helper,
-            format!(
-                "#!/bin/sh\nprintf '%s\\n' '{{\"protocol\":\"winwincode-kernel-helper\",\"version\":1,\"packageVersion\":\"{}\"}}'\n",
-                env!("CARGO_PKG_VERSION")
-            ),
-        )
-        .expect("write forged executable");
-        std::fs::set_permissions(&helper, std::fs::Permissions::from_mode(0o755))
-            .expect("make renamed executable runnable");
-        let manifest = HelperReleaseManifest::from_test_helper(&helper)
-            .expect("build test helper release manifest");
-        assert!(project_helper(&PathBuf::from(&helper), &manifest).is_none());
-        std::fs::remove_dir_all(root).expect("remove helper fixture");
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn linux_sandbox_alias_preserves_the_sealed_image_and_rejects_replacement() {
-        use std::os::unix::fs::symlink;
-
-        let root = test_root("sandbox-alias");
-        std::fs::create_dir_all(&root).unwrap();
-        let helper = helper_fixture(&root);
-        let alias = super::install_linux_sandbox_alias(&helper).unwrap();
-        assert_eq!(alias.file_name().unwrap(), "codex-linux-sandbox");
-        assert_eq!(
-            std::fs::read(&alias).unwrap(),
-            std::fs::read(&helper).unwrap()
-        );
-        assert_eq!(super::install_linux_sandbox_alias(&helper).unwrap(), alias);
-        std::fs::remove_file(&alias).unwrap();
-        std::fs::write(&alias, b"different helper").unwrap();
-        assert!(super::install_linux_sandbox_alias(&helper).is_err());
-        std::fs::remove_file(&alias).unwrap();
-        symlink(&helper, &alias).unwrap();
-        assert!(super::install_linux_sandbox_alias(&helper).is_err());
-        std::fs::remove_dir_all(root).unwrap();
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn sealed_helper_is_atomic_private_and_repairs_crash_snapshot_mode() {
-        use std::os::unix::fs::PermissionsExt as _;
-
-        let root = test_root("seal");
-        std::fs::create_dir_all(&root).expect("create helper fixture");
-        let helper = helper_fixture(&root);
-        let manifest = HelperReleaseManifest::from_test_helper(&helper)
-            .expect("build signed helper fixture manifest");
-        assert_eq!(manifest.binary_path(), "winwincode-kernel-helper");
-        assert_eq!(manifest.binary_mode(), 0o755);
-        let data = root.join("runtime");
-        let sealed = seal_helper(&helper, None, &data, &manifest).expect("seal helper");
-        assert_eq!(
-            sealed,
-            data.join("helper-installation/winwincode-kernel-helper")
-        );
-        assert_eq!(
-            std::fs::metadata(data.join("helper-installation"))
-                .expect("installation directory metadata")
-                .permissions()
-                .mode()
-                & 0o777,
-            0o700
-        );
-        assert_eq!(
-            std::fs::metadata(&sealed)
-                .expect("sealed helper metadata")
-                .permissions()
-                .mode()
-                & 0o777,
-            0o700
-        );
-
-        std::fs::set_permissions(&sealed, std::fs::Permissions::from_mode(0o600))
-            .expect("remove executable mode from crash snapshot");
-        assert_eq!(
-            seal_helper(&helper, None, &data, &manifest).expect("repair sealed helper"),
-            sealed
-        );
-        assert_eq!(
-            std::fs::metadata(&sealed)
-                .expect("repaired helper metadata")
-                .permissions()
-                .mode()
-                & 0o777,
-            0o700
-        );
-        std::fs::remove_dir_all(root).expect("remove helper fixture");
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn validated_helper_bytes_survive_release_path_replacement_before_sealing() {
-        use std::os::unix::fs::PermissionsExt as _;
-
-        let root = test_root("validated-replacement");
-        std::fs::create_dir_all(&root).expect("create helper fixture");
-        let helper = helper_fixture(&root);
-        let manifest = HelperReleaseManifest::from_test_helper(&helper)
-            .expect("build signed helper fixture manifest");
-        let validated = read_helper_bytes(&helper).expect("read validated helper bytes");
-        std::fs::write(&helper, b"#!/bin/sh\nexit 0\n").expect("replace release helper bytes");
-        std::fs::set_permissions(&helper, std::fs::Permissions::from_mode(0o600))
-            .expect("make replacement release path non-executable");
-
-        let data = root.join("runtime");
-        let sealed = seal_helper(&helper, Some(&validated), &data, &manifest)
-            .expect("seal the exact bytes owned by validated configuration");
-        assert_eq!(
-            read_helper_bytes(&sealed).expect("read sealed helper"),
-            validated
-        );
-        assert!(validate_sealed_helper(&sealed, &manifest));
-        std::fs::remove_dir_all(root).expect("remove helper fixture");
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn sealed_helper_rejects_source_replacement_and_destination_symlink() {
-        use std::os::unix::fs::{PermissionsExt as _, symlink};
-
-        let root = test_root("replacement");
-        std::fs::create_dir_all(&root).expect("create helper fixture");
-        let helper = helper_fixture(&root);
-        let manifest = HelperReleaseManifest::from_test_helper(&helper)
-            .expect("build signed helper fixture manifest");
-        let replacement_data = root.join("replacement-runtime");
-        std::fs::write(&helper, b"#!/bin/sh\nexit 0\n").expect("replace helper bytes");
-        std::fs::set_permissions(&helper, std::fs::Permissions::from_mode(0o755))
-            .expect("restore replacement helper mode");
-        assert_eq!(
-            seal_helper(&helper, None, &replacement_data, &manifest)
-                .expect_err("changed helper must fail closed")
-                .kind(),
-            ProductionCodexErrorKind::InvalidConfiguration
-        );
-
-        let symlink_data = root.join("symlink-runtime");
-        let destination_directory = symlink_data.join("helper-installation");
-        std::fs::create_dir_all(&destination_directory).expect("create symlink destination");
-        std::fs::set_permissions(
-            &destination_directory,
-            std::fs::Permissions::from_mode(0o700),
-        )
-        .expect("restrict symlink destination");
-        let destination = destination_directory.join(super::SEALED_HELPER_NAME);
-        symlink(&helper, &destination).expect("create replacement symlink");
-        assert_eq!(
-            seal_helper(&helper, None, &symlink_data, &manifest)
-                .expect_err("destination symlink must fail closed")
-                .kind(),
-            ProductionCodexErrorKind::InvalidConfiguration
-        );
-        std::fs::remove_dir_all(root).expect("remove helper fixture");
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn helper_handshake_succeeds_without_waiting_for_the_cleanup_deadline() {
-        use std::os::unix::fs::PermissionsExt as _;
-
-        let root = test_root("normal-handshake");
-        std::fs::create_dir_all(&root).expect("create helper fixture");
-        let helper = root.join("winwincode-kernel-helper");
-        let expected = b"exact helper handshake\n";
-        std::fs::write(&helper, "#!/bin/sh\nprintf 'exact helper handshake\\n'\n")
-            .expect("write normal helper");
-        std::fs::set_permissions(&helper, std::fs::Permissions::from_mode(0o755))
-            .expect("make normal helper runnable");
-
-        let started = std::time::Instant::now();
-        assert!(bounded_helper_handshake(&helper, expected));
-        assert!(started.elapsed() < std::time::Duration::from_secs(30));
-        std::fs::remove_dir_all(root).expect("remove helper fixture");
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn helper_handshake_accepts_delayed_startup_with_exact_output() {
-        use std::os::unix::fs::PermissionsExt as _;
-        let root = test_root("delayed-handshake");
-        std::fs::create_dir_all(&root).unwrap();
-        let helper = root.join("winwincode-kernel-helper");
-        std::fs::write(
-            &helper,
-            "#!/bin/sh\nsleep 3\nprintf 'exact helper handshake\\n'\n",
-        )
-        .unwrap();
-        std::fs::set_permissions(&helper, std::fs::Permissions::from_mode(0o755)).unwrap();
-        assert!(bounded_helper_handshake(
-            &helper,
-            b"exact helper handshake\n"
-        ));
-        std::fs::remove_dir_all(root).unwrap();
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn concurrent_release_probes_share_one_bounded_process_window() {
-        use std::os::unix::fs::PermissionsExt as _;
-        use std::sync::{Arc, Barrier};
-
-        const CONCURRENCY: usize = 8;
-        let root = test_root("concurrent-release-probes");
-        std::fs::create_dir_all(&root).expect("create helper fixture");
-        let helper = root.join("winwincode-kernel-helper");
-        let active = root.join("active");
-        std::fs::write(
-            &helper,
-            format!(
-                "#!/bin/sh\nmkdir '{}' || exit 9\ntrap 'rmdir \"{}\"' EXIT\nsleep 0.05\ncase \"$1\" in\n  --winwincode-helper-handshake) printf 'exact helper handshake\\n' ;;\n  --winwincode-helper-identity) printf 'exact helper identity\\n' ;;\n  *) exit 2 ;;\nesac\n",
-                active.display(),
-                active.display(),
-            ),
-        )
-        .expect("write contention-sensitive helper");
-        std::fs::set_permissions(&helper, std::fs::Permissions::from_mode(0o755))
-            .expect("make helper executable");
-        let manifest = Arc::new(
-            HelperReleaseManifest::from_test_helper(&helper).expect("build helper manifest"),
-        );
-
-        let helper = Arc::new(helper);
-        let barrier = Arc::new(Barrier::new(CONCURRENCY + 1));
-        let threads = (0..CONCURRENCY)
-            .map(|_| {
-                let helper = Arc::clone(&helper);
-                let manifest = Arc::clone(&manifest);
-                let barrier = Arc::clone(&barrier);
-                std::thread::spawn(move || {
-                    barrier.wait();
-                    validate_helper_image(
-                        &helper,
-                        &manifest,
-                        HELPER_RELEASE_BINARY_MODE,
-                        b"exact helper handshake\n",
-                        b"exact helper identity\n",
-                    )
-                    .is_some()
-                })
-            })
-            .collect::<Vec<_>>();
-        barrier.wait();
-        assert!(
-            threads
-                .into_iter()
-                .all(|thread| thread.join().expect("join release probe"))
-        );
-        assert!(!active.exists());
-        std::fs::remove_dir_all(root).expect("remove helper fixture");
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn concurrent_sealed_copies_reuse_the_exact_validated_helper_image() {
-        use std::os::unix::fs::PermissionsExt as _;
-        use std::sync::{Arc, Barrier};
-
-        const CONCURRENCY: usize = 44;
-        let root = test_root("concurrent-sealed-copies");
-        std::fs::create_dir_all(&root).expect("create helper fixture");
-        let helper = root.join("winwincode-kernel-helper");
-        let active = root.join("active");
-        std::fs::write(
-            &helper,
-            format!(
-                "#!/bin/sh\nmkdir '{}' || exit 9\ntrap 'rmdir \"{}\"' EXIT\nsleep 0.05\ncase \"$1\" in\n  --winwincode-helper-handshake) printf '%s\\n' '{{\"protocol\":\"winwincode-kernel-helper\",\"version\":1,\"packageVersion\":\"{}\"}}' ;;\n  --winwincode-helper-identity) printf '%s\\n' '{{\"protocol\":\"winwincode-kernel-helper\",\"version\":1,\"packageVersion\":\"{}\",\"sourceSha256\":\"{}\"}}' ;;\n  *) exit 2 ;;\nesac\n",
-                active.display(),
-                active.display(),
-                env!("CARGO_PKG_VERSION"),
-                env!("CARGO_PKG_VERSION"),
-                env!("WINWINCODE_HELPER_SOURCE_SHA256"),
-            ),
-        )
-        .expect("write contention-sensitive helper");
-        std::fs::set_permissions(&helper, std::fs::Permissions::from_mode(0o755))
-            .expect("make helper executable");
-        let manifest = Arc::new(
-            HelperReleaseManifest::from_test_helper(&helper).expect("build helper manifest"),
-        );
-        let handshake = format!(
-            "{{\"protocol\":\"winwincode-kernel-helper\",\"version\":1,\"packageVersion\":\"{}\"}}\n",
-            env!("CARGO_PKG_VERSION")
-        );
-        let identity = format!(
-            "{{\"protocol\":\"winwincode-kernel-helper\",\"version\":1,\"packageVersion\":\"{}\",\"sourceSha256\":\"{}\"}}\n",
-            env!("CARGO_PKG_VERSION"),
-            env!("WINWINCODE_HELPER_SOURCE_SHA256")
-        );
-        let validated = Arc::<[u8]>::from(
-            validate_helper_image(
-                &helper,
-                &manifest,
-                HELPER_RELEASE_BINARY_MODE,
-                handshake.as_bytes(),
-                identity.as_bytes(),
-            )
-            .expect("validate the source helper once")
-            .as_ref(),
-        );
-
-        let helper = Arc::new(helper);
-        let barrier = Arc::new(Barrier::new(CONCURRENCY + 1));
-        let threads = (0..CONCURRENCY)
-            .map(|index| {
-                let helper = Arc::clone(&helper);
-                let manifest = Arc::clone(&manifest);
-                let validated = Arc::clone(&validated);
-                let barrier = Arc::clone(&barrier);
-                let data = root.join(format!("runtime-{index}"));
-                std::thread::spawn(move || {
-                    barrier.wait();
-                    seal_helper(&helper, Some(validated.as_ref()), &data, &manifest).is_ok()
-                })
-            })
-            .collect::<Vec<_>>();
-        barrier.wait();
-        assert!(
-            threads
-                .into_iter()
-                .all(|thread| thread.join().expect("join sealed helper installation"))
-        );
-        assert!(!active.exists());
-        let changed = root
-            .join("runtime-0/helper-installation")
-            .join(super::SEALED_HELPER_NAME);
-        std::fs::write(&changed, b"#!/bin/sh\nexit 0\n").expect("replace one cached helper copy");
-        assert!(!validate_sealed_helper(&changed, &manifest));
-        std::fs::remove_dir_all(root).expect("remove helper fixture");
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn cold_release_probe_retries_once_without_weakening_the_exact_identity() {
-        use std::os::unix::fs::PermissionsExt as _;
-
-        let root = test_root("cold-release-probe");
-        std::fs::create_dir_all(&root).expect("create helper fixture");
-        let helper = root.join("winwincode-kernel-helper");
-        let first_probe = root.join("first-probe");
-        std::fs::write(
-            &helper,
-            format!(
-                "#!/bin/sh\nif [ \"$1\" = '--winwincode-helper-handshake' ] && [ ! -e '{}' ]; then\n  : > '{}'\n  exit 9\nfi\ncase \"$1\" in\n  --winwincode-helper-handshake) printf 'exact helper handshake\\n' ;;\n  --winwincode-helper-identity) printf 'exact helper identity\\n' ;;\n  *) exit 2 ;;\nesac\n",
-                first_probe.display(),
-                first_probe.display(),
-            ),
-        )
-        .expect("write cold-start helper");
-        std::fs::set_permissions(&helper, std::fs::Permissions::from_mode(0o755))
-            .expect("make helper executable");
-        let manifest =
-            HelperReleaseManifest::from_test_helper(&helper).expect("build helper manifest");
-
-        assert!(
-            validate_helper_image(
-                &helper,
-                &manifest,
-                HELPER_RELEASE_BINARY_MODE,
-                b"exact helper handshake\n",
-                b"exact helper identity\n",
-            )
-            .is_some()
-        );
-        assert!(first_probe.is_file());
-        std::fs::remove_dir_all(root).expect("remove helper fixture");
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn helper_handshake_has_a_bounded_timeout() {
-        use std::os::unix::fs::PermissionsExt as _;
-
-        let root = test_root("sleeping-helper");
-        std::fs::create_dir_all(&root).expect("create helper fixture");
-        let helper = root.join("winwincode-kernel-helper");
-        let process_id_path = root.join("helper.pid");
-        std::fs::write(
-            &helper,
-            format!(
-                "#!/bin/sh\nprintf '%s' \"$$\" > '{}'\nsleep 999\n",
-                process_id_path.display()
-            ),
-        )
-        .expect("write sleeping helper");
-        std::fs::set_permissions(&helper, std::fs::Permissions::from_mode(0o755))
-            .expect("make sleeping helper runnable");
-        let started = std::time::Instant::now();
-        assert!(!bounded_helper_handshake(&helper, b"never"));
-        assert!(started.elapsed() < std::time::Duration::from_secs(32));
-        let process_id = std::fs::read_to_string(process_id_path)
-            .expect("read helper process id")
-            .parse::<u32>()
-            .expect("parse helper process id");
-        assert_process_stops(process_id);
-        std::fs::remove_dir_all(root).expect("remove helper fixture");
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn helper_handshake_closes_inherited_descendant_pipes() {
-        use std::os::unix::fs::PermissionsExt as _;
-
-        let root = test_root("descendant-helper");
-        std::fs::create_dir_all(&root).expect("create helper fixture");
-        let helper = root.join("winwincode-kernel-helper");
-        let helper_process_id_path = root.join("helper.pid");
-        let descendant_process_id_path = root.join("descendant.pid");
-        let expected = b"exact helper handshake\n";
-        std::fs::write(
-            &helper,
-            format!(
-                "#!/bin/sh\nprintf '%s' \"$$\" > '{}'\nsleep 999 &\nprintf '%s' \"$!\" > '{}'\nprintf 'exact helper handshake\\n'\n",
-                helper_process_id_path.display(),
-                descendant_process_id_path.display()
-            ),
-        )
-        .expect("write descendant helper");
-        std::fs::set_permissions(&helper, std::fs::Permissions::from_mode(0o755))
-            .expect("make descendant helper runnable");
-        let started = std::time::Instant::now();
-        assert!(bounded_helper_handshake(&helper, expected));
-        assert!(started.elapsed() < std::time::Duration::from_secs(32));
-        let helper_process_id = std::fs::read_to_string(helper_process_id_path)
-            .expect("read helper process id")
-            .parse::<u32>()
-            .expect("parse helper process id");
-        let descendant_process_id = std::fs::read_to_string(descendant_process_id_path)
-            .expect("read descendant process id")
-            .parse::<u32>()
-            .expect("parse descendant process id");
-        assert_process_stops(helper_process_id);
-        assert_process_stops(descendant_process_id);
-        std::fs::remove_dir_all(root).expect("remove helper fixture");
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn helper_timeout_does_not_terminate_a_foreign_process_group() {
-        use std::os::unix::fs::PermissionsExt as _;
-        use std::os::unix::process::CommandExt as _;
-
-        let mut foreign = std::process::Command::new("/bin/sleep");
-        foreign
-            .arg("999")
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .process_group(0);
-        let mut foreign = foreign.spawn().expect("spawn foreign process group");
-
-        let root = test_root("foreign-process-group");
-        std::fs::create_dir_all(&root).expect("create helper fixture");
-        let helper = root.join("winwincode-kernel-helper");
-        std::fs::write(&helper, "#!/bin/sh\nsleep 999\n").expect("write sleeping helper");
-        std::fs::set_permissions(&helper, std::fs::Permissions::from_mode(0o755))
-            .expect("make sleeping helper runnable");
-
-        assert!(!bounded_helper_handshake(&helper, b"never"));
-        assert!(foreign.try_wait().expect("query foreign process").is_none());
-        assert!(terminate_helper_process_group(
-            &mut foreign,
-            std::time::Duration::from_secs(1)
-        ));
-        std::fs::remove_dir_all(root).expect("remove helper fixture");
     }
 }

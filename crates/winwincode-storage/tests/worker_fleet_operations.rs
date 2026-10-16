@@ -54,10 +54,8 @@ fn pool(seed: u64) -> WorkerPoolId {
 }
 
 fn authentication(worker: u64) -> WorkerAuthenticationIdentity {
-    WorkerAuthenticationIdentity::TransportPrincipal {
-        issuer: "fixture-issuer".to_owned(),
-        subject: format!("worker-{worker}"),
-        credential_fingerprint: Sha256Digest(format!("sha256:{}", "a".repeat(64))),
+    WorkerAuthenticationIdentity::LocalEmbedded {
+        control_plane_principal: format!("worker-{worker}"),
     }
 }
 

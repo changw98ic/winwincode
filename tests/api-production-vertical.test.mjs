@@ -2,7 +2,6 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import { existsSync, globSync, mkdtempSync, readFileSync, rmSync, writeFileSync, mkdirSync, statSync } from 'node:fs'
 import { createHash } from 'node:crypto'
-import { request as httpsRequest } from 'node:https'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
@@ -17,7 +16,7 @@ import { deviceTaskIdentities, withDeviceTaskRuntime } from '../scripts/device-t
 import { benchmarkConfiguration } from '../scripts/run-real-task-benchmark.mjs'
 import { deterministicDeviceProvider, installDevicePublicSmoke, waitFor } from '../scripts/device-production-fixture.mjs'
 import { cancellationEvidence } from './fixtures/code-mode-cancellation-evidence.mjs'
-import { assertSuccessfulRetainedCommands, completedCommandScript,
+import { assertSuccessfulRetainedCommands, completedCommandScript, loseCommittedCommandResponse,
   readRetainedCoreCommandResults } from './fixtures/chat-execution-transport-probe.mjs'
 
 test('a scenario propagates its Device cleanup failure', async () => {
@@ -121,37 +120,6 @@ async function assertUnknownExecutionAccounting(database, jobId, knownTokens) {
   }
   return { reservation: reservation.state, accounting: reconciliation.accounting_status,
     knownTokens: terminalUsage.knownTokens }
-}
-
-async function loseCommittedCommandResponse(api, command, expectedRevision, payload, requestId) {
-  const serialized = JSON.stringify({
-    schemaVersion: 'winwincode/v1', requestId, actor: api.actor, scope: api.scope,
-    command, expectedRevision, payload,
-  })
-  return new Promise((resolveResponse, rejectResponse) => {
-    let intentionallyClosed = false
-    const request = httpsRequest(`${api.baseUrl}/api/v1/commands`, {
-      method: 'POST', servername: 'control.localhost', timeout: 30_000,
-      rejectUnauthorized: api.ca !== undefined,
-      ...(api.ca === undefined ? {} : { ca: api.ca }),
-      headers: {
-        Origin: api.origin, Accept: 'application/json', Connection: 'close',
-        'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(serialized),
-        ...(api.cookie === null ? {} : { Cookie: api.cookie }),
-      },
-    }, response => {
-      // Successful headers follow the real commit. Close the real connection
-      // before consuming any response body; recovery has no returned receipt.
-      const status = response.statusCode
-      const bodyComplete = response.complete
-      intentionallyClosed = true
-      response.destroy()
-      resolveResponse({ status, bodyComplete, destroyed: response.destroyed })
-    })
-    request.on('error', error => { if (!intentionallyClosed) rejectResponse(error) })
-    request.on('timeout', () => request.destroy(new Error('lost response fixture timed out')))
-    request.end(serialized)
-  })
 }
 
 test('Chat replay preserves one execution and its durable terminal and accounting identities', async t => {
@@ -547,7 +515,7 @@ test('Chat project output preserves frozen ZIP bytes and exposes preparation bef
     directory, restart: false, repeat: false, ...apiProductionScenarioBinaries(),
     serverEnvironment: { WWC_SERVER_EXECUTION_LEASE_SECONDS: '30' },
     deviceProvider: { ...deterministicDeviceProvider(), nativeCellScripts: {
-      'native-cell-A': 'const command=ALL_TOOLS.find(tool=>tool.name.endsWith("exec_command")); if(!command) throw new Error("command tool missing"); text(await tools[command.name]({cmd:"printf \'%s\\n\' \'Chat project output\' > CHAT-OUTPUT.txt",yield_time_ms:1000}));',
+      'native-cell-A': completedCommandScript("printf '%s\\n' 'Chat project output' > CHAT-OUTPUT.txt"),
     } },
     scenario: { async run(context) {
       const { api, devicePath } = context

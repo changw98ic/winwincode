@@ -26,7 +26,8 @@ const {
   solutionReviewDecisionResolution,
 } = reviewModule
 const { deliveryReportText } = detailModule
-const { candidateCanApply } = await import(pathToFileURL(resolve(cache, 'candidate-application.js')).href)
+const { candidateCanApply, mountCandidateApplication } = await import(pathToFileURL(resolve(cache, 'candidate-application.js')).href)
+const { createControlPlaneClientCandidates } = await import(pathToFileURL(resolve(cache, 'community-control-plane-client.js')).href)
 const { diffLines, renderDiff } = await import(pathToFileURL(resolve(cache, 'diff-preview.js')).href)
 const { createStrongFlowReviewAnnotations } = annotationsModule
 const { redactPublicText, publicErrorText } = redactionModule
@@ -140,6 +141,134 @@ test('applying requires current candidate, current specification and resolvable 
     { ...state, detail: { ...state.detail, verdict: { ...state.detail.verdict, criteria: [state.detail.verdict.criteria[0]] } } },
     { ...state, detail: { ...state.detail, evidence: [{ ...evidence, snapshotId: 'snap_00000000000000000000000099' }] } },
   ]) assert.equal(candidateCanApply(changed), false)
+})
+
+async function applicationFixture(initialStatus) {
+  const dom = new JSDOM('<!doctype html><body><main></main></body>')
+  const document = dom.window.document
+  const root = document.querySelector('main')
+  const baseCommit = 'a'.repeat(40)
+  let applicationStatus = initialStatus
+  const calls = []
+  const state = { status: 'ready', detail: {
+    requirements: { deliverySpecId: 'spec-review', deliverySpecRevision: 1, acceptanceCriteria },
+    currentCandidate: candidate, evidence: [evidence],
+    verdict: { ...verdict, status: 'pass', unresolvedFindings: [],
+      criteria: verdict.criteria.map(item => ({ ...item, verdict: 'pass' })) },
+  } }
+  const localCandidate = () => ({
+    localCandidateReceiptId: 'local-fixture', candidateRef, repositoryBindingId: 'binding-fixture',
+    candidateCommit: candidate.candidateCommitId, baseCommit, localRefName: candidateRef,
+    state: 'retained', createdAt: '2026-10-15T00:00:00.000Z', revision: 1, branchName: null, history: [],
+    application: applicationStatus === null ? null : { applicationId: 'lar_00000000000000000000000001',
+      approvalId: 'approval-fixture', baseCommit, candidateDigest: `sha256:${'b'.repeat(64)}`,
+      targetBranch: 'release/original', status: applicationStatus },
+  })
+  const model = { state, subscribe(listener) { listener(state); return () => {} },
+    async refresh() {}, async acceptDelivery() { calls.push('accept') } }
+  const candidates = { async listDeviceCandidates() { return [localCandidate()] },
+    async applyCandidate(input) {
+      calls.push(input)
+      applicationStatus = 'applied'
+      return { ...input, localApplyReceiptId: 'receipt-fixture', strategy: 'fast_forward',
+        result: 'applied', resultingCommit: candidate.candidateCommitId, conflictArtifactRef: null,
+        createdAt: '2026-10-15T00:00:00.000Z', revision: 2 }
+    } }
+  const view = mountCandidateApplication({ root, model, candidates,
+    directory: { async listClients() { return [{ clientId: '123456789012', displayName: 'Remote Device' }] },
+      async listRepositories() { return [{ repositoryBindingId: 'binding-fixture', displayName: 'Fixture Project',
+        defaultBranch: 'main', headCommit: 'c'.repeat(40) }] } },
+    async claim() { calls.push('claim') },
+  })
+  await new Promise(resolvePromise => setImmediate(resolvePromise))
+  return { root, calls, view, localCandidate, setStatus(value) { applicationStatus = value },
+    async submit() {
+      root.querySelector('input[type=checkbox]').checked = true
+      root.querySelector('form').dispatchEvent(new dom.window.Event('submit', { cancelable: true }))
+      await new Promise(resolvePromise => setImmediate(resolvePromise))
+    }, close() { view.close(); dom.window.close() } }
+}
+
+test('candidate applications show durable recovery states and block repeated writes', async () => {
+  for (const status of ['applied', 'stale', 'blocked', 'failed']) {
+    const fixture = await applicationFixture(status)
+    assert.equal(fixture.root.querySelector('button[type=submit]').disabled, true, status)
+    assert.ok(fixture.root.querySelector('[role=status]').textContent.length > 0)
+    if (status === 'blocked') assert.match(fixture.root.textContent, /结果尚未确认.*暂停再次应用/su)
+    await fixture.submit()
+    assert.deepEqual(fixture.calls, [], `${status} cannot claim or apply`)
+    fixture.close()
+  }
+})
+
+test('an applying candidate can resume the original application after a lost response', async () => {
+  const fixture = await applicationFixture('applying')
+  const apply = fixture.root.querySelector('button[type=submit]')
+  assert.equal(apply.disabled, false)
+  assert.equal(apply.textContent, '恢复原应用')
+  assert.equal(fixture.root.querySelector('#wwc-apply-branch').disabled, true)
+  assert.equal(fixture.root.querySelector('#wwc-apply-branch').value, 'release/original')
+  assert.equal(fixture.root.querySelector('#wwc-apply-head').value, 'a'.repeat(40))
+  assert.deepEqual(fixture.calls, [])
+  await fixture.submit()
+  assert.deepEqual(fixture.calls, ['accept', 'claim', {
+    clientId: '123456789012', candidateRef, repositoryBindingId: 'binding-fixture',
+    targetBranch: 'release/original', expectedHead: 'a'.repeat(40),
+  }])
+  await fixture.submit()
+  assert.equal(fixture.calls.length, 3)
+  assert.match(fixture.root.textContent, /已确认应用完成/u)
+  fixture.close()
+})
+
+test('awaiting retry restores the original branch and baseline and submits it exactly once', async () => {
+  const fixture = await applicationFixture('awaiting_retry')
+  assert.equal(fixture.root.querySelector('button[type=submit]').textContent, '重试原应用')
+  assert.equal(fixture.root.querySelector('#wwc-apply-branch').value, 'release/original')
+  assert.equal(fixture.root.querySelector('#wwc-apply-branch').disabled, true)
+  assert.equal(fixture.root.querySelector('#wwc-apply-head').value, 'a'.repeat(40))
+  await fixture.submit()
+  assert.deepEqual(fixture.calls, ['accept', 'claim', {
+    clientId: '123456789012', candidateRef, repositoryBindingId: 'binding-fixture',
+    targetBranch: 'release/original', expectedHead: 'a'.repeat(40),
+  }])
+  await fixture.submit()
+  assert.equal(fixture.calls.length, 3)
+  assert.match(fixture.root.textContent, /已确认应用完成/u)
+  fixture.close()
+})
+
+test('a newly blocked application is re-read before accepting or applying a stale UI selection', async () => {
+  for (const status of [null, 'applying', 'awaiting_retry']) {
+    const fixture = await applicationFixture(status)
+    fixture.setStatus('blocked')
+    await fixture.submit()
+    assert.deepEqual(fixture.calls, [])
+    assert.equal(fixture.root.querySelector('button[type=submit]').disabled, true)
+    fixture.close()
+  }
+})
+
+test('candidate API preserves application recovery fields and rejects unknown recovery states', async () => {
+  const fixture = await applicationFixture('awaiting_retry')
+  const client = createControlPlaneClientCandidates({ client: { serverUrl: 'https://control.example' },
+    transport: { async fetch() { return { ok: true, status: 200,
+      async text() {
+        const local = fixture.localCandidate()
+        local.history = [{ localApplyReceiptId: 'lar_00000000000000000000000001', candidateRef,
+          repositoryBindingId: 'binding-fixture', targetBranch: 'release/original', expectedHead: 'a'.repeat(40),
+          strategy: 'fast_forward', result: 'outcome_unknown', resultingCommit: null, conflictArtifactRef: null,
+          createdAt: '2026-10-15T00:00:00.000Z', revision: 2 }]
+        return JSON.stringify({ schemaVersion: 'winwincode/v1', candidates: [local] })
+      } } } },
+  })
+  const [loaded] = await client.listDeviceCandidates({ clientId: '123456789012' })
+  assert.deepEqual(loaded.application, fixture.localCandidate().application)
+  assert.equal(loaded.baseCommit, 'a'.repeat(40))
+  assert.equal(loaded.history[0].result, 'outcome_unknown')
+  fixture.setStatus('unknown')
+  await assert.rejects(client.listDeviceCandidates({ clientId: '123456789012' }))
+  fixture.close()
 })
 
 function response(query, result, page = { hasMore: false, nextCursor: null }) {
