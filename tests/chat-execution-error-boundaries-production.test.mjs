@@ -18,7 +18,10 @@ import { isDeepStrictEqual } from 'node:util'
 
 import { runApiProductionVertical } from '../scripts/run-api-production-vertical.mjs'
 import { deterministicDeviceProvider, waitFor } from '../scripts/device-production-fixture.mjs'
-import { readRetainedOutcomes } from './fixtures/chat-execution-transport-probe.mjs'
+import {
+  assertSuccessfulRetainedCommands, completedCommandScript, readRetainedCoreCommandResults,
+  readRetainedOutcomes,
+} from './fixtures/chat-execution-transport-probe.mjs'
 
 const SECRET = 'fixture-secret-chat-error-boundaries-792615'
 const sha256 = bytes => createHash('sha256').update(bytes).digest('hex')
@@ -163,15 +166,13 @@ function coreCommands(deviceData, jobId, attempt = 1) {
       ? JSON.parse(JSON.parse(row.effective_input).input).cmd : null })))
 }
 
-function assertOneSuccessfulCommand(deviceData, jobId, command) {
-  const rows = coreCommands(deviceData, jobId).filter(row => row.command === command)
+function assertOneSuccessfulCommand(deviceData, jobId, command, attempt = 1) {
+  const rows = coreCommands(deviceData, jobId, attempt).filter(row => row.command === command)
   assert.equal(rows.length, 1, 'the original command has one actual Core handler attempt')
-  assert.equal(rows[0].execution, 'completed')
-  assert.equal(rows[0].disposition, 'accepted')
-  for (const field of ['execution_result', 'accepted_result']) {
-    assert.equal(JSON.parse(rows[0][field]).code_mode_result?.exit_code, 0,
-      `the original ${field} records actual OS completion`)
-  }
+  const original = rows[0]
+  const retained = readRetainedCoreCommandResults(deviceData, JSON.parse(original.request_json).thread_id)
+    .filter(row => row.attempt_id === original.attempt_id)
+  assertSuccessfulRetainedCommands(retained, 1)
 }
 
 function requiredStoreCoreCauseReference(core, run, observed, source, command) {
@@ -561,7 +562,7 @@ for (const fault of ['action-store-read', 'applied-response-write']) {
     const productSessionId = fault === 'action-store-read'
       ? 'psn_01J00000000000000000000173' : 'psn_01J00000000000000000000174'
     const command = `printf '%s' 'once' > CHAT-${fault.toUpperCase()}.txt`
-    await runFixture(t, fault, marker, nativeCommand(command), async context => {
+    await runFixture(t, fault, marker, completedCommandScript(command), async context => {
       const { cp, api, devicePath } = context
       const { job, authority } = await launch(context, cp, productSessionId, marker)
       await waitFor(() => devicePath.modelServer.requests.some(value => value.gateMarker === marker && value.active),
@@ -619,7 +620,7 @@ for (const fault of ['action-store-read', 'applied-response-write']) {
         const proof = await waitFor(() => responseProof(request),
           'the exact original recorded receipt repairs its required response proof', 60_000)
         await waitAcknowledgedTerminal(cp, api, devicePath.deviceData, productSessionId, job.job_id, authority)
-        assertOneSuccessfulCommand(devicePath.deviceData, job.job_id, command)
+        assertOneSuccessfulCommand(devicePath.deviceData, job.job_id, command, authority.attempt)
         assert.deepEqual(actionReceipt(cp, request.frame).bytes, recorded.bytes)
         if (originalClaim) assert.deepEqual(readFileSync(actionClaimPath(request)), originalClaim,
           'reliable-delivery repair never creates a second action claim')
