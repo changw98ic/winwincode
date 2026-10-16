@@ -331,7 +331,7 @@ test('Chat consumes canonical SSE errors inside HTTP 200 through one Provider re
       const { api, devicePath } = context
       const database = new DatabaseSync(join(directory, 'server-data', 'control-plane.sqlite3'), { readOnly: true })
       database.exec('PRAGMA busy_timeout=5000')
-      const providers = deviceProviderDatabases(devicePath.deviceData, { readOnly: true })
+      const providers = []
       try {
         const results = []
         for (const item of cases) {
@@ -350,6 +350,7 @@ test('Chat consumes canonical SSE errors inside HTTP 200 through one Provider re
               && messages.some(message => message.role === 'assistant' && message.state === item.state)
               ? { job, terminal, call: calls[0], messages } : false
           }, `${item.type} settles the original execution and physical Provider receipts`, 120_000)
+          if (providers.length === 0) providers.push(...deviceProviderDatabases(devicePath.deviceData, { readOnly: true }))
           const http = devicePath.modelServer.requests.slice(firstRequest)
           assert.equal(http.length, item.physical)
           assert.ok(http.every(request => request.status === 200), 'canonical errors arrive inside successful HTTP responses')
@@ -1110,7 +1111,7 @@ test('Chat keeps three real Provider HTTP attempts in flight while durable retry
     scenario: { async run(context) {
       const { api, devicePath } = context
       const database = new DatabaseSync(join(directory, 'server-data/control-plane.sqlite3'), { readOnly: true })
-      const providers = deviceProviderDatabases(devicePath.deviceData, { readOnly: true })
+      const providers = []
       const server = devicePath.modelServer
       const submitted = []
       const launch = async (index, marker) => {
@@ -1136,6 +1137,7 @@ test('Chat keeps three real Provider HTTP attempts in flight while durable retry
         for (const index of [0, 1]) await launch(index, heldMarkers[index])
         await waitFor(() => heldMarkers.slice(0, 2).every(marker => server.requests
           .some(request => request.gateMarker === marker && request.active)), 'two real HTTP requests retain their Provider slots', 60_000)
+        providers.push(...deviceProviderDatabases(devicePath.deviceData, { readOnly: true }))
         const retryJob = await launch(3, retryMarker)
         const retry = await waitFor(() => providers.flatMap(store => store.prepare(`
           SELECT r.exchange_id, r.wake_ms, r.policy_attempt, e.request_open

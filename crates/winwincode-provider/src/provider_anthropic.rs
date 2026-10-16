@@ -357,14 +357,17 @@ pub(crate) fn normalize_messages_request(
             "sessionId",
             "threadId",
             "turnId",
+            "fusionMember",
             "request",
         ],
     )?;
     for key in ["requestId", "provider", "sessionId", "threadId"] {
         validate_token(string(root, key)?, 512)?;
     }
-    if let Some(turn_id) = optional_string(root, "turnId")? {
-        validate_token(turn_id, 512)?;
+    for key in ["turnId", "fusionMember"] {
+        if let Some(value) = optional_string(root, key)? {
+            validate_token(value, 512)?;
+        }
     }
 
     let request = object(required(root, "request")?)?;

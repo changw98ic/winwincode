@@ -3,7 +3,7 @@
 import assert from 'node:assert/strict'
 import { execFileSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
-import { globSync, mkdtempSync, readFileSync, rmSync } from 'node:fs'
+import { existsSync, globSync, mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
@@ -1524,8 +1524,8 @@ test('Chat reopens the same durable Provider retry in a fresh Store and thread w
     scenario: { async run({ api, modelRoute, devicePath }) {
       const database = new DatabaseSync(join(directory, 'server-data/control-plane.sqlite3'), { readOnly: true })
       const device = new DatabaseSync(join(devicePath.deviceData, 'device-client.sqlite3'), { readOnly: true })
-      const provider = new DatabaseSync(join(devicePath.deviceData, 'providers/runtime/provider-runtime.sqlite3'), { readOnly: true })
-      for (const store of [database, device, provider]) store.exec('PRAGMA busy_timeout=5000')
+      let provider = null
+      for (const store of [database, device]) store.exec('PRAGMA busy_timeout=5000')
       const server = devicePath.modelServer
       const submitted = []
       const originals = []
@@ -1547,6 +1547,12 @@ test('Chat reopens the same durable Provider retry in a fresh Store and thread w
         for (let index = 0; index < 2; index++) {
             const job = submitted[index].job
             const retry = await waitFor(() => {
+              if (provider === null) {
+                const path = join(devicePath.deviceData, 'providers/runtime/provider-runtime.sqlite3')
+                if (!existsSync(path)) return false
+                provider = new DatabaseSync(path, { readOnly: true })
+                provider.exec('PRAGMA busy_timeout=5000')
+              }
               const value = retryStoreSnapshot(provider, job.job_id)
               return value && value.row.wake_ms > Date.now() + 5000
                 && providerEntryLines(devicePath.deviceData, value.open).some(line => line.includes('stage=provider_retry_deferred')
@@ -1670,7 +1676,7 @@ test('Chat reopens the same durable Provider retry in a fresh Store and thread w
           recoveryBoundary: 'old Provider invocation/thread/Store closed; fresh ProviderStore reopened original exchange; whole-process death not exercised' }
       } finally {
         for (const marker of markers) server.releaseResponseGate(marker)
-        provider.close(); device.close(); database.close()
+        provider?.close(); device.close(); database.close()
       }
     } },
   })

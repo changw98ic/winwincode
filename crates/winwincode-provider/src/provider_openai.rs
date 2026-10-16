@@ -1177,6 +1177,30 @@ mod tests {
     }
 
     #[test]
+    fn fusion_member_metadata_preserves_both_protocol_wire_requests() {
+        let payload = canonical_payload();
+        let mut request: Value = serde_json::from_slice(&payload).expect("payload");
+        request["fusionMember"] = json!("member-b");
+        let member_payload = serde_json::to_vec(&request).expect("member payload");
+        for (original, member) in [
+            (
+                prepare_openai_chat_request(&payload, "deepseek-flash", options()),
+                prepare_openai_chat_request(&member_payload, "deepseek-flash", options()),
+            ),
+            (
+                prepare_anthropic_request(&payload, "deepseek-flash", options()),
+                prepare_anthropic_request(&member_payload, "deepseek-flash", options()),
+            ),
+        ] {
+            let original = original.expect("ordinary request");
+            let member = member.expect("host Fusion member metadata");
+            assert_eq!(member.body, original.body);
+            let body: Value = serde_json::from_slice(&member.body).expect("wire body");
+            assert!(body.get("fusionMember").is_none());
+        }
+    }
+
+    #[test]
     fn structured_output_is_preserved_by_both_protocols_with_reasoning() {
         let mut request: Value = serde_json::from_slice(&canonical_payload()).expect("payload");
         let schema = json!({"type":"object", "additionalProperties":false,
