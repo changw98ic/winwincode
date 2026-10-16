@@ -245,7 +245,7 @@ fn repo_add_defaults_to_the_current_directory() {
     let fixture = Fixture::new();
     fixture.enroll();
     let repository = fixture.git_repository("current-directory-repo");
-    let output = Command::new(env!("CARGO_BIN_EXE_wwc"))
+    let output = Command::new(std::env::var_os("CARGO_BIN_EXE_wwc").expect("Cargo binary path"))
         .args(["repo", "add", "--data-dir", fixture.data_dir(), "--json"])
         .current_dir(&repository)
         .env("WINWINCODE_HOME", fixture.workspace.join("cli-home"))

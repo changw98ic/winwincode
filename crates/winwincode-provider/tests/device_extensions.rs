@@ -16,7 +16,7 @@ use winwincode_provider::DeviceProviderStore;
 
 fn encrypt(store: &DeviceProviderStore, mutation: &Value) -> DeviceConfigurationEnvelope {
     static SEQUENCE: AtomicUsize = AtomicUsize::new(0);
-    let module = Path::new(env!("CARGO_MANIFEST_DIR"))
+    let module = Path::new(&std::env::var("CARGO_MANIFEST_DIR").expect("Cargo manifest directory"))
         .join("../../apps/client/src/device-provider-encryption.ts");
     let mut child = Command::new("node")
         .args([
@@ -53,7 +53,8 @@ fn apply(store: &mut DeviceProviderStore, mutation: &Value) -> DeviceExtensionOu
 }
 
 fn fixture() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/extensions/mcp_server.py")
+    Path::new(&std::env::var("CARGO_MANIFEST_DIR").expect("Cargo manifest directory"))
+        .join("../../tests/fixtures/extensions/mcp_server.py")
 }
 
 #[test]

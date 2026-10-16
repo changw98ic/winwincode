@@ -86,7 +86,7 @@ function run(command, arguments_, options = {}) {
 
 function releaseEnvironment(target, targetDirectory, sourceDateEpoch, buildPaths) {
   return createReleaseBuildEnvironment({
-    baseEnvironment: process.env,
+    baseEnvironment: { ...process.env, WWC_RUST_CACHE: 'off' },
     root,
     buildRoot: buildPaths.buildRoot,
     targetDirectory,

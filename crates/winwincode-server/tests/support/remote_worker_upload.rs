@@ -186,11 +186,8 @@ impl ExecutionPortCore for ArtifactIngress {
 }
 
 fn adapter(root: &Path, config: &WorkerConfig) -> ProductionCodexAdapter {
-    let workspace = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .unwrap()
-        .parent()
-        .unwrap();
+    let manifest = std::env::var("CARGO_MANIFEST_DIR").expect("Cargo manifest directory");
+    let workspace = Path::new(&manifest).parent().unwrap().parent().unwrap();
     let target = std::env::var_os("CARGO_TARGET_DIR")
         .map_or_else(|| workspace.join("target"), std::path::PathBuf::from);
     let target = if target.is_absolute() {

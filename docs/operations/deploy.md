@@ -332,7 +332,7 @@ corepack pnpm install --frozen-lockfile
 corepack pnpm build
 ```
 
-`pnpm build` 产出浏览器 Client、`wwc`、Server、Worker 和内核辅助进程。Rust 程序默认位于 `target/debug/`。设置 `CARGO_TARGET_DIR` 后使用该目录。`pnpm start` 运行 Server 的开发入口。
+`pnpm build` 产出浏览器 Client、`wwc`、Server、Worker 和内核辅助进程。Rust 程序默认位于 `target/debug/`。设置 `CARGO_TARGET_DIR` 后使用该目录。`pnpm start` 运行 Server 的开发入口。本地 Rust 中间产物缓存的隔离、24 小时清理和远端限制见 [构建缓存](../testing.md#本地-rust-中间产物缓存)。
 
 ## Docker Compose
 

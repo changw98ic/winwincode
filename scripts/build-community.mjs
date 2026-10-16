@@ -52,15 +52,17 @@ cargoArguments.push('-p', LOCAL_PACKAGE_NAME)
 if (release) cargoArguments.push('--release')
 if (target !== undefined) cargoArguments.push('--target', target)
 
-const result = spawnSync('cargo', cargoArguments, {
+const result = spawnSync('python3', [
+  resolve(root, 'scripts/rust-build-cache.py'),
+  '--profile', release ? 'release' : 'debug', '--variant', 'default-features', '--',
+  'cargo', ...cargoArguments,
+], {
   cwd: root,
   env: process.env,
   stdio: 'inherit',
 })
 if (result.error !== undefined) throw result.error
-if (result.status !== 0 || result.signal !== null) {
-    throw new Error(`Community build failed with ${result.signal ?? `exit code ${result.status}`}`)
-}
+if (result.status !== 0 || result.signal !== null) process.exit(result.status ?? 1)
 
 const profile = release ? 'release' : 'debug'
 const output = targetDirectory(target)

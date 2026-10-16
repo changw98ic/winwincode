@@ -1796,11 +1796,13 @@ fn output_kinds(messages: &[ExecutionPortMessage]) -> Vec<&'static str> {
 
 #[test]
 fn standalone_binary_starts_without_an_external_execution_fallback() {
-    let output = Command::new(env!("CARGO_BIN_EXE_winwincode-worker"))
-        .arg("--check")
-        .env("PATH", "")
-        .output()
-        .unwrap();
+    let output = Command::new(
+        std::env::var_os("CARGO_BIN_EXE_winwincode-worker").expect("Cargo binary path"),
+    )
+    .arg("--check")
+    .env("PATH", "")
+    .output()
+    .unwrap();
     assert!(output.status.success());
     let identity: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(identity["role"], "execution-worker");

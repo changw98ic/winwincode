@@ -22,7 +22,7 @@
 | --- | --- |
 | `pnpm test` | 依次运行 `pnpm test:ts` 和 `pnpm test:rust` |
 | `pnpm test:ts` | 先运行 `pnpm build:ts`，再运行 `node scripts/run-ts-tests.mjs` |
-| `pnpm test:rust` | 先构建 `winwincode-kernel-helper`，再运行 `pnpm test:rust:built` |
+| `pnpm test:rust` | 在受管中间产物缓存中构建 helper 并执行测试 |
 | `pnpm test:rust:built` | 运行 `node scripts/test-rust-workspace.mjs`。调用前必须已有 helper |
 | `pnpm verify:docs` | 运行仓库格式检查、文档检查器的隔离测试和本地文件链接检查。它不构建产品 |
 | `pnpm verify:source` | 先运行 `pnpm verify:docs`，再检查 Rust 格式和源码边界 |
@@ -114,7 +114,17 @@ cargo nextest run --all-features --locked --workspace --exclude winwincode-kerne
 - `WWC_RUST_E2E=1` 只运行这三个目标。
 - 未设置时运行全部目标。
 
-CI 的 `test` 和 `e2e` lane 安装固定版本的 cargo-nextest。CI 因此不会使用本地回退路径。
+CI 的 producer 和两个消费者使用固定的 cargo-nextest 0.9.143。消费者直接调用 `cargo-nextest`，不会使用本地编译或回退路径。
+
+### CI 测试产物复用
+
+`scripts/rust-test-archive.mjs produce` 构建 helper，并用 `cargo nextest archive --workspace --all-features --locked` 创建测试包。包中包括 helper 的测试和可执行文件。`.config/nextest.toml` 要求 helper 存在。nextest 收集测试二进制、非测试二进制、动态库和必要的构建输出；源码、生成的已跟踪文件与 fixture 来自同一 commit 的 checkout。
+
+producer 用原来的 `--workspace --exclude winwincode-kernel-helper --all-features --locked` 和两个 `-E` 过滤器分别记录测试 ID。消费者对比实际 archive 的 ID，要求完全相等；helper 测试在两个消费者中另外保留。缺包、缺 helper、摘要不符、nextest 版本不符、OS/架构不符、commit 或 workflow run/attempt 不符时立即失败。
+
+消费者用 `--workspace-remap` 和 target/build 目录重映射执行。运行时使用的源码目录与 `CARGO_BIN_EXE_*` 从环境变量读取。`CARGO_TARGET_DIR`、`WWC_WORKER_HELPER_EXECUTABLE` 和 Code Mode helper 都指向解包目录。禁止缺文件后重新编译。`tests/rust-test-archive.test.mjs` 的真实 Rust fixture 在旧 checkout 不可用且 `cargo`、`rustc` 被失败桩替代时验证这条路径。producer CI 通过 `WWC_NEXTEST_INTEGRATION=1` 运行它。
+
+artifact 名称包含 run、attempt、SHA、OS 和架构，只供本次 workflow 使用，保留一天。它不是跨次构建缓存。Clippy 仍检查 all-targets/all-features；runtime 仍单独构建和验证默认 features 的产品。
 
 ### `test-support` 与 helper 前置条件
 
@@ -138,6 +148,28 @@ pnpm test:rust
 ```
 
 `scripts/test-rust-workspace.mjs`、`scripts/build-community.mjs`、`scripts/run-api-production-vertical.mjs` 和 `scripts/verify-products.mjs` 都读取该变量。不要在同一目标目录中并行运行会覆盖同一二进制的任务。`verify:api-production-sessions` 要求会话验证目录与当前配置的 `CARGO_TARGET_DIR/debug` 是同一 realpath。
+
+### 本地 Rust 中间产物缓存
+
+`scripts/rust-build-cache.py` 使用 Rust 1.95 的 `CARGO_BUILD_BUILD_DIR`，把中间产物放到项目自己的 `.cache/rust-build-v1/<debug|release>/<兼容摘要>/build`。`build:rust`、`lint:rust`、`test:rust`、`test:rust:built` 和 `test:rust:archive` 及 API 生产链路的 Cargo 构建使用该入口。直接运行 Cargo 不会自动纳入管理。需要 Python 3 和 POSIX `flock`；支持的开发宿主仍为 Linux/macOS。
+
+兼容摘要包含项目 realpath、OS/架构、Rust/Cargo 版本、profile、feature 变体、命令参数、Cargo 配置与锁文件、Rust/Cargo 编译环境和显式 C/C++ 编译器版本。Cargo 继续负责桶内的依赖与源码新鲜度判断。debug 和 release 的桶独立；默认 features、all-features 与 Clippy 也独立。常规 `target/debug`、`target/release` 或显式 `CARGO_TARGET_DIR` 仍接收产品输出。
+
+每个桶使用内核独占锁。进入构建时记录实际选择的桶，结束后更新时间，再扫描并整桶删除连续 86400 秒未使用的受管缓存。命中构建即使没有重写产物也会更新时间；失败构建同样收尾，清理或时间更新失败不会覆盖构建退出码。其他活跃构建持锁的桶会被跳过；等待构建与清理使用相同的锁。锁文件保留，避免删除再创建锁导致两个进程锁住不同 inode。
+
+访问粒度是一次 Cargo 构建选择的整个兼容桶，不是桶内每个 Cargo 文件。清理不使用 mtime，不逐个删除 Cargo 内部文件，也不扫描源码、用户数据、其他项目缓存或发布制品。缺少合法所有权记录、symlink 根目录或异常元数据时保留或拒绝，目录内部的 symlink 不会被递归跟随。已存在的传统 `target` 不会被接管或清理。没有定时任务。
+
+显式设置 `CARGO_BUILD_BUILD_DIR` 表示目录由调用方管理。`WWC_RUST_CACHE=off` 关闭本地缓存管理；发布制品门禁明确使用此值，保留同一输出目录的两次刻意清空重建。不要并行构建会覆盖同一产品输出路径的任务；需要隔离时设置不同的 `CARGO_TARGET_DIR`。
+
+### 远端缓存的限制与信任边界
+
+GitHub 临时 runner 沿用常规 `target`，不恢复整个 Cargo target。现有本地快照的 target 已达 GiB 量级，且测试包不含全部 rlib、fingerprint 与 V8 对象；不能把 archive 的大小当作完整 target 的传输成本。当前最小方案是同次测试 archive，加跨次 sccache 和 V8 `gn_out`。CI 输出 archive 大小及缓存传输日志，待有实际冷/热对照后再决定是否加入跨次 target 缓存。没有声称获得未测量的性能收益。
+
+sccache 根据工具链、编译参数和输入生成缓存键，不缓存链接等不支持的调用。GHA 后端没有暴露每个编译对象的完整使用记录或 24 小时 TTL。GitHub cache 的命中与访问时间属于整个远端条目；本地脚本不能实施逐对象访问清理。当前 workflow 只有 `contents: read`，不增加缓存删除或凭据权限；远端保留与驱逐由服务管理。24 小时策略适用于上述本地受管桶，不能宣称它控制了远端服务。
+
+主线 sccache 命名空间包含 OS、架构、debug 与 PR/可信运行边界；V8 键还包含 lane、锁文件、配置、构建脚本和 Clang 身份。PR 使用 PR 专属命名空间，不通过宽泛 restore-key 把不可信 PR 产物送入可信构建。发布流程保持自己的缓存与干净构建约束。
+
+历史 job `116576278491` 的 378 次 sccache 写入错误只有统计，未记录后端原因。`SCCACHE_LOG=sccache::server=debug` 在新构建中采集诊断，`scripts/report-sccache-errors.mjs` 只输出错误类别、HTTP 状态和计数，随后删除原始日志。不得根据命中率推断配额或权限故障。
 
 ## 定向验证
 
@@ -250,10 +282,11 @@ runner 核对两端操作系统主机身份、源码 commit、API 来源摘要�
 | `source` | `corepack pnpm verify:source` |
 | `typescript` | 安装锁定依赖，再运行 `corepack pnpm verify:typescript` |
 | `rust/lint` | 安装 Linux 构建依赖，再运行 `corepack pnpm lint:rust` |
-| `rust/test` | `WWC_RUST_E2E=0` 下运行 `corepack pnpm test:rust` |
-| `rust/e2e` | `WWC_RUST_E2E=1` 下运行 `corepack pnpm test:rust` |
+| `rust-test-build` | 构建 helper 和完整 nextest archive，记录原过滤器的测试 ID |
+| `rust-tests/test` | 下载本次 archive，运行原标准测试过滤器和 helper 测试 |
+| `rust-tests/e2e` | 下载本次 archive，运行原重负载过滤器和 helper 测试 |
 | `rust/runtime` | 构建 Rust 产品，检查产物，并运行两个 API 生产链路验证 |
-| `verify` | 要求 source、typescript 和全部 rust matrix lane 成功 |
+| `verify` | 要求 source、typescript、Rust 构建、producer 和两个测试消费者成功 |
 
 本地定向验证用于快速反馈。主线 CI 是合入前的完整组合门禁。
 

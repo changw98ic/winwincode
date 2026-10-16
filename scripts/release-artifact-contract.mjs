@@ -289,6 +289,7 @@ export function createReleaseBuildEnvironment({
     ...baseEnvironment,
     CARGO_INCREMENTAL: '0',
     CARGO_TARGET_DIR: targetDirectory,
+    CARGO_BUILD_BUILD_DIR: targetDirectory,
     CI: '1',
     COREPACK_ENABLE_DOWNLOAD_PROMPT: '0',
     RUSTFLAGS: [

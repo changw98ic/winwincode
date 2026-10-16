@@ -122,22 +122,24 @@ fn real_main_starts_bootstrap_and_product_https_with_both_crypto_providers() {
     let address = listener.local_addr().unwrap();
     drop(listener);
     let log = directory.join("server.log");
-    let server = Command::new(env!("CARGO_BIN_EXE_winwincode-server"))
-        .env("WWC_SERVER_BIND", address.to_string())
-        .env("WWC_SERVER_PUBLIC_URL", format!("https://{address}"))
-        .env("WWC_SERVER_ALLOWED_ORIGINS", format!("https://{address}"))
-        .env("WWC_SERVER_DATA_DIRECTORY", directory.join("server"))
-        .env("WWC_SERVER_REPOSITORY_ROOT", repository)
-        .env("WWC_SERVER_AUTH_MODE", "password")
-        .env("WWC_SERVER_BOOTSTRAP_PROOF", "bootstrap-proof")
-        .env("WWC_SERVER_TLS_CERTIFICATE", certificate)
-        .env("WWC_SERVER_TLS_PRIVATE_KEY", key)
-        .env_remove("WWC_SERVER_TLS_PROXY")
-        .env_remove("WWC_SERVER_PREVIEW_PUBLIC_URL")
-        .stdout(Stdio::null())
-        .stderr(std::fs::File::create(&log).unwrap())
-        .spawn()
-        .unwrap();
+    let server = Command::new(
+        std::env::var_os("CARGO_BIN_EXE_winwincode-server").expect("Cargo binary path"),
+    )
+    .env("WWC_SERVER_BIND", address.to_string())
+    .env("WWC_SERVER_PUBLIC_URL", format!("https://{address}"))
+    .env("WWC_SERVER_ALLOWED_ORIGINS", format!("https://{address}"))
+    .env("WWC_SERVER_DATA_DIRECTORY", directory.join("server"))
+    .env("WWC_SERVER_REPOSITORY_ROOT", repository)
+    .env("WWC_SERVER_AUTH_MODE", "password")
+    .env("WWC_SERVER_BOOTSTRAP_PROOF", "bootstrap-proof")
+    .env("WWC_SERVER_TLS_CERTIFICATE", certificate)
+    .env("WWC_SERVER_TLS_PRIVATE_KEY", key)
+    .env_remove("WWC_SERVER_TLS_PROXY")
+    .env_remove("WWC_SERVER_PREVIEW_PUBLIC_URL")
+    .stdout(Stdio::null())
+    .stderr(std::fs::File::create(&log).unwrap())
+    .spawn()
+    .unwrap();
     let mut fixture = Fixture { directory, server };
     let body = json!({"schemaVersion":"winwincode/v1","username":"Owner","password":"initial-owner-password"});
     let deadline = Instant::now() + Duration::from_secs(15);

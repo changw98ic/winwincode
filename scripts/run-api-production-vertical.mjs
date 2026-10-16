@@ -1830,7 +1830,8 @@ export async function runApiProductionVertical({
   let sourceSeal
   if (build) {
     const buildEnvironment = process.env
-    const result = spawnSync('cargo', [
+    const result = spawnSync('python3', [
+      resolve(root, 'scripts/rust-build-cache.py'), '--variant', 'default-features', '--', 'cargo',
       'build', '-p', 'winwincode-server', '--bin', 'winwincode-server',
       '-p', 'winwincode-kernel-helper', '--bin', 'winwincode-kernel-helper',
       '-p', 'winwincode-cli', '--bin', 'wwc',

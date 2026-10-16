@@ -317,8 +317,10 @@ fn browser_crypto_provider_envelope_with_mode_json(
     protocol: &str,
     structured_output_json: &str,
 ) -> DeviceConfigurationEnvelope {
-    let module = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../apps/client/src/device-provider-encryption.ts");
+    let module = std::path::Path::new(
+        &std::env::var("CARGO_MANIFEST_DIR").expect("Cargo manifest directory"),
+    )
+    .join("../../apps/client/src/device-provider-encryption.ts");
     let mut child = Command::new("node").args(["--input-type=module", "-e", r"
         import { pathToFileURL } from 'node:url';
         import { readFileSync } from 'node:fs';

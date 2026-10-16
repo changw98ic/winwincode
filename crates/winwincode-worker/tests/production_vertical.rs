@@ -1369,11 +1369,12 @@ fn helper_executable() -> PathBuf {
     if let Some(executable) = std::env::var_os("WWC_WORKER_HELPER_EXECUTABLE") {
         return PathBuf::from(executable);
     }
-    let workspace = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .and_then(Path::parent)
-        .expect("workspace root")
-        .to_path_buf();
+    let workspace =
+        PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").expect("Cargo manifest directory"))
+            .parent()
+            .and_then(Path::parent)
+            .expect("workspace root")
+            .to_path_buf();
     let target = std::env::var_os("CARGO_TARGET_DIR").map_or_else(
         || workspace.join("target"),
         |value| {

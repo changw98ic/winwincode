@@ -25,7 +25,7 @@ fn valid_config(root: &std::path::Path) -> serde_json::Value {
 }
 
 fn run_entry(args: &[&str]) -> std::process::Output {
-    Command::new(env!("CARGO_BIN_EXE_winwincode-worker"))
+    Command::new(std::env::var_os("CARGO_BIN_EXE_winwincode-worker").expect("Cargo binary path"))
         .args(args)
         .env_clear()
         .env("PATH", "")
@@ -91,18 +91,20 @@ fn managed_session_registers_over_device_stdio_without_provider_or_helper_prefli
     let config_path = root.path().join("session.json");
     let config = valid_config(root.path());
     fs::write(&config_path, config.to_string()).unwrap();
-    let mut child = Command::new(env!("CARGO_BIN_EXE_winwincode-worker"))
-        .arg("--managed-session")
-        .arg(&config_path)
-        .env_clear()
-        .env("PATH", "")
-        .env("WWC_WORKER_ID", "POISON")
-        .env("WWC_WORKER_SERVER_ORIGIN", "https://poison.invalid:1")
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .unwrap();
+    let mut child = Command::new(
+        std::env::var_os("CARGO_BIN_EXE_winwincode-worker").expect("Cargo binary path"),
+    )
+    .arg("--managed-session")
+    .arg(&config_path)
+    .env_clear()
+    .env("PATH", "")
+    .env("WWC_WORKER_ID", "POISON")
+    .env("WWC_WORKER_SERVER_ORIGIN", "https://poison.invalid:1")
+    .stdin(Stdio::piped())
+    .stdout(Stdio::piped())
+    .stderr(Stdio::piped())
+    .spawn()
+    .unwrap();
     let mut input = child.stdin.take().unwrap();
     let mut output = BufReader::new(child.stdout.take().unwrap());
     let mut registration = None;
@@ -181,15 +183,17 @@ fn permanent_registration_failures_exit_without_waiting_for_device_pipe_closure(
         fs::create_dir(root.path().join("source")).unwrap();
         let config_path = root.path().join("session.json");
         fs::write(&config_path, valid_config(root.path()).to_string()).unwrap();
-        let mut child = Command::new(env!("CARGO_BIN_EXE_winwincode-worker"))
-            .args(["--managed-session", config_path.to_str().unwrap()])
-            .env_clear()
-            .env("PATH", "")
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .unwrap();
+        let mut child = Command::new(
+            std::env::var_os("CARGO_BIN_EXE_winwincode-worker").expect("Cargo binary path"),
+        )
+        .args(["--managed-session", config_path.to_str().unwrap()])
+        .env_clear()
+        .env("PATH", "")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
         let mut input = child.stdin.take().unwrap();
         let mut output = BufReader::new(child.stdout.take().unwrap());
         let mut line = String::new();
@@ -280,15 +284,17 @@ fn shutdown_recovery_closes_pending_calls_and_preserves_unknown_usage_and_retain
         .unwrap();
     let retained_request = serde_json::to_string(&retained_open).unwrap();
     let retained_result = serde_json::to_string(&retained_chunks).unwrap();
-    let mut child = Command::new(env!("CARGO_BIN_EXE_winwincode-worker"))
-        .args(["--managed-session", config_path.to_str().unwrap()])
-        .env_clear()
-        .env("PATH", "")
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .unwrap();
+    let mut child = Command::new(
+        std::env::var_os("CARGO_BIN_EXE_winwincode-worker").expect("Cargo binary path"),
+    )
+    .args(["--managed-session", config_path.to_str().unwrap()])
+    .env_clear()
+    .env("PATH", "")
+    .stdin(Stdio::piped())
+    .stdout(Stdio::piped())
+    .stderr(Stdio::piped())
+    .spawn()
+    .unwrap();
     let _response_pipe = child.stdin.take().unwrap();
     let mut requests = BufReader::new(child.stdout.take().unwrap());
     let mut line = String::new();
@@ -358,16 +364,18 @@ fn managed_session_terminates_while_device_keeps_the_response_pipe_open() {
     fs::create_dir(root.path().join("source")).unwrap();
     let config_path = root.path().join("session.json");
     fs::write(&config_path, valid_config(root.path()).to_string()).unwrap();
-    let mut child = Command::new(env!("CARGO_BIN_EXE_winwincode-worker"))
-        .arg("--managed-session")
-        .arg(&config_path)
-        .env_clear()
-        .env("PATH", "")
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .unwrap();
+    let mut child = Command::new(
+        std::env::var_os("CARGO_BIN_EXE_winwincode-worker").expect("Cargo binary path"),
+    )
+    .arg("--managed-session")
+    .arg(&config_path)
+    .env_clear()
+    .env("PATH", "")
+    .stdin(Stdio::piped())
+    .stdout(Stdio::piped())
+    .stderr(Stdio::piped())
+    .spawn()
+    .unwrap();
     let _response_pipe = child.stdin.take().unwrap();
     let mut requests = BufReader::new(child.stdout.take().unwrap());
     let mut line = String::new();

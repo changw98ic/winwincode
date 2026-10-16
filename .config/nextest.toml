@@ -1,0 +1,4 @@
+[profile.default]
+archive.include = [
+  { path = "debug/winwincode-kernel-helper", relative-to = "target", on-missing = "error" },
+]

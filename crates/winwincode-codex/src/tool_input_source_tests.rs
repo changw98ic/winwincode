@@ -7,8 +7,8 @@ fn source_identity_matches_the_frozen_python_public_smoke_contract() {
     fs::create_dir(&directory).unwrap();
     fs::write(directory.join("main.py"), "print('trusted snapshot')\n").unwrap();
     fs::write(directory.join("节点😀.py"), "print(2)\n").unwrap();
-    let script =
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../scripts/benchmark-public-smoke.py");
+    let script = Path::new(&std::env::var("CARGO_MANIFEST_DIR").expect("Cargo manifest directory"))
+        .join("../../scripts/benchmark-public-smoke.py");
     let output = std::process::Command::new("/usr/bin/python3").args(["-I", "-c", "import importlib.util,json,sys; s=importlib.util.spec_from_file_location('smoke',sys.argv[1]);m=importlib.util.module_from_spec(s);s.loader.exec_module(m);print(json.dumps(m.source_identity(sys.argv[2],{'entry':'main.py','suffixes':['.py']})))"])
         .arg(script).arg(&directory).output().unwrap();
     assert!(

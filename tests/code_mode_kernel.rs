@@ -272,8 +272,9 @@ impl Fixture {
             "build the product helper before this test"
         );
         std::fs::copy(product_helper, root.join("helper")).unwrap();
-        let mcp = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("../../tests/fixtures/code-mode-mcp.mjs");
+        let mcp =
+            PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").expect("Cargo manifest directory"))
+                .join("../../tests/fixtures/code-mode-mcp.mjs");
         let mcp_arg = serde_json::to_string(&mcp.canonicalize().unwrap()).unwrap();
         let oracle_arg = serde_json::to_string(&root.join("echo-calls.jsonl")).unwrap();
         let catalog: Value = serde_json::from_str(include_str!(
@@ -317,10 +318,11 @@ impl Fixture {
     }
 
     fn configure_cancellation_mcp(&self) {
-        let mcp = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("../../tests/fixtures/code-mode-cancellation-mcp.mjs")
-            .canonicalize()
-            .unwrap();
+        let mcp =
+            PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").expect("Cargo manifest directory"))
+                .join("../../tests/fixtures/code-mode-cancellation-mcp.mjs")
+                .canonicalize()
+                .unwrap();
         std::fs::write(
             self.0.join("home/config.toml"),
             format!(

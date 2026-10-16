@@ -350,22 +350,24 @@ async fn committed_binding_survives_real_response_transport_failure() {
     drop(listener);
     let log = directory.join("server.stderr");
     let mut process = Process(
-        std::process::Command::new(env!("CARGO_BIN_EXE_winwincode-server"))
-            .env("WWC_SERVER_BIND", address.to_string())
-            .env("WWC_SERVER_PUBLIC_URL", format!("http://{address}"))
-            .env("WWC_SERVER_AUTH_MODE", "local-open")
-            .env("WWC_SERVER_ALLOWED_ORIGINS", ORIGIN)
-            .env("WWC_SERVER_DATA_DIRECTORY", &data)
-            .env("WWC_SERVER_REPOSITORY_ROOT", &repository)
-            .env("WWC_TEST_DROP_FIRST_DEVICE_BIND_RESPONSE", "1")
-            .env_remove("WWC_SERVER_TLS_CERTIFICATE")
-            .env_remove("WWC_SERVER_TLS_PRIVATE_KEY")
-            .env_remove("WWC_SERVER_TLS_PROXY")
-            .env_remove("WWC_SERVER_PREVIEW_PUBLIC_URL")
-            .stdout(std::process::Stdio::null())
-            .stderr(std::fs::File::create(&log).unwrap())
-            .spawn()
-            .unwrap(),
+        std::process::Command::new(
+            std::env::var_os("CARGO_BIN_EXE_winwincode-server").expect("Cargo binary path"),
+        )
+        .env("WWC_SERVER_BIND", address.to_string())
+        .env("WWC_SERVER_PUBLIC_URL", format!("http://{address}"))
+        .env("WWC_SERVER_AUTH_MODE", "local-open")
+        .env("WWC_SERVER_ALLOWED_ORIGINS", ORIGIN)
+        .env("WWC_SERVER_DATA_DIRECTORY", &data)
+        .env("WWC_SERVER_REPOSITORY_ROOT", &repository)
+        .env("WWC_TEST_DROP_FIRST_DEVICE_BIND_RESPONSE", "1")
+        .env_remove("WWC_SERVER_TLS_CERTIFICATE")
+        .env_remove("WWC_SERVER_TLS_PRIVATE_KEY")
+        .env_remove("WWC_SERVER_TLS_PROXY")
+        .env_remove("WWC_SERVER_PREVIEW_PUBLIC_URL")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::fs::File::create(&log).unwrap())
+        .spawn()
+        .unwrap(),
     );
     let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
     loop {

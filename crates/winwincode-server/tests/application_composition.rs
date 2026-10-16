@@ -1502,7 +1502,12 @@ mod heartbeat_gap {
         };
         let capabilities: WorkerCapabilitySet = serde_json::from_value(serde_json::json!({"platform":"aarch64-apple-darwin", "features":["sandbox"], "capabilityDigest":format!("sha256:{}", "a".repeat(64)), "maxConcurrentJobs":1})).unwrap();
         let target = std::env::var_os("CARGO_TARGET_DIR").map_or_else(
-            || PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target"),
+            || {
+                PathBuf::from(
+                    std::env::var("CARGO_MANIFEST_DIR").expect("Cargo manifest directory"),
+                )
+                .join("../../target")
+            },
             PathBuf::from,
         );
         let helper = target.join("debug/winwincode-kernel-helper");
