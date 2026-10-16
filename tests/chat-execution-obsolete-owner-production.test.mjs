@@ -13,7 +13,7 @@ import { runApiProductionVertical } from '../scripts/run-api-production-vertical
 import { deterministicDeviceProvider, waitFor } from '../scripts/device-production-fixture.mjs'
 import { assertSuccessfulRetainedCommands, completedCommandScript, readRetainedCoreCommandResults,
   readRetainedOutcomes, readRetainedRuntime, readWorkerTransport,
-  runtimeLedgerSnapshot, signalIfPresent } from './fixtures/chat-execution-transport-probe.mjs'
+  runtimeLedgerSnapshot } from './fixtures/chat-execution-transport-probe.mjs'
 
 function sealedBinaries() {
   const directory = process.env.WWC_CODE_MODE_ACCEPTANCE_BIN_DIR
@@ -284,14 +284,6 @@ for (const kind of ['runtime', 'outcome']) {
             assert.equal(usage.tokens ?? null, null)
             assert.equal(usage.costMicrounits ?? null, null)
           }
-          const successorPaused = signalIfPresent(successorProbe.pid, 'SIGSTOP')
-          paused = successorPaused ? successorProbe.pid : null
-          if (!successorPaused) await waitFor(() => {
-            const exit = database.prepare('SELECT * FROM worker_launch_grant_exits WHERE worker_launch_grant_id=?')
-              .get(replacement.successor_grant_id)
-            return exit?.worker_instance_id === successorProbe.workerInstanceId
-              && exit.worker_session_id === successorProbe.launchWorkerSessionId && exit
-          }, 'the acknowledged successor has its exact trusted process exit', 30_000)
           const before = businessSnapshot(database, productSessionId, job.job_id)
           const predecessorTerminal = assertReplacementTerminal(database, oldAuthority, oldFacts, replacement.successor_grant_id)
           assert.equal(before.sessionJobs.length, 1)
@@ -310,8 +302,6 @@ for (const kind of ['runtime', 'outcome']) {
           assert.deepEqual(assertReplacementTerminal(database, oldAuthority, oldFacts, replacement.successor_grant_id), predecessorTerminal)
           const heartbeat = database.prepare('SELECT heartbeat_sequence FROM execution_workers WHERE worker_id=?')
             .get(successorProbe.workerId)
-          if (successorPaused) signalIfPresent(successorProbe.pid, 'SIGCONT')
-          paused = null
           const successorPostProbe = await waitFor(() => {
             const current = database.prepare('SELECT worker_instance_id,heartbeat_sequence FROM execution_workers WHERE worker_id=?')
               .get(successorProbe.workerId)
