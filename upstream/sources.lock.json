@@ -1718,7 +1718,7 @@
       "id": "codex-tool-review-supervised-process-shutdown",
       "file": "upstream/patches/codex/0121-tool-review-supervised-process-shutdown.patch",
       "planned": false,
-      "patchSha256": "4759309fd4275e3b7bdb4d13382dfd3e36c5622e4a00685c70d911a857b99be7",
+      "patchSha256": "ffa99ad3aaf6ca92f1ea37025f35f2efcce22be62309584d3747c8e159dd8b50",
       "targets": [
         "codex-rs/core/src/session/handlers.rs",
         "codex-rs/core/src/unified_exec/mod.rs",
@@ -1735,7 +1735,8 @@
         "codex-rs/hooks/src/engine/command_runner.rs",
         "codex-rs/rmcp-client/src/stdio_server_launcher.rs",
         "codex-rs/rmcp-client/src/http_headers.rs",
-        "codex-rs/git-utils/src/git_process.rs"
+        "codex-rs/git-utils/src/git_process.rs",
+        "codex-rs/core/tests/suite/tools.rs"
       ]
     }
   ],

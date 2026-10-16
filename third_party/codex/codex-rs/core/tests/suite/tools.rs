@@ -909,8 +909,10 @@ async fn unified_exec_spec_toggle_end_to_end() -> Result<()> {
     Ok(())
 }
 
+#[test_case("sleep 1"; "empty_stdout")]
+#[test_case("yes line | head -n 400; sleep 1"; "stdout_command")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn shell_command_timeout_includes_timeout_prefix_and_metadata() -> Result<()> {
+async fn shell_command_timeout_includes_timeout_prefix_and_metadata(command: &str) -> Result<()> {
     skip_if_no_network!(Ok(()));
 
     let server = start_mock_server().await;
@@ -920,7 +922,7 @@ async fn shell_command_timeout_includes_timeout_prefix_and_metadata() -> Result<
     let call_id = "shell-command-timeout";
     let timeout_ms = 50u64;
     let args = json!({
-        "command": "yes line | head -n 400; sleep 1",
+        "command": command,
         "login": false,
         "timeout_ms": timeout_ms,
     });
@@ -979,7 +981,7 @@ async fn shell_command_timeout_includes_timeout_prefix_and_metadata() -> Result<
             .trim_end_matches('\n')
             .to_string();
 
-        let shell_output_pattern = r"(?s)^Exit code: 124\nWall time: [0-9]+(?:\.[0-9]+)? seconds\nOutput:\ncommand timed out after [0-9]+ milliseconds\n(?:.*)?$";
+        let shell_output_pattern = r"(?s)^Exit code: 124\nWall time: [0-9]+(?:\.[0-9]+)? seconds\nOutput:\ncommand timed out after [0-9]+ milliseconds(?:\n.*)?$";
         if Regex::new(shell_output_pattern)
             .expect("shell timeout output regex should compile")
             .is_match(&normalized_output)
