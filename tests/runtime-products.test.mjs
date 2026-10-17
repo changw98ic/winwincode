@@ -32,6 +32,12 @@ test('four serial session groups cover exactly the original fourteen files once'
 })
 
 test('original source seal relocates with executable products and a consumer-only rerun needs no compiler', t => {
+  const previousTarget = process.env.CARGO_TARGET_DIR
+  process.env.CARGO_TARGET_DIR = 'target'
+  t.after(() => {
+    if (previousTarget === undefined) delete process.env.CARGO_TARGET_DIR
+    else process.env.CARGO_TARGET_DIR = previousTarget
+  })
   const base = mkdtempSync(join(tmpdir(), 'wwc-runtime-products-'))
   t.after(() => rmSync(base, { recursive: true, force: true }))
   const root = join(base, 'producer')

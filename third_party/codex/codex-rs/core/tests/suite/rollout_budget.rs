@@ -174,16 +174,42 @@ async fn invalid_provider_rollout_budget_units_fail_without_retry() -> Result<()
     Ok(())
 }
 
+#[derive(Clone, Copy)]
+enum ChildCompletionOrder {
+    Concurrent,
+    BeforeRootContinuation,
+}
+
+#[test_case(ChildCompletionOrder::Concurrent; "concurrent child")]
+#[test_case(ChildCompletionOrder::BeforeRootContinuation; "child notification first")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn subagent_usage_draws_from_the_shared_budget() -> Result<()> {
+async fn subagent_usage_draws_from_the_shared_budget(
+    completion_order: ChildCompletionOrder,
+) -> Result<()> {
     skip_if_no_network!(Ok(()));
 
     const ROOT_PROMPT: &str = "spawn a budget worker";
     const CHILD_PROMPT: &str = "consume child budget";
     const FOLLOW_UP_PROMPT: &str = "report the shared budget";
     const SPAWN_CALL_ID: &str = "spawn-budget-worker";
+    const WAIT_CALL_ID: &str = "wait-budget-worker";
 
     let server = start_mock_server().await;
+    let test = test_codex()
+        .with_config(|config| {
+            config
+                .features
+                .enable(Feature::Collab)
+                .expect("test config should allow multi-agent tools");
+            config
+                .features
+                .enable(Feature::MultiAgentV2)
+                .expect("test config should allow multi-agent v2");
+            config.rollout_budget = Some(rollout_budget());
+        })
+        .build(&server)
+        .await?;
+    let root_thread_id = test.session_configured.thread_id.to_string();
     let spawn_args = json!({
         "message": CHILD_PROMPT,
         "task_name": "budget_worker",
@@ -206,21 +232,70 @@ async fn subagent_usage_draws_from_the_shared_budget() -> Result<()> {
     .await;
     mount_sse_once_match(
         &server,
-        |request: &wiremock::Request| wire_request_contains(request, "\"type\":\"agent_message\""),
+        {
+            let root_thread_id = root_thread_id.clone();
+            move |request: &wiremock::Request| {
+                request
+                    .headers
+                    .get("thread-id")
+                    .and_then(|value| value.to_str().ok())
+                    .is_some_and(|thread_id| thread_id != root_thread_id)
+            }
+        },
         sse(vec![
             ev_response_created("child-1"),
             ev_completed_with_tokens("child-1", /*total_tokens*/ 30),
         ]),
     )
     .await;
-    mount_sse_once_match(
+    if matches!(
+        completion_order,
+        ChildCompletionOrder::BeforeRootContinuation
+    ) {
+        let root_thread_id = root_thread_id.clone();
+        mount_sse_once_match(
+            &server,
+            move |request: &wiremock::Request| {
+                request
+                    .headers
+                    .get("thread-id")
+                    .and_then(|value| value.to_str().ok())
+                    == Some(root_thread_id.as_str())
+                    && wire_request_contains(request, SPAWN_CALL_ID)
+                    && !wire_request_contains(request, WAIT_CALL_ID)
+                    && !wire_request_contains(request, "\"type\":\"agent_message\"")
+            },
+            sse(vec![
+                ev_response_created("root-wait"),
+                ev_function_call_with_namespace(
+                    WAIT_CALL_ID,
+                    MULTI_AGENT_V2_NAMESPACE,
+                    "wait_agent",
+                    r#"{"timeout_ms":10000}"#,
+                ),
+                ev_completed("root-wait"),
+            ]),
+        )
+        .await;
+    }
+    let root_continuation = mount_sse_once_match(
         &server,
-        |request: &wiremock::Request| {
-            wire_request_contains(request, SPAWN_CALL_ID)
-                && !wire_request_contains(request, "\"type\":\"agent_message\"")
+        {
+            let root_thread_id = root_thread_id.clone();
+            move |request: &wiremock::Request| {
+                request
+                    .headers
+                    .get("thread-id")
+                    .and_then(|value| value.to_str().ok())
+                    == Some(root_thread_id.as_str())
+                    && wire_request_contains(request, SPAWN_CALL_ID)
+                    && (matches!(completion_order, ChildCompletionOrder::Concurrent)
+                        || wire_request_contains(request, "\"type\":\"agent_message\""))
+            }
         },
         sse(vec![
             ev_response_created("root-2"),
+            ev_assistant_message("root-2-message", "worker spawned"),
             ev_completed_with_tokens("root-2", /*total_tokens*/ 10),
         ]),
     )
@@ -228,24 +303,13 @@ async fn subagent_usage_draws_from_the_shared_budget() -> Result<()> {
     let follow_up = mount_sse_once_match(
         &server,
         |request: &wiremock::Request| wire_request_contains(request, FOLLOW_UP_PROMPT),
-        sse(vec![ev_response_created("root-3"), ev_completed("root-3")]),
+        sse(vec![
+            ev_response_created("root-3"),
+            ev_assistant_message("root-3-message", "shared budget reported"),
+            ev_completed("root-3"),
+        ]),
     )
     .await;
-
-    let test = test_codex()
-        .with_config(|config| {
-            config
-                .features
-                .enable(Feature::Collab)
-                .expect("test config should allow multi-agent tools");
-            config
-                .features
-                .enable(Feature::MultiAgentV2)
-                .expect("test config should allow multi-agent v2");
-            config.rollout_budget = Some(rollout_budget());
-        })
-        .build(&server)
-        .await?;
 
     let mut created_threads = test.thread_manager.subscribe_thread_created();
     test.submit_turn(ROOT_PROMPT).await?;
@@ -291,6 +355,61 @@ async fn subagent_usage_draws_from_the_shared_budget() -> Result<()> {
         rollout_budget_texts(request).last(),
         Some(&rollout_budget_message(/*remaining_tokens*/ 50))
     );
+    assert_eq!(
+        (
+            test.codex
+                .token_usage_info()
+                .await
+                .expect("root token usage")
+                .total_token_usage
+                .total_tokens,
+            child_thread
+                .token_usage_info()
+                .await
+                .expect("child token usage")
+                .total_token_usage
+                .total_tokens,
+        ),
+        (20, 30)
+    );
+    let mut expected_root_requests = 3;
+    if matches!(
+        completion_order,
+        ChildCompletionOrder::BeforeRootContinuation
+    ) {
+        let request = root_continuation
+            .requests()
+            .into_iter()
+            .find(|request| {
+                request.header("thread-id").as_deref() == Some(root_thread_id.as_str())
+                    && !request.inputs_of_type("agent_message").is_empty()
+                    && !request.body_contains_text(FOLLOW_UP_PROMPT)
+            })
+            .expect("root continuation after the child notification");
+        if let Some(wait_output) = request.function_call_output_text(WAIT_CALL_ID) {
+            let wait_result: serde_json::Value = serde_json::from_str(&wait_output)?;
+            assert_eq!(wait_result["timed_out"], json!(false));
+            expected_root_requests += 1;
+        }
+        assert!(request.inputs_of_type("agent_message").iter().any(|item| {
+            item["author"] == "/root/budget_worker" && item["recipient"] == "/root"
+        }));
+    }
+    let root_request_count = server
+        .received_requests()
+        .await
+        .expect("recorded requests")
+        .iter()
+        .filter(|request| {
+            request.url.path().ends_with("/responses")
+                && request
+                    .headers
+                    .get("thread-id")
+                    .and_then(|value| value.to_str().ok())
+                    == Some(root_thread_id.as_str())
+        })
+        .count();
+    assert_eq!(root_request_count, expected_root_requests);
 
     Ok(())
 }

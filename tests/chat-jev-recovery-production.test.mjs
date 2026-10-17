@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import assert from 'node:assert/strict'
-import { createHash } from 'node:crypto'
+import { createHash, randomBytes } from 'node:crypto'
 import { globSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { createServer } from 'node:https'
 import { tmpdir } from 'node:os'
@@ -12,6 +12,7 @@ import test from 'node:test'
 import { createCertificate, runApiProductionVertical } from '../scripts/run-api-production-vertical.mjs'
 import { waitFor, writeDeviceTrustRoot } from '../scripts/device-production-fixture.mjs'
 import { readDeviceExecutionReceipts } from '../scripts/export-device-candidate.mjs'
+import { assertManagedProviderWorker, assertProviderRuntimeBoundary } from './fixtures/provider-secret-boundary.mjs'
 
 const digest = bytes => `sha256:${createHash('sha256').update(bytes).digest('hex')}`
 
@@ -35,7 +36,7 @@ function sealedBinaries() {
 // Real HTTPS Responses and SystemOne protocols. Only these owned endpoints
 // produce deterministic model output; Worker, Core, preparation and accounting
 // use their production paths and retain their original inputs and receipts.
-async function startJevChatProvider(certificate) {
+async function startJevChatProvider(certificate, { providerKey, jevKey, privateHeader }) {
   const requests = []
   const errors = []
   const server = createServer({ key: readFileSync(certificate.key), cert: readFileSync(certificate.cert) },
@@ -53,6 +54,8 @@ async function startJevChatProvider(certificate) {
         const payload = JSON.parse(bytes)
         requests.push({ path: request.url, bytes, payload })
         if (request.url === '/jev') {
+          assert.equal(request.headers.authorization === `Bearer ${jevKey}`, true,
+            'Device-resolved JEV credentials reach only the configured HTTPS endpoint')
           assert.ok(Object.keys(payload.questions).length > 0)
           const answers = Object.fromEntries(Object.keys(payload.questions).map(key => [key, {
             type: 'choice', choice: 'neutral', confidence: 0.8,
@@ -64,6 +67,9 @@ async function startJevChatProvider(certificate) {
           return
         }
         assert.equal(request.url, '/v1/responses')
+        assert.equal(request.headers.authorization === `Bearer ${providerKey}`, true,
+          'Device-resolved model credentials reach the configured HTTPS endpoint')
+        assert.equal(request.headers['x-device-private'] === privateHeader, true)
         assert.ok(Array.isArray(payload.input))
         assert.deepEqual(payload.tools.map(tool => tool.name).sort(), ['exec', 'wait'])
         const outputs = payload.input.filter(item => ['custom_tool_call_output', 'function_call_output'].includes(item.type))
@@ -155,7 +161,7 @@ function coreFacts(run, deviceData) {
 }
 
 function preparedModelRequests(deviceData, jobId) {
-  return globSync('**/providers.sqlite3', { cwd: deviceData }).sort().flatMap(path => {
+  return globSync('**/provider-runtime.sqlite3', { cwd: deviceData }).sort().flatMap(path => {
     const database = new DatabaseSync(join(deviceData, path), { readOnly: true })
     try {
       database.exec('PRAGMA busy_timeout=5000')
@@ -186,14 +192,17 @@ function acceptedOutcome(database, jobId) {
 // terminal retention. Preparation-in-flight death is a separate recovery case.
 test('JEv-enabled Chat preserves completed paid preparation after Worker terminal retention and a Server crash', async t => {
   const directory = mkdtempSync(join(tmpdir(), 'wwc-chat-jev-recovery-'))
+  const providerKey = randomBytes(32).toString('hex')
+  const jevKey = randomBytes(32).toString('hex')
+  const privateHeader = randomBytes(32).toString('hex')
   const certificate = createCertificate(directory)
   writeDeviceTrustRoot({ certificatePath: certificate.cert,
     destination: join(directory, 'device-provider-trust-root.der') })
-  const provider = await startJevChatProvider(certificate)
+  const provider = await startJevChatProvider(certificate, { providerKey, jevKey, privateHeader })
   const settingsPath = join(directory, 'jev-settings.toml')
   writeFileSync(settingsPath, `providerId = "jev-chat-acceptance"
 endpoint = "${provider.origin}/jev"
-apiKey = "owned-jev-chat-secret"
+apiKey = "${jevKey}"
 modelId = "owned-jev-chat-model"
 timeoutMs = 5000
 retries = 0
@@ -217,8 +226,9 @@ dtypes = ["auto"]
     directory, restart: false, repeat: false, includeStrongFlow: false, ...sealedBinaries(),
     deviceProvider: { providerId: 'owned-chat-jev', modelId: 'owned-chat-model',
       displayName: 'Owned real Chat and JEv acceptance Provider',
-      endpoint: `${provider.origin}/v1/responses`, protocol: 'openai_responses', responsesStructuredOutput: 'text' },
-    deviceProviderSecrets: ['owned-chat-model-secret'],
+      endpoint: `${provider.origin}/v1/responses`, protocol: 'openai_responses', responsesStructuredOutput: 'text',
+      customHeaders: { 'x-device-private': privateHeader } },
+    deviceProviderSecrets: [providerKey, jevKey, privateHeader],
     deviceAgentEnvironment: { WWC_WORKER_JEV_CONTEXT: JSON.stringify({ provider: 'jev-chat-acceptance', policy: {
       version: 'chat-jev-acceptance-v1', minimumConfidence: 0.6, pinThreshold: 0.8,
       keepThreshold: 0.8, compactThreshold: 0.8, dropThreshold: 0.8,
@@ -228,7 +238,9 @@ dtypes = ["auto"]
       await api.command('session.create', 0, { productSessionId,
         projectId: 'prj_01J00000000000000000000000', repositoryId: 'rep_01J00000000000000000000000',
         title: 'Real JEv Chat preparation recovery', modelRoute })
-      await devicePath.launchAnchor({ productSessionId })
+      const launched = await devicePath.launchAnchor({ productSessionId })
+      const processBoundary = await assertManagedProviderWorker({ deviceData: devicePath.deviceData,
+        launched, secrets: [providerKey, jevKey, privateHeader], jevSettingsPath: settingsPath })
       const database = new DatabaseSync(join(directory, 'server-data/control-plane.sqlite3'))
       database.exec('PRAGMA busy_timeout=5000')
       try {
@@ -332,7 +344,7 @@ dtypes = ["auto"]
         assert.deepEqual(provider.requests.map(({ path, bytes }) => ({ path, bytes: Buffer.from(bytes) })), physical,
           'recovery and completed command replay must add no physical model or paid JEv request')
         assert.deepEqual(provider.errors, [])
-        return { jobId: job.job_id, coreTurnId: originalCore.submissionId, modelAttempts: calls.length,
+        return { jobId: job.job_id, coreTurnId: originalCore.submissionId, modelAttempts: calls.length, processBoundary,
           jevContext: jev.filter(call => call.kind === 'context').length,
           jevJudge: jev.filter(call => call.kind === 'judge').length, measuredTokens, businessAcknowledged: true }
       } finally {
@@ -342,6 +354,7 @@ dtypes = ["auto"]
     } },
   })
   assert.equal(report.flow.scenario.businessAcknowledged, true)
+  assertProviderRuntimeBoundary({ directory, secrets: [providerKey, jevKey, privateHeader] })
   t.diagnostic(JSON.stringify(report.flow.scenario))
   complete = true
 })

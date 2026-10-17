@@ -1823,6 +1823,13 @@ fn standalone_binary_starts_without_an_external_execution_fallback() {
     assert!(!source.contains("codex app-server"));
 }
 
+fn provider_runtime_directory(directory: &Path) -> PathBuf {
+    winwincode_provider::ProviderRuntimeStore::prepare(directory)
+        .unwrap()
+        .directory()
+        .to_path_buf()
+}
+
 #[tokio::test]
 async fn registration_send_loss_retries_the_durable_original_before_new_work() {
     let port = RecordingPort::fail_once();
@@ -4053,7 +4060,12 @@ async fn deferred_observer_start_uses_common_outbox_after_renewal() {
     let ObserverWorkerFixture { worker, pump, .. } = observer_worker_fixture().await;
     let root = tempfile::tempdir().unwrap();
     let providers = root.path().join("providers");
-    let mut worker = worker.with_device_providers(&providers);
+    let mut worker = worker.with_provider_runtime(
+        &provider_runtime_directory(&providers),
+        Arc::new(winwincode_provider::LocalDeviceProviderSource::new(
+            providers.clone(),
+        )),
+    );
     assert!(worker.inject_device_start_fault());
     assert_eq!(
         worker.poll_codex_boxed().await.unwrap_err().code,
@@ -4096,7 +4108,7 @@ async fn deferred_observer_start_uses_common_outbox_after_renewal() {
         .unwrap();
     let later = Instant("2027-01-15T08:06:00.000Z".into());
     Box::pin(worker.poll_codex(later.clone())).await.unwrap();
-    let store = winwincode_provider::DeviceProviderStore::open(&providers).unwrap();
+    let store = winwincode_provider::ProviderRuntimeStore::prepare(&providers).unwrap();
     for _ in 0..100 {
         if !store.list_stored_model_exchanges().unwrap().is_empty() {
             break;
@@ -5272,7 +5284,12 @@ async fn deferred_local_model_start_obeys_current_lease_and_keeps_the_original_i
         let root = tempfile::tempdir().unwrap();
         let providers = root.path().join("providers");
         let mut worker = test_worker(worker_config(1), RecordingPort::default(), codex)
-            .with_device_providers(&providers);
+            .with_provider_runtime(
+                &provider_runtime_directory(&providers),
+                Arc::new(winwincode_provider::LocalDeviceProviderSource::new(
+                    providers.clone(),
+                )),
+            );
         register(&mut worker).await;
         worker
             .accept_control_and_drive(
@@ -5323,7 +5340,7 @@ async fn deferred_local_model_start_obeys_current_lease_and_keeps_the_original_i
                 WorkerErrorCode::ExecutionMessageRejected
             );
         }
-        let store = winwincode_provider::DeviceProviderStore::open(&providers).unwrap();
+        let store = winwincode_provider::ProviderRuntimeStore::prepare(&providers).unwrap();
         for _ in 0..100 {
             if store.list_stored_model_exchanges().unwrap().len() == usize::from(renewed) {
                 break;
@@ -5377,7 +5394,12 @@ async fn preserved_clock_anchor_allows_new_leases_without_extending_expiry() {
         let root = tempfile::tempdir().unwrap();
         let providers = root.path().join("providers");
         let mut worker = test_worker(worker_config(1), RecordingPort::default(), codex)
-            .with_device_providers(&providers);
+            .with_provider_runtime(
+                &provider_runtime_directory(&providers),
+                Arc::new(winwincode_provider::LocalDeviceProviderSource::new(
+                    providers.clone(),
+                )),
+            );
         register(&mut worker).await;
         worker.inject_driver_clock(now(), std::time::Duration::from_millis(10_005));
         let mut dispatch = dispatch('A', delivery_scope('A'));
@@ -5419,7 +5441,7 @@ async fn preserved_clock_anchor_allows_new_leases_without_extending_expiry() {
                 WorkerErrorCode::ExecutionMessageRejected
             );
         }
-        let store = winwincode_provider::DeviceProviderStore::open(&providers).unwrap();
+        let store = winwincode_provider::ProviderRuntimeStore::prepare(&providers).unwrap();
         for _ in 0..100 {
             if store.list_stored_model_exchanges().unwrap().len() == usize::from(allowed) {
                 break;
@@ -5466,7 +5488,12 @@ async fn stale_driver_time_cannot_reset_elapsed_first_start_authority() {
         let root = tempfile::tempdir().unwrap();
         let providers = root.path().join("providers");
         let mut worker = test_worker(worker_config(1), RecordingPort::default(), codex)
-            .with_device_providers(&providers);
+            .with_provider_runtime(
+                &provider_runtime_directory(&providers),
+                Arc::new(winwincode_provider::LocalDeviceProviderSource::new(
+                    providers.clone(),
+                )),
+            );
         register(&mut worker).await;
         let mut dispatch = dispatch('A', delivery_scope('A'));
         dispatch.lease.expires_at = Instant("2027-01-15T08:00:03.000Z".into());
@@ -5520,7 +5547,7 @@ async fn stale_driver_time_cannot_reset_elapsed_first_start_authority() {
                 "reusing a pre-await wall timestamp must retain elapsed monotonic time"
             );
         }
-        let store = winwincode_provider::DeviceProviderStore::open(&providers).unwrap();
+        let store = winwincode_provider::ProviderRuntimeStore::prepare(&providers).unwrap();
         for _ in 0..100 {
             if store.list_stored_model_exchanges().unwrap().len() == usize::from(renewed) {
                 break;
@@ -5596,7 +5623,7 @@ fn provider_quota_messages(
 
 #[tokio::test]
 async fn full_provider_slots_do_not_block_another_provider_or_model_cancellation() {
-    use winwincode_provider::{DeviceModelAdmission, DeviceProviderStore};
+    use winwincode_provider::{DeviceModelAdmission, ProviderRuntimeStore};
 
     let port = RecordingPort::default();
     let messages = Rc::clone(&port.messages);
@@ -5604,7 +5631,12 @@ async fn full_provider_slots_do_not_block_another_provider_or_model_cancellation
     let mut pump = codex.clone();
     let root = tempfile::tempdir().unwrap();
     let providers = root.path().join("providers");
-    let mut worker = test_worker(worker_config(1), port, codex).with_device_providers(&providers);
+    let mut worker = test_worker(worker_config(1), port, codex).with_provider_runtime(
+        &provider_runtime_directory(&providers),
+        Arc::new(winwincode_provider::LocalDeviceProviderSource::new(
+            providers.clone(),
+        )),
+    );
     register(&mut worker).await;
     worker
         .accept_control_and_drive(
@@ -5615,7 +5647,7 @@ async fn full_provider_slots_do_not_block_another_provider_or_model_cancellation
         .unwrap();
     let (open_a, open_b, cancellation) = provider_quota_messages(worker.active_jobs()[0]);
 
-    let store = DeviceProviderStore::open(&providers).unwrap();
+    let store = ProviderRuntimeStore::prepare(&providers).unwrap();
     let mut held_slots = Vec::new();
     for _ in 0..3 {
         let DeviceModelAdmission::InvokeAttempt(permit) = store.try_model_permit(&open_a).unwrap()
@@ -5745,7 +5777,12 @@ async fn owned_model_chunk_retry_does_not_starve_cancelled_core_facts() {
     let providers = root.path().join("providers");
     let intake_log = root.path().join("intake.log");
     let mut worker = test_worker(worker_config(1), port, codex)
-        .with_device_providers(&providers)
+        .with_provider_runtime(
+            &provider_runtime_directory(&providers),
+            Arc::new(winwincode_provider::LocalDeviceProviderSource::new(
+                providers.clone(),
+            )),
+        )
         .with_model_intake_log(&intake_log);
     register(&mut worker).await;
     worker
@@ -5757,7 +5794,7 @@ async fn owned_model_chunk_retry_does_not_starve_cancelled_core_facts() {
         .unwrap();
     let active = worker.active_jobs()[0].clone();
     let (open, _, mut replay) = provider_quota_messages(&active);
-    let store = winwincode_provider::DeviceProviderStore::open(&providers).unwrap();
+    let store = winwincode_provider::ProviderRuntimeStore::prepare(&providers).unwrap();
     let original = store.reject_model_start(&open).unwrap();
     replay.model_exchange_id = open.model_exchange_id.clone();
     replay.ack_sequence = ExecutionAckSequence(0);
@@ -5843,7 +5880,7 @@ async fn owned_model_chunk_retry_does_not_starve_cancelled_core_facts() {
 async fn invalid_provider_slot_permissions_complete_with_failure_without_blocking_the_batch() {
     use std::os::unix::fs::PermissionsExt as _;
     use winwincode_execution_port::generated::ExecutionPortErrorCode;
-    use winwincode_provider::{DeviceModelAdmission, DeviceProviderStore};
+    use winwincode_provider::{DeviceModelAdmission, ProviderRuntimeStore};
 
     for corrupt_slot_file in [false, true] {
         let codex = FakeCodex::with_threads([thread('A')]);
@@ -5851,7 +5888,12 @@ async fn invalid_provider_slot_permissions_complete_with_failure_without_blockin
         let root = tempfile::tempdir().unwrap();
         let providers = root.path().join("providers");
         let mut worker = test_worker(worker_config(1), RecordingPort::default(), codex)
-            .with_device_providers(&providers);
+            .with_provider_runtime(
+                &provider_runtime_directory(&providers),
+                Arc::new(winwincode_provider::LocalDeviceProviderSource::new(
+                    providers.clone(),
+                )),
+            );
         register(&mut worker).await;
         worker
             .accept_control_and_drive(
@@ -5861,13 +5903,14 @@ async fn invalid_provider_slot_permissions_complete_with_failure_without_blockin
             .await
             .unwrap();
         let (open_a, open_b, cancellation) = provider_quota_messages(worker.active_jobs()[0]);
-        let store = DeviceProviderStore::open(&providers).unwrap();
+        let store = ProviderRuntimeStore::prepare(&providers).unwrap();
         let DeviceModelAdmission::InvokeAttempt(permit) = store.try_model_permit(&open_a).unwrap()
         else {
             panic!("initial Provider A slot is available before changing permissions");
         };
         drop(permit);
-        let slots = providers
+        let slots = store
+            .directory()
             .join("model-provider-slots")
             .join(format!("{:x}", Sha256::digest(b"quota-provider-A")));
         let (path, mode) = if corrupt_slot_file {
@@ -5972,7 +6015,12 @@ async fn never_started_local_model_retries_through_the_worker_outbox_and_release
             .unwrap()
             .as_nanos()
     ));
-    let mut worker = test_worker(worker_config(1), port, codex).with_device_providers(&root);
+    let mut worker = test_worker(worker_config(1), port, codex).with_provider_runtime(
+        &provider_runtime_directory(&root),
+        Arc::new(winwincode_provider::LocalDeviceProviderSource::new(
+            root.clone(),
+        )),
+    );
     register(&mut worker).await;
     worker
         .accept_control_and_drive(

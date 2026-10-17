@@ -1252,6 +1252,10 @@ export async function stopProcessGroup(child, { graceMillis = 1000, deviceData }
     for (const [target, witnesses] of targets) {
       if (!witnesses.some(row => ownedProcessAlive(row, processSnapshot()))) continue
       try { process.kill(target, signal) } catch (error) {
+        if (error.code === 'EPERM') {
+          const current = processSnapshot()
+          if (!witnesses.some(row => ownedProcessAlive(row, current))) continue
+        }
         if (error.code !== 'ESRCH') {
           const targetIdentity = target < 0 ? `pgid:${-target}` : `pid:${target}`
           const ownership = witnesses.map(row => ({ pid: row.pid, parentPid: row.parent,

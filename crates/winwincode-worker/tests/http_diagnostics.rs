@@ -2,6 +2,9 @@
 
 use std::io::Cursor;
 
+use winwincode_client_port::private_worker_channel::{
+    PrivateWorkerResponse, PrivateWorkerResponseBody,
+};
 use winwincode_client_port::worker_relay::WorkerRelayResponse;
 use winwincode_execution_port::generated::ExecutionPortMessage;
 use winwincode_network::{Acceptance, ErrorKind, Phase};
@@ -43,10 +46,15 @@ async fn worker_retains_the_status_forwarded_by_device() {
         let ExecutionPortMessage::RuntimeEventMessage(event) = &message else {
             unreachable!()
         };
-        let mut response = serde_json::to_vec(&WorkerRelayResponse {
-            failure: None,
-            status,
-            body: "SYNTHETIC_PRIVATE_RESPONSE".into(),
+        let mut response = serde_json::to_vec(&PrivateWorkerResponse {
+            request_id: 1,
+            response: PrivateWorkerResponseBody::Relay {
+                response: WorkerRelayResponse {
+                    failure: None,
+                    status,
+                    body: "SYNTHETIC_PRIVATE_RESPONSE".into(),
+                },
+            },
         })
         .unwrap();
         response.push(b'\n');

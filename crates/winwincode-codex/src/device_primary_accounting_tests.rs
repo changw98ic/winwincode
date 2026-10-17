@@ -30,12 +30,14 @@ async fn assert_device_primary_accounting_without_jev(missing_attempt_usage: boo
 
     let root = test_root("device-primary-accounting-without-jev");
     let directory = root.join("providers");
+    let device = winwincode_provider::ProviderRuntimeStore::prepare(&directory).unwrap();
+    let runtime_directory = device.directory().to_path_buf();
     let config = diagnostic_adapter_config(&root);
     assert!(config.jev_context.is_none());
     assert!(config.jev_judge.is_none());
     let mut adapter = ProductionCodexAdapter::open(config)
         .unwrap()
-        .with_device_extensions(directory.clone())
+        .with_provider_runtime(runtime_directory.clone())
         .unwrap();
     let (mut record, mut binding) = delegated_record_and_binding();
     binding.authority.session_identity.product_session_id =
@@ -118,8 +120,8 @@ async fn assert_device_primary_accounting_without_jev(missing_attempt_usage: boo
         session_identity: open.session_identity.clone(),
         worker_session_id: open.worker_session_id.clone(),
     };
-    let device = winwincode_provider::DeviceProviderStore::open(&directory).unwrap();
-    let db = rusqlite::Connection::open(directory.join("providers.sqlite3")).unwrap();
+    let db =
+        rusqlite::Connection::open(runtime_directory.join("provider-runtime.sqlite3")).unwrap();
     let saved = serde_json::to_string(&open).unwrap();
     db.execute(
         "INSERT INTO exchanges(exchange_id,digest,request_open) VALUES(?1,?2,?3)",
@@ -298,7 +300,7 @@ async fn assert_device_primary_accounting_without_jev(missing_attempt_usage: boo
     drop(adapter);
     let reopened = ProductionCodexAdapter::open(diagnostic_adapter_config(&root))
         .unwrap()
-        .with_device_extensions(directory)
+        .with_provider_runtime(runtime_directory)
         .unwrap();
     let retained = load_stored_run(&reopened.store, &key).unwrap().unwrap();
     let Some(super::StoredTerminal::Completed {

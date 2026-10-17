@@ -12976,6 +12976,7 @@ dependencies = [
  "serde_json",
  "sha2 0.10.9",
  "winwincode-api",
+ "winwincode-execution-port",
  "winwincode-network",
 ]
 
@@ -13069,6 +13070,7 @@ dependencies = [
  "ureq",
  "winwincode-api",
  "winwincode-client-port",
+ "winwincode-execution-port",
  "winwincode-network",
  "winwincode-provider",
  "winwincode-worker",
@@ -13203,6 +13205,7 @@ dependencies = [
  "httpdate",
  "jsonwebtoken",
  "p256",
+ "percent-encoding",
  "rcgen",
  "rmcp",
  "rusqlite",

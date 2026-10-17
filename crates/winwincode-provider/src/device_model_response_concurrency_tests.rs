@@ -8,15 +8,15 @@ use std::{sync::mpsc, time::Duration};
 #[test]
 fn response_publication_waits_for_a_concurrent_writer_and_preserves_original_frames() {
     let root = test_directory("model-response-writer");
-    let publisher = DeviceProviderStore::open(&root).unwrap();
-    let writer = DeviceProviderStore::open(&root).unwrap();
+    let publisher = ProviderRuntimeStore::prepare(&root).unwrap();
+    let writer = ProviderRuntimeStore::prepare(&root).unwrap();
     let open = fixture_open();
     let mut chunk = model_chunk(&open, 1);
     chunk.is_final = true;
     let original = vec![chunk];
     writer
         .connection
-        .execute_batch("BEGIN IMMEDIATE; UPDATE identity SET revision=revision+1;")
+        .execute_batch("BEGIN IMMEDIATE; UPDATE runtime_origin SET source_id=source_id;")
         .unwrap();
     let (starting, started) = mpsc::channel();
     let (completed, completion) = mpsc::channel();
@@ -53,7 +53,7 @@ fn response_publication_waits_for_a_concurrent_writer_and_preserves_original_fra
 #[test]
 fn nested_response_publication_preserves_the_callers_rollback_boundary() {
     let root = test_directory("model-response-nested-rollback");
-    let store = DeviceProviderStore::open(&root).unwrap();
+    let store = ProviderRuntimeStore::prepare(&root).unwrap();
     let open = fixture_open();
     let mut chunk = model_chunk(&open, 1);
     chunk.is_final = true;
@@ -75,7 +75,7 @@ fn nested_response_publication_preserves_the_callers_rollback_boundary() {
             .is_empty()
     );
     drop(store);
-    let reopened = DeviceProviderStore::open(&root).unwrap();
+    let reopened = ProviderRuntimeStore::prepare(&root).unwrap();
     assert!(reopened.list_stored_model_exchanges().unwrap().is_empty());
     drop(reopened);
     std::fs::remove_dir_all(root).unwrap();

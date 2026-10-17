@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use super::*;
-use crate::{DeviceProviderStore, JevContextRequest, StoredJevContext};
+use crate::{JevContextRequest, ProviderRuntimeStore, StoredJevContext};
 use std::{
     io::Write as _,
     path::PathBuf,
@@ -199,7 +199,7 @@ fn legacy_jev_failure_json_remains_readable() {
 #[test]
 fn malformed_json_diagnostic_is_persisted_and_replayed_without_another_call() {
     let directory = TestDirectory::new("malformed-json");
-    let store = DeviceProviderStore::open(&directory.0).unwrap();
+    let store = ProviderRuntimeStore::prepare(&directory.0).unwrap();
     let (transport, server) = response_transport(b"{\n\"SYNTHETIC_PRIVATE_RESPONSE\":}".to_vec());
     let runtime = runtime(Arc::new(transport));
     let digest = format!("sha256:{}", "1".repeat(64));
@@ -240,7 +240,7 @@ fn malformed_json_diagnostic_is_persisted_and_replayed_without_another_call() {
         encoded
     );
     drop(store);
-    let store = DeviceProviderStore::open(&directory.0).unwrap();
+    let store = ProviderRuntimeStore::prepare(&directory.0).unwrap();
     let replay = block_on(store.evaluate_context_once(
         "jev:diagnostic-fixture:0",
         &digest,
@@ -297,7 +297,7 @@ impl JevRemoteTransport for DisconnectedTransport {
 #[test]
 fn connection_wait_is_retained_before_authority_ends() {
     let directory = TestDirectory::new("connection-wait");
-    let store = DeviceProviderStore::open(&directory.0).unwrap();
+    let store = ProviderRuntimeStore::prepare(&directory.0).unwrap();
     let allowed = Arc::new(AtomicBool::new(true));
     let runtime = runtime(Arc::new(DisconnectedTransport(Arc::clone(&allowed))))
         .with_attempt_journal(
@@ -390,7 +390,7 @@ impl JevRemoteTransport for CountedFailureTransport {
 #[test]
 fn failed_attempt_journal_prevents_a_second_inference_call() {
     let directory = TestDirectory::new("journal-failure");
-    let store = DeviceProviderStore::open(&directory.0).unwrap();
+    let store = ProviderRuntimeStore::prepare(&directory.0).unwrap();
     store
         .connection
         .execute("DROP TABLE jev_attempt_diagnostics", [])
@@ -455,7 +455,7 @@ fn schema_diagnostics_identify_safe_fields_without_retaining_invalid_values() {
 fn stopping_before_send_is_durable_and_does_not_create_an_inference_attempt() {
     for cancelled in [false, true] {
         let directory = TestDirectory::new("stop-before-send");
-        let store = DeviceProviderStore::open(&directory.0).unwrap();
+        let store = ProviderRuntimeStore::prepare(&directory.0).unwrap();
         let calls = Arc::new(AtomicUsize::new(0));
         let cancellation = Arc::new(winwincode_network::transport::ExchangeCancellation::default());
         if cancelled {
@@ -526,7 +526,7 @@ impl JevRemoteTransport for PendingTransport {
 #[test]
 fn cancelling_an_active_call_retains_unknown_acceptance_without_retry() {
     let directory = TestDirectory::new("stop-active-call");
-    let store = DeviceProviderStore::open(&directory.0).unwrap();
+    let store = ProviderRuntimeStore::prepare(&directory.0).unwrap();
     let calls = Arc::new(AtomicUsize::new(0));
     let cancellation = Arc::new(winwincode_network::transport::ExchangeCancellation::default());
     let runtime = runtime(Arc::new(PendingTransport(Arc::clone(&calls))))
@@ -572,7 +572,7 @@ fn cancelling_an_active_call_retains_unknown_acceptance_without_retry() {
 #[test]
 fn field_failure_after_http_response_retains_status_and_safe_field() {
     let directory = TestDirectory::new("http-field");
-    let store = DeviceProviderStore::open(&directory.0).unwrap();
+    let store = ProviderRuntimeStore::prepare(&directory.0).unwrap();
     let body = serde_json::to_vec(&serde_json::json!({
         "entailment": "SYNTHETIC_PRIVATE_RESPONSE", "contradiction": 0.1, "neutral": 0.1
     }))

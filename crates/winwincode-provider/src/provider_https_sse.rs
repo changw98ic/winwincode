@@ -691,6 +691,7 @@ impl HttpsSseProviderError {
         })
     }
 
+    #[cfg(test)]
     pub(crate) fn response(&self) -> Option<&[u8]> {
         self.response.as_deref()
     }
@@ -1226,6 +1227,7 @@ impl HttpsSseProviderAdapter {
                             "providerDiagnostic": error.metadata.diagnostic,
                         }),
                         bytes,
+                        &self.output_leak_gate(&receipt.stream_leak_gate),
                     );
                 }
                 error.network = Some(Box::new(failure));
@@ -1243,20 +1245,7 @@ impl HttpsSseProviderAdapter {
         schema: Option<&crate::provider_response_schema::ResponseSchema>,
     ) -> Result<HttpsSseProviderCompletion, HttpsSseProviderError> {
         let mut receipt = receipt.clone();
-        for (name, value) in &self.shared.config.custom_headers {
-            if matches!(
-                self.shared.config.protocol,
-                HttpsSseProviderProtocol::OpenAiResponses { .. }
-            ) && name.eq_ignore_ascii_case("x-openai-internal-codex-responses-lite")
-                && value == "true"
-            {
-                continue;
-            }
-            let secret = ResolvedSecret::from_bytes(value.as_bytes().to_vec()).map_err(|_| {
-                HttpsSseProviderError::new(HttpsSseProviderErrorKind::InvalidConfiguration)
-            })?;
-            receipt.stream_leak_gate.track_secret(&secret);
-        }
+        receipt.stream_leak_gate = self.output_leak_gate(&receipt.stream_leak_gate);
         let receipt = &receipt;
         let bytes = match self.read_bounded(receipt, body) {
             Ok(bytes) => bytes,
@@ -1925,11 +1914,32 @@ impl HttpsSseProviderAdapter {
         }
     }
 
+    fn output_leak_gate(&self, base: &crate::CredentialLeakGate) -> crate::CredentialLeakGate {
+        let mut gate = base.fingerprint_snapshot();
+        for (name, value) in &self.shared.config.custom_headers {
+            gate.track_provider_header(
+                name,
+                value,
+                matches!(
+                    self.shared.config.protocol,
+                    HttpsSseProviderProtocol::OpenAiResponses { .. }
+                ),
+            );
+        }
+        if let Some(account) = &self.shared.config.codex_account_id
+            && let Ok(secret) = ResolvedSecret::from_bytes(account.as_bytes().to_vec())
+        {
+            gate.track_secret(&secret);
+        }
+        gate
+    }
+
     fn retain_failed_response(
         &self,
         mut failure: winwincode_network::NetworkFailure,
         metadata: &serde_json::Value,
         body: &[u8],
+        gate: &crate::CredentialLeakGate,
     ) -> winwincode_network::NetworkFailure {
         let directory = match self.shared.sse_failure_log.lock() {
             Ok(directory) => directory.clone(),
@@ -1941,7 +1951,23 @@ impl HttpsSseProviderAdapter {
         let mut diagnostic = failure.diagnostic.unwrap_or_else(|| {
             winwincode_network::NetworkDiagnostic::new(winwincode_network::DiagnosticCode::SseEvent)
         });
-        match crate::provider_sse_failure_log::retain(&directory, metadata, body) {
+        let received_bytes = body.len();
+        let body_retained = gate
+            .inspect_bytes(crate::CredentialOutputBoundary::Persistence, body)
+            .is_ok();
+        let body = if body_retained { body } else { &[] };
+        let safe_metadata = serde_json::to_vec(metadata).ok().filter(|bytes| {
+            gate.inspect_bytes(crate::CredentialOutputBoundary::Persistence, bytes)
+                .is_ok()
+        });
+        let mut metadata = if safe_metadata.is_some() {
+            metadata.clone()
+        } else {
+            serde_json::json!({"schemaVersion":1,"failure":failure})
+        };
+        metadata["responseBytesReceived"] = serde_json::json!(received_bytes);
+        metadata["bodyRetained"] = serde_json::json!(body_retained);
+        match crate::provider_sse_failure_log::retain(&directory, &metadata, body) {
             Ok(id) => {
                 diagnostic.response_log =
                     winwincode_network::SseResponseLogId::parse(&format!("{id}.log"));
@@ -1962,6 +1988,7 @@ impl HttpsSseProviderAdapter {
         response: &mut ureq::http::Response<ureq::Body>,
         failure: winwincode_network::NetworkFailure,
         metadata: &ProviderFailureMetadata,
+        credential: &[u8],
     ) -> winwincode_network::NetworkFailure {
         if !self
             .shared
@@ -1984,6 +2011,10 @@ impl HttpsSseProviderAdapter {
             .as_ref()
             .err()
             .map(winwincode_network::NetworkDiagnostic::io);
+        let mut gate = crate::CredentialLeakGate::new();
+        if let Ok(secret) = ResolvedSecret::from_bytes(credential.to_vec()) {
+            gate.track_secret(&secret);
+        }
         self.retain_failed_response(
             failure,
             &serde_json::json!({
@@ -1998,6 +2029,7 @@ impl HttpsSseProviderAdapter {
                 },
             }),
             &bytes,
+            &self.output_leak_gate(&gate),
         )
     }
 
@@ -2008,12 +2040,19 @@ impl HttpsSseProviderAdapter {
         credential: &[u8],
     ) -> Result<ProviderFailureMetadata, ProviderAdapterError> {
         let status = response.status().as_u16();
-        let metadata = response_metadata(
+        let mut metadata = response_metadata(
             response.headers(),
             status,
             credential,
             &self.shared.config.custom_headers,
         );
+        if metadata.provider_request_id.as_ref().is_some_and(|id| {
+            self.output_leak_gate(&crate::CredentialLeakGate::new())
+                .inspect_bytes(crate::CredentialOutputBoundary::Error, id.as_bytes())
+                .is_err()
+        }) {
+            metadata.provider_request_id = None;
+        }
         if !(200..=299).contains(&status) {
             let failure = self.retain_http_error_response(
                 response,
@@ -2024,6 +2063,7 @@ impl HttpsSseProviderAdapter {
                         .map(Duration::from_millis),
                 ),
                 &metadata,
+                credential,
             );
             if failure.retryable() {
                 self.abandon_retryable_open(invocation)?;
@@ -2821,9 +2861,11 @@ fn response_metadata(
                 .as_bytes()
                 .windows(credential.len().max(1))
                 .any(|window| window == credential)
-                && !custom_headers
-                    .iter()
-                    .any(|(_, secret)| !secret.is_empty() && value.contains(secret))
+                && !custom_headers.iter().any(|(name, secret)| {
+                    crate::credential_leak_gate::provider_header_is_sensitive(name, secret, false)
+                        && !secret.is_empty()
+                        && value.contains(secret)
+                })
         })
         .map(str::to_owned);
     ProviderFailureMetadata {
@@ -3027,6 +3069,7 @@ mod tests {
     const PAYLOAD: &[u8] = br#"{"input":"local TLS fixture"}"#;
 
     include!("provider_http_error_diagnostics.test.rs");
+    include!("provider_header_sensitivity.test.rs");
     include!("provider_request_identity_diagnostics.test.rs");
 
     fn responses_api_payload() -> Vec<u8> {

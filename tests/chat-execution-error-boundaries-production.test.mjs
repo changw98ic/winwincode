@@ -233,7 +233,7 @@ function requiredStoreCoreCauseReference(core, run, observed, source, command) {
 }
 
 function providerFacts(deviceData, jobId, attempt = 1) {
-  return storeRows(deviceData, 'providers.sqlite3', (store, path) => store.prepare('SELECT * FROM exchanges WHERE request_open IS NOT NULL').all()
+  return storeRows(deviceData, 'provider-runtime.sqlite3', (store, path) => store.prepare('SELECT * FROM exchanges WHERE request_open IS NOT NULL').all()
     .flatMap(exchange => {
       const open = JSON.parse(exchange.request_open)
       if (open.lease.jobId !== jobId || open.lease.attempt !== attempt) return []

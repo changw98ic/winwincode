@@ -10,7 +10,7 @@ use rusqlite::OptionalExtension as _;
 use sha2::{Digest as _, Sha256};
 use winwincode_execution_port::generated::ModelOpenMessage;
 
-use crate::{DeviceProviderError, DeviceProviderStore, device_model::validated_model_payload};
+use crate::{DeviceProviderError, ProviderRuntimeStore, device_model::validated_model_payload};
 
 #[cfg(test)]
 #[path = "device_model_concurrency_tests.rs"]
@@ -51,7 +51,7 @@ pub enum DeviceModelAdmission {
     Deferred,
 }
 
-impl DeviceProviderStore {
+impl ProviderRuntimeStore {
     pub(crate) fn try_model_exchange_owner(
         &self,
         exchange_id: &str,
@@ -137,26 +137,34 @@ impl DeviceProviderStore {
                 .ok_or(DeviceProviderError::StateInvalid)?,
         );
         let root = database.parent().ok_or(DeviceProviderError::StateInvalid)?;
-        let slots = root.join("model-provider-slots");
-        private_directory(&slots)?;
-        let provider_slots = slots.join(format!("{:x}", Sha256::digest(provider.as_bytes())));
-        private_directory(&provider_slots)?;
-        for slot in 0..PROVIDER_MODEL_SLOTS {
-            let file = private_slot_file(&provider_slots.join(format!("slot-{slot}")))?;
-            match file.try_lock() {
-                Ok(()) => {
-                    return Ok(DeviceModelAdmission::InvokeAttempt(DeviceModelPermit {
-                        slot: file,
-                    }));
-                }
-                Err(TryLockError::WouldBlock) => {}
-                Err(TryLockError::Error(_)) => {
-                    return Err(DeviceProviderError::FilesystemUnavailable);
-                }
+        try_provider_model_permit(root, provider)
+    }
+}
+
+pub(crate) fn try_provider_model_permit(
+    root: &Path,
+    provider: &str,
+) -> Result<DeviceModelAdmission, DeviceProviderError> {
+    private_directory(root)?;
+    let slots = root.join("model-provider-slots");
+    private_directory(&slots)?;
+    let provider_slots = slots.join(format!("{:x}", Sha256::digest(provider.as_bytes())));
+    private_directory(&provider_slots)?;
+    for slot in 0..PROVIDER_MODEL_SLOTS {
+        let file = private_slot_file(&provider_slots.join(format!("slot-{slot}")))?;
+        match file.try_lock() {
+            Ok(()) => {
+                return Ok(DeviceModelAdmission::InvokeAttempt(DeviceModelPermit {
+                    slot: file,
+                }));
+            }
+            Err(TryLockError::WouldBlock) => {}
+            Err(TryLockError::Error(_)) => {
+                return Err(DeviceProviderError::FilesystemUnavailable);
             }
         }
-        Ok(DeviceModelAdmission::Deferred)
     }
+    Ok(DeviceModelAdmission::Deferred)
 }
 
 pub(crate) fn private_directory(path: &Path) -> Result<(), DeviceProviderError> {

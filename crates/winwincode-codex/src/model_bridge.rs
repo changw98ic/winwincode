@@ -781,7 +781,7 @@ impl ModelChunkSink for KernelStreamSink {
 pub(crate) struct ExecutionPortModelBridge {
     route: ModelGatewayRoute,
     expected_provider: Option<String>,
-    device_provider_directory: std::sync::OnceLock<std::path::PathBuf>,
+    provider_runtime_directory: std::sync::OnceLock<std::path::PathBuf>,
     queue: QueuedModelPort,
     sink: KernelStreamSink,
     authority: SharedAuthoritySource,
@@ -835,7 +835,7 @@ impl ExecutionPortModelBridge {
         Self {
             route,
             expected_provider,
-            device_provider_directory: std::sync::OnceLock::new(),
+            provider_runtime_directory: std::sync::OnceLock::new(),
             queue,
             sink,
             authority,
@@ -847,14 +847,14 @@ impl ExecutionPortModelBridge {
         }
     }
 
-    pub(crate) fn attach_device_provider_directory(
+    pub(crate) fn attach_provider_runtime_directory(
         &self,
         directory: std::path::PathBuf,
     ) -> Result<(), BridgeError> {
-        if self.device_provider_directory.get() == Some(&directory) {
+        if self.provider_runtime_directory.get() == Some(&directory) {
             return Ok(());
         }
-        self.device_provider_directory
+        self.provider_runtime_directory
             .set(directory)
             .map_err(|_| BridgeError::Conflict)
     }
@@ -979,7 +979,7 @@ impl ExecutionPortModelBridge {
     pub(crate) fn fence_binding(&self, binding: &ModelRunBinding) -> Result<(), BridgeError> {
         let aliases = self.authority.fence_run(&binding.run_key)?;
         self.fence_action_sessions(aliases)?;
-        if let Some(directory) = self.device_provider_directory.get() {
+        if let Some(directory) = self.provider_runtime_directory.get() {
             let exchanges = self
                 .exchanges
                 .lock()
@@ -988,7 +988,7 @@ impl ExecutionPortModelBridge {
                 .filter(|(_, owner)| owner.run_key == binding.run_key)
                 .map(|(exchange, _)| exchange.clone())
                 .collect::<Vec<_>>();
-            let device = winwincode_provider::DeviceProviderStore::open(directory)
+            let device = winwincode_provider::ProviderRuntimeStore::open_existing(directory)
                 .map_err(|_| BridgeError::Unavailable)?;
             for exchange in exchanges {
                 device
@@ -1363,14 +1363,14 @@ impl ExecutionPortModelBridge {
         let mut usage = observed_usage.unwrap_or_default();
         let mut usage_known = observed_usage.is_some();
         let mut cache_breakdown_known = usage_known && usage.cached.is_some();
-        if let Some(directory) = self.device_provider_directory.get() {
+        if let Some(directory) = self.provider_runtime_directory.get() {
             let physical_usage = (|| {
                 let open = self
                     .outbox
                     .retained_model_open(&chunk.model_exchange_id)
                     .map_err(|_| BridgeError::Unavailable)?
                     .ok_or(BridgeError::Conflict)?;
-                let device = winwincode_provider::DeviceProviderStore::open(directory)
+                let device = winwincode_provider::ProviderRuntimeStore::open_existing(directory)
                     .map_err(|_| BridgeError::Unavailable)?;
                 let physical = device
                     .model_primary_usage(&open)
@@ -1441,13 +1441,13 @@ impl ExecutionPortModelBridge {
         exchange: &ModelExchangeId,
         received_at: &Instant,
     ) -> Result<(), BridgeError> {
-        if let Some(directory) = self.device_provider_directory.get() {
+        if let Some(directory) = self.provider_runtime_directory.get() {
             let open = self
                 .outbox
                 .retained_model_open(exchange)
                 .map_err(|_| BridgeError::Unavailable)?
                 .ok_or(BridgeError::Conflict)?;
-            let device = winwincode_provider::DeviceProviderStore::open(directory)
+            let device = winwincode_provider::ProviderRuntimeStore::open_existing(directory)
                 .map_err(|_| BridgeError::Unavailable)?;
             for receipt in device
                 .model_jev_receipts(&open)
@@ -1963,7 +1963,7 @@ impl ExecutionPortModelBridge {
         // the Kernel is already processing the replayed model response. The
         // shared source makes this exact binding available to the action gate
         // before Core can authorize a tool.
-        let payload_bytes = self.prepare_host_payload(
+        let mut payload_bytes = self.prepare_host_payload(
             request,
             stored.as_ref(),
             &binding.run_key,
@@ -2016,8 +2016,13 @@ impl ExecutionPortModelBridge {
                 &self.authority,
             )?));
         }
-        let prepared_payload: serde_json::Value = serde_json::from_slice(&payload_bytes)
+        let mut prepared_payload: serde_json::Value = serde_json::from_slice(&payload_bytes)
             .map_err(|_| model_failure(BridgeError::InvalidPayload))?;
+        if let Some(member) = fusion_member {
+            prepared_payload["fusionMember"] = serde_json::Value::String(member.to_owned());
+            payload_bytes = serde_json::to_vec(&prepared_payload)
+                .map_err(|_| model_failure(BridgeError::InvalidPayload))?;
+        }
         let prepared_request_digest =
             model_open_request_digest(&prepared_payload).map_err(model_failure)?;
         Ok(OpenStreamPreparation::Open(Box::new(OpenStreamExchange {
@@ -2327,7 +2332,21 @@ fn model_open_request_digest(
         .get("request")
         .filter(|request| request.is_object())
         .ok_or(BridgeError::InvalidPayload)?;
-    model_call_digest(request)
+    let Some(member) = payload.get("fusionMember") else {
+        return model_call_digest(request);
+    };
+    let member = member
+        .as_str()
+        .filter(|member| !member.trim().is_empty())
+        .ok_or(BridgeError::InvalidPayload)?;
+    let provider = payload
+        .get("provider")
+        .and_then(serde_json::Value::as_str)
+        .filter(|provider| !provider.trim().is_empty())
+        .ok_or(BridgeError::InvalidPayload)?;
+    model_call_digest(
+        &serde_json::json!({"fusionMember":member,"provider":provider,"request":request}),
+    )
 }
 
 pub(crate) fn extend_binding_lineage(
@@ -2892,6 +2911,7 @@ mod tests {
     include!("model_local_cancellation_tests.rs");
     include!("model_task_context_replay_tests.rs");
     include!("model_ack_transport_identity_tests.rs");
+    include!("model_fusion_payload_regression_tests.rs");
     use serde_json::json;
     use std::sync::Arc;
     use winwincode_domain::{
@@ -3465,9 +3485,9 @@ mod tests {
                 "kernel",
             ));
             let device_root = root.join("device");
-            let device = winwincode_provider::DeviceProviderStore::open(&device_root).unwrap();
+            let device = winwincode_provider::ProviderRuntimeStore::prepare(&device_root).unwrap();
             bridge
-                .attach_device_provider_directory(device_root.clone())
+                .attach_provider_runtime_directory(device.directory().to_path_buf())
                 .unwrap();
             let request = ModelPortRequest {
                 request_id: "original-call".into(),
@@ -3492,7 +3512,9 @@ mod tests {
                 .outbox
                 .retain(&ExecutionPortMessage::ModelOpenMessage(open.clone()))
                 .unwrap();
-            let db = rusqlite::Connection::open(device_root.join("providers.sqlite3")).unwrap();
+            let db =
+                rusqlite::Connection::open(device.directory().join("provider-runtime.sqlite3"))
+                    .unwrap();
             let saved = serde_json::to_string(&open).unwrap();
             db.execute(
                 "INSERT INTO exchanges(exchange_id,digest,request_open) VALUES(?1,?2,?3)",

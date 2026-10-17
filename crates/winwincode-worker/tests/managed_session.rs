@@ -4,6 +4,10 @@ use std::fs;
 use std::io::{BufRead, BufReader, Write};
 use std::process::{Command, Stdio};
 
+use winwincode_client_port::private_worker_channel::{
+    PrivateWorkerRequest, PrivateWorkerRequestBody, PrivateWorkerResponse,
+    PrivateWorkerResponseBody,
+};
 use winwincode_client_port::worker_relay::{WorkerRelayRequest, WorkerRelayResponse};
 use winwincode_execution_port::transport::{RemoteExchangeRequest, RemoteTransportAdapter};
 
@@ -19,7 +23,8 @@ fn valid_config(root: &std::path::Path) -> serde_json::Value {
         "workerInstanceId": "wki_00000000000000000000000001",
         "sourceDirectory": root.join("source"),
         "dataDirectory": root.join("worker"),
-        "providerDirectory": root.join("providers"),
+        "providerRuntimeDirectory": root.join("providers/runtime"),
+        "providerExecutionProfile": {},
         "helperExecutable": root.join("winwincode-kernel-helper")
     })
 }
@@ -113,7 +118,11 @@ fn managed_session_registers_over_device_stdio_without_provider_or_helper_prefli
         if output.read_line(&mut line).unwrap() == 0 {
             break;
         }
-        let request: WorkerRelayRequest = serde_json::from_str(&line).unwrap();
+        let request: PrivateWorkerRequest = serde_json::from_str(&line).unwrap();
+        let request_id = request.request_id;
+        let PrivateWorkerRequestBody::Relay { request } = request.request else {
+            panic!("registration requested local execution materials");
+        };
         let response = match request {
             WorkerRelayRequest::Exchange { body } => {
                 let exchange = RemoteExchangeRequest::decode(body.as_bytes()).unwrap();
@@ -134,7 +143,14 @@ fn managed_session_registers_over_device_stdio_without_provider_or_helper_prefli
                 panic!("registration has no accounting statement")
             }
         };
-        serde_json::to_writer(&mut input, &response).unwrap();
+        serde_json::to_writer(
+            &mut input,
+            &PrivateWorkerResponse {
+                request_id,
+                response: PrivateWorkerResponseBody::Relay { response },
+            },
+        )
+        .unwrap();
         input.write_all(b"\n").unwrap();
         input.flush().unwrap();
         if registration.is_some() {
@@ -198,16 +214,24 @@ fn permanent_registration_failures_exit_without_waiting_for_device_pipe_closure(
         let mut output = BufReader::new(child.stdout.take().unwrap());
         let mut line = String::new();
         assert_ne!(output.read_line(&mut line).unwrap(), 0);
+        let request: PrivateWorkerRequest = serde_json::from_str(&line).unwrap();
         assert!(matches!(
-            serde_json::from_str::<WorkerRelayRequest>(&line).unwrap(),
-            WorkerRelayRequest::Exchange { .. }
+            request.request,
+            PrivateWorkerRequestBody::Relay {
+                request: WorkerRelayRequest::Exchange { .. }
+            }
         ));
         serde_json::to_writer(
             &mut input,
-            &WorkerRelayResponse {
-                status: failure.http_status.unwrap_or(502),
-                body: String::new(),
-                failure: Some(failure),
+            &PrivateWorkerResponse {
+                request_id: request.request_id,
+                response: PrivateWorkerResponseBody::Relay {
+                    response: WorkerRelayResponse {
+                        status: failure.http_status.unwrap_or(502),
+                        body: String::new(),
+                        failure: Some(failure),
+                    },
+                },
             },
         )
         .unwrap();
@@ -245,8 +269,13 @@ fn shutdown_recovery_closes_pending_calls_and_preserves_unknown_usage_and_retain
     let config = valid_config(root.path());
     let config_path = root.path().join("session.json");
     fs::write(&config_path, config.to_string()).unwrap();
-    drop(winwincode_provider::DeviceProviderStore::open(&root.path().join("providers")).unwrap());
-    let db = rusqlite::Connection::open(root.path().join("providers/providers.sqlite3")).unwrap();
+    let runtime_directory =
+        winwincode_provider::ProviderRuntimeStore::prepare(&root.path().join("providers"))
+            .unwrap()
+            .directory()
+            .to_path_buf();
+    let db =
+        rusqlite::Connection::open(runtime_directory.join("provider-runtime.sqlite3")).unwrap();
     let fixture: serde_json::Value = serde_json::from_str(include_str!(
         "../../../tests/fixtures/contracts/execution-port.valid.json"
     ))
@@ -278,7 +307,7 @@ fn shutdown_recovery_closes_pending_calls_and_preserves_unknown_usage_and_retain
         &retained_open,
         "SYNTHETIC_RETAINED_RESPONSE",
     )];
-    winwincode_provider::DeviceProviderStore::open(&root.path().join("providers"))
+    winwincode_provider::ProviderRuntimeStore::open_existing(&runtime_directory)
         .unwrap()
         .retain_stored_model_exchange_chunks(&retained_open, &retained_chunks)
         .unwrap();
@@ -380,7 +409,7 @@ fn managed_session_terminates_while_device_keeps_the_response_pipe_open() {
     let mut requests = BufReader::new(child.stdout.take().unwrap());
     let mut line = String::new();
     assert_ne!(requests.read_line(&mut line).unwrap(), 0);
-    serde_json::from_str::<WorkerRelayRequest>(&line).unwrap();
+    serde_json::from_str::<PrivateWorkerRequest>(&line).unwrap();
     assert!(
         Command::new("/bin/kill")
             .args(["-TERM", &child.id().to_string()])

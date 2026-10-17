@@ -9,6 +9,7 @@ use std::{
     },
     time::Duration,
 };
+use winwincode_network::Acceptance;
 
 use futures::future::BoxFuture;
 use serde::{Deserialize, Serialize};
@@ -186,7 +187,7 @@ impl JevProviderError {
         Self::from_network(
             winwincode_network::NetworkFailure::new(
                 winwincode_network::ErrorKind::ProtocolInvalid,
-                winwincode_network::Acceptance::ResponseReceived,
+                Acceptance::ResponseReceived,
                 winwincode_network::Phase::Decode,
             )
             .with_diagnostic(diagnostic),
@@ -264,8 +265,7 @@ impl JevProviderError {
             _ => JevProviderErrorKind::InvalidResponse,
         };
         let mut error = Self::new(kind);
-        error.connection_pending =
-            failure.acceptance == winwincode_network::Acceptance::NotSent && failure.retryable();
+        error.connection_pending = failure.acceptance == Acceptance::NotSent && failure.retryable();
         error.retry_after = failure.retry_after_ms.map(Duration::from_millis);
         error.network = Some(Box::new(failure));
         error
@@ -375,6 +375,10 @@ impl<T> JevRun<T> {
 #[path = "jev_call_records.rs"]
 mod call_records;
 
+#[cfg(test)]
+#[path = "jev_execution_snapshot_tests.rs"]
+mod execution_snapshot_tests;
+
 trait MeasuredJevResult {
     fn observation(
         &self,
@@ -441,6 +445,11 @@ pub struct JevRuntime {
     config: JevRuntimeConfig,
     cancellation: Option<Arc<winwincode_network::transport::ExchangeCancellation>>,
     attempt_journal: Option<(std::path::PathBuf, String, &'static str)>,
+    execution_source: Option<(
+        Arc<dyn crate::device_execution_source::ProviderExecutionSource>,
+        crate::device_execution_source::ProviderExecutionRequest,
+        crate::device_execution_source::ProviderJevParameters,
+    )>,
 }
 
 impl JevRuntime {
@@ -451,7 +460,104 @@ impl JevRuntime {
             config,
             cancellation: None,
             attempt_journal: None,
+            execution_source: None,
         }
+    }
+
+    pub(crate) fn with_execution_source(
+        mut self,
+        source: Arc<dyn crate::device_execution_source::ProviderExecutionSource>,
+        request: crate::device_execution_source::ProviderExecutionRequest,
+        parameters: crate::device_execution_source::ProviderJevParameters,
+    ) -> Self {
+        self.execution_source = Some((source, request, parameters));
+        self
+    }
+
+    fn attempt_provider(
+        &self,
+        provider: Arc<dyn JevProvider>,
+        sequence: i64,
+        can_start: &(impl Fn() -> bool + ?Sized),
+    ) -> Result<(Arc<dyn JevProvider>, crate::CredentialLeakGate), JevProviderError> {
+        let Some((source, request, expected)) = &self.execution_source else {
+            return Ok((provider, crate::CredentialLeakGate::new()));
+        };
+        let mut request = request.clone();
+        request.physical_attempt = Some(sequence);
+        request.model_id = Some(provider.capabilities().model_id);
+        let may_start = || can_start() && !self.cancelled();
+        let stopped = || {
+            JevProviderError::from_network(winwincode_network::NetworkFailure::new(
+                if self.cancelled() {
+                    winwincode_network::ErrorKind::Cancelled
+                } else {
+                    winwincode_network::ErrorKind::AuthorityExpired
+                },
+                Acceptance::NotSent,
+                winwincode_network::Phase::Connect,
+            ))
+        };
+        if !may_start() {
+            return Err(stopped());
+        }
+        let mut material = source
+            .resolve_connection(&request, &may_start)
+            .map_err(|_| {
+                if may_start() {
+                    JevProviderError::from_network(winwincode_network::NetworkFailure::new(
+                        winwincode_network::ErrorKind::StorageUnavailable,
+                        Acceptance::NotSent,
+                        winwincode_network::Phase::Connect,
+                    ))
+                } else {
+                    stopped()
+                }
+            })?;
+        if !may_start() {
+            return Err(stopped());
+        }
+        let crate::device_execution_source::ProviderConnectionParameters::Jev(parameters) =
+            &material.parameters
+        else {
+            return Err(JevProviderError::new(JevProviderErrorKind::InvalidRequest));
+        };
+        let mut parameters = parameters.clone();
+        parameters.timeout_ms = expected.timeout_ms;
+        parameters.retries = expected.retries;
+        if &parameters != expected {
+            return Err(JevProviderError::new(JevProviderErrorKind::InvalidRequest));
+        }
+        let mut settings = parameters.settings();
+        let mut leak_gate = crate::CredentialLeakGate::new();
+        if let Some(bytes) = &material.secret
+            && let Ok(secret) = crate::ResolvedSecret::from_bytes(bytes.clone())
+        {
+            leak_gate.track_secret(&secret);
+        }
+        settings.api_key = material
+            .take_secret()
+            .map_err(|_| JevProviderError::new(JevProviderErrorKind::InvalidRequest))?
+            .map(|secret| {
+                String::from_utf8(secret.expose().to_vec())
+                    .map_err(|_| JevProviderError::new(JevProviderErrorKind::InvalidRequest))
+            })
+            .transpose()?;
+        let configured = settings.to_config_and_runtime();
+        if let Some(key) = &mut settings.api_key {
+            clear_jev_secret(key);
+        }
+        let (config, _) = configured?;
+        let transport = crate::device_store::device_jev_transport(&config)
+            .map_err(|_| JevProviderError::new(JevProviderErrorKind::InvalidRequest))?
+            .with_cancellation(self.cancellation.clone());
+        if !may_start() {
+            return Err(stopped());
+        }
+        Ok((
+            Arc::new(OpenJevRemoteProvider::new(config, Arc::new(transport))),
+            leak_gate,
+        ))
     }
 
     pub(crate) fn with_attempt_journal(
@@ -545,7 +651,7 @@ impl JevRuntime {
         &self,
         mut failures: Vec<JevAttemptFailure>,
         provider_id: &str,
-        acceptance: winwincode_network::Acceptance,
+        acceptance: Acceptance,
     ) -> JevRun<T> {
         use winwincode_network::{
             DiagnosticCode, ErrorKind, NetworkDiagnostic, NetworkFailure, Phase,
@@ -562,7 +668,7 @@ impl JevRuntime {
                         ErrorKind::AuthorityExpired
                     },
                     acceptance,
-                    if acceptance == winwincode_network::Acceptance::NotSent {
+                    if acceptance == Acceptance::NotSent {
                         Phase::Connect
                     } else {
                         Phase::ResponseHeaders
@@ -584,7 +690,7 @@ impl JevRuntime {
                 network: Some(
                     NetworkFailure::new(
                         ErrorKind::StorageUnavailable,
-                        winwincode_network::Acceptance::Unknown,
+                        Acceptance::Unknown,
                         Phase::Persist,
                     )
                     .with_diagnostic(NetworkDiagnostic::new(DiagnosticCode::Storage)),
@@ -625,7 +731,7 @@ impl JevRuntime {
             network: Some(
                 winwincode_network::NetworkFailure::new(
                     winwincode_network::ErrorKind::StorageUnavailable,
-                    winwincode_network::Acceptance::Unknown,
+                    Acceptance::Unknown,
                     winwincode_network::Phase::Persist,
                 )
                 .with_diagnostic(winwincode_network::NetworkDiagnostic::new(
@@ -649,6 +755,14 @@ impl JevRuntime {
         }
     }
 
+    fn result_is_safe(value: &impl Serialize, leak_gate: &crate::CredentialLeakGate) -> bool {
+        serde_json::to_vec(value).is_ok_and(|bytes| {
+            leak_gate
+                .inspect_bytes(crate::CredentialOutputBoundary::Persistence, &bytes)
+                .is_ok()
+        })
+    }
+
     async fn run<T>(
         &self,
         batch_size: usize,
@@ -664,11 +778,7 @@ impl JevRuntime {
         for provider in &self.providers {
             let capabilities = provider.capabilities();
             if self.cancelled() {
-                return self.stopped_run(
-                    failures,
-                    &capabilities.provider_id,
-                    winwincode_network::Acceptance::NotSent,
-                );
+                return self.stopped_run(failures, &capabilities.provider_id, Acceptance::NotSent);
             }
             if !capabilities.supports(batch_size, options) {
                 failures.push(Self::unsupported_provider_failure(capabilities.provider_id));
@@ -685,13 +795,23 @@ impl JevRuntime {
                     return self.stopped_run(
                         failures,
                         &capabilities.provider_id,
-                        winwincode_network::Acceptance::NotSent,
+                        Acceptance::NotSent,
                     );
                 }
                 let Ok(invocation) = self.begin_invocation(&capabilities, request) else {
                     return Self::storage_failed_run(failures, &capabilities.provider_id);
                 };
-                let Some(result) = self.invoke(Arc::clone(provider), &operation).await else {
+                let sequence = invocation
+                    .as_ref()
+                    .map_or(i64::from(retry.attempt()), |invocation| invocation.sequence);
+                let (result, leak_gate) =
+                    match self.attempt_provider(Arc::clone(provider), sequence, can_start) {
+                        Ok((provider, leak_gate)) => {
+                            (self.invoke(provider, &operation).await, leak_gate)
+                        }
+                        Err(error) => (Some(Err(error)), crate::CredentialLeakGate::new()),
+                    };
+                let Some(result) = result else {
                     return self.cancelled_invocation(
                         invocation.as_ref(),
                         failures,
@@ -701,8 +821,9 @@ impl JevRuntime {
                 let latency = started.elapsed();
                 let error = match result {
                     Ok(value) => {
-                        if let Some(observation) =
-                            value.observation(&capabilities, latency, batch_size)
+                        if Self::result_is_safe(&value, &leak_gate)
+                            && let Some(observation) =
+                                value.observation(&capabilities, latency, batch_size)
                         {
                             return Self::successful_run(
                                 invocation.as_ref(),
@@ -742,7 +863,7 @@ impl JevRuntime {
                     return self.stopped_run(
                         failures,
                         &capabilities.provider_id,
-                        winwincode_network::Acceptance::NotSent,
+                        Acceptance::NotSent,
                     );
                 }
             }
@@ -916,6 +1037,19 @@ pub struct OpenJevRemoteConfig {
     dtypes: Vec<JevDtype>,
     timeout: Duration,
     api_key: Option<String>,
+}
+
+fn clear_jev_secret(value: &mut String) {
+    let mut bytes = std::mem::take(value).into_bytes();
+    bytes.fill(0);
+}
+
+impl Drop for OpenJevRemoteConfig {
+    fn drop(&mut self) {
+        if let Some(key) = &mut self.api_key {
+            clear_jev_secret(key);
+        }
+    }
 }
 
 impl OpenJevRemoteConfig {
@@ -1196,6 +1330,14 @@ impl fmt::Debug for HttpsJevRemoteTransport {
     }
 }
 
+impl Drop for HttpsJevRemoteTransport {
+    fn drop(&mut self) {
+        if let Some(key) = &mut self.api_key {
+            clear_jev_secret(key);
+        }
+    }
+}
+
 impl HttpsJevRemoteTransport {
     pub fn try_new(config: &OpenJevRemoteConfig) -> Result<Self, JevProviderError> {
         Self::try_new_with_tls_roots(config, &crate::ProviderTlsRoots::WebPki)
@@ -1365,7 +1507,7 @@ fn read_jev_response(
                     } else {
                         winwincode_network::ErrorKind::TransportInterrupted
                     },
-                    winwincode_network::Acceptance::ResponseReceived,
+                    Acceptance::ResponseReceived,
                     winwincode_network::Phase::ResponseBody,
                 )
                 .with_diagnostic(winwincode_network::NetworkDiagnostic::io(&error)),
@@ -1376,7 +1518,7 @@ fn read_jev_response(
         return Err(JevProviderError::from_network(
             winwincode_network::NetworkFailure::new(
                 winwincode_network::ErrorKind::ProtocolInvalid,
-                winwincode_network::Acceptance::ResponseReceived,
+                Acceptance::ResponseReceived,
                 winwincode_network::Phase::ResponseBody,
             )
             .with_diagnostic(winwincode_network::NetworkDiagnostic::new(
@@ -1389,7 +1531,7 @@ fn read_jev_response(
         JevProviderError::from_network(
             winwincode_network::NetworkFailure::new(
                 winwincode_network::ErrorKind::ProtocolInvalid,
-                winwincode_network::Acceptance::ResponseReceived,
+                Acceptance::ResponseReceived,
                 winwincode_network::Phase::Decode,
             )
             .with_diagnostic(winwincode_network::NetworkDiagnostic::json(&error)),
@@ -2984,7 +3126,7 @@ dtypes = ["float32", "float16"]
         assert!(stopped.attempt.is_none());
         let network = stopped.network.as_ref().expect("cancel evidence");
         assert_eq!(network.kind, winwincode_network::ErrorKind::Cancelled);
-        assert_eq!(network.acceptance, winwincode_network::Acceptance::Unknown);
+        assert_eq!(network.acceptance, Acceptance::Unknown);
         assert_eq!(
             network
                 .diagnostic

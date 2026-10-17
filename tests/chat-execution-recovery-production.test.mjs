@@ -3,7 +3,7 @@
 import assert from 'node:assert/strict'
 import { execFileSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
-import { globSync, mkdtempSync, readFileSync, rmSync } from 'node:fs'
+import { existsSync, globSync, mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
@@ -145,7 +145,7 @@ function retainedRuns(deviceData, jobId) {
 }
 
 function providerExchangeFacts(deviceData, exchangeId) {
-  const paths = globSync('**/providers.sqlite3', { cwd: deviceData })
+  const paths = globSync('**/provider-runtime.sqlite3', { cwd: deviceData })
   assert.ok(paths.length > 0, 'the real Device Provider store exists')
   return paths.flatMap(path => {
     const store = new DatabaseSync(join(deviceData, path), { readOnly: true })
@@ -559,6 +559,114 @@ test('Chat replaces a crashed real Worker and embedded Core through trusted Devi
   assert.equal(report.flow.scenario.peakHttp, 3)
   assert.equal(report.flow.scenario.oldPhysicalAttempts, 0)
   assert.equal(report.flow.scenario.realCommands, 1)
+  t.diagnostic(JSON.stringify(report.flow.scenario))
+  complete = true
+})
+
+test('Chat Worker replacement preserves the original sent Provider exchange without reissuing its physical request', async t => {
+  const directory = mkdtempSync(join(tmpdir(), 'wwc-provider-worker-restart-'))
+  const productSessionId = 'psn_01J00000000000000000000231'
+  const requestId = 'req_01J00000000000000000000231'
+  const marker = 'provider-boundary-worker-restart'
+  let complete = false
+  t.after(() => {
+    if (complete) rmSync(directory, { recursive: true, force: true })
+    else t.diagnostic(`Failed Provider Worker restart evidence retained at ${directory}`)
+  })
+  const report = await runApiProductionVertical({
+    directory, restart: false, repeat: false, includeStrongFlow: false, ...sealedBinaries(),
+    serverEnvironment: { WWC_SERVER_EXECUTION_LEASE_SECONDS: '10' },
+    deviceProvider: { ...deterministicDeviceProvider(), responseGateMarkers: [marker] },
+    scenario: { async run({ api, modelRoute, devicePath }) {
+      const database = new DatabaseSync(join(directory, 'server-data/control-plane.sqlite3'), { readOnly: true })
+      const device = new DatabaseSync(join(devicePath.deviceData, 'device-client.sqlite3'), { readOnly: true })
+      for (const store of [database, device]) store.exec('PRAGMA busy_timeout=5000')
+      const server = devicePath.modelServer
+      try {
+        await api.command('session.create', 0, { productSessionId,
+          projectId: 'prj_01J00000000000000000000000', repositoryId: 'rep_01J00000000000000000000000',
+          title: 'Provider sent request survives Worker replacement', modelRoute })
+        await devicePath.launchAnchor({ productSessionId })
+        const payload = { productSessionId, message: marker }
+        const submitted = await api.command('chat.submit', 1, payload, requestId)
+        const jobs = () => database.prepare('SELECT * FROM scheduler_execution_jobs WHERE submission_request_id=?').all(requestId)
+        assert.equal(jobs().length, 1)
+        const job = jobs()[0]
+        const original = await waitFor(() => {
+          const run = retainedRuns(devicePath.deviceData, job.job_id).find(value => value.run.job.attempt === 1)
+          if (!run?.requests.length) return false
+          const [fact] = providerExchangeFacts(devicePath.deviceData, run.requests[0].modelExchangeId)
+          const attempt = fact?.attempts[0]
+          const physical = attempt && server.requests.find(request => request.idempotencyKey === attempt.adapter_request_id && request.active)
+          return fact?.attempts.length === 1 && attempt.state === 'invoking' && physical ? { run, fact, attempt } : false
+        }, 'the original exchange has one actual accepted HTTPS request', 60_000)
+        const originalExchangeId = original.run.requests[0].modelExchangeId
+        const originalKey = original.attempt.adapter_request_id
+        const authority = database.prepare('SELECT * FROM execution_dispatch_authorities WHERE job_id=?').get(job.job_id)
+        const worker = actualWorkerProcess(device, authority)
+        assert.equal(worker.state, 'running')
+        assert.ok(worker.data_directory.startsWith(`${devicePath.deviceData}/`))
+        process.kill(-worker.pid, 'SIGKILL')
+        const interrupted = await waitFor(() => {
+          const [fact] = providerExchangeFacts(devicePath.deviceData, originalExchangeId)
+          return fact?.attempts.length === 1 && fact.attempts[0].state === 'interrupted_unknown' && fact.exchange.chunks ? fact : false
+        }, 'trusted Device recovery closes the original physical attempt in the runtime ledger', 30_000)
+        assert.equal(interrupted.exchange.request_open, original.fact.exchange.request_open)
+        assert.equal(interrupted.attempts[0].adapter_request_id, originalKey)
+        assert.equal(interrupted.attempts[0].accounting_chunks, null)
+        const replacement = await waitFor(() => {
+          const current = jobs()[0]
+          const next = database.prepare('SELECT * FROM execution_dispatch_authorities WHERE job_id=?').get(job.job_id)
+          const run = retainedRuns(devicePath.deviceData, job.job_id).find(value => value.run.job.attempt === 2)
+          const physical = server.requests.find(request => request.gateMarker === marker && request.idempotencyKey !== originalKey && request.active)
+          return current?.attempt === 2 && next?.attempt === 2 && run?.requests.length === 1 && physical
+            ? { authority: next, run, physical } : false
+        }, 'the official successor starts its own exchange after trusted Worker exit', 90_000)
+        assert.equal(jobs().length, 1)
+        assert.notEqual(replacement.authority.worker_instance_id, authority.worker_instance_id)
+        assert.notEqual(replacement.run.requests[0].modelExchangeId, originalExchangeId)
+        assert.equal(server.requests.filter(request => request.idempotencyKey === originalKey).length, 1)
+        const assertOriginalExchange = () => {
+          const facts = providerExchangeFacts(devicePath.deviceData, originalExchangeId)
+          assert.equal(facts.length, 1)
+          assert.equal(facts[0].exchange.request_open, interrupted.exchange.request_open)
+          assert.equal(facts[0].exchange.chunks, interrupted.exchange.chunks)
+          assert.deepEqual(facts[0].attempts, interrupted.attempts,
+            'new credential resolution leaves the original interrupted physical attempt unchanged')
+        }
+        assertOriginalExchange()
+        const session = (await api.query('session.get', { productSessionId })).result
+        const cancellationStarted = performance.now()
+        await api.command('session.cancel', session.revision, { productSessionId,
+          reason: 'Cancel the observed successor while every response gate remains held' })
+        await waitFor(() => {
+          assert.ok(performance.now() - cancellationStarted < 10_000,
+            'HTTPS closure and successor cancellation ACK share the original ten-second budget')
+          const terminal = database.prepare('SELECT * FROM execution_lease_terminals WHERE job_id=? AND attempt=?')
+            .get(job.job_id, replacement.authority.attempt)
+          const accepted = acceptedOutcome(database, job.job_id, replacement.authority.attempt)
+          const worker = readRetainedOutcomes(devicePath.deviceData, job.job_id)
+            .find(value => value.message.lease.attempt === replacement.authority.attempt)
+          return server.activeRequests === 0 && terminal?.outcome === 'cancelled'
+            && terminal.worker_instance_id === replacement.authority.worker_instance_id
+            && accepted?.revision === 2 && accepted.payload.acknowledgementReady
+            && worker?.message.outcome.status === 'cancelled' && worker.workerAcknowledged
+        }, 'the successor closes HTTPS and commits cancellation with its exact business ACK while the response gate remains held',
+        Math.max(0, 10_000 - (performance.now() - cancellationStarted)), 50)
+        const cancellationMillis = performance.now() - cancellationStarted
+        assert.ok(cancellationMillis < 10_000)
+        server.releaseResponseGate(marker)
+        assert.deepEqual((await api.command('chat.submit', 1, payload, requestId)).result, submitted.result)
+        assert.equal(server.requests.filter(request => request.idempotencyKey === originalKey).length, 1)
+        assertOriginalExchange()
+        return { originalExchangeId, originalPhysicalRequests: 1,
+          successorExchangeId: replacement.run.requests[0].modelExchangeId,
+          originalWorkerInstanceId: authority.worker_instance_id,
+          successorWorkerInstanceId: replacement.authority.worker_instance_id, cancellationMillis }
+      } finally { server.releaseResponseGate(marker); device.close(); database.close() }
+    } },
+  })
+  assert.equal(report.flow.scenario.originalPhysicalRequests, 1)
   t.diagnostic(JSON.stringify(report.flow.scenario))
   complete = true
 })
@@ -982,15 +1090,13 @@ test('Chat preserves its original partial multiquestion answer set and exact liv
   const requestId = 'req_01J00000000000000000000065'
   const answerRequestIds = ['req_01J00000000000000000000066', 'req_01J00000000000000000000067']
   const privateValues = ['recovery-private-first-3847', 'recovery-private-second-1926']
-  const script = `const input=ALL_TOOLS.find(tool=>tool.name.endsWith("request_user_input"));
-    if(!input) throw new Error("input tool missing");
-    await tools[input.name]({questions:[
+  const script = `const requestInput=ALL_TOOLS.find(tool=>tool.name.endsWith("request_user_input"));
+    if(!requestInput) throw new Error("input tool missing");
+    await tools[requestInput.name]({questions:[
       {id:"recovery_first",header:"First",question:"First recovery choice?",options:[{label:"continue",description:"Continue."},{label:"revise",description:"Revise."}]},
       {id:"recovery_second",header:"Second",question:"Second recovery choice?",options:[{label:"continue",description:"Continue."},{label:"revise",description:"Revise."}]}
     ]});
-    const command=ALL_TOOLS.find(tool=>tool.name.endsWith("exec_command"));
-    if(!command) throw new Error("command tool missing");
-    text(await tools[command.name]({cmd:"printf 'once\\n' >> CHAT-INPUT-RECOVERY-ONCE.txt",yield_time_ms:1000}));`
+    ${completedCommandScript("printf 'once\n' >> CHAT-INPUT-RECOVERY-ONCE.txt")}`
   const report = await runApiProductionVertical({
     directory, restart: false, repeat: false, includeStrongFlow: false, ...sealedBinaries(),
     serverEnvironment: { WWC_SERVER_EXECUTION_LEASE_SECONDS: '30' },
@@ -1176,10 +1282,9 @@ test('Chat preserves its original pending real Core approval across a Server cra
   const productSessionId = 'psn_01J00000000000000000000068'
   const requestId = 'req_01J00000000000000000000068'
   const decisionRequestId = 'req_01J00000000000000000000069'
-  const script = `const command=ALL_TOOLS.find(tool=>tool.name.endsWith("exec_command"));
-    if(!command) throw new Error("command tool missing");
-    text(await tools[command.name]({cmd:"printf 'once\\n' >> CHAT-APPROVAL-RECOVERY-ONCE.txt",
-      sandbox_permissions:"require_escalated",justification:"Exercise the temporary recovered approval fixture.",yield_time_ms:1000}));`
+  const script = completedCommandScript("printf 'once\n' >> CHAT-APPROVAL-RECOVERY-ONCE.txt", 1, {
+    sandbox_permissions: 'require_escalated', justification: 'Exercise the temporary recovered approval fixture.',
+  })
   const report = await runApiProductionVertical({
     directory, restart: false, repeat: false, includeStrongFlow: false, ...sealedBinaries(),
     serverEnvironment: { WWC_SERVER_EXECUTION_LEASE_SECONDS: '30' },
@@ -1414,13 +1519,13 @@ test('Chat reopens the same durable Provider retry in a fresh Store and thread w
     serverEnvironment: { WWC_SERVER_EXECUTION_LEASE_SECONDS: '10' },
     deviceProvider: { ...deterministicDeviceProvider(), responseGateMarkers: markers,
       httpFailures: Object.fromEntries(markers.slice(0, 2).map(marker => [marker, { status: 429, count: 1, retryAfterSeconds: 30 }])),
-      nativeCellScripts: { 'native-cell-A': 'const command=ALL_TOOLS.find(tool=>tool.name.endsWith("exec_command")); if(!command) throw new Error("command tool missing"); text(await tools[command.name]({cmd:"printf \'once\\n\' >> CHAT-REOPENED-ONCE.txt",yield_time_ms:1000}));' },
+      nativeCellScripts: { 'native-cell-A': completedCommandScript("printf 'once\n' >> CHAT-REOPENED-ONCE.txt") },
     },
     scenario: { async run({ api, modelRoute, devicePath }) {
       const database = new DatabaseSync(join(directory, 'server-data/control-plane.sqlite3'), { readOnly: true })
       const device = new DatabaseSync(join(devicePath.deviceData, 'device-client.sqlite3'), { readOnly: true })
-      const provider = new DatabaseSync(join(devicePath.deviceData, 'providers/providers.sqlite3'), { readOnly: true })
-      for (const store of [database, device, provider]) store.exec('PRAGMA busy_timeout=5000')
+      let provider = null
+      for (const store of [database, device]) store.exec('PRAGMA busy_timeout=5000')
       const server = devicePath.modelServer
       const submitted = []
       const originals = []
@@ -1442,6 +1547,12 @@ test('Chat reopens the same durable Provider retry in a fresh Store and thread w
         for (let index = 0; index < 2; index++) {
             const job = submitted[index].job
             const retry = await waitFor(() => {
+              if (provider === null) {
+                const path = join(devicePath.deviceData, 'providers/runtime/provider-runtime.sqlite3')
+                if (!existsSync(path)) return false
+                provider = new DatabaseSync(path, { readOnly: true })
+                provider.exec('PRAGMA busy_timeout=5000')
+              }
               const value = retryStoreSnapshot(provider, job.job_id)
               return value && value.row.wake_ms > Date.now() + 5000
                 && providerEntryLines(devicePath.deviceData, value.open).some(line => line.includes('stage=provider_retry_deferred')
@@ -1565,7 +1676,7 @@ test('Chat reopens the same durable Provider retry in a fresh Store and thread w
           recoveryBoundary: 'old Provider invocation/thread/Store closed; fresh ProviderStore reopened original exchange; whole-process death not exercised' }
       } finally {
         for (const marker of markers) server.releaseResponseGate(marker)
-        provider.close(); device.close(); database.close()
+        provider?.close(); device.close(); database.close()
       }
     } },
   })

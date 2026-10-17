@@ -8,7 +8,10 @@ use std::fs;
 use std::future::Future;
 use std::io::Write as _;
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::Duration;
+
+use winwincode_client_port::private_worker_channel::ProviderExecutionProfile;
 
 use winwincode_codex::{
     ExecutionMode, ObserverMode, ProductionCodexAdapter, ProductionCodexConfig,
@@ -55,7 +58,9 @@ fn main() {
 
 async fn recover_interrupted_calls(config_path: &str) -> Result<(), Box<dyn std::error::Error>> {
     let config = ManagedSessionConfig::read(std::path::Path::new(config_path))?;
-    let store = winwincode_provider::DeviceProviderStore::open(&config.provider_directory)?;
+    let store = winwincode_provider::ProviderRuntimeStore::open_existing(
+        &config.provider_runtime_directory,
+    )?;
     store.fail_terminated_worker_calls(&config.worker_instance_id.0)?;
     winwincode_codex::recover_interrupted_tool_calls(
         &config.data_directory.join("codex-runtime/kernel-home"),
@@ -86,7 +91,8 @@ struct WorkerBootstrap {
     started_at: Instant,
     data_directory: PathBuf,
     execution_workspace_directory: Option<PathBuf>,
-    provider_directory: PathBuf,
+    provider_runtime_directory: PathBuf,
+    provider_execution_profile: ProviderExecutionProfile,
     source_directory: PathBuf,
     helper_executable: PathBuf,
     model_route: ModelGatewayRoute,
@@ -118,7 +124,8 @@ async fn run_managed(config_path: &str) -> Result<(), Box<dyn std::error::Error>
         started_at: now_instant()?,
         data_directory: config.data_directory,
         execution_workspace_directory: config.execution_workspace_directory,
-        provider_directory: config.provider_directory,
+        provider_runtime_directory: config.provider_runtime_directory,
+        provider_execution_profile: config.provider_execution_profile,
         source_directory: config.source_directory,
         helper_executable: config.helper_executable,
         model_route: config.model_route.unwrap_or_else(default_model_route),
@@ -195,7 +202,8 @@ async fn run_worker(bootstrap: WorkerBootstrap) -> Result<(), Box<dyn std::error
         started_at,
         data_directory,
         execution_workspace_directory,
-        provider_directory,
+        provider_runtime_directory,
+        provider_execution_profile,
         source_directory,
         helper_executable,
         model_route,
@@ -204,12 +212,16 @@ async fn run_worker(bootstrap: WorkerBootstrap) -> Result<(), Box<dyn std::error
     winwincode_worker::mechanism_timing::configure(data_directory.join("mechanism-timing.jsonl"));
     let capabilities = worker_capabilities()?;
     let execution_mode = configured_execution_mode("WWC_WORKER_EXECUTION_MODE")?;
-    let observer_mode = configured_observer_mode("WWC_WORKER_OBSERVER_MODE")?;
-    let observation_model = configured_observation_model(observer_mode, required)?;
+    let observer_mode = provider_execution_profile.observer_mode;
+    let observation_model = configured_observation_model(&provider_execution_profile)?;
     let (port, handle) = RemoteWorkerPort::open(worker_id.clone(), worker_instance_id.clone());
+    let execution_source = port.provider_execution_source();
+    let extension_source = port.device_extension_source();
     let codex = production_codex(
         &data_directory,
-        &provider_directory,
+        &provider_runtime_directory,
+        &provider_execution_profile,
+        extension_source,
         model_route,
         capabilities.clone(),
         execution_mode,
@@ -235,7 +247,7 @@ async fn run_worker(bootstrap: WorkerBootstrap) -> Result<(), Box<dyn std::error
         .join("codex-runtime")
         .join("model-intake.log");
     let mut worker = WorkerMain::new(config, port, codex, workspaces)
-        .with_device_providers(&provider_directory)
+        .with_provider_runtime(&provider_runtime_directory, execution_source)
         .with_observer_mode(observer_mode)
         .with_registration_request_namespace(&worker_instance_id, &started_at)
         .with_model_intake_log(&intake_log);
@@ -265,7 +277,7 @@ async fn run_worker(bootstrap: WorkerBootstrap) -> Result<(), Box<dyn std::error
 
     let _accounting_reconciler = worker
         .execution_port()
-        .spawn_accounting_reconciler(provider_directory);
+        .spawn_accounting_reconciler(provider_runtime_directory);
     let mut drive = tokio::time::interval(Duration::from_millis(25));
     drive.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut observed_drive_failures = Vec::new();
@@ -368,17 +380,20 @@ where
     worker.drain_controls(handle, now_instant).await
 }
 
+#[allow(clippy::too_many_arguments)]
 fn production_codex(
     data_directory: &std::path::Path,
-    provider_directory: &std::path::Path,
+    provider_runtime_directory: &std::path::Path,
+    profile: &ProviderExecutionProfile,
+    extension_source: Arc<dyn winwincode_provider::DeviceExtensionSource>,
     model_route: ModelGatewayRoute,
     capabilities: WorkerCapabilitySet,
     execution_mode: ExecutionMode,
     observer_mode: ObserverMode,
     helper_executable: PathBuf,
 ) -> Result<ProductionCodexAdapter, Box<dyn std::error::Error>> {
-    let provider_id = env::var("WWC_WORKER_MODEL_PROVIDER_ID").ok();
-    let model_id = env::var("WWC_WORKER_MODEL_ID").ok();
+    let provider_id = profile.provider.clone();
+    let model_id = profile.model.clone();
     let options = ProductionCodexOptions {
         data_directory: data_directory.join("codex-runtime"),
         helper_executable,
@@ -396,43 +411,24 @@ fn production_codex(
         Ok("core") | Err(env::VarError::NotPresent) => {}
         _ => return Err("invalid Worker approval owner".into()),
     }
-    if let Some(value) = env::var_os("WWC_BENCHMARK_SEALED_TOOLS") {
-        if value != "1" {
-            return Err("invalid benchmark sealed tools".into());
-        }
-        config = config.with_sealed_benchmark_tools();
+    if let Some(effort) = &profile.reasoning {
+        config = config.with_reasoning_effort(effort)?;
     }
-    if let Some(effort) = env::var_os("WWC_WORKER_MODEL_REASONING_EFFORT") {
-        config =
-            config.with_reasoning_effort(effort.to_str().ok_or("invalid reasoning effort")?)?;
+    if let Some(settings) = &profile.fusion {
+        config = config.with_fusion(settings.clone())?;
     }
-    if let Some(settings) = configured_fusion(env::var_os("WWC_WORKER_FUSION").as_deref())? {
-        config = config.with_fusion(settings)?;
+    if let Some(provider) = &profile.jev_judge {
+        config = config.with_jev_judge(provider.clone())?;
     }
-    let judge = env::var_os("WWC_WORKER_JEV_JUDGE");
-    let context = env::var_os("WWC_WORKER_JEV_CONTEXT");
-    let file = env::var_os("WWC_DEVICE_JEV_SETTINGS_FILE");
-    if judge.is_some() || context.is_some() || file.is_some() {
-        let store = winwincode_provider::DeviceProviderStore::open(provider_directory)?;
-        if let Some(provider) = configured_jev_judge(&store, judge.as_deref(), file.as_deref())? {
-            config = config.with_jev_judge(provider)?;
-        }
-        if let Some(settings) = configured_jev_context(
-            &store,
-            context.as_deref(),
-            if judge.is_some() && context.is_none() {
-                None
-            } else {
-                file.as_deref()
-            },
-        )? {
-            config = config.with_jev_context(settings)?;
-        }
+    if let Some(settings) = &profile.jev_context {
+        config = config.with_jev_context(settings.clone())?;
     }
     Ok(ProductionCodexAdapter::open(config)?
-        .with_device_extensions(provider_directory.to_path_buf())?)
+        .with_provider_runtime(provider_runtime_directory.to_path_buf())?
+        .with_device_extension_source(extension_source))
 }
 
+#[cfg(test)]
 fn configured_fusion(
     profile: Option<&std::ffi::OsStr>,
 ) -> Result<
@@ -446,56 +442,6 @@ fn configured_fusion(
         .map_err(|_| "invalid Fusion profile")?;
     winwincode_execution_port::agent_config::validate_fusion_settings(&settings)
         .map_err(|_| "invalid Fusion members")?;
-    Ok(Some(settings))
-}
-
-fn configured_jev_judge(
-    store: &winwincode_provider::DeviceProviderStore,
-    profile: Option<&std::ffi::OsStr>,
-    settings_file: Option<&std::ffi::OsStr>,
-) -> Result<Option<String>, Box<dyn std::error::Error>> {
-    let Some(profile) = profile else {
-        return Ok(None);
-    };
-    let provider = profile.to_str().ok_or("invalid JEV Judge provider")?;
-    if provider.is_empty()
-        || provider.len() > 200
-        || !provider
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || b"-_.:".contains(&byte))
-    {
-        return Err("invalid JEV Judge provider".into());
-    }
-    if let Some(path) = settings_file {
-        store.import_jev_settings(std::path::Path::new(path), provider)?;
-    }
-    store.resolve_jev_settings(provider)?;
-    Ok(Some(provider.to_owned()))
-}
-
-fn configured_jev_context(
-    store: &winwincode_provider::DeviceProviderStore,
-    profile: Option<&std::ffi::OsStr>,
-    settings_file: Option<&std::ffi::OsStr>,
-) -> Result<
-    Option<winwincode_execution_port::agent_config::AgentJevContextSettings>,
-    Box<dyn std::error::Error>,
-> {
-    let Some(profile) = profile else {
-        if settings_file.is_some() {
-            return Err("JEV settings file requires WWC_WORKER_JEV_CONTEXT".into());
-        }
-        return Ok(None);
-    };
-    let settings: winwincode_execution_port::agent_config::AgentJevContextSettings =
-        serde_json::from_str(profile.to_str().ok_or("invalid JEV context profile")?)
-            .map_err(|_| "invalid JEV context profile")?;
-    winwincode_execution_port::jev_decision::validate_policy(&settings.policy)
-        .map_err(|_| "invalid JEV context policy")?;
-    if let Some(path) = settings_file {
-        store.import_jev_settings(std::path::Path::new(path), &settings.provider)?;
-    }
-    store.resolve_jev_settings(&settings.provider)?;
     Ok(Some(settings))
 }
 
@@ -525,34 +471,29 @@ fn released_worker_execution_mode_required(mode: ExecutionMode) -> Result<(), &'
     }
 }
 
-fn configured_observer_mode(name: &str) -> Result<ObserverMode, Box<dyn std::error::Error>> {
-    let value = optional_configuration(name, "off")?;
-    ObserverMode::from_config(&value)
-        .ok_or_else(|| format!("{name} contains an unsupported observer mode").into())
-}
-
-fn configured_observation_model<Read>(
-    observer_mode: ObserverMode,
-    mut read: Read,
-) -> Result<Option<ObservationModelConfiguration>, Box<dyn std::error::Error>>
-where
-    Read: FnMut(&str) -> Result<String, Box<dyn std::error::Error>>,
-{
-    match observer_mode {
+fn configured_observation_model(
+    profile: &ProviderExecutionProfile,
+) -> Result<Option<ObservationModelConfiguration>, Box<dyn std::error::Error>> {
+    let required = |value: &Option<String>| {
+        value
+            .clone()
+            .ok_or("Observer model configuration is incomplete")
+    };
+    match profile.observer_mode {
         ObserverMode::Off => Ok(None),
         ObserverMode::AmbiguousOnly => ObservationModelConfiguration::try_new(
-            read("WWC_WORKER_OBSERVER_MODEL_PROVIDER_ID")?,
-            read("WWC_WORKER_OBSERVER_MODEL_ID")?,
+            required(&profile.observer_provider)?,
+            required(&profile.observer_model)?,
             ModelGatewayRoute {
-                capability: read("WWC_WORKER_OBSERVER_MODEL_CAPABILITY")?,
-                route: read("WWC_WORKER_OBSERVER_MODEL_ROUTE")?,
+                capability: required(&profile.observer_capability)?,
+                route: required(&profile.observer_route)?,
             },
         )
         .map(Some)
         .map_err(Into::into),
         ObserverMode::Shadow | ObserverMode::Always => Err(format!(
             "Observer mode {} is not implemented by this Worker release",
-            observer_mode.as_config()
+            profile.observer_mode.as_config()
         )
         .into()),
     }
@@ -589,10 +530,6 @@ fn worker_capabilities() -> Result<WorkerCapabilitySet, Box<dyn std::error::Erro
         max_concurrent_jobs: 1,
         platform,
     })
-}
-
-fn required(name: &str) -> Result<String, Box<dyn std::error::Error>> {
-    env::var(name).map_err(|_| format!("required environment variable {name} is missing").into())
 }
 
 fn now_instant() -> Result<Instant, Box<dyn std::error::Error>> {
@@ -781,94 +718,6 @@ mod tests {
     }
 
     #[test]
-    fn jev_startup_requires_private_matching_settings() {
-        use std::ffi::OsStr;
-        use std::os::unix::fs::{PermissionsExt, symlink};
-        use winwincode_provider::DeviceProviderStore;
-
-        let directory = tempfile::tempdir().unwrap();
-        let store = DeviceProviderStore::open(&directory.path().join("device")).unwrap();
-        let path = directory.path().join("jev.toml");
-        let text = "providerId = 'device-jev'\nendpoint = 'https://nli.invalid/score'\napiKey = 'test-private-key'\ntimeoutMs = 1000\nretries = 0\n";
-        std::fs::write(&path, text).unwrap();
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
-        let profile = serde_json::json!({
-            "provider": "device-jev",
-            "policy": {
-                "version": "jev-policy.v1", "minimumConfidence": 0.55,
-                "pinThreshold": 0.9, "keepThreshold": 0.75, "compactThreshold": 0.75,
-                "dropThreshold": 0.9, "taskMemoryThreshold": 0.4,
-                "projectMemoryThreshold": 0.6, "longTermMemoryThreshold": 0.8,
-            }
-        });
-        let serialized = profile.to_string();
-        let profile_arg = Some(OsStr::new(&serialized));
-        let configure = |profile, file| super::configured_jev_context(&store, profile, file);
-        assert!(configure(None, None).unwrap().is_none());
-        assert!(configure(None, Some(path.as_os_str())).is_err());
-        assert!(configure(profile_arg, None).is_err());
-        assert!(configure(Some(OsStr::new("")), Some(path.as_os_str())).is_err());
-        let configured = configure(profile_arg, Some(path.as_os_str()))
-            .unwrap()
-            .unwrap();
-        assert_eq!(configured.provider, "device-jev");
-        assert_eq!(
-            super::configured_jev_judge(&store, Some(OsStr::new("device-jev")), None).unwrap(),
-            Some("device-jev".into())
-        );
-        assert!(
-            super::configured_jev_judge(&store, Some(OsStr::new("other-provider")), None).is_err()
-        );
-        assert!(
-            super::configured_jev_judge(&store, Some(OsStr::new("device-jev\n")), None).is_err()
-        );
-        assert!(
-            super::configured_jev_judge(&store, None, None)
-                .unwrap()
-                .is_none()
-        );
-        assert_eq!(configure(profile_arg, None).unwrap(), Some(configured));
-        let mut invalid = profile.clone();
-        invalid["apiKey"] = "do-not-print-this".into();
-        let invalid_secret = invalid.to_string();
-        let error = configure(Some(OsStr::new(&invalid_secret)), None).unwrap_err();
-        assert!(!error.to_string().contains("do-not-print-this"));
-        invalid = profile;
-        invalid["policy"]["dropThreshold"] = 2.0.into();
-        let invalid_policy = invalid.to_string();
-        assert!(configure(Some(OsStr::new(&invalid_policy)), None).is_err());
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
-        assert!(configure(profile_arg, Some(path.as_os_str())).is_err());
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
-        let link = directory.path().join("link.toml");
-        symlink(&path, &link).unwrap();
-        assert!(configure(profile_arg, Some(link.as_os_str())).is_err());
-        for bad in [
-            text.replace("device-jev", "other-provider"),
-            "broken secret".into(),
-            "x".repeat(65_537),
-        ] {
-            std::fs::write(&path, bad).unwrap();
-            assert!(configure(profile_arg, Some(path.as_os_str())).is_err());
-            assert_eq!(
-                store
-                    .resolve_jev_settings("device-jev")
-                    .unwrap()
-                    .api_key
-                    .as_deref(),
-                Some("test-private-key")
-            );
-        }
-        drop(store);
-        let reopened = DeviceProviderStore::open(&directory.path().join("device")).unwrap();
-        assert!(
-            super::configured_jev_context(&reopened, profile_arg, None)
-                .unwrap()
-                .is_some()
-        );
-    }
-
-    #[test]
     fn execution_modes_fail_closed_until_debug_probe_routing_exists() {
         for (mode, expected) in [
             (ExecutionMode::React, Ok(())),
@@ -886,31 +735,48 @@ mod tests {
 
     #[test]
     fn observer_modes_have_one_closed_release_configuration() {
-        for (mode, expected_reads, route_expected, error_expected) in [
-            (ObserverMode::Off, 0, false, false),
-            (ObserverMode::AmbiguousOnly, 4, true, false),
-            (ObserverMode::Shadow, 0, false, true),
-            (ObserverMode::Always, 0, false, true),
+        for (mode, route_expected, error_expected) in [
+            (ObserverMode::Off, false, false),
+            (ObserverMode::AmbiguousOnly, true, false),
+            (ObserverMode::Shadow, false, true),
+            (ObserverMode::Always, false, true),
         ] {
-            let mut reads = Vec::new();
-            let configured = configured_observation_model(mode, |name| {
-                reads.push(name.to_owned());
-                Ok(match name {
-                    "WWC_WORKER_OBSERVER_MODEL_PROVIDER_ID" => "observer-provider",
-                    "WWC_WORKER_OBSERVER_MODEL_ID" => "observer-model",
-                    "WWC_WORKER_OBSERVER_MODEL_CAPABILITY" => "strict-json",
-                    "WWC_WORKER_OBSERVER_MODEL_ROUTE" => "observer-route",
-                    _ => unreachable!("unexpected Observer environment name"),
-                }
-                .to_owned())
-            });
+            let profile = super::ProviderExecutionProfile {
+                observer_mode: mode,
+                observer_provider: Some("observer-provider".into()),
+                observer_model: Some("observer-model".into()),
+                observer_capability: Some("strict-json".into()),
+                observer_route: Some("observer-route".into()),
+                ..super::ProviderExecutionProfile::default()
+            };
+            let configured = configured_observation_model(&profile);
             assert_eq!(configured.is_err(), error_expected, "mode={mode:?}");
             assert_eq!(
                 configured.as_ref().ok().is_some_and(Option::is_some),
                 route_expected,
                 "mode={mode:?}"
             );
-            assert_eq!(reads.len(), expected_reads, "mode={mode:?}");
+            if let Ok(Some(configured)) = configured {
+                assert_eq!(Some(configured.provider), profile.observer_provider);
+                assert_eq!(Some(configured.model), profile.observer_model);
+                assert_eq!(
+                    Some(configured.route.capability),
+                    profile.observer_capability
+                );
+                assert_eq!(Some(configured.route.route), profile.observer_route);
+            }
         }
+        assert!(
+            configured_observation_model(&super::ProviderExecutionProfile::default())
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            configured_observation_model(&super::ProviderExecutionProfile {
+                observer_mode: ObserverMode::AmbiguousOnly,
+                ..super::ProviderExecutionProfile::default()
+            })
+            .is_err()
+        );
     }
 }

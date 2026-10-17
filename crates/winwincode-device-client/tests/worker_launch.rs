@@ -335,8 +335,10 @@ fn retain_empty_provider_store_for_recovery(lane: &WorkerLane) -> PathBuf {
     let config: Value = serde_json::from_slice(&fs::read(&config_path).expect("managed config"))
         .expect("managed config JSON");
     drop(
-        winwincode_provider::DeviceProviderStore::open(Path::new(
-            config["providerDirectory"].as_str().expect("Provider path"),
+        winwincode_provider::ProviderRuntimeStore::open_existing(Path::new(
+            config["providerRuntimeDirectory"]
+                .as_str()
+                .expect("Provider runtime path"),
         ))
         .expect("the original instance has a real empty Provider store"),
     );

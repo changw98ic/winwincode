@@ -27,7 +27,7 @@ use tokio_rustls::rustls::{
     pki_types::{PrivateKeyDer, PrivatePkcs8KeyDer},
 };
 use winwincode_execution_port::generated::{ExecutionPortMessage, ModelOpenMessage};
-use winwincode_provider::{DeviceModelAdmission, DeviceProviderStore};
+use winwincode_provider::{DeviceModelAdmission, ProviderRuntimeStore};
 
 const TEST: &str = "device_model::concurrency_tests::physical_attempt_tests::three_real_https_attempts_bound_restarted_retries_and_cancelled_waiters";
 const DIRECTORY: &str = "WWC_PHYSICAL_ATTEMPT_TEST_DIRECTORY";
@@ -251,9 +251,9 @@ fn serve(
 }
 
 fn seed_and_crash(directory: &Path, endpoint: &str) -> ! {
-    let _ = DeviceProviderStore::open(directory).unwrap();
-    let mut models = DeviceModels::new(directory);
-    let database = rusqlite::Connection::open(directory.join("providers.sqlite3")).unwrap();
+    let _ = ProviderRuntimeStore::prepare(directory).unwrap();
+    let mut models = DeviceModels::for_test(directory);
+    let database = crate::device_model::concurrency_tests::runtime_database(directory);
     for (provider, protocol) in [
         ("qwen", "openai_chat_completions"),
         ("glm", "anthropic_messages"),
@@ -261,7 +261,7 @@ fn seed_and_crash(directory: &Path, endpoint: &str) -> ! {
         let config = serde_json::json!({"providerId":provider,"displayName":"fixture","endpoint":format!("{endpoint}/{provider}"),"protocol":protocol,"modelIds":[format!("{provider}-model")],"enabled":true});
         database
             .execute(
-                "INSERT INTO providers VALUES (?1,?2,?3)",
+                "INSERT INTO configuration.providers VALUES (?1,?2,?3)",
                 rusqlite::params![provider, config.to_string(), b"fixture-only-key".as_slice()],
             )
             .unwrap();
@@ -297,9 +297,9 @@ fn seed_and_crash(directory: &Path, endpoint: &str) -> ! {
     reason = "restored retries, exact replay and cancellation share the same three physically occupied slots"
 )]
 fn recover_under_three_live_requests(directory: &Path) {
-    let database = rusqlite::Connection::open(directory.join("providers.sqlite3")).unwrap();
-    let store = DeviceProviderStore::open(directory).unwrap();
-    let mut models = DeviceModels::new(directory);
+    let database = crate::device_model::concurrency_tests::runtime_database(directory);
+    let store = ProviderRuntimeStore::prepare(directory).unwrap();
+    let mut models = DeviceModels::for_test(directory);
     for (member, index) in LIVE.into_iter().enumerate() {
         send(&mut models, &open("qwen", index, &format!("live-{member}")));
     }

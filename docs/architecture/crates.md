@@ -133,9 +133,9 @@
 
 ## `winwincode-provider`
 
-职责：在设备侧保存 Provider 配置和密钥，并执行 HTTPS/SSE 模型请求、流转换、JEV 和扩展装配。
+职责：在设备侧保存 Provider 配置和密钥，并执行 HTTPS/SSE 模型请求、流转换、JEV 和扩展装配。`DeviceProviderStore` 提供 Device 配置访问，`ProviderRuntimeStore` 提供 Worker 执行账本。`ProviderExecutionSource` 提供按需连接材料。长期凭据解析、Codex 登录绑定和 OAuth 刷新由 Device 拥有。运行账本使用独立数据库，不持久化调用凭据。
 
-- 主要入口：`crates/winwincode-provider/src/lib.rs`、`src/device_store.rs::DeviceProviderStore` 和 `src/provider_https_sse.rs::HttpsSseProviderAdapter`。
+- 主要入口：`crates/winwincode-provider/src/lib.rs`、`src/device_store.rs::DeviceProviderStore`、`src/device_runtime_store.rs::ProviderRuntimeStore` 和 `src/device_execution_source.rs::ProviderExecutionSource`。HTTPS/SSE 适配器位于 `src/provider_https_sse.rs::HttpsSseProviderAdapter`。
 - normal 依赖：`winwincode-api`、`winwincode-domain`、`winwincode-execution-port`、`winwincode-network`。
 - 反向依赖：`device-client`、`worker`、`codex`、`control-plane`。
 - 测试：`crates/winwincode-provider/tests`，4 个 Cargo test target；`src` 中还有单元和回归测试模块。
@@ -160,7 +160,7 @@
 
 ## `winwincode-codex`
 
-职责：把 Kernel 适配到 Worker。它管理 Codex 线程、模型桥、执行回执、候选产物和持久 outbox。
+职责：把 Kernel 适配到 Worker。它管理 Codex 线程、模型桥、执行回执、候选产物和持久 outbox。`with_provider_runtime` 为模型桥附加运行账本；`with_device_extension_source` 独立注入扩展读取接口。
 
 - 主要入口：`crates/winwincode-codex/src/lib.rs::ProductionCodexAdapter`；核心实现位于 `src/adapter.rs` 和 `src/model_bridge.rs`。
 - normal 依赖：`winwincode-domain`、`winwincode-execution-port`、`winwincode-fusion`、`winwincode-kernel`、`winwincode-provider`。
@@ -169,7 +169,7 @@
 
 ## `winwincode-worker`
 
-职责：实现独立 Execution Worker 生命周期、工作区隔离、内嵌 Codex 执行和设备侧模型调用。
+职责：实现独立 Execution Worker 生命周期、工作区隔离、内嵌 Codex 执行和设备侧模型调用。Worker 通过 `with_provider_runtime` 接收运行账本目录与 `Arc<dyn ProviderExecutionSource>`。managed Worker 按需从父 Device 取得内存连接材料，并直接发出模型 HTTPS/SSE 请求。调用前继续核对当前租约、取消和调用准入。
 
 - 主要入口：`crates/winwincode-worker/src/main.rs` 和 `src/lib.rs::WorkerMain`；设备模型执行位于 `src/device_model.rs::DeviceModels`。
 - normal 依赖：`winwincode-codex`、`winwincode-domain`、`winwincode-execution-port`、`winwincode-network`、`winwincode-provider`。
@@ -187,7 +187,7 @@
 
 ## `winwincode-local`
 
-职责：在一个进程中组合 Control Plane 和 Worker，并用内存 ExecutionPort 转发类型化消息。
+职责：在一个进程中组合 Control Plane 和 Worker，并用内存 ExecutionPort 转发类型化消息。`LocalLauncher::start` 接收通用的 `Core` 与 `Codex`，不自动装配设备模型。需要设备模型的同进程组合通过 `WorkerMain::with_provider_runtime` 显式注入运行账本和 Device 拥有的 `ProviderExecutionSource`。
 
 - 主要入口：`crates/winwincode-local/src/lib.rs::LocalLauncher` 和 `LocalExecutionPortHandle`。
 - normal 依赖：`winwincode-control-plane`、`winwincode-observability-core`、`winwincode-worker`。
@@ -205,7 +205,7 @@
 
 ## `winwincode-device-client`
 
-职责：实现设备身份、本地仓库映射、`ClientControlPort` 交换、占用状态、Worker 进程监管和 Worker 消息转发。
+职责：实现设备身份、本地仓库映射、`ClientControlPort` 交换、占用状态、Worker 进程监管和 Worker 消息转发。Device 长期持有 Provider 配置库，在父子私有管道中按实际监管的执行身份处理凭据请求。远程执行和用量请求使用独立的 HTTP DTO。Device 将 MCP 配置物化到 `kernel_home`；该目录仍可包含 MCP env 和 header。
 
 - 主要入口：`crates/winwincode-device-client/src/lib.rs`；守护循环位于 `src/daemon.rs`，SQLite 存储位于 `src/store.rs::DeviceStore`。
 - normal 依赖：`winwincode-api`、`winwincode-client-port`、`winwincode-network`、`winwincode-provider`。

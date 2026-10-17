@@ -21,7 +21,7 @@ use tokio_rustls::rustls::{
 use winwincode_execution_port::generated::{
     ExecutionPortMessage, ModelChunkMessage, ModelOpenMessage,
 };
-use winwincode_provider::{DeviceModelAdmission, DeviceModelPermit, DeviceProviderStore};
+use winwincode_provider::{DeviceModelAdmission, DeviceModelPermit, ProviderRuntimeStore};
 
 const CHILD_DIRECTORY: &str = "WWC_WORKER_MODEL_RECOVERY_TEST_DIRECTORY";
 const CHILD_ENDPOINT: &str = "WWC_WORKER_MODEL_RECOVERY_TEST_ENDPOINT";
@@ -177,12 +177,12 @@ fn serve_retry(
 }
 
 fn run_worker_retry(directory: &Path, endpoint: &str) {
-    let _ = DeviceProviderStore::open(directory).unwrap();
-    let mut models = DeviceModels::new(directory);
-    let database = rusqlite::Connection::open(directory.join("providers.sqlite3")).unwrap();
+    let _ = ProviderRuntimeStore::prepare(directory).unwrap();
+    let mut models = DeviceModels::for_test(directory);
+    let database = crate::device_model::concurrency_tests::runtime_database(directory);
     configure_retry_provider(&database, endpoint);
     let open = completed_tool_history_open();
-    let store = DeviceProviderStore::open(directory).unwrap();
+    let store = ProviderRuntimeStore::prepare(directory).unwrap();
     let held = (0..2).map(|_| acquire(&store, &open)).collect::<Vec<_>>();
     assert_eq!(
         models
@@ -258,16 +258,16 @@ fn configure_retry_provider(database: &rusqlite::Connection, endpoint: &str) {
         "protocol":"openai_chat_completions","modelIds":["qwen-model"],"enabled":true});
     database
         .execute(
-            "INSERT INTO providers VALUES (?1,?2,?3)",
+            "INSERT INTO configuration.providers VALUES (?1,?2,?3)",
             rusqlite::params!["qwen", config.to_string(), b"fixture-only-key".as_slice()],
         )
         .unwrap();
 }
 
 fn crash_after_retained_retry(directory: &Path, endpoint: &str) -> ! {
-    let _ = DeviceProviderStore::open(directory).unwrap();
-    let mut models = DeviceModels::new(directory);
-    let database = rusqlite::Connection::open(directory.join("providers.sqlite3")).unwrap();
+    let _ = ProviderRuntimeStore::prepare(directory).unwrap();
+    let mut models = DeviceModels::for_test(directory);
+    let database = crate::device_model::concurrency_tests::runtime_database(directory);
     configure_retry_provider(&database, endpoint);
     let open = completed_tool_history_open();
     assert_eq!(
@@ -294,15 +294,15 @@ fn crash_after_retained_retry(directory: &Path, endpoint: &str) -> ! {
 }
 
 fn run_reopened_retry(directory: &Path) {
-    let database = rusqlite::Connection::open(directory.join("providers.sqlite3")).unwrap();
-    let store = DeviceProviderStore::open(directory).unwrap();
+    let database = crate::device_model::concurrency_tests::runtime_database(directory);
+    let store = ProviderRuntimeStore::prepare(directory).unwrap();
     let open = completed_tool_history_open();
     assert!(matches!(
         store.try_model_permit(&open).unwrap(),
         DeviceModelAdmission::RecoverExchange
     ));
     let mut held = (0..3).map(|_| acquire(&store, &open)).collect::<Vec<_>>();
-    let mut models = DeviceModels::new(directory);
+    let mut models = DeviceModels::for_test(directory);
     assert_eq!(
         models
             .send(
@@ -330,7 +330,7 @@ fn run_reopened_retry(directory: &Path) {
     held.push(acquire(&store, &open));
     assert_full(&store, &open);
     drop(models);
-    let mut replay = DeviceModels::new(directory);
+    let mut replay = DeviceModels::for_test(directory);
     assert_eq!(
         replay
             .send(
@@ -378,7 +378,7 @@ fn completed_tool_history_open() -> ModelOpenMessage {
     open
 }
 
-fn acquire(store: &DeviceProviderStore, open: &ModelOpenMessage) -> DeviceModelPermit {
+fn acquire(store: &ProviderRuntimeStore, open: &ModelOpenMessage) -> DeviceModelPermit {
     match store.try_model_attempt_permit(open).unwrap() {
         DeviceModelAdmission::InvokeAttempt(permit) => permit,
         DeviceModelAdmission::Deferred => panic!("expected an available actual-invocation slot"),
@@ -386,7 +386,7 @@ fn acquire(store: &DeviceProviderStore, open: &ModelOpenMessage) -> DeviceModelP
     }
 }
 
-fn assert_full(store: &DeviceProviderStore, open: &ModelOpenMessage) {
+fn assert_full(store: &ProviderRuntimeStore, open: &ModelOpenMessage) {
     assert!(matches!(
         store.try_model_attempt_permit(open).unwrap(),
         DeviceModelAdmission::Deferred

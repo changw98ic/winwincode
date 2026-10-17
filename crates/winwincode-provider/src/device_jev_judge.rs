@@ -1,8 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 
+#[cfg(test)]
+use crate::DeviceProviderStore;
 use crate::{
-    DeviceProviderError, DeviceProviderStore, JevExecutionOptions, JevHypothesis, JevRun,
-    JevRuntime, JevScores,
+    DeviceProviderError, JevExecutionOptions, JevHypothesis, JevRun, JevRuntime, JevScores,
+    ProviderRuntimeStore,
 };
 use rusqlite::{OptionalExtension, params};
 use sha2::{Digest, Sha256};
@@ -16,7 +18,7 @@ pub enum StoredJevJudge {
     Incomplete,
 }
 
-impl DeviceProviderStore {
+impl ProviderRuntimeStore {
     pub(crate) async fn prepare_jev_judge_request(
         &self,
         open: &winwincode_execution_port::generated::ModelOpenMessage,
@@ -37,6 +39,9 @@ impl DeviceProviderStore {
         }
         let judge = judge.ok_or(DeviceProviderError::StateInvalid)?;
         let inputs = judge.as_array().ok_or(DeviceProviderError::StateInvalid)?;
+        if inputs.is_empty() {
+            return Ok(());
+        }
         let provider = session
             .profile
             .source
@@ -44,7 +49,15 @@ impl DeviceProviderStore {
             .jev_judge
             .as_ref()
             .ok_or(DeviceProviderError::StateInvalid)?;
-        let settings = self.resolve_jev_settings(provider)?;
+        let execution_request = self.jev_execution_request(
+            &format!("judge:{}:0", open.model_exchange_id.0),
+            provider,
+            true,
+        )?;
+        let settings = self
+            .execution_source()?
+            .jev_parameters(&execution_request)?
+            .settings();
         let configuration_digest =
             crate::device_jev_context::configured_context_digest(session, &settings)?;
         let mut feedback = Vec::new();
@@ -174,7 +187,11 @@ impl DeviceProviderStore {
             .jev_judge
             .as_ref()
             .ok_or(DeviceProviderError::StateInvalid)?;
-        let settings = self.resolve_jev_settings(provider)?;
+        let execution_request = self.jev_execution_request(operation_id, provider, true)?;
+        let parameters = self
+            .execution_source()?
+            .jev_parameters(&execution_request)?;
+        let settings = parameters.settings();
         let (config, retry) = settings
             .to_config_and_runtime()
             .map_err(|_| DeviceProviderError::StateInvalid)?;
@@ -189,7 +206,14 @@ impl DeviceProviderStore {
             ))],
             retry,
         )
-        .with_cancellation(cancellation);
+        .with_cancellation(cancellation)
+        .with_execution_source(
+            self.execution_source
+                .clone()
+                .ok_or(DeviceProviderError::StateInvalid)?,
+            execution_request,
+            parameters,
+        );
         self.evaluate_judge_once_authorized(
             operation_id,
             &digest,
@@ -325,12 +349,13 @@ mod tests {
     fn model_request_receives_only_provisional_feedback_from_retained_judge() {
         use winwincode_execution_port::agent_config::resolve_agent_session_config;
         let root = std::env::temp_dir().join(format!("wwc-judge-hook-{}", std::process::id()));
-        let store = DeviceProviderStore::open(&root).unwrap();
+        let config = DeviceProviderStore::open(&root).unwrap();
         let settings: crate::OpenJevRemoteSettings = serde_json::from_value(serde_json::json!({
             "providerId":"judge", "endpoint":"https://nli.invalid/score", "apiKey":"invalid-offline-key",
             "modelId":"fixture", "timeoutMs":1000,"retries":0,"devices":["remote"],"dtypes":["auto"]
         })).unwrap();
-        store.save_jev_settings(&settings).unwrap();
+        config.save_jev_settings(&settings).unwrap();
+        let store = ProviderRuntimeStore::prepare(&root).unwrap();
         let session = resolve_agent_session_config(&winwincode_domain::WorkerId("worker".into()),
             &serde_json::from_value(serde_json::json!({"capabilityDigest":format!("sha256:{}","a".repeat(64)),"features":[],"maxConcurrentJobs":1,"platform":"aarch64-apple-darwin"})).unwrap(),
             "executor", serde_json::from_value(serde_json::json!({"provider":"fixture","model":"fixture","reasoning":"max","tools":[],"sandbox":"candidate","instructions":null,"jevJudge":"judge"})).unwrap(),
@@ -418,6 +443,7 @@ mod tests {
             assert_eq!(provider.calls(),1);
         });
         drop(store);
+        drop(config);
         std::fs::remove_dir_all(root).unwrap();
     }
 
@@ -429,7 +455,7 @@ mod tests {
     fn live_authorization_guards_each_judge_operation_but_allows_exact_recovery() {
         let root = std::env::temp_dir().join(format!("wwc-judge-guard-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
-        let store = DeviceProviderStore::open(&root).unwrap();
+        let store = ProviderRuntimeStore::prepare(&root).unwrap();
         let provider = Arc::new(MockJevProvider::healthy("judge"));
         let runtime = JevRuntime::new(
             vec![provider.clone()],
@@ -575,10 +601,10 @@ mod tests {
                 .unwrap()
                 .as_nanos()
         ));
-        let store = DeviceProviderStore::open(&root).unwrap();
+        let store = ProviderRuntimeStore::prepare(&root).unwrap();
         store.connection.execute("INSERT INTO jev_context_exchanges(operation_id,digest,request_json) VALUES('retained','digest','input')",[]).unwrap();
         drop(store);
-        let store = DeviceProviderStore::open(&root).unwrap();
+        let store = ProviderRuntimeStore::prepare(&root).unwrap();
         assert_eq!(
             store
                 .connection
@@ -611,7 +637,7 @@ mod tests {
             .enable_all()
             .build()
             .unwrap();
-        let evaluate = |store: &DeviceProviderStore, input| {
+        let evaluate = |store: &ProviderRuntimeStore, input| {
             executor.block_on(store.evaluate_judge_once(
                 "judge:one",
                 &digest,
@@ -630,7 +656,7 @@ mod tests {
         assert_eq!(provider.calls(), 1);
         assert!(run.observation.is_some());
         drop(store);
-        let store = DeviceProviderStore::open(&root).unwrap();
+        let store = ProviderRuntimeStore::prepare(&root).unwrap();
         assert_eq!(
             evaluate(&store, input.clone()).unwrap(),
             StoredJevJudge::Completed {

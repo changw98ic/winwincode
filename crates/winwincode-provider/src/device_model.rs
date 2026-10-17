@@ -45,9 +45,12 @@ use winwincode_execution_port::generated::{
 };
 
 use crate::{
-    CredentialLeakGate, DeviceProviderError, DeviceProviderStore, ProviderAdapterInvocation,
-    ProviderAdapterPort, ProviderGatewayOpenReceipt, ProviderStreamControlAction,
+    CredentialLeakGate, DeviceProviderError, ProviderAdapterInvocation, ProviderAdapterPort,
+    ProviderGatewayOpenReceipt, ProviderRuntimeStore, ProviderStreamControlAction,
 };
+
+#[cfg(test)]
+use crate::DeviceProviderStore;
 
 /// One Worker-owned Provider execution entry. A deferred retry has no terminal frame.
 #[derive(Debug)]
@@ -373,7 +376,7 @@ fn model_auxiliary<T>(result: Result<T, DeviceProviderError>, stage: &'static st
     }
 }
 
-impl DeviceProviderStore {
+impl ProviderRuntimeStore {
     pub fn execute_model(
         &self,
         open: &ModelOpenMessage,
@@ -690,6 +693,27 @@ impl DeviceProviderStore {
         }
     }
 
+    fn retain_model_attempt_not_sent(
+        &self,
+        open: &ModelOpenMessage,
+        attempt_number: i64,
+        code: &'static str,
+    ) -> Result<(), DeviceProviderError> {
+        let code = if self.model_cancelled(&open.model_exchange_id.0)? {
+            "DEVICE_MODEL_CANCELLED"
+        } else {
+            code
+        };
+        let changed = self.connection.execute(
+            "UPDATE model_invocation_attempts SET state='not_sent',failure_chunks=?3 WHERE exchange_id=?1 AND attempt_number=?2 AND state='prepared'",
+            params![open.model_exchange_id.0, attempt_number, serde_json::to_string(&vec![model_failure(open, code)])?],
+        )?;
+        if changed != 1 {
+            return Err(DeviceProviderError::StateInvalid);
+        }
+        Ok(())
+    }
+
     #[allow(clippy::too_many_lines)]
     fn invoke_model_step_using(
         &self,
@@ -718,15 +742,48 @@ impl DeviceProviderStore {
             .and_then(serde_json::Value::as_str)
             .ok_or(DeviceModelFailure::RequestInvalid)?
             .to_owned();
-        let (config, secret, codex_account) = self.resolve_connection(&provider_id)?;
-        if !config.enabled || !config.model_ids.iter().any(|model| model == &model_id) {
-            return Err(DeviceModelFailure::Unavailable);
+        let fusion_member = request
+            .get("fusionMember")
+            .and_then(serde_json::Value::as_str);
+        let observer = request
+            .pointer("/request/text/format/name")
+            .and_then(serde_json::Value::as_str)
+            == Some("winwincode_observation_response")
+            && request
+                .pointer("/request/text/format/type")
+                .and_then(serde_json::Value::as_str)
+                == Some("json_schema")
+            && request
+                .pointer("/request/text/format/strict")
+                .and_then(serde_json::Value::as_bool)
+                == Some(true);
+        if observer && fusion_member.is_some() {
+            return Err(DeviceModelFailure::RequestInvalid);
         }
+        let execution_request = crate::device_execution_source::ProviderExecutionRequest {
+            context: Some(open.into()),
+            provider_id: provider_id.clone(),
+            model_id: Some(model_id.clone()),
+            purpose: if observer {
+                crate::device_execution_source::ProviderExecutionPurpose::Observer
+            } else {
+                fusion_member.map_or(
+                    crate::device_execution_source::ProviderExecutionPurpose::Model,
+                    |member| crate::device_execution_source::ProviderExecutionPurpose::Fusion {
+                        member_id: member.to_owned(),
+                    },
+                )
+            },
+            physical_attempt: None,
+            adapter_request_id: None,
+        };
         if let Some(prepared) = self.prepared_model_retry_payload(open)? {
             payload = prepared;
         } else if request.get("winwincodeJevContext").is_some()
             || request.get("winwincodeJevTask").is_some()
         {
+            self.execution_source()?
+                .model_parameters(&execution_request)?;
             let runtime = tokio::runtime::Builder::new_current_thread()
                 .enable_time()
                 .build()
@@ -752,7 +809,6 @@ impl DeviceProviderStore {
         } else {
             self.retain_prepared_payload(open, &payload)?;
         }
-        let headers = self.custom_headers(&provider_id)?;
         let mut attempt_number: i64 = self.connection.query_row("SELECT COALESCE(MAX(attempt_number),0) FROM model_invocation_attempts WHERE exchange_id=?1",[&open.model_exchange_id.0],|row|row.get(0))?;
         let retained_retry = self.model_retry_state(open)?;
         let (next_policy_attempt, _, connection_attempt) = retained_retry.unwrap_or((1, 0, 0));
@@ -826,21 +882,6 @@ impl DeviceProviderStore {
                 "device-{}:attempt:{attempt_number}",
                 open.model_exchange_id.0
             );
-            let adapter =
-                make_adapter(&config, headers.clone(), codex_account.clone()).map_err(|cause| {
-                    match cause {
-                        DeviceProviderError::StateInvalid => {
-                            DeviceModelFailure::InvalidConfiguration
-                        }
-                        _ => DeviceModelFailure::Durable(cause),
-                    }
-                })?;
-            let Some(cancellation) = self.active_cancellation(&open.model_exchange_id.0)? else {
-                return Err(DeviceModelFailure::Unavailable);
-            };
-            let adapter = adapter
-                .with_cancellation(cancellation)
-                .with_sse_failure_log(sse_failure_log.clone());
             let inserted = self.connection.execute(
                 "INSERT INTO model_invocation_attempts(exchange_id,attempt_number,adapter_request_id,state,request_json,request_payload) SELECT ?1,?2,?3,'prepared',?6,?7 WHERE EXISTS(SELECT 1 FROM exchanges WHERE exchange_id=?1 AND cancelled=0 AND chunks IS NULL) AND NOT EXISTS(SELECT 1 FROM accounting_closed_attempts WHERE job_id=?4 AND attempt=?5)",
                 params![open.model_exchange_id.0, attempt_number, adapter_request_id, open.lease.job_id.0, open.lease.attempt, serde_json::to_string(open)?, payload],
@@ -863,8 +904,114 @@ impl DeviceProviderStore {
                 );
                 return Err(DeviceModelFailure::LeaseExpired);
             }
+            let mut request = execution_request.clone();
+            request.physical_attempt = Some(attempt_number);
+            request.adapter_request_id = Some(adapter_request_id.clone());
+            let may_start = || {
+                can_start() && matches!(self.model_cancelled(&open.model_exchange_id.0), Ok(false))
+            };
+            let material = self
+                .execution_source()
+                .and_then(|source| source.resolve_connection(&request, &may_start));
+            let mut material = match material {
+                Ok(material) if may_start() => material,
+                Ok(_) => {
+                    self.retain_model_attempt_not_sent(
+                        open,
+                        attempt_number,
+                        DeviceModelFailure::LeaseExpired.code(),
+                    )?;
+                    return Err(DeviceModelFailure::LeaseExpired);
+                }
+                Err(error) => {
+                    self.retain_model_attempt_not_sent(open, attempt_number, error.code())?;
+                    return Err(error.into());
+                }
+            };
+            let crate::device_execution_source::ProviderConnectionParameters::Model(parameters) =
+                &material.parameters
+            else {
+                self.retain_model_attempt_not_sent(
+                    open,
+                    attempt_number,
+                    DeviceModelFailure::InvalidConfiguration.code(),
+                )?;
+                return Err(DeviceModelFailure::InvalidConfiguration);
+            };
+            if parameters.provider_id != provider_id {
+                self.retain_model_attempt_not_sent(
+                    open,
+                    attempt_number,
+                    DeviceModelFailure::InvalidConfiguration.code(),
+                )?;
+                return Err(DeviceModelFailure::InvalidConfiguration);
+            }
+            let config = parameters.adapter_config(&model_id);
+            let secret = match material
+                .take_secret()
+                .and_then(|secret| secret.ok_or(DeviceProviderError::StateInvalid))
+            {
+                Ok(secret) => secret,
+                Err(error) => {
+                    self.retain_model_attempt_not_sent(
+                        open,
+                        attempt_number,
+                        DeviceModelFailure::InvalidConfiguration.code(),
+                    )?;
+                    return Err(error.into());
+                }
+            };
             let mut leak_gate = CredentialLeakGate::new();
             leak_gate.track_secret(&secret);
+            for (name, value) in &material.custom_headers {
+                leak_gate.track_provider_header(
+                    name,
+                    value,
+                    config.protocol
+                        == winwincode_api::generated::DeviceProviderProtocol::OpenaiResponses,
+                );
+            }
+            if let Some(account) = &material.codex_account
+                && let Ok(sensitive) =
+                    crate::ResolvedSecret::from_bytes(account.as_bytes().to_vec())
+            {
+                leak_gate.track_secret(&sensitive);
+            }
+            let adapter = make_adapter(
+                &config,
+                std::mem::take(&mut material.custom_headers),
+                material.codex_account.take(),
+            )
+            .map_err(|cause| match cause {
+                DeviceProviderError::StateInvalid => DeviceModelFailure::InvalidConfiguration,
+                _ => DeviceModelFailure::Durable(cause),
+            });
+            let adapter = match adapter {
+                Ok(adapter) => adapter,
+                Err(error) => {
+                    self.retain_model_attempt_not_sent(open, attempt_number, error.code())?;
+                    return Err(error);
+                }
+            };
+            let Some(cancellation) = self.active_cancellation(&open.model_exchange_id.0)? else {
+                self.retain_model_attempt_not_sent(
+                    open,
+                    attempt_number,
+                    DeviceModelFailure::Unavailable.code(),
+                )?;
+                return Err(DeviceModelFailure::Unavailable);
+            };
+            let adapter = adapter
+                .with_cancellation(cancellation)
+                .with_sse_failure_log(sse_failure_log.clone());
+            if !may_start() {
+                self.retain_model_attempt_not_sent(
+                    open,
+                    attempt_number,
+                    DeviceModelFailure::LeaseExpired.code(),
+                )?;
+                return Err(DeviceModelFailure::LeaseExpired);
+            }
             let invocation = ProviderAdapterInvocation {
                 model_exchange_id: &open.model_exchange_id,
                 request_id: &open.request_id,
@@ -936,7 +1083,7 @@ impl DeviceProviderStore {
                             error.metadata(),
                         )?),
                         retryable: error.retryable(),
-                        response: error.response().map(<[u8]>::to_vec),
+                        response: None,
                         response_bytes_received: error.response_bytes_received(),
                         accounting: error
                             .observed_receipt()
@@ -1763,12 +1910,13 @@ mod tests {
     use super::*;
 
     #[test]
-    fn provider_adapter_setup_preserves_storage_io_encoding_failure_before_any_attempt() {
+    fn provider_adapter_setup_preserves_storage_io_encoding_failure_before_any_physical_send() {
         let root =
             std::env::temp_dir().join(format!("wwc-model-setup-source-{}", std::process::id()));
-        let store = DeviceProviderStore::open(&root).unwrap();
+        let store = ProviderRuntimeStore::prepare(&root).unwrap();
         let config = serde_json::json!({"providerId":"setup-fixture","displayName":"fixture","endpoint":"https://example.com/responses","protocol":"canonical","modelIds":["fixture-model"],"enabled":true});
-        store
+        DeviceProviderStore::open(&root)
+            .unwrap()
             .connection
             .execute(
                 "INSERT INTO providers VALUES (?1,?2,?3)",
@@ -1838,7 +1986,7 @@ mod tests {
         let attempts: i64 = store
             .connection
             .query_row(
-                "SELECT count(*) FROM model_invocation_attempts",
+                "SELECT count(*) FROM model_invocation_attempts WHERE state != 'not_sent'",
                 [],
                 |row| row.get(0),
             )
@@ -1889,8 +2037,8 @@ mod tests {
                 .unwrap()
                 .as_nanos()
         ));
-        let store = DeviceProviderStore::open(&root).unwrap();
-        let accounting = DeviceProviderStore::open(&root).unwrap();
+        let store = ProviderRuntimeStore::prepare(&root).unwrap();
+        let accounting = ProviderRuntimeStore::prepare(&root).unwrap();
         store
             .connection
             .busy_timeout(Duration::from_millis(50))
@@ -2036,7 +2184,7 @@ mod tests {
     fn invalid_local_model_requests_retain_a_request_failure_before_provider_resolution() {
         let directory =
             std::env::temp_dir().join(format!("wwc-invalid-model-request-{}", std::process::id()));
-        let store = DeviceProviderStore::open(&directory).unwrap();
+        let store = ProviderRuntimeStore::prepare(&directory).unwrap();
         let fixture: serde_json::Value = serde_json::from_str(include_str!(
             "../../../tests/fixtures/contracts/execution-port.valid.json"
         ))
@@ -2088,7 +2236,7 @@ mod tests {
                 .unwrap()
                 .as_nanos()
         ));
-        let store = DeviceProviderStore::open(&root).unwrap();
+        let store = ProviderRuntimeStore::prepare(&root).unwrap();
         let fixture: serde_json::Value = serde_json::from_str(include_str!(
             "../../../tests/fixtures/contracts/execution-port.valid.json"
         ))
@@ -2194,7 +2342,7 @@ mod tests {
             "wwc-model-preparation-expiry-{}",
             std::process::id()
         ));
-        let store = DeviceProviderStore::open(&root).unwrap();
+        let store = ProviderRuntimeStore::prepare(&root).unwrap();
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         listener.set_nonblocking(true).unwrap();
         let port = listener.local_addr().unwrap().port();
@@ -2216,7 +2364,8 @@ mod tests {
             }
         });
         let config = serde_json::json!({"providerId":"lease-fixture","displayName":"fixture","endpoint":format!("https://127.0.0.1:{port}/v1/responses"),"protocol":"canonical","modelIds":["fixture-model"],"enabled":true});
-        store
+        DeviceProviderStore::open(&root)
+            .unwrap()
             .connection
             .execute(
                 "INSERT INTO providers VALUES (?1,?2,?3)",
@@ -2282,6 +2431,173 @@ mod tests {
     }
 
     #[test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "The expiry and cancellation cases share one exact replay and slot-release fixture"
+    )]
+    fn material_wait_stops_on_expiry_or_cancel_and_replay_does_not_resolve_again() {
+        use crate::device_execution_source::{
+            ProviderConnectionMaterial, ProviderConnectionParameters, ProviderExecutionRequest,
+            ProviderExecutionSource, ProviderJevParameters, ProviderModelParameters,
+        };
+        use std::sync::{
+            Arc,
+            atomic::{AtomicBool, AtomicUsize, Ordering},
+        };
+        #[derive(Debug)]
+        struct Source {
+            live: Arc<AtomicBool>,
+            calls: Arc<AtomicUsize>,
+            cancel_directory: Option<std::path::PathBuf>,
+        }
+        impl ProviderExecutionSource for Source {
+            fn model_parameters(
+                &self,
+                _: &ProviderExecutionRequest,
+            ) -> Result<ProviderModelParameters, DeviceProviderError> {
+                Err(DeviceProviderError::StateInvalid)
+            }
+            fn jev_parameters(
+                &self,
+                _: &ProviderExecutionRequest,
+            ) -> Result<ProviderJevParameters, DeviceProviderError> {
+                Err(DeviceProviderError::StateInvalid)
+            }
+            fn resolve_connection(
+                &self,
+                request: &ProviderExecutionRequest,
+                _: &dyn Fn() -> bool,
+            ) -> Result<ProviderConnectionMaterial, DeviceProviderError> {
+                self.calls.fetch_add(1, Ordering::SeqCst);
+                assert!(request.context.is_some());
+                assert_eq!(request.physical_attempt, Some(1));
+                if let Some(directory) = &self.cancel_directory {
+                    ProviderRuntimeStore::open_existing(directory)?
+                        .cancel_model(&request.context.as_ref().unwrap().model_exchange_id.0)?;
+                } else {
+                    self.live.store(false, Ordering::SeqCst);
+                }
+                Ok(ProviderConnectionMaterial {
+                    parameters: ProviderConnectionParameters::Model(ProviderModelParameters {
+                        provider_id: request.provider_id.clone(),
+                        endpoint: "https://fixture.invalid/responses".into(),
+                        protocol: winwincode_api::generated::DeviceProviderProtocol::Canonical,
+                        responses_structured_output: None,
+                    }),
+                    secret: Some(b"fixture-private-token".to_vec()),
+                    custom_headers: std::collections::BTreeMap::new(),
+                    codex_account: None,
+                })
+            }
+        }
+        fn run_case(cancel: bool) {
+            let root = std::env::temp_dir().join(format!(
+                "wwc-material-authority-{}-{}",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos()
+            ));
+            let device = ProviderRuntimeStore::prepare(&root).unwrap();
+            let live = Arc::new(AtomicBool::new(true));
+            let calls = Arc::new(AtomicUsize::new(0));
+            let store = ProviderRuntimeStore::open_existing(device.directory())
+                .unwrap()
+                .with_execution_source(Arc::new(Source {
+                    live: Arc::clone(&live),
+                    calls: Arc::clone(&calls),
+                    cancel_directory: cancel.then(|| device.directory().to_path_buf()),
+                }));
+            let fixture: serde_json::Value = serde_json::from_str(include_str!(
+                "../../../tests/fixtures/contracts/execution-port.valid.json"
+            ))
+            .unwrap();
+            let mut open: ModelOpenMessage = serde_json::from_value(
+                fixture["messages"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .find(|message| message["kind"] == "model.open")
+                    .unwrap()
+                    .clone(),
+            )
+            .unwrap();
+            let payload = serde_json::to_vec(&serde_json::json!({"provider":"material-fixture","request":{"model":"fixture-model","stream":true,"input":"fixture"}})).unwrap();
+            open.request.content_type = "application/json".into();
+            open.request.data_base64 = STANDARD.encode(&payload);
+            open.request.payload_digest.0 = format!("sha256:{:x}", Sha256::digest(&payload));
+            let chunks = store
+                .execute_model_using(
+                    &open,
+                    || live.load(Ordering::SeqCst),
+                    |_, _| panic!("ended authority cannot construct an adapter"),
+                )
+                .unwrap();
+            if cancel {
+                assert!(chunks.is_empty());
+            } else {
+                assert_eq!(
+                    chunks[0].error.as_ref().unwrap().code,
+                    ExecutionPortErrorCode::LeaseExpired
+                );
+            }
+            let state: String = store
+                .connection
+                .query_row(
+                    "SELECT state FROM model_invocation_attempts WHERE exchange_id=?1",
+                    [&open.model_exchange_id.0],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(state, "not_sent");
+            let failure: String = store
+                .connection
+                .query_row(
+                    "SELECT failure_chunks FROM model_invocation_attempts WHERE exchange_id=?1",
+                    [&open.model_exchange_id.0],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert!(failure.contains(if cancel {
+                "DEVICE_MODEL_CANCELLED"
+            } else {
+                "DEVICE_MODEL_START_LEASE_EXPIRED"
+            }));
+            assert_eq!(
+                store
+                    .execute_model_using(
+                        &open,
+                        || false,
+                        |_, _| panic!("replay cannot construct an adapter")
+                    )
+                    .unwrap(),
+                chunks
+            );
+            assert_eq!(calls.load(Ordering::SeqCst), 1);
+            let mut permits = Vec::new();
+            for _ in 0..3 {
+                let crate::DeviceModelAdmission::InvokeAttempt(permit) =
+                    store.try_model_attempt_permit(&open).unwrap()
+                else {
+                    panic!("material failure leaked a physical slot")
+                };
+                permits.push(permit);
+            }
+            assert!(matches!(
+                store.try_model_attempt_permit(&open).unwrap(),
+                crate::DeviceModelAdmission::Deferred
+            ));
+            drop(permits);
+            drop(store);
+            drop(device);
+            std::fs::remove_dir_all(root).unwrap();
+        }
+        run_case(false);
+        run_case(true);
+    }
+
+    #[test]
     fn model_failure_codes_preserve_the_provider_failure_boundary() {
         let fixture: serde_json::Value = serde_json::from_str(include_str!(
             "../../../tests/fixtures/contracts/execution-port.valid.json"
@@ -2334,7 +2650,7 @@ mod tests {
     fn prepared_payload_is_exact_single_write_and_fenced() {
         let directory =
             std::env::temp_dir().join(format!("wwc-prepared-model-{}", std::process::id()));
-        let store = DeviceProviderStore::open(&directory).unwrap();
+        let store = ProviderRuntimeStore::prepare(&directory).unwrap();
         let fixture: serde_json::Value = serde_json::from_str(include_str!(
             "../../../tests/fixtures/contracts/execution-port.valid.json"
         ))
@@ -2366,7 +2682,7 @@ mod tests {
         assert!(store.retain_prepared_payload(&open, b"overwrite").is_err());
         assert!(store.prepared_model_retry_payload(&open).unwrap().is_none());
         drop(store);
-        let store = DeviceProviderStore::open(&directory).unwrap();
+        let store = ProviderRuntimeStore::prepare(&directory).unwrap();
         let saved: Vec<u8> = store
             .connection
             .query_row(

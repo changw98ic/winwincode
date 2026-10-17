@@ -77,6 +77,81 @@ fn boundaries() -> [CredentialOutputBoundary; 12] {
 }
 
 #[test]
+fn bearer_documentation_is_safe_at_every_output_boundary() {
+    let gate = CredentialLeakGate::new();
+    for text in [
+        "Authorization: Bearer $OPENAI_API_KEY",
+        "Authorization: Bearer ${OPENAI_API_KEY}",
+        "Bearer YOUR_API_KEY",
+        "Bearer YOUR_APPLICATION_API_KEY",
+        "Bearer YOURAPPLICATIONTOKEN",
+        "Authorization: Bearer YOUR_APPLICATION_API_KEY.",
+        "Bearer process.env.OPENAI_API_KEY.",
+        "Bearer import.meta.env.",
+        "use a bearer token",
+        "Bearer process.env.OPENAI_API_KEY",
+        "Bearer import.meta.env.PUBLIC_API_TOKEN",
+        "Bearer <YOUR_APPLICATION_TOKEN>",
+    ] {
+        for boundary in boundaries() {
+            gate.inspect_bytes(boundary, text.as_bytes())
+                .unwrap_or_else(|error| panic!("{boundary:?}: {text}: {error}"));
+            gate.inspect_serializable(boundary, &json!({ "output": { "text": text } }))
+                .unwrap_or_else(|error| panic!("{boundary:?}: {text}: {error}"));
+        }
+    }
+}
+
+#[test]
+fn bearer_documentation_keeps_real_secrets_and_authentication_metadata_private() {
+    for secret_text in [
+        "$OPENAI_API_KEY",
+        "YOUR_APPLICATION_API_KEY",
+        "process.env.OPENAI_API_KEY",
+        "token",
+    ] {
+        let mut gate = CredentialLeakGate::new();
+        gate.track_secret(
+            &ResolvedSecret::from_bytes(secret_text.as_bytes().to_vec())
+                .expect("configured secret"),
+        );
+        for boundary in boundaries() {
+            let text = format!("Authorization: Bearer {secret_text}");
+            assert_eq!(
+                gate.inspect_bytes(boundary, text.as_bytes())
+                    .expect_err("configured secret must remain private")
+                    .kind(),
+                CredentialLeakErrorKind::ExactSecret
+            );
+        }
+    }
+    let gate = CredentialLeakGate::new();
+    for boundary in boundaries() {
+        for token in [
+            "abcdefghijklmnop",
+            "abcdefghijklmnop._~+/-==",
+            "1234567890123456",
+        ] {
+            assert_eq!(
+                gate.inspect_bytes(boundary, format!("Bearer {token}").as_bytes())
+                    .expect_err("opaque bearer credential must remain private")
+                    .kind(),
+                CredentialLeakErrorKind::RecognizedEncoding
+            );
+        }
+        assert_eq!(
+            gate.inspect_serializable(
+                boundary,
+                &json!({ "authorization": "Bearer $OPENAI_API_KEY" }),
+            )
+            .expect_err("authentication metadata remains private")
+            .kind(),
+            CredentialLeakErrorKind::ForbiddenField
+        );
+    }
+}
+
+#[test]
 fn exact_fingerprints_and_field_policy_fail_closed_with_secret_free_diagnostics() {
     let secret = ResolvedSecret::from_bytes(EXACT_SECRET.to_vec()).expect("fixture secret");
     let mut gate = CredentialLeakGate::new();

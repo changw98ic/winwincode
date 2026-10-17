@@ -1,9 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use super::*;
+use crate::ProviderRuntimeStore;
 use std::path::PathBuf;
 
-fn setup(case: &str) -> (PathBuf, DeviceProviderStore, ModelOpenMessage) {
+fn setup(case: &str) -> (PathBuf, ProviderRuntimeStore, ModelOpenMessage) {
     let root = std::env::temp_dir().join(format!(
         "wwc-call-pairs-{case}-{}-{}",
         std::process::id(),
@@ -12,7 +13,7 @@ fn setup(case: &str) -> (PathBuf, DeviceProviderStore, ModelOpenMessage) {
             .unwrap()
             .as_nanos()
     ));
-    let store = DeviceProviderStore::open(&root).unwrap();
+    let store = ProviderRuntimeStore::prepare(&root).unwrap();
     let fixture: serde_json::Value = serde_json::from_str(include_str!(
         "../../../tests/fixtures/contracts/execution-port.valid.json"
     ))

@@ -2,7 +2,7 @@
 
 use crate::{
     DeviceProviderStore, HttpsSseProviderAdapter, HttpsSseProviderConfig, HttpsSseProviderLimits,
-    HttpsSseProviderTimeouts,
+    HttpsSseProviderTimeouts, ProviderRuntimeStore,
 };
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use rusqlite::params;
@@ -171,10 +171,10 @@ fn failing_tls_provider() -> (String, Vec<u8>, std::thread::JoinHandle<usize>) {
 #[test]
 fn four_failed_model_calls_preserve_all_physical_diagnostics_and_paid_budget() {
     let directory = TestDirectory::new("four-attempts");
-    let store = DeviceProviderStore::open(&directory.0).unwrap();
+    let store = ProviderRuntimeStore::prepare(&directory.0).unwrap();
     let open = open_message();
     let (endpoint, certificate, server) = failing_tls_provider();
-    configure(&store, &endpoint);
+    configure(&DeviceProviderStore::open(&directory.0).unwrap(), &endpoint);
     let started = Instant::now();
     let chunks = store
         .execute_model_using(
@@ -258,11 +258,11 @@ fn four_failed_model_calls_preserve_all_physical_diagnostics_and_paid_budget() {
 #[test]
 fn connection_wait_keeps_physical_evidence_without_consuming_a_paid_attempt() {
     let directory = TestDirectory::new("connection-wait");
-    let store = DeviceProviderStore::open(&directory.0).unwrap();
+    let store = ProviderRuntimeStore::prepare(&directory.0).unwrap();
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let endpoint = format!("https://{}/v1/responses", listener.local_addr().unwrap());
     drop(listener);
-    configure(&store, &endpoint);
+    configure(&DeviceProviderStore::open(&directory.0).unwrap(), &endpoint);
     let open = open_message();
     let started = Instant::now();
     store

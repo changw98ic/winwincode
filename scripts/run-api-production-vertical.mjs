@@ -1873,7 +1873,7 @@ export async function runApiProductionVertical({
   writeJsonAtomically(join(fixtureDirectory, 'product-source-seal.json'), sourceSeal.seal)
   const certificate = createCertificate(fixtureDirectory)
   const proof = randomBytes(32).toString('base64url')
-  const proofs = [proof].filter(Boolean)
+  const proofs = [proof, ...deviceProviderSecrets].filter(Boolean)
   const controlledRepository = prepareControlledRepository({
     fixtureDirectory,
     files: scenario?.files,
@@ -2433,7 +2433,7 @@ export async function runApiProductionVertical({
     assert.equal(
       proofs.some(secret => serverOutput.includes(secret)),
       false,
-      'Server output must not contain bootstrap proof',
+      'Server output must not contain bootstrap or Provider secrets',
     )
     if (
       failure !== null

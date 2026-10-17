@@ -30,6 +30,7 @@ pub mod identity;
 pub mod managed_app;
 pub mod path_confinement;
 pub mod preview;
+mod provider_broker;
 pub mod remote_auth;
 pub mod repository;
 pub mod repository_exchange;
@@ -37,6 +38,7 @@ pub mod repository_git;
 pub mod service;
 pub mod store;
 pub mod supervisor;
+mod worker_channel;
 pub mod worker_logs;
 
 pub use apply_engine::{

@@ -68,7 +68,7 @@ try {
   })
 
   const directory = resolve(root, 'm19')
-  await mkdir(resolve(directory, 'device-data/providers'), { recursive: true })
+  await mkdir(resolve(directory, 'device-data/providers/runtime'), { recursive: true })
   await mkdir(resolve(directory, 'device-data/worker-sessions'), { recursive: true })
   const cell = buildBenchmarkPlan({ taskIds: Array.from({ length: 20 }, (_, index) => `offline-task-${index}`) }).cells[0]
   const request = { ...cell, callId: `${cell.runId}:model`, provider: cell.comparison }
@@ -95,7 +95,7 @@ try {
   await writeFile(resolve(directory, 'task-source-binding.json'), JSON.stringify({ runId: request.runId,
     callId: request.callId, taskId: request.taskId, taskInputSha256: original.taskInputDigest }))
   await writeFile(resolve(directory, 'product-source-seal.json'), '{}')
-  const provider = new DatabaseSync(resolve(directory, 'device-data/providers/providers.sqlite3'))
+  const provider = new DatabaseSync(resolve(directory, 'device-data/providers/runtime/provider-runtime.sqlite3'))
   provider.exec('CREATE TABLE exchanges(exchange_id TEXT,request_open TEXT,chunks TEXT)')
   provider.close()
   execFileSync('openssl', ['req', '-x509', '-newkey', 'rsa:2048', '-nodes', '-sha256', '-days', '1',

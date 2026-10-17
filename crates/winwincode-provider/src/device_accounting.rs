@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
-use crate::{DeviceProviderError, DeviceProviderStore};
+use crate::{DeviceProviderError, ProviderRuntimeStore};
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use rusqlite::{OptionalExtension as _, params};
 use sha2::{Digest, Sha256};
@@ -19,7 +19,7 @@ pub struct DevicePrimaryModelUsage {
     pub cost_microunits: Option<u64>,
 }
 
-impl DeviceProviderStore {
+impl ProviderRuntimeStore {
     pub fn model_primary_usage(
         &self,
         open: &ModelOpenMessage,
@@ -237,10 +237,20 @@ impl DeviceProviderStore {
                     });
                 }
                 for receipt in self.model_jev_receipts(&open)? {
-                    append_jev(&mut statement, &open, &receipt)?;
+                    let original_digest = self.connection.query_row(
+                        "SELECT original_receipt_digest FROM jev_context_exchanges WHERE operation_id=?1",
+                        [&receipt.operation_id],
+                        |row| row.get(0),
+                    )?;
+                    append_jev(&mut statement, &open, &receipt, original_digest)?;
                 }
                 for receipt in self.model_jev_judge_receipts(&open)? {
-                    append_jev(&mut statement, &open, &receipt)?;
+                    let original_digest = self.connection.query_row(
+                        "SELECT original_receipt_digest FROM jev_judge_exchanges WHERE operation_id=?1",
+                        [&receipt.operation_id],
+                        |row| row.get(0),
+                    )?;
+                    append_jev(&mut statement, &open, &receipt, original_digest)?;
                 }
             }
             statement.manifest.sort();
@@ -373,6 +383,7 @@ fn append_jev<T: serde::Serialize>(
     statement: &mut AttemptAccountingStatement,
     open: &ModelOpenMessage,
     receipt: &crate::DeviceJevReceipt<T>,
+    original_receipt_digest: Option<String>,
 ) -> Result<(), DeviceProviderError> {
     statement.manifest.push(receipt.operation_id.clone());
     if let Some(run) = &receipt.run {
@@ -382,13 +393,16 @@ fn append_jev<T: serde::Serialize>(
                 .push(format!("{}:failed:{index}", receipt.operation_id));
         }
         if let Some(observation) = &run.observation {
-            let bytes = serde_json::to_vec(receipt)?;
+            let source_digest = match original_receipt_digest {
+                Some(digest) => digest,
+                None => format!("sha256:{:x}", Sha256::digest(serde_json::to_vec(receipt)?)),
+            };
             statement.receipts.push(ProviderAccountingReceipt {
                 slot: receipt.operation_id.clone(),
                 model_exchange_id: open.model_exchange_id.clone(),
                 provider_id: observation.provider_id.clone(),
                 provider_receipt_id: receipt.operation_id.clone(),
-                source_digest: Sha256Digest(format!("sha256:{:x}", Sha256::digest(bytes))),
+                source_digest: Sha256Digest(source_digest),
                 tokens: observation
                     .output_tokens
                     .and_then(|output| observation.input_tokens.checked_add(output)),
@@ -406,6 +420,7 @@ fn append_jev<T: serde::Serialize>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ProviderRuntimeStore;
     use winwincode_execution_port::generated::EncodedPayload;
 
     #[test]
@@ -446,7 +461,7 @@ mod tests {
             payload_digest: Sha256Digest(format!("sha256:{:x}", Sha256::digest(&request))),
         };
 
-        let store = DeviceProviderStore::open(&root).unwrap();
+        let store = ProviderRuntimeStore::prepare(&root).unwrap();
         let saved = serde_json::to_string(&open).unwrap();
         store
             .connection
@@ -525,7 +540,7 @@ mod tests {
                 .is_empty()
         );
         drop(store);
-        let store = DeviceProviderStore::open(&root).unwrap();
+        let store = ProviderRuntimeStore::prepare(&root).unwrap();
         assert_eq!(
             store.accounting_statement(&open.lease,).unwrap(),
             Some(statement)

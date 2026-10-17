@@ -91,6 +91,12 @@ Server 在同一当前时间核对帧自身期限、当前 Job 租约、完整 l
 
 约束：不可转移的 Codex 线程恢复为新 attempt。新 attempt 使用新的 Worker instance、WorkerSession、CodexThread、租约和更大的 fencing token。它保留原始产品请求身份，但不能把前一 attempt 的活权限带入新进程。
 
+Provider 账本迁移保留原 exchange、request、attempt、adapter request ID、prepared payload、模型结果、模型响应游标、重试状态、JEV 执行记录和用量对账事实的关联。迁移不能把已发送或结果未知的调用改成新调用。历史诊断的原始 `response_bytes` 在目标库置为 NULL；调用状态、已知用量、费用和 unknown 结论保持原值。
+
+历史 JEV 结果中的 Provider 回传模型标签在迁移时统一清理。`value.resolved_model_id` 和 `observation.resolvedModelId` 置为 NULL；context 的 `value.decision.model` 改用请求侧的 `observation.modelId`。context 与 judge 表的可空字段 `original_receipt_digest` 在发生转换时保留原 typed 完整回执摘要，对账继续使用该摘要。原 operation、request、分数、用量和计费回执身份保持不变，原完整结果保留在 Device 源库。新执行继续使用凭据泄漏检查，保留通过检查的正常模型标签。
+
+迁移完成后，新的执行与恢复事实只写入 `ProviderRuntimeStore`。旧配置库保留的运行表是迁移留档，不再是当前账本。新账本已接受调用后，即使旧程序还能读取旧配置库，也不能直接将旧账本作为当前事实恢复。具体步骤见 [Provider 账本迁移与回退](operations/deploy.md#provider-账本迁移与回退)。
+
 源码依据：
 
 - `crates/winwincode-control-plane/src/recovery_router.rs`：`SessionRecoveryPlan::StartFreshAttempt`、`WorkerReplacementPlan`、`RecoveryRouter::recover_session`。
@@ -98,8 +104,26 @@ Server 在同一当前时间核对帧自身期限、当前 Job 租约、完整 l
 - `crates/kernel/src/lib.rs`：`recover_interrupted_tool_calls`。
 - `crates/winwincode-codex/src/store.rs`：`close_unmeasured_primary`、`close_pending_jev_parent`。
 - `crates/winwincode-codex/src/adapter.rs`：`interrupt`、`poll` 的中断取消恢复分支。
+- `crates/winwincode-provider/src/device_store.rs`、`device_runtime_store.rs`：配置库切换记录、运行表复制与来源核对。
+- `crates/winwincode-device-client/src/supervisor.rs`：`prepare_provider_runtime` 先停止旧 Worker，再迁移账本。`recover_terminated_calls` 在实际恢复某个 Worker 时按需改写其旧配置；无需恢复的历史 managed 配置不参与初始化。
 
 相关测试：`tests/chat-call-pairs-production.test.mjs`、`tests/chat-execution-recovery-production.test.mjs`、`crates/winwincode-delivery/tests/workrun_replacement.rs`。
+
+## Provider 凭据与运行账本
+
+约束：Device 长期保管 Provider secret、敏感请求头、OAuth 刷新材料和 Codex 登录绑定。Worker 打开独立运行账本，按需使用内存连接材料。运行账本与秘密配置库使用不同的数据库文件。运行账本中的用户请求与结果仍按敏感数据保护。
+
+本地凭据请求由父 Device 按实际监管的 Worker、Worker instance，以及已观察派发的租约和 attempt 核对。会话标识还须满足一致性、产品会话和 WorkRun 归属检查。Device 根据保存的 Provider 配置选择端点与连接材料。该请求只在本机处理，不进入 Server HTTP DTO、远程重试队列或持久消息。凭据及敏感请求头不得写入运行账本、通用 Debug 输出或诊断原始负载。
+
+凭据获取不是一次模型外部调用，也不产生长期执行权限。Worker 在等待凭据、OAuth 刷新、调用准入或重试后，仍须核对当前租约与取消状态，再决定能否发送 Provider 请求。凭据等待不能阻塞独立的心跳、取消和清理消息。已有执行租约、网络退避和不确定结果处理继续适用。
+
+Device 在凭据请求入口和返回前检查当前 Worker 记录、占用围栏和受管子进程。检查使用受管 `Child` 的存活状态，在 attempts 锁外执行。凭据解析中的回调只核对本地 attempt、租约、取消和路由。凭据返回前再次核对这些状态。
+
+managed Worker 的模型、JEV/Fusion、用量对账和终止恢复共用运行账本。同进程设备模型通过 `WorkerMain::with_provider_runtime` 显式注入 `ProviderExecutionSource`。Codex 的运行账本和扩展读取 source 分别装配。JEV 配置只在首次已授权的 JEV 调用中导入，启动时不解析 Provider 或 JEV 凭据。
+
+一次 JEV operation 固定开始时的 timeout 和 retries。退避期间修改这两个参数只影响下一次 operation。每次尝试仍重新解析凭据，并核对当前授权、路由、模型和其他语义参数。原配置摘要、请求和账本身份保持不变；恢复读取原 operation 的已保存结果。
+
+源码依据：`crates/winwincode-device-client/src/provider_broker.rs`、`worker_channel.rs`，`crates/winwincode-provider/src/device_execution_source.rs`、`device_model.rs`，以及 `crates/winwincode-worker/src/remote_transport.rs`。
 
 ## 旧 Worker 的迟到消息
 
@@ -205,6 +229,8 @@ Unix 受管 pipe、PTY、legacy shell、原生验证、MCP 子进程、hook、Sh
 已批准的开发目标适用于未发布结构。新改动不再为旧的未发布 schema 增加自动升级、回填或兼容路径。不兼容结构应拒绝打开。实现这个目标时必须保留已有数据和失败现场。不得为了启动而删除表、清空库或覆盖用户数据。处理现有迁移需要独立实施任务。
 
 已发布用户数据的升级政策尚未定义。这个开发目标不能代替后续发布政策。备份只提供恢复点，不提供 schema 升级。操作见 [部署指南](operations/deploy.md#备份校验和恢复)。
+
+Provider 配置库版本 `16` 到 `17` 的拆分迁移是本节的窄范围例外。它将原执行账本复制到独立的 `ProviderRuntimeStore`，保留原配置、凭据、回执和旧运行表留档。复制与校验完成后，源库才提交切换记录。中断后重新核对两库来源和已有复制结果，不删除源数据。该例外不适用于其他数据库的自动升级或回填，也不定义通用的已发布数据升级政策。
 
 本节核对的严格初始化和结构校验入口有两个：
 

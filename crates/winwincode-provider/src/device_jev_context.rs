@@ -6,7 +6,7 @@ use winwincode_execution_port::jev_decision::{JevPolicy, validate_policy};
 
 use crate::{
     DeviceProviderError, DeviceProviderStore, JevContextEvaluation, JevContextRequest,
-    JevExecutionOptions, JevRun, JevRuntime,
+    JevExecutionOptions, JevRun, JevRuntime, ProviderRuntimeStore,
 };
 
 #[cfg(test)]
@@ -32,7 +32,7 @@ pub struct DeviceJevReceipt<T = JevContextEvaluation> {
     pub run: Option<JevRun<T>>,
 }
 
-impl DeviceProviderStore {
+impl ProviderRuntimeStore {
     pub fn model_jev_source_item(
         &self,
         open: &winwincode_execution_port::generated::ModelOpenMessage,
@@ -131,7 +131,9 @@ impl DeviceProviderStore {
         })
         .collect()
     }
+}
 
+impl DeviceProviderStore {
     pub fn save_jev_settings(
         &self,
         settings: &crate::OpenJevRemoteSettings,
@@ -192,6 +194,59 @@ impl DeviceProviderStore {
         }
         validated_system_one_settings(settings)
     }
+}
+
+impl ProviderRuntimeStore {
+    pub(crate) fn jev_execution_request(
+        &self,
+        operation_id: &str,
+        provider: &str,
+        judge: bool,
+    ) -> Result<crate::device_execution_source::ProviderExecutionRequest, DeviceProviderError> {
+        let context = if let Some(operation) =
+            operation_id.strip_prefix(if judge { "judge:" } else { "jev:" })
+        {
+            let (exchange, _) = operation
+                .rsplit_once(':')
+                .ok_or(DeviceProviderError::StateInvalid)?;
+            let saved: Option<String> = self
+                .connection
+                .query_row(
+                    "SELECT request_open FROM exchanges WHERE exchange_id=?1",
+                    [exchange],
+                    |row| row.get(0),
+                )
+                .optional()?
+                .flatten();
+            saved
+                .map(|saved| {
+                    serde_json::from_str::<winwincode_execution_port::generated::ModelOpenMessage>(
+                        &saved,
+                    )
+                })
+                .transpose()?
+                .as_ref()
+                .map(Into::into)
+        } else {
+            None
+        };
+        Ok(crate::device_execution_source::ProviderExecutionRequest {
+            context,
+            provider_id: provider.to_owned(),
+            model_id: None,
+            purpose: if judge {
+                crate::device_execution_source::ProviderExecutionPurpose::JevJudge {
+                    operation_id: operation_id.to_owned(),
+                }
+            } else {
+                crate::device_execution_source::ProviderExecutionPurpose::JevContext {
+                    operation_id: operation_id.to_owned(),
+                }
+            },
+            physical_attempt: None,
+            adapter_request_id: None,
+        })
+    }
 
     pub async fn evaluate_configured_context_once(
         &self,
@@ -220,7 +275,12 @@ impl DeviceProviderStore {
             .jev_context
             .as_ref()
             .ok_or(DeviceProviderError::StateInvalid)?;
-        let settings = self.resolve_jev_settings(&context.provider)?;
+        let execution_request =
+            self.jev_execution_request(operation_id, &context.provider, false)?;
+        let parameters = self
+            .execution_source()?
+            .jev_parameters(&execution_request)?;
+        let settings = parameters.settings();
         let (config, retry) = settings
             .to_config_and_runtime()
             .map_err(|_| DeviceProviderError::StateInvalid)?;
@@ -235,7 +295,14 @@ impl DeviceProviderStore {
             ))],
             retry,
         )
-        .with_cancellation(cancellation);
+        .with_cancellation(cancellation)
+        .with_execution_source(
+            self.execution_source
+                .clone()
+                .ok_or(DeviceProviderError::StateInvalid)?,
+            execution_request,
+            parameters,
+        );
         self.evaluate_context_once_authorized(
             operation_id,
             &configuration_digest,
@@ -334,18 +401,32 @@ impl DeviceProviderStore {
         let Some(context) = session.profile.source.settings.jev_context.as_ref() else {
             return Ok(());
         };
-        let settings = self.resolve_jev_settings(&context.provider)?;
-        let configuration_digest = configured_context_digest(session, &settings)?;
         let task_text = context_task_text(job, request)?;
         let input = request
             .pointer_mut("/request/input")
             .and_then(serde_json::Value::as_array_mut)
             .ok_or(DeviceProviderError::StateInvalid)?;
         let last_commentary = input.iter().rposition(is_assistant_commentary);
-        for index in (0..input.len()).rev() {
-            if Some(index) == last_commentary || !is_assistant_commentary(&input[index]) {
-                continue;
-            }
+        let candidates: Vec<_> = (0..input.len())
+            .rev()
+            .filter(|index| {
+                Some(*index) != last_commentary && is_assistant_commentary(&input[*index])
+            })
+            .collect();
+        if candidates.is_empty() {
+            return Ok(());
+        }
+        let execution_request = self.jev_execution_request(
+            &format!("jev:{}:0", open.model_exchange_id.0),
+            &context.provider,
+            false,
+        )?;
+        let settings = self
+            .execution_source()?
+            .jev_parameters(&execution_request)?
+            .settings();
+        let configuration_digest = configured_context_digest(session, &settings)?;
+        for index in candidates {
             if self.model_cancelled(&open.model_exchange_id.0)? {
                 return Err(DeviceProviderError::StateInvalid);
             }
@@ -677,7 +758,7 @@ mod tests {
     fn live_authorization_guards_each_context_operation_but_allows_exact_recovery() {
         let root = std::env::temp_dir().join(format!("wwc-context-guard-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
-        let store = DeviceProviderStore::open(&root).unwrap();
+        let store = ProviderRuntimeStore::prepare(&root).unwrap();
         let provider = Arc::new(crate::MockJevProvider::healthy("context"));
         let runtime = JevRuntime::new(
             vec![provider.clone()],
@@ -903,7 +984,7 @@ mod tests {
         use base64::Engine as _;
         let directory =
             std::env::temp_dir().join(format!("wwc-jev-request-{}", std::process::id()));
-        let store = DeviceProviderStore::open(&directory).unwrap();
+        let config_store = DeviceProviderStore::open(&directory).unwrap();
         let fixture: serde_json::Value = serde_json::from_str(include_str!(
             "../../../tests/fixtures/contracts/execution-port.valid.json"
         ))
@@ -934,7 +1015,8 @@ mod tests {
             "modelId":"fixture-jev-model", "timeoutMs":1000, "retries":0,
             "maxBatchSize":4, "devices":["remote"], "dtypes":["auto"]
         })).unwrap();
-        store.save_jev_settings(&settings).unwrap();
+        config_store.save_jev_settings(&settings).unwrap();
+        let store = ProviderRuntimeStore::prepare(&directory).unwrap();
         let profile: AgentProfileSettings = serde_json::from_value(serde_json::json!({
             "provider":"fixture", "model":"fixture-model", "reasoning":"max", "tools":[], "sandbox":"candidate", "instructions":null,
             "jevContext":{"provider":"fixture-jev", "policy":{"version":"fixture-policy", "minimumConfidence":0.6,
@@ -1189,7 +1271,7 @@ mod tests {
                     "UPDATE jev_context_exchanges SET request_json=?1,digest=?2",
                     params![saved_request, saved_digest],
                 ).unwrap();
-                let reopened = DeviceProviderStore::open(&directory).unwrap();
+                let reopened = ProviderRuntimeStore::prepare(&directory).unwrap();
                 let mut replay = original.clone();
                 reopened
                     .prepare_jev_model_request(&open, &mut replay, &|| true)
@@ -1243,6 +1325,7 @@ mod tests {
             .unwrap();
         assert_eq!(count, 1);
         drop(store);
+        drop(config_store);
         std::fs::remove_dir_all(directory).unwrap();
     }
 }

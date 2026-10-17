@@ -293,7 +293,7 @@ fn interrupted_and_cancelled_attempts_close_with_honest_financial_facts() {
                 .unwrap()
                 .as_nanos()
         ));
-        let store = DeviceProviderStore::open(&root).unwrap();
+        let store = ProviderRuntimeStore::prepare(&root).unwrap();
         let fixture: serde_json::Value = serde_json::from_str(include_str!(
             "../../../tests/fixtures/contracts/execution-port.valid.json"
         ))
@@ -449,7 +449,7 @@ fn interrupted_and_cancelled_attempts_close_with_honest_financial_facts() {
     }
 }
 
-fn assert_interrupted_diagnostics_settled(store: &DeviceProviderStore, open: &ModelOpenMessage) {
+fn assert_interrupted_diagnostics_settled(store: &ProviderRuntimeStore, open: &ModelOpenMessage) {
     let original: (i64, i64, String, Option<String>, String) = store.connection.query_row(
         "SELECT started_ms,finished_ms,outcome,failure_json,stop_reason FROM model_attempt_diagnostics WHERE exchange_id=?1 AND sequence=1",
         [&open.model_exchange_id.0], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?))).unwrap();
@@ -509,7 +509,7 @@ fn real_provider_attempts_recover_without_replaying_tools_or_network() {
                 .unwrap()
                 .as_nanos()
         ));
-        drop(DeviceProviderStore::open(&root).unwrap());
+        drop(ProviderRuntimeStore::prepare(&root).unwrap());
         let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
         let CertifiedKey { cert, signing_key } =
             generate_simple_self_signed(vec!["localhost".into()]).unwrap();
@@ -619,9 +619,10 @@ fn real_provider_attempts_recover_without_replaying_tools_or_network() {
 )]
 fn run_child(case: &str) {
     let root = std::path::PathBuf::from(std::env::var_os(CHILD_ROOT).unwrap());
-    let store = DeviceProviderStore::open(&root).unwrap();
+    let store = ProviderRuntimeStore::prepare(&root).unwrap();
     let config = serde_json::json!({"providerId":"recovery-provider","displayName":"fixture","endpoint":std::env::var(CHILD_ENDPOINT).unwrap(),"protocol":"openai_chat_completions","modelIds":["fixture-model"],"enabled":true});
-    store
+    DeviceProviderStore::open(&root)
+        .unwrap()
         .connection
         .execute(
             "INSERT INTO providers VALUES (?1,?2,?3)",
@@ -678,7 +679,7 @@ fn run_child(case: &str) {
         Some(std::thread::spawn(move || {
             received.recv().unwrap();
             std::thread::sleep(Duration::from_millis(30));
-            DeviceProviderStore::open(&root)
+            ProviderRuntimeStore::prepare(&root)
                 .unwrap()
                 .cancel_model(&exchange)
                 .unwrap();
@@ -761,7 +762,7 @@ fn run_child(case: &str) {
             "all measured physical calls remain in the lower bound"
         );
         assert_eq!(usage.cost_microunits, None);
-        let reopened = DeviceProviderStore::open(&root).unwrap();
+        let reopened = ProviderRuntimeStore::prepare(&root).unwrap();
         assert_eq!(reopened.model_primary_usage(&open).unwrap(), usage);
         assert!(
             reopened
@@ -785,7 +786,7 @@ fn run_child(case: &str) {
         statement.validate().unwrap();
         assert_eq!(statement.receipts[0].tokens, Some(5));
         drop(store);
-        let reopened = DeviceProviderStore::open(&root).unwrap();
+        let reopened = ProviderRuntimeStore::prepare(&root).unwrap();
         assert_eq!(
             reopened
                 .execute_model_recovering_authorized(
@@ -918,7 +919,13 @@ fn run_child(case: &str) {
         "one bounded financial aggregate retains all actual invocation facts"
     );
     if matches!(case, "incomplete" | "incomplete_reset") {
-        assert!(attempts[0].3.as_ref().unwrap().starts_with(b"data:"));
+        assert!(attempts[0].3.is_none());
+        let received: i64 = store.connection.query_row(
+            "SELECT response_bytes_received FROM model_invocation_attempts WHERE exchange_id=?1 AND attempt_number=1",
+            [&open.model_exchange_id.0],
+            |row| row.get(0),
+        ).unwrap();
+        assert!(received > 0);
         assert_eq!(
             statement.receipts.len(),
             1,
@@ -993,7 +1000,7 @@ fn serve(
             StreamOwned::new(ServerConnection::new(Arc::clone(config)).unwrap(), socket);
         requests.push(read_request(&mut stream));
         if let Some(root) = concurrent_root {
-            let store = DeviceProviderStore::open(root).unwrap();
+            let store = ProviderRuntimeStore::prepare(root).unwrap();
             let (exchange, request): (String, String) = store
                 .connection
                 .query_row(

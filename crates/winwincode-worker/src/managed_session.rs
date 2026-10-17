@@ -5,6 +5,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
+use winwincode_client_port::private_worker_channel::ProviderExecutionProfile;
 use winwincode_domain::{
     ClientInstanceId, ClientNodeId, ClientOccupancyLeaseId, ProductSessionId, RepositoryBindingId,
     WorkRunId, WorkerId, WorkerInstanceId, WorkerSessionId,
@@ -25,7 +26,7 @@ impl fmt::Display for ManagedSessionConfigError {
 impl std::error::Error for ManagedSessionConfigError {}
 
 #[derive(Debug, Clone, PartialEq, serde::Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct ManagedSessionConfig {
     pub client_node_id: ClientNodeId,
     pub client_instance_id: ClientInstanceId,
@@ -41,7 +42,8 @@ pub struct ManagedSessionConfig {
     pub source_directory: PathBuf,
     pub data_directory: PathBuf,
     pub execution_workspace_directory: Option<PathBuf>,
-    pub provider_directory: PathBuf,
+    pub provider_runtime_directory: PathBuf,
+    pub provider_execution_profile: ProviderExecutionProfile,
     pub helper_executable: PathBuf,
     pub model_route: Option<ModelGatewayRoute>,
 }
@@ -81,7 +83,8 @@ mod tests {
             "workerInstanceId": "worker-instance",
             "sourceDirectory": "/repo",
             "dataDirectory": "/data/worker",
-            "providerDirectory": "/data/providers",
+            "providerRuntimeDirectory": "/data/providers/runtime",
+            "providerExecutionProfile": {},
             "helperExecutable": "/bin/winwincode-kernel-helper"
         })
     }
@@ -98,7 +101,19 @@ mod tests {
             config.helper_executable,
             PathBuf::from("/bin/winwincode-kernel-helper")
         );
-        assert!(!config.provider_directory.exists());
+        assert!(!config.provider_runtime_directory.exists());
+    }
+
+    #[test]
+    fn rejects_a_secret_store_path_in_the_worker_configuration() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("session.json");
+        let mut config = config();
+        config["providerDirectory"] = "/device/provider-secrets".into();
+        fs::write(&path, config.to_string()).unwrap();
+        let error = ManagedSessionConfig::read(&path).unwrap_err().to_string();
+        assert!(error.contains("providerDirectory"));
+        assert!(!error.contains("/device/provider-secrets"));
     }
 
     #[test]

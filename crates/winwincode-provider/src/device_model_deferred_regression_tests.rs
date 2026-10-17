@@ -34,7 +34,7 @@ fn exercise_deferred(crash_resume: bool) {
             .unwrap()
             .as_nanos()
     ));
-    let store = DeviceProviderStore::open(&root).unwrap();
+    let store = ProviderRuntimeStore::prepare(&root).unwrap();
     let fixture: serde_json::Value = serde_json::from_str(include_str!(
         "../../../tests/fixtures/contracts/execution-port.valid.json"
     ))
@@ -71,7 +71,8 @@ fn exercise_deferred(crash_resume: bool) {
         listener.local_addr().unwrap().port()
     );
     let provider = serde_json::json!({"providerId":"deferred-fixture","displayName":"fixture","endpoint":endpoint,"protocol":"canonical","modelIds":["fixture-model"],"enabled":true});
-    store
+    DeviceProviderStore::open(&root)
+        .unwrap()
         .connection
         .execute(
             "INSERT INTO providers VALUES(?1,?2,?3)",
@@ -212,7 +213,7 @@ fn exercise_deferred(crash_resume: bool) {
             )
             .unwrap();
         drop(store);
-        let store = DeviceProviderStore::open(&root).unwrap();
+        let store = ProviderRuntimeStore::prepare(&root).unwrap();
         assert_eq!(
             store.model_retry_state(&open).unwrap(),
             Some((next_attempt, wake_ms, 0))
@@ -352,7 +353,7 @@ fn review_not_sent_backoff_survives_deferred_store_reopen() {
         listener.local_addr().unwrap().port()
     );
     drop(listener);
-    let store = DeviceProviderStore::open(&root).unwrap();
+    let store = ProviderRuntimeStore::prepare(&root).unwrap();
     let fixture: serde_json::Value = serde_json::from_str(include_str!(
         "../../../tests/fixtures/contracts/execution-port.valid.json"
     ))
@@ -375,7 +376,8 @@ fn review_not_sent_backoff_survives_deferred_store_reopen() {
     open.request.payload_digest.0 = format!("sha256:{:x}", Sha256::digest(&payload));
     let provider = serde_json::json!({"providerId":"refused-fixture","displayName":"fixture",
         "endpoint":endpoint,"protocol":"canonical","modelIds":["fixture-model"],"enabled":true});
-    store
+    DeviceProviderStore::open(&root)
+        .unwrap()
         .connection
         .execute(
             "INSERT INTO providers VALUES(?1,?2,?3)",
@@ -390,7 +392,7 @@ fn review_not_sent_backoff_survives_deferred_store_reopen() {
     for (index, expected_delay) in [5000_i64, 10000].into_iter().enumerate() {
         let store = initial
             .take()
-            .unwrap_or_else(|| DeviceProviderStore::open(&root).unwrap());
+            .unwrap_or_else(|| ProviderRuntimeStore::prepare(&root).unwrap());
         let can_start = || true;
         let outcome = store
             .execute_model_recovering_step_authorized(

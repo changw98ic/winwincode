@@ -13,7 +13,7 @@ import { crc32, inflateRawSync } from 'node:zlib'
 import { runApiProductionVertical, waitForDeviceWorkerRegistered } from '../scripts/run-api-production-vertical.mjs'
 import { deterministicDeviceProvider, waitFor } from '../scripts/device-production-fixture.mjs'
 import { readDeviceExecutionReceipts } from '../scripts/export-device-candidate.mjs'
-import { assertSuccessfulRetainedCommands, readRetainedCoreCommandResults,
+import { assertSuccessfulRetainedCommands, completedCommandScript, readRetainedCoreCommandResults,
   readRetainedOutcomes, readRetainedRuntime } from './fixtures/chat-execution-transport-probe.mjs'
 
 const LEASE_SECONDS = 30
@@ -230,10 +230,7 @@ test('Chat heartbeat, cancellation and completion stay timely while actual auxil
     directory, restart: false, repeat: false, includeStrongFlow: false, ...sealedBinaries(),
     serverEnvironment: { WWC_SERVER_EXECUTION_LEASE_SECONDS: String(LEASE_SECONDS) },
     deviceProvider: { ...deterministicDeviceProvider(), responseGateMarkers: cases.map(item => item.marker),
-      nativeCellScripts: { 'native-cell-A': `const command=ALL_TOOLS.find(tool=>tool.name.endsWith("exec_command"));
-        if(!command) throw new Error("command tool missing");
-        const result=await tools[command.name]({cmd:${JSON.stringify(COMMAND)},yield_time_ms:1000});
-        if(result.exit_code!==0) throw new Error("original auxiliary isolation command failed"); text(result);` } },
+      nativeCellScripts: { 'native-cell-A': completedCommandScript(COMMAND) } },
     scenario: { async run(context) {
       const { api, devicePath } = context
       const database = openDatabase(join(directory, 'server-data/control-plane.sqlite3'))

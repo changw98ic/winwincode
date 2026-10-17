@@ -13,12 +13,12 @@ use std::{
     collections::{HashMap, HashSet, VecDeque},
     io::Write,
     path::{Path, PathBuf},
-    sync::mpsc,
+    sync::{Arc, mpsc},
 };
 use winwincode_execution_port::generated::{ExecutionPortMessage, ModelChunkMessage};
 use winwincode_provider::{
-    DeviceModelAdmission, DeviceModelStepOutcome, DeviceProviderError, DeviceProviderStore,
-    model_failure,
+    DeviceModelAdmission, DeviceModelStepOutcome, DeviceProviderError, ProviderExecutionSource,
+    ProviderRuntimeStore, model_failure,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -30,7 +30,8 @@ pub(crate) enum DeviceModelSendOutcome {
 
 pub(crate) struct DeviceModels {
     directory: PathBuf,
-    recovery_store: Option<DeviceProviderStore>,
+    recovery_store: Option<ProviderRuntimeStore>,
+    execution_source: Arc<dyn ProviderExecutionSource>,
     recovery_version: Option<i64>,
     pending: HashMap<String, PendingModelOpen>,
     sender: mpsc::Sender<(String, DeviceModelStepOutcome)>,
@@ -78,11 +79,15 @@ pub(crate) struct IntakeLogLine<'a> {
 }
 
 impl DeviceModels {
-    pub(crate) fn new(directory: &Path) -> Self {
+    pub(crate) fn new(
+        directory: &Path,
+        execution_source: Arc<dyn ProviderExecutionSource>,
+    ) -> Self {
         let intake_log = std::env::var_os("WWC_MODEL_INTAKE_LOG").map(PathBuf::from);
         let (sender, receiver) = mpsc::channel();
         Self {
             directory: directory.to_owned(),
+            execution_source,
             recovery_store: None,
             recovery_version: None,
             pending: HashMap::new(),
@@ -97,6 +102,17 @@ impl DeviceModels {
             #[cfg(any(test, feature = "test-support"))]
             fail_next_start: false,
         }
+    }
+
+    #[cfg(test)]
+    fn for_test(configuration_directory: &Path) -> Self {
+        let store = ProviderRuntimeStore::prepare(configuration_directory).unwrap();
+        Self::new(
+            store.directory(),
+            Arc::new(winwincode_provider::LocalDeviceProviderSource::new(
+                configuration_directory.to_path_buf(),
+            )),
+        )
     }
 
     pub(crate) fn set_intake_log(&mut self, path: Option<PathBuf>) {
@@ -126,7 +142,7 @@ impl DeviceModels {
         open: &winwincode_execution_port::generated::ModelOpenMessage,
     ) {
         if self.recovery_store.is_none() {
-            self.recovery_store = DeviceProviderStore::open(&self.directory).ok();
+            self.recovery_store = ProviderRuntimeStore::open_existing(&self.directory).ok();
         }
         self.owned_exchanges
             .insert(open.model_exchange_id.0.clone());
@@ -214,7 +230,7 @@ impl DeviceModels {
                 Ok(DeviceModelSendOutcome::Handled)
             }
             ExecutionPortMessage::ModelAckMessage(ack) => {
-                let store = DeviceProviderStore::open(&self.directory)?;
+                let store = ProviderRuntimeStore::open_existing(&self.directory)?;
                 if ack.error.is_some() {
                     store.cancel_model(&ack.model_exchange_id.0)?;
                     self.chunks
@@ -241,13 +257,15 @@ impl DeviceModels {
             return Err(std::io::Error::other("injected thread start refusal"));
         }
         let directory = self.directory.clone();
+        let execution_source = Arc::clone(&self.execution_source);
         let sender = self.sender.clone();
         let open = open.clone();
         let intake_log = self.intake_log.clone();
         std::thread::Builder::new()
             .name("device-provider".to_owned())
             .spawn(move || {
-                let outcome = DeviceProviderStore::open(&directory)
+                let outcome = ProviderRuntimeStore::open_existing(&directory)
+                    .map(|store| store.with_execution_source(execution_source))
                     .and_then(|store| {
                         let detail = format!(
                             "request_id={} provider_thread={:?} retry_entry={retry_entry}",
@@ -297,7 +315,7 @@ impl DeviceModels {
         &self,
         open: &winwincode_execution_port::generated::ModelOpenMessage,
     ) -> Result<bool, DeviceProviderError> {
-        DeviceProviderStore::open(&self.directory)?.model_start_recorded(open)
+        ProviderRuntimeStore::open_existing(&self.directory)?.model_start_recorded(open)
     }
 
     pub(crate) fn retry_chunk(&mut self, chunk: ModelChunkMessage) {
@@ -335,7 +353,7 @@ impl DeviceModels {
                     continue;
                 }
             };
-            if !DeviceProviderStore::open(&self.directory)?.model_cancelled(&id)? {
+            if !ProviderRuntimeStore::open_existing(&self.directory)?.model_cancelled(&id)? {
                 self.owned_exchanges.insert(id.clone());
                 if let Some(first) = chunks.first() {
                     let session = first.session_identity.worker_session_id.0.clone();
@@ -586,7 +604,7 @@ mod tests {
     #[test]
     fn full_provider_slots_defer_a_never_started_request_without_losing_its_identity() {
         let root = temp_root("deferred-start");
-        let mut models = DeviceModels::new(&root);
+        let mut models = DeviceModels::for_test(&root);
         let fixture: serde_json::Value = serde_json::from_str(include_str!(
             "../../../tests/fixtures/contracts/execution-port.valid.json"
         ))
@@ -607,7 +625,7 @@ mod tests {
                 base64::Engine::encode(&base64::engine::general_purpose::STANDARD, payload);
             request.request.payload_digest.0 = format!("sha256:{:x}", Sha256::digest(payload));
         }
-        let store = DeviceProviderStore::open(&root).unwrap();
+        let store = ProviderRuntimeStore::prepare(&root).unwrap();
         let ExecutionPortMessage::ModelOpenMessage(request) = &open else {
             unreachable!()
         };
@@ -689,7 +707,7 @@ mod tests {
         let wsn = format!("wsn_{}", "B".repeat(26));
         let wki = format!("wki_{}", "G".repeat(26));
         {
-            let store = DeviceProviderStore::open(&root).expect("open device provider store");
+            let store = ProviderRuntimeStore::prepare(&root).expect("open device provider store");
             let chunks = vec![
                 chunk(&exchange, 1, false, &wsn, &wki),
                 chunk(&exchange, 2, false, &wsn, &wki),
@@ -699,8 +717,9 @@ mod tests {
                 .retain_stored_model_exchange_chunks(&retained_open(&exchange, &wsn, &wki), &chunks)
                 .expect("seed durable provider exchange");
         }
-        let mut models = DeviceModels::new(&root);
-        models.recovery_store = Some(DeviceProviderStore::open(&root).unwrap());
+        let mut models = DeviceModels::for_test(&root);
+        models.recovery_store =
+            Some(ProviderRuntimeStore::open_existing(&models.directory).unwrap());
         models.owned_exchanges.insert(exchange.clone());
         models.delivered_high_water.insert(exchange.clone(), 1);
         let recovered: Vec<_> = std::iter::from_fn(|| models.next_chunk().unwrap())
@@ -728,7 +747,7 @@ mod tests {
         let foreign_wki = format!("wki_{}", "1".repeat(26));
         let owned_wki = format!("wki_{}", "2".repeat(26));
         {
-            let store = DeviceProviderStore::open(&root).expect("open device provider store");
+            let store = ProviderRuntimeStore::prepare(&root).expect("open device provider store");
             store
                 .retain_stored_model_exchange_chunks(
                     &retained_open(&foreign_exchange, &foreign_wsn, &foreign_wki),
@@ -749,8 +768,9 @@ mod tests {
                 )
                 .expect("seed owned verification exchange");
         }
-        let mut models = DeviceModels::new(&root);
-        models.recovery_store = Some(DeviceProviderStore::open(&root).unwrap());
+        let mut models = DeviceModels::for_test(&root);
+        models.recovery_store =
+            Some(ProviderRuntimeStore::open_existing(&models.directory).unwrap());
         models.note_worker_instance_id(&owned_wki);
         models.session_ids.insert(owned_wsn.clone());
         models.owned_exchanges.insert(owned_exchange.clone());
@@ -784,7 +804,7 @@ mod tests {
         let wsn = format!("wsn_{}", "R".repeat(26));
         let wki = format!("wki_{}", "K".repeat(26));
         {
-            let store = DeviceProviderStore::open(&root).expect("open device provider store");
+            let store = ProviderRuntimeStore::prepare(&root).expect("open device provider store");
             store
                 .retain_stored_model_exchange_chunks(
                     &retained_open(&exchange, &wsn, &wki),
@@ -795,8 +815,9 @@ mod tests {
                 )
                 .expect("seed durable verification exchange");
         }
-        let mut models = DeviceModels::new(&root);
-        models.recovery_store = Some(DeviceProviderStore::open(&root).unwrap());
+        let mut models = DeviceModels::for_test(&root);
+        models.recovery_store =
+            Some(ProviderRuntimeStore::open_existing(&models.directory).unwrap());
         models.session_ids.insert(wsn.clone());
         models.note_worker_instance_id(&wki);
         let recovered: Vec<_> = std::iter::from_fn(|| models.next_chunk().unwrap()).collect();
@@ -820,7 +841,12 @@ mod lazy_store_tests {
         let root = tempfile::tempdir().unwrap();
         let directory = root.path().join("providers");
         std::fs::write(&directory, "unavailable provider store").unwrap();
-        let mut models = DeviceModels::new(&directory);
+        let mut models = DeviceModels::new(
+            &directory,
+            std::sync::Arc::new(winwincode_provider::LocalDeviceProviderSource::new(
+                directory.clone(),
+            )),
+        );
         models.note_worker_instance_id("worker-instance");
         assert!(models.next_chunk().unwrap().is_none());
         assert!(models.recovery_store.is_none());
@@ -846,7 +872,12 @@ mod lazy_store_tests {
                 .clone(),
         )
         .unwrap();
-        let mut models = DeviceModels::new(&directory);
+        let mut models = DeviceModels::new(
+            &directory,
+            std::sync::Arc::new(winwincode_provider::LocalDeviceProviderSource::new(
+                directory.clone(),
+            )),
+        );
         models.send(&open, None, None).unwrap();
         assert!(models.next_chunk().unwrap().unwrap().error.is_some());
         assert!(models.next_chunk().unwrap().is_none());

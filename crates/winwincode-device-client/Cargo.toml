@@ -12,6 +12,7 @@ include = ["src/**", "tests/**", "Cargo.toml"]
 [dependencies]
 winwincode-network = { workspace = true, features = ["journal"] }
 winwincode-api.workspace = true
+winwincode-execution-port.workspace = true
 winwincode-provider.workspace = true
 base64.workspace = true
 futures.workspace = true

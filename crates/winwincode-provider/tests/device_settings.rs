@@ -10,7 +10,9 @@ use winwincode_api::generated::{
     DeviceConfigurationEnvelope, DeviceProviderConfig, DeviceProviderOutcome,
     DeviceProviderProtocol, DeviceProviderSnapshot,
 };
-use winwincode_provider::{DeviceProviderStore, valid_device_provider_config};
+use winwincode_provider::{
+    DeviceProviderStore, ProviderRuntimeStore, valid_device_provider_config,
+};
 
 #[test]
 fn responses_protocol_accepts_custom_https_endpoints_without_chatgpt_binding() {
@@ -87,7 +89,7 @@ fn opening_current_device_store_does_not_require_the_writer_lock() {
     let directory =
         std::env::temp_dir().join(format!("wwc-device-provider-reader-{}", std::process::id()));
     let _ = fs::remove_dir_all(&directory);
-    drop(DeviceProviderStore::open(&directory).expect("initialize schema"));
+    drop(ProviderRuntimeStore::prepare(&directory).expect("initialize current schema"));
     let writer = rusqlite::Connection::open(directory.join("providers.sqlite3"))
         .expect("concurrent accounting writer");
     writer
@@ -107,6 +109,83 @@ fn opening_current_device_store_does_not_require_the_writer_lock() {
     drop(reader);
     drop(writer);
     fs::remove_dir_all(directory).expect("remove reader fixture");
+}
+
+#[test]
+fn current_configuration_remains_available_when_runtime_is_unavailable() {
+    use base64::{Engine as _, engine::general_purpose::STANDARD};
+    use sha2::{Digest as _, Sha256};
+
+    let root = std::env::temp_dir().join(format!(
+        "wwc-configuration-runtime-boundary-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    for state in ["missing", "corrupt", "unsafe-permissions"] {
+        let directory = root.join(state);
+        let store = DeviceProviderStore::open(&directory).unwrap();
+        let snapshot = store.snapshot("configuration-device").unwrap();
+        drop(store);
+        let source_id = format!(
+            "{:x}",
+            Sha256::digest(STANDARD.decode(snapshot.encryption_public_key).unwrap())
+        );
+        let database = rusqlite::Connection::open(directory.join("providers.sqlite3")).unwrap();
+        database
+            .execute_batch(
+                "CREATE TABLE IF NOT EXISTS provider_runtime_cutover(singleton INTEGER PRIMARY KEY CHECK(singleton=1),source_id TEXT NOT NULL); PRAGMA user_version=17;",
+            )
+            .unwrap();
+        database
+            .execute(
+                "INSERT INTO provider_runtime_cutover VALUES(1,?1) ON CONFLICT(singleton) DO UPDATE SET source_id=excluded.source_id",
+                [source_id],
+            )
+            .unwrap();
+        drop(database);
+        let runtime = directory.join("runtime");
+        if runtime.exists() {
+            fs::remove_dir_all(&runtime).unwrap();
+        }
+        let runtime_database = runtime.join("provider-runtime.sqlite3");
+        if state != "missing" {
+            fs::create_dir(&runtime).unwrap();
+            fs::set_permissions(&runtime, fs::Permissions::from_mode(0o700)).unwrap();
+            fs::write(&runtime_database, b"unavailable-runtime-fixture").unwrap();
+            fs::set_permissions(
+                &runtime_database,
+                fs::Permissions::from_mode(if state == "corrupt" { 0o600 } else { 0o644 }),
+            )
+            .unwrap();
+        }
+        let mut store = DeviceProviderStore::open(&directory).unwrap_or_else(|error| {
+            panic!("configuration open must ignore {state} runtime: {error}")
+        });
+        let snapshot = store.snapshot("configuration-device").unwrap();
+        let envelope = browser_crypto_provider_envelope(&snapshot, "anthropic_messages", None);
+        let receipt = store.apply(&snapshot.client_node_id, &envelope).unwrap();
+        assert_eq!(receipt.outcome, DeviceProviderOutcome::Saved, "{state}");
+        assert_eq!(receipt.revision, 1, "{state}");
+        assert_saved_provider_configuration(&store, "anthropic_messages", None);
+        assert_eq!(
+            store.apply(&snapshot.client_node_id, &envelope).unwrap(),
+            receipt,
+            "{state} runtime must preserve the configuration receipt"
+        );
+        drop(store);
+        if state == "missing" {
+            assert!(!runtime.exists());
+        } else {
+            assert_eq!(
+                fs::read(runtime_database).unwrap(),
+                b"unavailable-runtime-fixture"
+            );
+        }
+    }
+    fs::remove_dir_all(root).unwrap();
 }
 
 #[test]
@@ -375,7 +454,7 @@ fn configured_jev_request_cannot_silently_run_as_baseline() {
                 Sha256::digest(&payload)
             )),
         };
-        let store = DeviceProviderStore::open(&directory).unwrap();
+        let store = ProviderRuntimeStore::prepare(&directory).unwrap();
         let db = rusqlite::Connection::open(directory.join("providers.sqlite3")).unwrap();
         let config = serde_json::json!({"providerId":"unconfigured", "displayName":"fixture", "endpoint":"https://example.invalid/v1/responses", "protocol":"canonical", "modelIds":["unconfigured"], "enabled":true});
         db.execute(
@@ -397,9 +476,10 @@ fn configured_jev_request_cannot_silently_run_as_baseline() {
         );
         assert_eq!(error.message, "DEVICE_JEV_UNAVAILABLE");
         drop(store);
-        let reopened = DeviceProviderStore::open(&directory).unwrap();
+        let reopened = ProviderRuntimeStore::prepare(&directory).unwrap();
         assert_eq!(reopened.execute_model(&open).unwrap(), result);
-        let db = rusqlite::Connection::open(directory.join("providers.sqlite3")).unwrap();
+        let db =
+            rusqlite::Connection::open(directory.join("runtime/provider-runtime.sqlite3")).unwrap();
         let (saved, digest, prepared): (String, String, Option<Vec<u8>>) = db
             .query_row(
                 "SELECT request_open, digest, prepared_payload FROM exchanges WHERE exchange_id=?1",
@@ -449,14 +529,14 @@ fn model_failure_replay_cancellation_and_public_projection_stay_local() {
             .clone(),
     )
     .expect("open contract");
-    let store = DeviceProviderStore::open(&directory).expect("store");
+    let store = ProviderRuntimeStore::prepare(&directory).expect("store");
     let chunks = store
         .execute_model(&open)
         .expect("no configured Provider fails locally");
     assert_eq!(chunks.len(), 1);
     assert!(chunks[0].is_final && chunks[0].error.is_some());
     drop(store);
-    let store = DeviceProviderStore::open(&directory).expect("restart");
+    let store = ProviderRuntimeStore::prepare(&directory).expect("restart");
     assert_eq!(store.execute_model(&open).expect("exact replay"), chunks);
     open.request_id.0.push('X');
     assert!(store.execute_model(&open).is_err());

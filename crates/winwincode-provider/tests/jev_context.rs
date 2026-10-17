@@ -216,7 +216,7 @@ fn invalid_decision_metadata_keeps_paid_usage_without_a_retention_action() {
 
 #[test]
 fn device_context_receipt_replays_success_and_failure_after_reopen() {
-    use winwincode_provider::{DeviceProviderStore, StoredJevContext};
+    use winwincode_provider::{ProviderRuntimeStore, StoredJevContext};
     tokio::runtime::Builder::new_current_thread()
         .enable_time()
         .build()
@@ -228,7 +228,7 @@ fn device_context_receipt_replays_success_and_failure_after_reopen() {
                 let _ = std::fs::remove_dir_all(&directory);
                 let configuration = format!("sha256:{}", "a".repeat(64));
                 let (runtime, calls) = setup(available, "resolved-jev", false);
-                let store = DeviceProviderStore::open(&directory).unwrap();
+                let store = ProviderRuntimeStore::prepare(&directory).unwrap();
                 let first = store
                     .evaluate_context_once(
                         "exchange/candidate",
@@ -250,7 +250,7 @@ fn device_context_receipt_replays_success_and_failure_after_reopen() {
                 assert_eq!(run.value.is_some(), available);
                 assert_eq!(run.failures.is_empty(), available);
                 drop(store);
-                let store = DeviceProviderStore::open(&directory).unwrap();
+                let store = ProviderRuntimeStore::prepare(&directory).unwrap();
                 assert_eq!(
                     store
                         .evaluate_context_once(
@@ -282,7 +282,9 @@ fn device_context_receipt_replays_success_and_failure_after_reopen() {
                         .is_err()
                 );
                 assert_eq!(calls.load(Ordering::SeqCst), 1);
-                let db = rusqlite::Connection::open(directory.join("providers.sqlite3")).unwrap();
+                let db =
+                    rusqlite::Connection::open(directory.join("runtime/provider-runtime.sqlite3"))
+                        .unwrap();
                 let stored: String = db
                     .query_row("SELECT result FROM jev_context_exchanges", [], |row| {
                         row.get(0)
@@ -299,7 +301,7 @@ fn device_context_receipt_replays_success_and_failure_after_reopen() {
 
 #[test]
 fn interrupted_device_context_inference_is_not_reissued_after_reopen() {
-    use winwincode_provider::{DeviceProviderStore, StoredJevContext};
+    use winwincode_provider::{ProviderRuntimeStore, StoredJevContext};
     tokio::runtime::Builder::new_current_thread()
         .enable_time()
         .build()
@@ -310,7 +312,7 @@ fn interrupted_device_context_inference_is_not_reissued_after_reopen() {
             let _ = std::fs::remove_dir_all(&directory);
             let configuration = format!("sha256:{}", "b".repeat(64));
             let (runtime, calls) = setup(true, "resolved-jev", true);
-            let store = DeviceProviderStore::open(&directory).unwrap();
+            let store = ProviderRuntimeStore::prepare(&directory).unwrap();
             let policy = policy();
             {
                 let mut future = Box::pin(store.evaluate_context_once(
@@ -325,7 +327,7 @@ fn interrupted_device_context_inference_is_not_reissued_after_reopen() {
                 assert_eq!(calls.load(Ordering::SeqCst), 1);
             }
             drop(store);
-            let store = DeviceProviderStore::open(&directory).unwrap();
+            let store = ProviderRuntimeStore::prepare(&directory).unwrap();
             assert_eq!(
                 store
                     .evaluate_context_once(
@@ -380,9 +382,9 @@ fn sealed_context_session(
 
 #[test]
 fn configured_context_rejects_unsealed_or_foreign_provider_before_claim() {
-    use winwincode_provider::{DeviceProviderStore, OpenJevRemoteSettings};
+    use winwincode_provider::{DeviceProviderStore, OpenJevRemoteSettings, ProviderRuntimeStore};
     let directory = std::env::temp_dir().join(format!("wwc-jev-profile-{}", std::process::id()));
-    let store = DeviceProviderStore::open(&directory).unwrap();
+    let config = DeviceProviderStore::open(&directory).unwrap();
     let settings = OpenJevRemoteSettings {
         provider_id: "device-jev".into(),
         endpoint: "https://nli.invalid/score".into(),
@@ -394,7 +396,8 @@ fn configured_context_rejects_unsealed_or_foreign_provider_before_claim() {
         devices: Some(vec!["remote".into()]),
         dtypes: Some(vec!["auto".into()]),
     };
-    store.save_jev_settings(&settings).unwrap();
+    config.save_jev_settings(&settings).unwrap();
+    let store = ProviderRuntimeStore::prepare(&directory).unwrap();
     let mut altered = sealed_context_session("device-jev");
     altered
         .profile
@@ -423,7 +426,8 @@ fn configured_context_rejects_unsealed_or_foreign_provider_before_claim() {
                 );
             }
         });
-    let database = rusqlite::Connection::open(directory.join("providers.sqlite3")).unwrap();
+    let database =
+        rusqlite::Connection::open(directory.join("runtime/provider-runtime.sqlite3")).unwrap();
     let count: i64 = database
         .query_row("SELECT COUNT(*) FROM jev_context_exchanges", [], |r| {
             r.get(0)
@@ -432,6 +436,7 @@ fn configured_context_rejects_unsealed_or_foreign_provider_before_claim() {
     assert_eq!(count, 0);
     drop(database);
     drop(store);
+    drop(config);
     std::fs::remove_dir_all(directory).unwrap();
 }
 
@@ -504,7 +509,9 @@ fn persisted_remote_probabilities_roundtrip_exactly() {
 #[test]
 #[ignore = "requires Device-local SystemOne credentials and explicit live-run directory"]
 fn configured_system_one_context_live_receipt_replays_after_restart() {
-    use winwincode_provider::{DeviceProviderStore, OpenJevRemoteSettings, StoredJevContext};
+    use winwincode_provider::{
+        DeviceProviderStore, OpenJevRemoteSettings, ProviderRuntimeStore, StoredJevContext,
+    };
     let required = |key| std::env::var(key).expect("live JEV setting is required");
     let directory = std::path::PathBuf::from(required("WWC_JEV_LIVE_DIRECTORY"));
     let provider = required("JEV_PROVIDER_ID");
@@ -525,8 +532,9 @@ fn configured_system_one_context_live_receipt_replays_after_restart() {
         .build()
         .unwrap()
         .block_on(async {
-            let store = DeviceProviderStore::open(&directory).unwrap();
-            store.save_jev_settings(&settings).unwrap();
+            let config = DeviceProviderStore::open(&directory).unwrap();
+            config.save_jev_settings(&settings).unwrap();
+            let store = ProviderRuntimeStore::prepare(&directory).unwrap();
             let first = store
                 .evaluate_configured_context_once("live-context-1", &session, request(true))
                 .await
@@ -543,7 +551,7 @@ fn configured_system_one_context_live_receipt_replays_after_restart() {
             assert_eq!(evaluation.decision.provider, provider);
             assert!(run.observation.is_some());
             drop(store);
-            let store = DeviceProviderStore::open(&directory).unwrap();
+            let store = ProviderRuntimeStore::prepare(&directory).unwrap();
             let replay = store
                 .evaluate_configured_context_once("live-context-1", &session, request(true))
                 .await

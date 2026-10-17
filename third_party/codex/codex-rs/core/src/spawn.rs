@@ -104,7 +104,9 @@ pub(crate) async fn spawn_child_async(
         .then(codex_utils_pty::process_group::ProcessGroupLifeline::new)
         .transpose()?;
     #[cfg(unix)]
-    let lifeline_fds = lifeline.as_ref().map(|lifeline| lifeline.child_fds());
+    let lifeline_fds = lifeline
+        .as_ref()
+        .map(codex_utils_pty::process_group::ProcessGroupLifeline::child_fds);
     #[cfg(unix)]
     unsafe {
         let detach_from_tty = matches!(stdio_policy, StdioPolicy::RedirectForShellTool);
@@ -153,6 +155,6 @@ pub(crate) async fn spawn_child_async(
     Ok(SpawnedChild {
         child: cmd.kill_on_drop(true).spawn()?,
         #[cfg(unix)]
-        _lifeline: lifeline.map(|lifeline| lifeline.into_writer()),
+        _lifeline: lifeline.map(codex_utils_pty::process_group::ProcessGroupLifeline::into_writer),
     })
 }

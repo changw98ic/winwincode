@@ -59,7 +59,7 @@ export function snapshotPendingModelOpen(deviceData, identity, exactJobId) {
   const adapterPath = ownedPath(join(worker.data_directory, 'codex-runtime', 'worker-codex.sqlite3'))
   if (!existsSync(adapterPath)) return { status: 'adapter_not_available', worker, observedAtUtc: new Date().toISOString() }
   const opens = readDatabase(adapterPath, db => db.prepare(witnessQueries.opens).all(context.workerInstanceId, context.jobId))
-  const providerPath = ownedPath(join(data, 'providers', 'providers.sqlite3'))
+  const providerPath = ownedPath(join(data, 'providers', 'runtime', 'provider-runtime.sqlite3'))
   const candidates = opens.map(row => {
     const raw = Buffer.from(row.frame_json)
     const open = JSON.parse(raw)

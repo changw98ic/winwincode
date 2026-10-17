@@ -3,8 +3,12 @@
 use super::*;
 use std::collections::VecDeque;
 use std::io::{BufReader, Read, Write};
-use std::sync::{Arc, atomic::AtomicBool};
+use std::sync::{Arc, Condvar, atomic::AtomicBool};
 use std::time::Duration;
+use winwincode_client_port::private_worker_channel::{
+    PrivateWorkerRequest, PrivateWorkerRequestBody, PrivateWorkerResponse,
+    PrivateWorkerResponseBody,
+};
 use winwincode_client_port::worker_relay::{WorkerRelayRequest, WorkerRelayResponse};
 use winwincode_codex::{CodexCoreAdapter, WorkerExecutionPort};
 use winwincode_control_plane::{RepositoryExecutionScheduler, WorkRunCancellationRequest};
@@ -29,6 +33,7 @@ impl ExecutionPortCore for RelayCore {
 #[derive(Default)]
 struct RelayState {
     response: VecDeque<u8>,
+    closed: bool,
     requests: Vec<ExecutionPortMessage>,
     cancellation: Option<JobCancelMessage>,
     retry_started: Option<std::time::Instant>,
@@ -38,11 +43,17 @@ struct RelayState {
 }
 
 #[derive(Clone)]
-struct RelayInput(Arc<Mutex<RelayState>>);
+struct RelayInput(Arc<Mutex<RelayState>>, Arc<Condvar>);
 
 impl Read for RelayInput {
     fn read(&mut self, bytes: &mut [u8]) -> std::io::Result<usize> {
+        if bytes.is_empty() {
+            return Ok(0);
+        }
         let mut state = self.0.lock().unwrap();
+        while state.response.is_empty() && !state.closed {
+            state = self.1.wait(state).unwrap();
+        }
         let count = bytes.len().min(state.response.len());
         for byte in &mut bytes[..count] {
             *byte = state.response.pop_front().unwrap();
@@ -53,7 +64,15 @@ impl Read for RelayInput {
 
 struct RelayOutput {
     state: Arc<Mutex<RelayState>>,
+    wake: Arc<Condvar>,
     pending: Vec<u8>,
+}
+
+impl Drop for RelayOutput {
+    fn drop(&mut self) {
+        self.state.lock().unwrap().closed = true;
+        self.wake.notify_all();
+    }
 }
 
 impl Write for RelayOutput {
@@ -63,7 +82,10 @@ impl Write for RelayOutput {
     }
 
     fn flush(&mut self) -> std::io::Result<()> {
-        let WorkerRelayRequest::Exchange { body } = serde_json::from_slice(&self.pending).unwrap()
+        let envelope: PrivateWorkerRequest = serde_json::from_slice(&self.pending).unwrap();
+        let PrivateWorkerRequestBody::Relay {
+            request: WorkerRelayRequest::Exchange { body },
+        } = envelope.request
         else {
             panic!("execution exchange");
         };
@@ -136,10 +158,15 @@ impl Write for RelayOutput {
                 failure: None,
             }
         };
-        state
-            .response
-            .extend(serde_json::to_vec(&response).unwrap());
+        state.response.extend(
+            serde_json::to_vec(&PrivateWorkerResponse {
+                request_id: envelope.request_id,
+                response: PrivateWorkerResponseBody::Relay { response },
+            })
+            .unwrap(),
+        );
         state.response.push_back(b'\n');
+        self.wake.notify_one();
         Ok(())
     }
 }
@@ -216,14 +243,16 @@ fn cancellation_ack_crosses_a_retrying_durable_runtime_prefix() {
         let dispatch = dispatch(&root);
         let recorded = RecordedPort::default();
         let state = Arc::new(Mutex::new(RelayState::default()));
+        let wake = Arc::new(Condvar::new());
         let enabled = Arc::new(AtomicBool::new(false));
         let models = Arc::new(Mutex::new(LocalModelLane::default()));
         let (remote, controls) = RemoteWorkerPort::with_io(
             worker_config().worker_id,
             worker_config().worker_instance_id,
-            BufReader::new(RelayInput(Arc::clone(&state))),
+            BufReader::new(RelayInput(Arc::clone(&state), Arc::clone(&wake))),
             RelayOutput {
                 state: Arc::clone(&state),
+                wake,
                 pending: Vec::new(),
             },
         );
@@ -632,13 +661,15 @@ fn durable_retries_preserve_dependencies_and_allow_an_independent_job_outcome() 
             fail_artifacts: true,
             ..RelayState::default()
         }));
+        let wake = Arc::new(Condvar::new());
         let enabled = Arc::new(AtomicBool::new(false));
         let (remote, controls) = RemoteWorkerPort::with_io(
             worker_config().worker_id,
             worker_config().worker_instance_id,
-            BufReader::new(RelayInput(Arc::clone(&state))),
+            BufReader::new(RelayInput(Arc::clone(&state), Arc::clone(&wake))),
             RelayOutput {
                 state: Arc::clone(&state),
+                wake,
                 pending: Vec::new(),
             },
         );

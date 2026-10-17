@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use super::*;
-use crate::{DeviceProviderStore, model_failure};
+use crate::{DeviceProviderStore, ProviderRuntimeStore, model_failure};
 use std::path::PathBuf;
 use winwincode_domain::{ExecutionMessageId, ExecutionSequence, Sha256Digest};
 use winwincode_execution_port::generated::EncodedPayload;
@@ -78,12 +78,14 @@ fn concurrent_first_open_uses_one_current_schema_and_identity() {
                 let barrier = &barrier;
                 scope.spawn(move || {
                     barrier.wait();
+                    let runtime = ProviderRuntimeStore::prepare(path).unwrap();
                     let store = DeviceProviderStore::open(path).unwrap();
+                    assert!(runtime.directory().is_dir());
                     let version: i64 = store
                         .connection
                         .query_row("PRAGMA user_version", [], |row| row.get(0))
                         .unwrap();
-                    assert_eq!(version, 16);
+                    assert_eq!(version, 17);
                     store
                         .snapshot("current-schema-test")
                         .unwrap()
@@ -109,7 +111,7 @@ fn repeated_concurrent_first_open_keeps_one_current_schema_and_identity() {
 #[test]
 fn sealed_response_is_duplicate_only_and_suffix_corruption_fails_closed() {
     let directory = TestDirectory::new("immutable-response");
-    let store = DeviceProviderStore::open(&directory.0).unwrap();
+    let store = ProviderRuntimeStore::prepare(&directory.0).unwrap();
     let (open, chunks) = fixture();
     store
         .retain_stored_model_exchange_chunks(&open, &chunks)
@@ -156,12 +158,13 @@ fn sealed_response_is_duplicate_only_and_suffix_corruption_fails_closed() {
 }
 
 #[test]
+#[allow(clippy::too_many_lines)]
 fn sealed_response_read_does_not_mix_old_metadata_with_concurrently_changed_suffix() {
     use rusqlite::hooks::{AuthAction, AuthContext, Authorization};
     use std::sync::{Arc, Mutex};
 
     let directory = TestDirectory::new("response-read-snapshot");
-    let store = DeviceProviderStore::open(&directory.0).unwrap();
+    let store = ProviderRuntimeStore::prepare(&directory.0).unwrap();
     let (open, chunks) = fixture();
     store
         .retain_stored_model_exchange_chunks(&open, &chunks)
@@ -180,7 +183,7 @@ fn sealed_response_read_does_not_mix_old_metadata_with_concurrently_changed_suff
     validate_response_frame(&changed).unwrap();
     let changed_bytes = serde_json::to_string(&changed).unwrap();
     let changed_digest = frame_digest(changed_bytes.as_bytes());
-    let writer_path = directory.0.join("providers.sqlite3");
+    let writer_path = store.directory().join("provider-runtime.sqlite3");
     let exchange = open.model_exchange_id.0.clone();
     let mutation = Arc::new(Mutex::new(None::<Result<i64, String>>));
     let mutation_for_hook = Arc::clone(&mutation);
@@ -265,7 +268,7 @@ fn sealed_response_read_does_not_mix_old_metadata_with_concurrently_changed_suff
 fn sealed_response_read_snapshot_preserves_caller_transaction_on_success_and_error() {
     for revoked in [false, true] {
         let directory = TestDirectory::new("response-read-caller-transaction");
-        let store = DeviceProviderStore::open(&directory.0).unwrap();
+        let store = ProviderRuntimeStore::prepare(&directory.0).unwrap();
         let (open, chunks) = fixture();
         store
             .retain_stored_model_exchange_chunks(&open, &chunks)
@@ -317,7 +320,7 @@ fn normalized_body_and_digest_mutation_delete_and_insert_invalidate_the_seal() {
     let (open, chunks) = fixture();
     for mode in ["body-and-digest", "delete", "insert"] {
         let directory = TestDirectory::new(mode);
-        let store = DeviceProviderStore::open(&directory.0).unwrap();
+        let store = ProviderRuntimeStore::prepare(&directory.0).unwrap();
         store
             .retain_stored_model_exchange_chunks(&open, &chunks)
             .unwrap();
@@ -363,7 +366,7 @@ fn normalized_body_and_digest_mutation_delete_and_insert_invalidate_the_seal() {
             "private canonical source survives: {mode}"
         );
         drop(store);
-        let reopened = DeviceProviderStore::open(&directory.0).unwrap();
+        let reopened = ProviderRuntimeStore::prepare(&directory.0).unwrap();
         assert!(
             reopened.replay_model(&open.model_exchange_id.0, 1).is_err(),
             "reopen cannot invent a new seal: {mode}"
@@ -374,7 +377,7 @@ fn normalized_body_and_digest_mutation_delete_and_insert_invalidate_the_seal() {
 #[test]
 fn complete_response_publication_rolls_back_source_on_index_failure_then_reopens() {
     let directory = TestDirectory::new("publication-transaction");
-    let store = DeviceProviderStore::open(&directory.0).unwrap();
+    let store = ProviderRuntimeStore::prepare(&directory.0).unwrap();
     let (open, chunks) = fixture();
     let request_open = serde_json::to_string(&open).unwrap();
     store
@@ -433,7 +436,7 @@ fn complete_response_publication_rolls_back_source_on_index_failure_then_reopens
         chunks[2..]
     );
     drop(store);
-    let reopened = DeviceProviderStore::open(&directory.0).unwrap();
+    let reopened = ProviderRuntimeStore::prepare(&directory.0).unwrap();
     assert_eq!(
         reopened.replay_model(&open.model_exchange_id.0, 1).unwrap(),
         chunks
@@ -445,7 +448,7 @@ fn response_source_request_digest_and_exchange_mutation_invalidate_the_seal() {
     let (open, chunks) = fixture();
     for field in ["request_open", "digest", "exchange_id"] {
         let directory = TestDirectory::new(field);
-        let store = DeviceProviderStore::open(&directory.0).unwrap();
+        let store = ProviderRuntimeStore::prepare(&directory.0).unwrap();
         store
             .retain_stored_model_exchange_chunks(&open, &chunks)
             .unwrap();
@@ -483,7 +486,7 @@ fn response_source_request_digest_and_exchange_mutation_invalidate_the_seal() {
         );
         drop(store);
         assert!(
-            DeviceProviderStore::open(&directory.0)
+            ProviderRuntimeStore::prepare(&directory.0)
                 .unwrap()
                 .replay_model(exchange, 1)
                 .is_err(),

@@ -272,9 +272,9 @@ test('dispatch failure reports preserve a model cause only from the failed job',
   const directory = await mkdtemp(resolve(tmpdir(), 'benchmark-model-dispatch-failure-'))
   t.after(() => rm(directory, { recursive: true, force: true }))
   await mkdir(resolve(directory, 'server-data'))
-  await mkdir(resolve(directory, 'device-data/providers'), { recursive: true })
+  await mkdir(resolve(directory, 'device-data/providers/runtime'), { recursive: true })
   const server = new DatabaseSync(resolve(directory, 'server-data/control-plane.sqlite3'))
-  const providers = new DatabaseSync(resolve(directory, 'device-data/providers/providers.sqlite3'))
+  const providers = new DatabaseSync(resolve(directory, 'device-data/providers/runtime/provider-runtime.sqlite3'))
   t.after(() => { server.close(); providers.close() })
   server.exec(`CREATE TABLE scheduler_execution_jobs (job_id TEXT, delivery_id TEXT,
     work_run_id TEXT, state TEXT, attempt INTEGER, revision INTEGER, updated_at TEXT);
@@ -444,7 +444,7 @@ test('recovery uses the last cursor-matched terminal projection when the registe
   const cursor = { deliveryId: launch.deliveryId, deliveryRevision: 4, token: 'cursor-4' }
   const configuration = Object.fromEntries(['configurationId', 'track', 'fusion', 'jev', 'jevContext', 'jevJudge']
     .map(key => [key, cell[key]]))
-  await mkdir(resolve(directory, 'device-data/providers'), { recursive: true })
+  await mkdir(resolve(directory, 'device-data/providers/runtime'), { recursive: true })
   await mkdir(resolve(directory, 'device-data/worker-sessions'), { recursive: true })
   await writeFile(resolve(directory, 'task-input.json'), inputBytes, { mode: 0o600 })
   await writeFile(resolve(directory, 'task-source-binding.json'), JSON.stringify({ runId: cell.runId, callId,
@@ -458,7 +458,7 @@ test('recovery uses the last cursor-matched terminal projection when the registe
     } }), { mode: 0o600 })
   const productSeal = Buffer.from('{"source":"frozen"}\n')
   await writeFile(resolve(directory, 'product-source-seal.json'), productSeal, { mode: 0o600 })
-  const database = new DatabaseSync(resolve(directory, 'device-data/providers/providers.sqlite3'))
+  const database = new DatabaseSync(resolve(directory, 'device-data/providers/runtime/provider-runtime.sqlite3'))
   database.exec('CREATE TABLE exchanges(exchange_id TEXT,request_open TEXT,chunks TEXT)')
   database.close()
   execFileSync('openssl', ['req', '-x509', '-newkey', 'rsa:2048', '-nodes', '-sha256', '-days', '1',
@@ -2456,9 +2456,9 @@ test('candidate export verifies a self-contained Git bundle and preserves failed
   const cell = buildBenchmarkPlan({ taskIds: Array.from({ length: 20 }, (_, i) => `task-${i}`) }).cells[0]
   const launch = { callId: `${cell.runId}:model`, directory,
     deliveryId: 'dlv_01J00000000000000000000001', productSessionId: 'psn_01J00000000000000000000001' }
-  const providerDirectory = resolve(directory, 'device-data', 'providers')
+  const providerDirectory = resolve(directory, 'device-data', 'providers', 'runtime')
   await mkdir(providerDirectory, { recursive: true })
-  const providerDatabase = new DatabaseSync(resolve(providerDirectory, 'providers.sqlite3'))
+  const providerDatabase = new DatabaseSync(resolve(providerDirectory, 'provider-runtime.sqlite3'))
   providerDatabase.exec('CREATE TABLE exchanges(exchange_id TEXT,request_open TEXT,chunks TEXT)')
   const encode = object => {
     const bytes = Buffer.from(JSON.stringify(object))
@@ -2577,7 +2577,7 @@ test('candidate export verifies a self-contained Git bundle and preserves failed
             jobId: 'original-job', state: 'failed', attempt: 1, revision: 5, updatedAt: 'now' } }
         const oldBytes = JSON.stringify(oldReport)
         await writeFile(reportPath, oldBytes)
-        const originalProviderBytes = await readFile(resolve(providerDirectory, 'providers.sqlite3'))
+        const originalProviderBytes = await readFile(resolve(providerDirectory, 'provider-runtime.sqlite3'))
         cancelled = true
         const request = { ...cell, callId: launch.callId, provider: cell.comparison }
         const result = await resolveRegisteredDeviceTask(request, launch)
@@ -2586,7 +2586,7 @@ test('candidate export verifies a self-contained Git bundle and preserves failed
         assert.equal(result.externalScore, null)
         assert.equal(result.recovery.originalReportSha256, sha(oldBytes))
         assert.equal(await readFile(reportPath, 'utf8'), oldBytes)
-        assert.deepEqual(await readFile(resolve(providerDirectory, 'providers.sqlite3')), originalProviderBytes)
+        assert.deepEqual(await readFile(resolve(providerDirectory, 'provider-runtime.sqlite3')), originalProviderBytes)
         assert.equal(productStarts, 1)
         cancelled = false
         done = false
@@ -2735,9 +2735,9 @@ test('Device benchmark loads private routes and pins the four frozen model selec
 test('execution receipt export retains typed model failures without copying upstream text', async t => {
   const directory = await mkdtemp(resolve(tmpdir(), 'execution-failure-receipts-'))
   t.after(() => rm(directory, { recursive: true, force: true }))
-  const device = resolve(directory, 'device-data', 'providers')
+  const device = resolve(directory, 'device-data', 'providers', 'runtime')
   await mkdir(device, { recursive: true })
-  const database = new DatabaseSync(resolve(device, 'providers.sqlite3'))
+  const database = new DatabaseSync(resolve(device, 'provider-runtime.sqlite3'))
   t.after(() => database.close())
   database.exec('CREATE TABLE exchanges(exchange_id TEXT,request_open TEXT,chunks TEXT)')
   const requestBytes = Buffer.from(JSON.stringify({ provider: 'deepseek', request: { model: 'deepseek-flash' } }))
@@ -2774,9 +2774,9 @@ test('execution receipt export retains typed model failures without copying upst
 test('execution receipt export validates payloads, omits private text and preserves unknown failed usage', async t => {
   const directory = await mkdtemp(resolve(tmpdir(), 'execution-receipts-'))
   t.after(() => rm(directory, { recursive: true, force: true }))
-  const device = resolve(directory, 'device-data', 'providers')
+  const device = resolve(directory, 'device-data', 'providers', 'runtime')
   await mkdir(device, { recursive: true })
-  const database = new DatabaseSync(resolve(device, 'providers.sqlite3'))
+  const database = new DatabaseSync(resolve(device, 'provider-runtime.sqlite3'))
   t.after(() => database.close())
   database.exec('CREATE TABLE exchanges(exchange_id TEXT,request_open TEXT,chunks TEXT)')
   const encode = object => {
@@ -2829,10 +2829,10 @@ test('execution receipt export validates payloads, omits private text and preser
 test('shared Device receipts select durable Delivery jobs including role Sessions', async t => {
   const directory = await mkdtemp(resolve(tmpdir(), 'shared-device-receipts-'))
   t.after(() => rm(directory, { recursive: true, force: true }))
-  await mkdir(resolve(directory, 'device-data', 'providers'), { recursive: true })
+  await mkdir(resolve(directory, 'device-data', 'providers', 'runtime'), { recursive: true })
   await mkdir(resolve(directory, 'server-data'))
   const server = new DatabaseSync(resolve(directory, 'server-data', 'control-plane.sqlite3'))
-  const providers = new DatabaseSync(resolve(directory, 'device-data', 'providers', 'providers.sqlite3'))
+  const providers = new DatabaseSync(resolve(directory, 'device-data', 'providers', 'runtime', 'provider-runtime.sqlite3'))
   t.after(() => { server.close(); providers.close() })
   server.exec('CREATE TABLE scheduler_execution_jobs(job_id TEXT,delivery_id TEXT,product_session_id TEXT)')
   providers.exec('CREATE TABLE exchanges(exchange_id TEXT,request_open TEXT,chunks TEXT)')
@@ -2871,9 +2871,9 @@ test('shared Device receipts select durable Delivery jobs including role Session
 async function actualProviderReceiptFixture(t, exchangeId = 'actual-provider-call') {
   const directory = await mkdtemp(resolve(tmpdir(), 'actual-provider-receipts-'))
   t.after(() => rm(directory, { recursive: true, force: true }))
-  const providerDirectory = resolve(directory, 'device-data/providers')
+  const providerDirectory = resolve(directory, 'device-data/providers/runtime')
   await mkdir(providerDirectory, { recursive: true })
-  const database = new DatabaseSync(resolve(providerDirectory, 'providers.sqlite3'))
+  const database = new DatabaseSync(resolve(providerDirectory, 'provider-runtime.sqlite3'))
   t.after(() => database.close())
   database.exec(`CREATE TABLE exchanges(exchange_id TEXT, request_open TEXT, chunks TEXT);
     CREATE TABLE model_invocation_attempts(exchange_id TEXT, attempt_number INTEGER,

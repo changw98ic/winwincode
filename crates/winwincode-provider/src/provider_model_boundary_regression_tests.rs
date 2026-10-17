@@ -1137,7 +1137,7 @@ fn mechanism_actual_tls_size_limit_device_accounting_preserves_known_usage() {
             .unwrap()
             .as_nanos()
     ));
-    let store = crate::DeviceProviderStore::open(&root).unwrap();
+    let store = crate::ProviderRuntimeStore::prepare(&root).unwrap();
     let fixture_open: serde_json::Value = serde_json::from_str(include_str!(
         "../../../tests/fixtures/contracts/execution-port.valid.json"
     ))
@@ -1158,7 +1158,8 @@ fn mechanism_actual_tls_size_limit_device_accounting_preserves_known_usage() {
     open.request.payload_digest.0 = format!("sha256:{:x}", Sha256::digest(request.as_bytes()));
     let provider = serde_json::json!({"providerId":"provider-https-fixture","displayName":"offline fixture","endpoint":fixture.endpoint,
         "protocol":"openai_responses","modelIds":["fixture-model"],"enabled":true});
-    store
+    crate::DeviceProviderStore::open(&root)
+        .unwrap()
         .connection
         .execute(
             "INSERT INTO providers VALUES(?1,?2,?3)",
@@ -1212,11 +1213,7 @@ fn mechanism_actual_tls_size_limit_device_accounting_preserves_known_usage() {
     .unwrap();
     assert_eq!(accounted["tokenUsage"]["inputTokens"], 11);
     assert_eq!(accounted["tokenUsage"]["outputTokens"], 5);
-    assert!(
-        response_bytes
-            .as_ref()
-            .is_some_and(|bytes| bytes.starts_with(prefix.as_bytes()))
-    );
+    assert!(response_bytes.is_none());
     let received: i64 = store.connection.query_row("SELECT response_bytes_received FROM model_invocation_attempts WHERE exchange_id=?1 AND attempt_number=1",[&open.model_exchange_id.0],|row|row.get(0)).unwrap();
     assert!(received > i64::try_from(prefix.len() + 64).unwrap());
     assert_eq!(factory_calls.get(), 1);
@@ -1242,7 +1239,7 @@ fn mechanism_actual_tls_size_limit_device_accounting_preserves_known_usage() {
     audit_provider_report(
         "actual-size-limit-device-accounting",
         &serde_json::json!({"schema_version":1,"finding":"MP-C02",
-        "actual_path":"DeviceProviderStore::execute_model_using -> HttpsSseProviderAdapter::read_bounded -> actual model_invocation_attempts",
+        "actual_path":"ProviderRuntimeStore::execute_model_using -> HttpsSseProviderAdapter::read_bounded -> actual model_invocation_attempts",
         "physical_requests":1,"factory_calls":factory_calls.get(),"attempt_state":state,"usage_prefix_bytes":prefix.len(),
         "actual_reader_reads":reads,"attempt_accounting_chunks_is_null":false,"attempt_response_bytes_is_null":false,"response_bytes_received":received,
         "first_size_limit_retryable":first_failure[0]["error"]["retryable"],"attempt_record_count":attempt_count,
@@ -1375,7 +1372,7 @@ fn mechanism_actual_tls_failed_partial_retries_with_a_fresh_decoder() {
             .unwrap()
             .as_nanos()
     ));
-    let store = crate::DeviceProviderStore::open(&root).unwrap();
+    let store = crate::ProviderRuntimeStore::prepare(&root).unwrap();
     let template: serde_json::Value = serde_json::from_str(include_str!(
         "../../../tests/fixtures/contracts/execution-port.valid.json"
     ))
@@ -1397,7 +1394,8 @@ fn mechanism_actual_tls_failed_partial_retries_with_a_fresh_decoder() {
     open.request.payload_digest.0 = format!("sha256:{:x}", Sha256::digest(request.as_bytes()));
     let provider = serde_json::json!({"providerId":"provider-https-fixture","displayName":"owned offline partial-response fixture",
         "endpoint":fixture.endpoint,"protocol":"openai_responses","modelIds":["fixture-model"],"enabled":true});
-    store
+    crate::DeviceProviderStore::open(&root)
+        .unwrap()
         .connection
         .execute(
             "INSERT INTO providers VALUES(?1,?2,?3)",
@@ -1431,15 +1429,15 @@ fn mechanism_actual_tls_failed_partial_retries_with_a_fresh_decoder() {
         2,
         "the second physical attempt constructs a fresh adapter"
     );
-    let (first_state, first_bytes, first_failure): (String, Vec<u8>, String) = store.connection.query_row(
+    let (first_state, first_bytes, first_failure): (String, Option<Vec<u8>>, String) = store.connection.query_row(
         "SELECT state,response_bytes,failure_chunks FROM model_invocation_attempts WHERE exchange_id=?1 AND attempt_number=1",
         [&open.model_exchange_id.0], |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?))).unwrap();
     assert_eq!(first_state, "failed");
-    assert_eq!(
-        first_bytes,
-        first.as_bytes(),
-        "actual reader retained the first physical response prefix"
-    );
+    assert!(first_bytes.is_none());
+    let received: i64 = store.connection.query_row(
+        "SELECT response_bytes_received FROM model_invocation_attempts WHERE exchange_id=?1 AND attempt_number=1",
+        [&open.model_exchange_id.0], |row| row.get(0)).unwrap();
+    assert_eq!(received, i64::try_from(first.len()).unwrap());
     let first_failure: serde_json::Value = serde_json::from_str(&first_failure).unwrap();
     assert_eq!(first_failure[0]["error"]["retryable"], true);
     let first_network_json: String = store.connection.query_row(
@@ -1513,11 +1511,12 @@ fn mechanism_actual_tls_failed_partial_retries_with_a_fresh_decoder() {
         "actual-tls-failed-partial-fresh-decoder",
         &serde_json::json!({
         "schema_version":1,"scope":"attached positive control, not a new finding ID",
-        "actual_path":"DeviceProviderStore::execute_model_using -> actual HttpsSseProviderAdapter/read_bounded -> fresh second adapter decoder",
+        "actual_path":"ProviderRuntimeStore::execute_model_using -> actual HttpsSseProviderAdapter/read_bounded -> fresh second adapter decoder",
         "physical_requests":requests.len(),"factory_calls":factory_calls.get(),"elapsed_ms":elapsed_ms,
         "authority_bound_seconds":20,"listener_total_accept_bound_seconds":20,"socket_read_write_bound_seconds":2,
-        "first_response_body_declared_bytes":first.len()+32,"first_response_prefix_bytes_retained":first_bytes.len(),
-        "first_response_prefix_sha256":format!("{:x}",Sha256::digest(&first_bytes)),"first_network":first_network,
+        "first_response_body_declared_bytes":first.len()+32,"first_response_prefix_bytes_received":received,
+        "first_response_prefix_bytes_retained":first_bytes.as_ref().map_or(0,Vec::len),
+        "first_response_prefix_sha256":first_bytes.as_ref().map(|bytes|format!("{:x}",Sha256::digest(bytes))),"first_network":first_network,
         "first_attempt_state":first_state,"first_error_retryable":true,"second_attempt_state":second_state,
         "requests":request_facts,"returned_chunk_count":chunks.len(),"returned_first_sequence":1,
         "complete_final_preserved":true,"first_partial_content_in_returned_response":false,
