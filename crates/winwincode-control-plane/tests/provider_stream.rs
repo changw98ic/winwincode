@@ -49,6 +49,19 @@ use winwincode_execution_port::generated::{
 use winwincode_storage::SqliteStorage;
 
 const PROVIDER_SECRET: &[u8] = b"provider-stream-secret-fixture";
+const BEARER_DOCUMENTATION_EXAMPLES: [&str; 11] = [
+    "Authorization: Bearer $OPENAI_API_KEY",
+    "Bearer YOUR_API_KEY",
+    "use a bearer token",
+    "Bearer process.env.OPENAI_API_KEY",
+    "Bearer import.meta.env.PUBLIC_API_TOKEN",
+    "Bearer APPLICATION_PUBLIC_API_TOKEN",
+    "Bearer YOURAPPLICATIONTOKEN_PLACEHOLDER",
+    "Bearer ${OPENAI_API_KEY}",
+    "Bearer {{OPENAI_API_KEY}}",
+    "Authorization: Bearer YOUR_APPLICATION_API_KEY.",
+    "Bearer process.env.OPENAI_API_KEY.",
+];
 static NEXT_TEMP_DIRECTORY: AtomicU64 = AtomicU64::new(1);
 
 fn id(prefix: &str, seed: u64) -> String {
@@ -1030,6 +1043,93 @@ fn source_code_with_credential_field_names_survives_provider_conversion() {
     assert!(payloads.iter().any(|value| {
         value["type"] == "output_item_done" && value["item"]["content"][0]["text"] == source
     }));
+}
+
+#[test]
+fn bearer_documentation_survives_text_conversion() {
+    let receipt = gateway_receipt();
+    for text in BEARER_DOCUMENTATION_EXAMPLES {
+        for split in (1..=text.len()).filter(|&split| text.is_char_boundary(split)) {
+            let mut events = vec![
+                ProviderStreamEvent::ResponseStarted {
+                    observed_model_id: Some("observed-fixture-model".to_owned()),
+                    provider_response_id: "response-bearer-docs".to_owned(),
+                },
+                ProviderStreamEvent::TextStarted { index: 0 },
+            ];
+            for delta in [&text[..split], &text[split..]] {
+                if !delta.is_empty() {
+                    events.push(ProviderStreamEvent::TextDelta {
+                        index: 0,
+                        delta: delta.to_owned(),
+                    });
+                }
+            }
+            events.extend([
+                ProviderStreamEvent::TextEnded { index: 0 },
+                ProviderStreamEvent::Finished(ProviderFinishReason::Stop),
+            ]);
+            let payloads = values(&convert(&receipt, events));
+            assert!(
+                payloads.iter().any(|value| {
+                    value["type"] == "output_text_delta" && value["delta"] == text
+                })
+            );
+            assert!(payloads.iter().any(|value| {
+                value["type"] == "output_item_done" && value["item"]["content"][0]["text"] == text
+            }));
+            assert_eq!(payloads.last().unwrap()["type"], "completed");
+        }
+    }
+}
+
+#[test]
+fn bearer_documentation_survives_tool_argument_conversion() {
+    let receipt = gateway_receipt();
+    for text in BEARER_DOCUMENTATION_EXAMPLES {
+        for kind in [ProviderToolKind::Function, ProviderToolKind::Custom] {
+            let arguments = serde_json::json!({"command":text}).to_string();
+            for split in (1..=arguments.len()).filter(|&split| arguments.is_char_boundary(split)) {
+                let mut events = vec![
+                    ProviderStreamEvent::ResponseStarted {
+                        observed_model_id: Some("observed-fixture-model".to_owned()),
+                        provider_response_id: "response-bearer-tool-docs".to_owned(),
+                    },
+                    ProviderStreamEvent::ToolCallStarted {
+                        index: 0,
+                        provider_call_id: "call-docs".to_owned(),
+                        identity: ProviderToolIdentity::try_new(kind, "exec".to_owned(), None)
+                            .unwrap(),
+                    },
+                ];
+                for delta in [&arguments[..split], &arguments[split..]] {
+                    if !delta.is_empty() {
+                        events.push(ProviderStreamEvent::ToolCallArgumentsDelta {
+                            index: 0,
+                            provider_call_id: "call-docs".to_owned(),
+                            delta: delta.to_owned(),
+                        });
+                    }
+                }
+                events.extend([
+                    ProviderStreamEvent::ToolCallEnded {
+                        index: 0,
+                        provider_call_id: "call-docs".to_owned(),
+                    },
+                    ProviderStreamEvent::Finished(ProviderFinishReason::ToolCalls),
+                ]);
+                let payloads = values(&convert(&receipt, events));
+                let field = match kind {
+                    ProviderToolKind::Function => "arguments",
+                    ProviderToolKind::Custom => "input",
+                };
+                assert!(payloads.iter().any(|value| {
+                    value["type"] == "output_item_done" && value["item"][field] == arguments
+                }));
+                assert_eq!(payloads.last().unwrap()["type"], "completed");
+            }
+        }
+    }
 }
 
 #[test]

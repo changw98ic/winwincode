@@ -701,33 +701,8 @@ impl SessionSupervisor {
         let supervisor = self.clone();
         let expected = record.clone();
         let occupancy_token = request.occupancy_fencing_token;
-        let live_process = Arc::new(move || {
-            let store = supervisor.lock_store();
-            let Ok(Some(current)) = store.worker_process(&expected.worker_session_id) else {
-                return false;
-            };
-            if current.state != WORKER_STATE_RUNNING
-                || current.worker_id != expected.worker_id
-                || current.worker_instance_id != expected.worker_instance_id
-                || current.pid != expected.pid
-                || current.process_start_identity != expected.process_start_identity
-                || current.launch_grant_id != expected.launch_grant_id
-            {
-                return false;
-            }
-            let Ok(guard) = FencingGuard::from_store(&store) else {
-                return false;
-            };
-            matches!(
-                guard.authorize_command(
-                    FencedCommandKind::WorkerLaunch,
-                    &expected.occupancy_lease_id,
-                    occupancy_token
-                ),
-                FencingVerdict::Authorized(_)
-            ) && probe_process(expected.pid, &expected.process_start_identity)
-                == ProcessProbe::Alive
-        });
+        let live_process =
+            Arc::new(move || supervisor.provider_process_active(&expected, occupancy_token));
         let broker = Arc::new(crate::provider_broker::ProviderBroker::new(
             provider_directory.to_path_buf(),
             request.data_directory.join("codex-runtime/kernel-home"),
@@ -743,6 +718,42 @@ impl SessionSupervisor {
                 output, input, endpoint, transport, node, worker, instance, &broker,
             );
         })
+    }
+
+    fn provider_process_active(
+        &self,
+        expected: &WorkerProcessRecord,
+        occupancy_token: u64,
+    ) -> bool {
+        let store = self.lock_store();
+        let Ok(Some(current)) = store.worker_process(&expected.worker_session_id) else {
+            return false;
+        };
+        if current.state != WORKER_STATE_RUNNING
+            || current.worker_id != expected.worker_id
+            || current.worker_instance_id != expected.worker_instance_id
+            || current.pid != expected.pid
+            || current.process_start_identity != expected.process_start_identity
+            || current.launch_grant_id != expected.launch_grant_id
+        {
+            return false;
+        }
+        let Ok(guard) = FencingGuard::from_store(&store) else {
+            return false;
+        };
+        matches!(
+            guard.authorize_command(
+                FencedCommandKind::WorkerLaunch,
+                &expected.occupancy_lease_id,
+                occupancy_token
+            ),
+            FencingVerdict::Authorized(_)
+        ) && self
+            .lock_children()
+            .get_mut(&expected.worker_session_id)
+            .is_some_and(|tracked| {
+                tracked.child.id() == expected.pid && matches!(tracked.child.try_wait(), Ok(None))
+            })
     }
 
     fn start_log_reader<R: Read + Send + 'static>(
@@ -2308,6 +2319,76 @@ mod tests {
             "{} must be mode 0600",
             path.display()
         );
+    }
+
+    #[test]
+    fn provider_process_authority_follows_the_owned_child_and_current_registry() {
+        let bin_root = temp_root("provider-authority-bin");
+        let binary = bin_root.join("winwincode-worker");
+        write_executable_script(&binary, "exec sleep 30");
+        let (supervisor, root) = supervisor_with_mirror("provider-authority", &binary, LEASE, 7);
+        supervisor
+            .spawn(spawn_request(
+                "wss_PROVIDER",
+                WORKER_INSTANCE,
+                &root.join("repo"),
+                &root.join("data"),
+                &root.join("worker-root"),
+            ))
+            .unwrap();
+        let cleanup = StopOnDrop::watch(&supervisor, "wss_PROVIDER");
+        let record = supervisor.worker_process("wss_PROVIDER").unwrap().unwrap();
+        assert!(supervisor.provider_process_active(&record, 7));
+        for field in ["worker", "instance", "pid", "start", "grant", "state"] {
+            let mut replaced = record.clone();
+            match field {
+                "worker" => replaced.worker_id.push('x'),
+                "instance" => replaced.worker_instance_id = WORKER_INSTANCE_2.into(),
+                "pid" => replaced.pid += 1,
+                "start" => replaced.process_start_identity.push('x'),
+                "grant" => replaced.launch_grant_id.push('x'),
+                "state" => replaced.state = WORKER_STATE_EXITED.into(),
+                _ => unreachable!(),
+            }
+            supervisor
+                .lock_store()
+                .put_worker_process(&replaced)
+                .unwrap();
+            assert!(!supervisor.provider_process_active(&record, 7), "{field}");
+            supervisor.lock_store().put_worker_process(&record).unwrap();
+        }
+        let tracked = supervisor.lock_children().remove("wss_PROVIDER").unwrap();
+        let untracked = supervisor.provider_process_active(&record, 7);
+        supervisor
+            .lock_children()
+            .insert("wss_PROVIDER".into(), tracked);
+        assert!(!untracked);
+        supervisor
+            .lock_store()
+            .advance_occupancy_mirror(&mirror_update(LEASE, 8))
+            .unwrap();
+        assert!(!supervisor.provider_process_active(&record, 7));
+        assert!(supervisor.provider_process_active(&record, 8));
+        {
+            let mut children = supervisor.lock_children();
+            let child = &mut children.get_mut("wss_PROVIDER").unwrap().child;
+            child.kill().unwrap();
+            child.wait().unwrap();
+        }
+        assert_eq!(
+            supervisor
+                .worker_process("wss_PROVIDER")
+                .unwrap()
+                .unwrap()
+                .state,
+            WORKER_STATE_RUNNING
+        );
+        assert!(!supervisor.provider_process_active(&record, 8));
+        assert!(supervisor.lock_children().contains_key("wss_PROVIDER"));
+        drop(cleanup);
+        drop(supervisor);
+        fs::remove_dir_all(root).unwrap();
+        fs::remove_dir_all(bin_root).unwrap();
     }
 
     const WORKER_CONFIG_CONTRACT_FIELDS: [&str; 17] = [

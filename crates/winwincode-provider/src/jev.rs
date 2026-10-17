@@ -375,6 +375,10 @@ impl<T> JevRun<T> {
 #[path = "jev_call_records.rs"]
 mod call_records;
 
+#[cfg(test)]
+#[path = "jev_execution_snapshot_tests.rs"]
+mod execution_snapshot_tests;
+
 trait MeasuredJevResult {
     fn observation(
         &self,
@@ -518,7 +522,10 @@ impl JevRuntime {
         else {
             return Err(JevProviderError::new(JevProviderErrorKind::InvalidRequest));
         };
-        if parameters != expected {
+        let mut parameters = parameters.clone();
+        parameters.timeout_ms = expected.timeout_ms;
+        parameters.retries = expected.retries;
+        if &parameters != expected {
             return Err(JevProviderError::new(JevProviderErrorKind::InvalidRequest));
         }
         let mut settings = parameters.settings();

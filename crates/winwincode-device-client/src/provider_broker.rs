@@ -93,7 +93,7 @@ impl ProviderBroker {
     }
 
     fn lease_matches(&self, lease: &ExecutionLeaseStamp, current: &Attempt) -> bool {
-        self.active()
+        !self.closed.load(Ordering::Acquire)
             && !current.cancelled
             && Instant::now() < current.deadline
             && lease.worker_id.0 == self.worker_id
@@ -221,7 +221,7 @@ impl ProviderBroker {
     ) -> PrivateWorkerResponseBody {
         let result = (|| {
             let request: ProviderExecutionRequest = serde_json::from_str(body)?;
-            if !self.allowed(&request) {
+            if !self.active() || !self.allowed(&request) {
                 return Err(DeviceProviderError::AuthorityEnded);
             }
             if matches!(
@@ -273,7 +273,7 @@ impl ProviderBroker {
                 }
             };
             let payload = SensitivePayload(bytes);
-            if !self.allowed(&request) {
+            if !self.active() || !self.allowed(&request) {
                 return Err(DeviceProviderError::AuthorityEnded);
             }
             Ok(payload)
@@ -284,6 +284,9 @@ impl ProviderBroker {
     pub(crate) fn extensions(&self, body: &str) -> PrivateWorkerResponseBody {
         let result = (|| {
             let lease: ExecutionLeaseStamp = serde_json::from_str(body)?;
+            if !self.active() {
+                return Err(DeviceProviderError::AuthorityEnded);
+            }
             let benchmark = {
                 let attempts = self
                     .attempts
@@ -469,7 +472,10 @@ pub(crate) fn local_response(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::AtomicUsize;
     use winwincode_provider::ProviderExecutionContext;
+
+    static NEXT_CREDENTIAL_ROOT: AtomicUsize = AtomicUsize::new(1);
 
     fn fixture() -> (ProviderBroker, ProviderExecutionRequest, JobDispatchMessage) {
         let fixture: serde_json::Value = serde_json::from_str(include_str!(
@@ -541,6 +547,220 @@ mod tests {
             adapter_request_id: Some("physical-request".into()),
         };
         (broker, request, dispatch)
+    }
+
+    fn credential_fixture() -> (ProviderBroker, ProviderExecutionRequest, PathBuf) {
+        let (mut broker, request, _) = fixture();
+        let root = std::env::temp_dir().join(format!(
+            "wwc-broker-credentials-{}-{}-{}",
+            std::process::id(),
+            time::OffsetDateTime::now_utc().unix_timestamp_nanos(),
+            NEXT_CREDENTIAL_ROOT.fetch_add(1, Ordering::Relaxed)
+        ));
+        broker.directory = root.join("providers");
+        drop(DeviceProviderStore::open(&broker.directory).unwrap());
+        let connection =
+            rusqlite::Connection::open(broker.directory.join("providers.sqlite3")).unwrap();
+        connection
+            .execute(
+                "INSERT INTO providers(provider_id,config,secret) VALUES(?1,?2,?3)",
+                rusqlite::params![
+                    "provider-a",
+                    serde_json::json!({
+                        "displayName": "Broker fixture",
+                        "enabled": true,
+                        "endpoint": "https://provider.invalid/v1/responses",
+                        "modelIds": ["model-a"],
+                        "protocol": "openai_responses",
+                        "providerId": "provider-a"
+                    })
+                    .to_string(),
+                    b"broker-fixture-secret".as_slice()
+                ],
+            )
+            .unwrap();
+        (broker, request, root)
+    }
+
+    fn assert_authority_ended(response: &PrivateWorkerResponseBody) {
+        let PrivateWorkerResponseBody::Local { payload, error } = response else {
+            panic!("local response required");
+        };
+        assert!(payload.0.is_empty());
+        assert_eq!(
+            error.as_deref(),
+            Some(DeviceProviderError::AuthorityEnded.code())
+        );
+    }
+
+    #[test]
+    fn credential_resolution_checks_process_only_at_request_boundaries() {
+        let (mut broker, request, root) = credential_fixture();
+        let checks = Arc::new(AtomicUsize::new(0));
+        let observed = checks.clone();
+        broker.live_process = Arc::new(move || {
+            observed.fetch_add(1, Ordering::SeqCst);
+            true
+        });
+        let response = broker.provider(
+            ProviderOperation::ResolveConnection,
+            &serde_json::to_string(&request).unwrap(),
+        );
+        let PrivateWorkerResponseBody::Local { payload, error } = response else {
+            panic!("local response required");
+        };
+        assert_eq!(error, None);
+        let material: winwincode_provider::ProviderConnectionMaterial =
+            serde_json::from_slice(&payload.0).unwrap();
+        assert_eq!(
+            material.secret.as_deref(),
+            Some(b"broker-fixture-secret".as_slice())
+        );
+        assert_eq!(checks.load(Ordering::SeqCst), 2);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn credential_resolution_checks_process_outside_the_attempt_lock() {
+        let (mut broker, request, root) = credential_fixture();
+        let broker = Arc::new_cyclic(|weak: &std::sync::Weak<ProviderBroker>| {
+            let weak = weak.clone();
+            broker.live_process = Arc::new(move || {
+                assert!(weak.upgrade().unwrap().attempts.try_lock().is_ok());
+                true
+            });
+            broker
+        });
+        let response = broker.provider(
+            ProviderOperation::ResolveConnection,
+            &serde_json::to_string(&request).unwrap(),
+        );
+        assert!(matches!(
+            response,
+            PrivateWorkerResponseBody::Local { error: None, .. }
+        ));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn credential_resolution_keeps_cancel_observation_unblocked_during_process_check() {
+        let (mut broker, request, root) = credential_fixture();
+        let dispatch = broker.attempts.lock().unwrap()
+            [&request.context.as_ref().unwrap().lease.job_id.0]
+            .dispatch
+            .clone();
+        let (entered, checking) = std::sync::mpsc::channel();
+        let (release, resumed) = std::sync::mpsc::channel();
+        let resumed = Mutex::new(resumed);
+        let checks = AtomicUsize::new(0);
+        broker.live_process = Arc::new(move || {
+            if checks.fetch_add(1, Ordering::SeqCst) == 0 {
+                entered.send(()).unwrap();
+                resumed.lock().unwrap().recv().unwrap();
+            }
+            true
+        });
+        let broker = Arc::new(broker);
+        let pending = broker.clone();
+        let resolution = std::thread::spawn(move || {
+            pending.provider(
+                ProviderOperation::ResolveConnection,
+                &serde_json::to_string(&request).unwrap(),
+            )
+        });
+        checking.recv_timeout(Duration::from_secs(5)).unwrap();
+        let mut cancel: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../tests/fixtures/contracts/execution-port.valid.json"
+        ))
+        .unwrap();
+        let cancel = cancel["messages"]
+            .as_array_mut()
+            .unwrap()
+            .iter_mut()
+            .find(|value| value["kind"] == "job.cancel")
+            .unwrap();
+        cancel["lease"] = serde_json::to_value(&dispatch.lease).unwrap();
+        let message: ExecutionPortMessage = serde_json::from_value(cancel.clone()).unwrap();
+        let frame = RemoteTransportAdapter::<NoopCore>::encode(
+            &winwincode_execution_port::transport::TypedFrame::new(
+                winwincode_execution_port::transport::FrameDirection::ControlPlaneToWorker,
+                message,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        let response = WorkerRelayResponse {
+            status: 200,
+            body: serde_json::json!({
+                "schemaVersion": "execution-port.remote-exchange.v2",
+                "frameAccepted": true,
+                "serverTime": dispatch.lease.issued_at,
+                "deliveries": [{"deliveryId": cancel["messageId"], "frame": frame}]
+            })
+            .to_string(),
+            failure: None,
+        };
+        let observer = broker.clone();
+        let (notification, completed) = std::sync::mpsc::channel();
+        let observation = std::thread::spawn(move || {
+            observer.observe(
+                &WorkerRelayRequest::Exchange {
+                    body: String::new(),
+                },
+                &response,
+                Instant::now(),
+            );
+            notification.send(()).unwrap();
+        });
+        let unblocked = completed.recv_timeout(Duration::from_secs(1)).is_ok();
+        release.send(()).unwrap();
+        observation.join().unwrap();
+        let response = resolution.join().unwrap();
+        assert!(unblocked);
+        assert_authority_ended(&response);
+        assert!(broker.attempts.lock().unwrap()[&dispatch.job.job_id.0].cancelled);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn credential_resolution_rejects_authority_ended_before_the_response() {
+        for ended in ["process", "instance", "cancel", "closed", "expired"] {
+            let (mut broker, request, root) = credential_fixture();
+            let job = request.context.as_ref().unwrap().lease.job_id.0.clone();
+            let checks = Arc::new(AtomicUsize::new(0));
+            let observed = checks.clone();
+            let broker = Arc::new_cyclic(|weak: &std::sync::Weak<ProviderBroker>| {
+                let weak = weak.clone();
+                broker.live_process = Arc::new(move || {
+                    if observed.fetch_add(1, Ordering::SeqCst) == 0 {
+                        return true;
+                    }
+                    let broker = weak.upgrade().unwrap();
+                    match ended {
+                        "process" => return false,
+                        "closed" => broker.close(),
+                        _ => {
+                            let mut attempts = broker.attempts.try_lock().unwrap();
+                            let current = attempts.get_mut(&job).unwrap();
+                            match ended {
+                                "instance" => current.dispatch.lease.worker_instance_id.0.push('x'),
+                                "cancel" => current.cancelled = true,
+                                "expired" => current.deadline = Instant::now(),
+                                _ => unreachable!(),
+                            }
+                        }
+                    }
+                    true
+                });
+                broker
+            });
+            assert_authority_ended(&broker.provider(
+                ProviderOperation::ResolveConnection,
+                &serde_json::to_string(&request).unwrap(),
+            ));
+            assert_eq!(checks.load(Ordering::SeqCst), 2, "{ended}");
+            std::fs::remove_dir_all(root).unwrap();
+        }
     }
 
     #[test]

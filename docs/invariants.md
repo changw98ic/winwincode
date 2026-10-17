@@ -117,7 +117,11 @@ Provider 账本迁移保留原 exchange、request、attempt、adapter request ID
 
 凭据获取不是一次模型外部调用，也不产生长期执行权限。Worker 在等待凭据、OAuth 刷新、调用准入或重试后，仍须核对当前租约与取消状态，再决定能否发送 Provider 请求。凭据等待不能阻塞独立的心跳、取消和清理消息。已有执行租约、网络退避和不确定结果处理继续适用。
 
+Device 在凭据请求入口和返回前检查当前 Worker 记录、占用围栏和受管子进程。检查使用受管 `Child` 的存活状态，在 attempts 锁外执行。凭据解析中的回调只核对本地 attempt、租约、取消和路由。凭据返回前再次核对这些状态。
+
 managed Worker 的模型、JEV/Fusion、用量对账和终止恢复共用运行账本。同进程设备模型通过 `WorkerMain::with_provider_runtime` 显式注入 `ProviderExecutionSource`。Codex 的运行账本和扩展读取 source 分别装配。JEV 配置只在首次已授权的 JEV 调用中导入，启动时不解析 Provider 或 JEV 凭据。
+
+一次 JEV operation 固定开始时的 timeout 和 retries。退避期间修改这两个参数只影响下一次 operation。每次尝试仍重新解析凭据，并核对当前授权、路由、模型和其他语义参数。原配置摘要、请求和账本身份保持不变；恢复读取原 operation 的已保存结果。
 
 源码依据：`crates/winwincode-device-client/src/provider_broker.rs`、`worker_channel.rs`，`crates/winwincode-provider/src/device_execution_source.rs`、`device_model.rs`，以及 `crates/winwincode-worker/src/remote_transport.rs`。
 

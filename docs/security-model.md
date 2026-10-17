@@ -93,6 +93,10 @@ API key 和 ChatGPT Plan OAuth 凭据保存在 `providers` 表的 `secret` 字�
 
 运行账本保存请求、prepared payload、模型结果、恢复游标和用量事实。它仍是敏感数据。拆成不同数据库防止 Worker 经运行接口读取长期凭据，但不构成同一操作系统用户之间的强隔离。迁移与回退约束见 [Provider 账本迁移](operations/deploy.md#provider-账本迁移与回退)。
 
+Provider 输出使用共享 `CredentialLeakGate` 检查。实际配置秘密的精确指纹和内部认证字段始终受保护。Bearer 通用识别只匹配至少 16 个字符的令牌形态。环境变量引用、大写代码标识符和普通短句可以正常输出。环境变量引用的分片前缀同样可用。该规则用于文本、工具参数、持久化、HTTP 和 WebSocket；它不能准确区分所有未登记令牌与普通文本。
+
+`X-Title` 和符合格式的 `HTTP-Referer` 属于应用归属信息。后者要求 HTTP/HTTPS URL 含主机名，且不含用户认证信息、查询参数、fragment 或已识别凭据形态。分类同时检查原值和一次百分号解码后的值。本机地址与正常编码路径同样可用。其他私有或未知请求头继续登记为秘密。流转换、设备模型、错误日志和响应元数据共用 `provider_header_is_sensitive` 分类。
+
 ### Server 侧 secret
 
 Server 侧 Credential Reference 只保存标识、作用域、Provider、轮换版本和状态。需要 Server 侧 secret 的发布适配器使用 `SECRET_DIRECTORY`。`LocalSecretStoreAdapter` 要求 secret 目录模式为 `0700`，文件模式为 `0600`，并按作用域和 Credential Reference 分目录保存版本。

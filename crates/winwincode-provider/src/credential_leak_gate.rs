@@ -19,9 +19,25 @@ pub(crate) fn provider_header_is_sensitive(
     allow_responses_lite: bool,
 ) -> bool {
     !(name.eq_ignore_ascii_case("x-title")
+        || (name.eq_ignore_ascii_case("http-referer") && public_application_url(value))
         || (allow_responses_lite
             && name.eq_ignore_ascii_case("x-openai-internal-codex-responses-lite")
             && value == "true"))
+}
+
+fn public_application_url(value: &str) -> bool {
+    url::Url::parse(value).is_ok_and(|url| {
+        matches!(url.scheme(), "http" | "https")
+            && url.has_host()
+            && url.username().is_empty()
+            && url.password().is_none()
+            && url.query().is_none()
+            && url.fragment().is_none()
+            && !contains_recognized_credential(value)
+            && !contains_recognized_credential(
+                &percent_encoding::percent_decode_str(value).decode_utf8_lossy(),
+            )
+    })
 }
 
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
@@ -478,7 +494,7 @@ fn safe_placeholder(value: &Value) -> bool {
 fn contains_recognized_credential(value: &str) -> bool {
     let normalized = value.to_ascii_lowercase();
     contains_private_key(&normalized)
-        || contains_bearer(&normalized)
+        || contains_bearer(value)
         || contains_url_userinfo(&normalized)
         || contains_provider_token(&normalized)
 }
@@ -494,20 +510,42 @@ fn contains_private_key(value: &str) -> bool {
 }
 
 fn contains_bearer(value: &str) -> bool {
-    let mut remainder = value;
-    while let Some(index) = remainder.find("bearer ") {
-        let candidate = remainder[index + "bearer ".len()..]
-            .split(|character: char| {
-                character.is_ascii_whitespace() || ",;\"'}]".contains(character)
+    value
+        .to_ascii_lowercase()
+        .match_indices("bearer ")
+        .any(|(index, _)| {
+            let candidate = value[index + "bearer ".len()..]
+                .split(|character: char| {
+                    character.is_ascii_whitespace() || ",;\"'}]`)".contains(character)
+                })
+                .next()
+                .unwrap_or("");
+            let token = candidate.trim_end_matches('=');
+            token.len() >= 16
+                && token
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || b"._~+/-".contains(&byte))
+                && !bearer_documentation_placeholder(candidate)
+        })
+}
+
+fn bearer_documentation_placeholder(value: &str) -> bool {
+    (value.starts_with(|character: char| character.is_ascii_uppercase() || character == '_')
+        && value
+            .trim_end_matches('.')
+            .bytes()
+            .all(|byte| byte.is_ascii_uppercase() || byte.is_ascii_digit() || byte == b'_'))
+        || ["process.env.", "import.meta.env."].iter().any(|prefix| {
+            value.strip_prefix(prefix).is_some_and(|name| {
+                let name = name.trim_end_matches('.');
+                name.is_empty()
+                    || (name.starts_with(|character: char| {
+                        character.is_ascii_alphabetic() || character == '_'
+                    }) && name
+                        .bytes()
+                        .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_'))
             })
-            .next()
-            .unwrap_or("");
-        if !candidate.is_empty() && candidate != "[redacted" && candidate != "<redacted>" {
-            return true;
-        }
-        remainder = &remainder[index + "bearer ".len()..];
-    }
-    false
+        })
 }
 
 fn contains_provider_token(value: &str) -> bool {

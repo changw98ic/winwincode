@@ -4,6 +4,7 @@ fn metadata_header_settings(fixture: &TlsFixture) -> HttpsSseProviderConfig {
     config(fixture)
         .with_custom_headers([
             ("X-Title".into(), "My App".into()),
+            ("HTTP-Referer".into(), "https://public.example/app".into()),
             (
                 "X-Private-Provider-Header".into(),
                 "fixture-private-header-value".into(),
@@ -36,12 +37,16 @@ fn metadata_header_sse(text: &str) -> String {
     )
 }
 
-fn metadata_header_echoes() -> [&'static str; 4] {
+fn metadata_header_echoes() -> [(&'static str, bool); 8] {
     [
-        "My App",
-        std::str::from_utf8(SECRET).unwrap(),
-        "fixture-private-header-value",
-        "fixture-unknown-header-value",
+        ("My App", true),
+        ("https://public.example/app", true),
+        ("Authorization: Bearer $OPENAI_API_KEY", true),
+        ("Bearer YOUR_API_KEY", true),
+        ("use a bearer token", true),
+        (std::str::from_utf8(SECRET).unwrap(), false),
+        ("fixture-private-header-value", false),
+        ("fixture-unknown-header-value", false),
     ]
 }
 
@@ -66,7 +71,7 @@ fn metadata_header_output(
 
 #[test]
 fn metadata_header_stream_preserves_public_text_and_blocks_credentials() {
-    for echoed in metadata_header_echoes() {
+    for (echoed, public) in metadata_header_echoes() {
         let body = metadata_header_sse(echoed);
         let fixture = TlsFixture::start(vec![TestResponse {
             status: "200 OK",
@@ -89,7 +94,7 @@ fn metadata_header_stream_preserves_public_text_and_blocks_credentials() {
         adapter.open_https(request, SECRET).unwrap();
         let result = adapter.drain_canonical(&responses_api_receipt(exchange, request_id));
         assert_eq!(fixture.finish().len(), 1);
-        if echoed == "My App" {
+        if public {
             let completion = result.unwrap();
             assert!(matches!(
                 completion.terminal,
@@ -99,7 +104,7 @@ fn metadata_header_stream_preserves_public_text_and_blocks_credentials() {
                 completion
                     .frames
                     .iter()
-                    .any(|frame| frame.payload_json().contains("My App"))
+                    .any(|frame| frame.payload_json().contains(echoed))
             );
         } else {
             assert_eq!(
@@ -107,6 +112,294 @@ fn metadata_header_stream_preserves_public_text_and_blocks_credentials() {
                 HttpsSseProviderErrorKind::CredentialLeak
             );
         }
+    }
+}
+
+#[test]
+fn responses_header_stream_preserves_fragmented_documentation_and_blocks_credentials() {
+    for (source, split, public) in [
+        (
+            "Bearer process.env.OPENAI_API_KEY",
+            "Bearer process.env.OPENAI".len(),
+            true,
+        ),
+        (
+            "Bearer import.meta.env.PUBLIC_API_TOKEN",
+            "Bearer import.meta.env.".len(),
+            true,
+        ),
+        (
+            "Bearer YOURAPPLICATIONTOKEN_PLACEHOLDER",
+            "Bearer YOURAPPLICATIONTOKEN".len(),
+            true,
+        ),
+        ("use a bearer token", "use a bea".len(), true),
+        (
+            "https://public.example/app",
+            "https://public.example".len(),
+            true,
+        ),
+        (
+            std::str::from_utf8(SECRET).unwrap(),
+            SECRET.len() / 2,
+            false,
+        ),
+        (
+            "fixture-private-header-value",
+            "fixture-private".len(),
+            false,
+        ),
+    ] {
+        let mut events = responses_api_body(source)
+            .lines()
+            .filter_map(|line| line.strip_prefix("data: "))
+            .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+            .collect::<Vec<_>>();
+        let delta_index = events
+            .iter()
+            .position(|event| event["type"] == "response.custom_tool_call_input.delta")
+            .unwrap();
+        let mut tail = events[delta_index].clone();
+        events[delta_index]["delta"] = serde_json::json!(&source[..split]);
+        tail["delta"] = serde_json::json!(&source[split..]);
+        events.insert(delta_index + 1, tail);
+        let body = responses_wire(&events);
+        let fixture = TlsFixture::start(vec![TestResponse {
+            status: "200 OK",
+            content_type: "text/event-stream",
+            body: &body,
+            declared_length: None,
+            delay: Duration::ZERO,
+        }]);
+        let adapter = HttpsSseProviderAdapter::try_new(
+            metadata_header_settings(&fixture)
+                .with_openai_responses(32_768)
+                .unwrap(),
+        )
+        .unwrap();
+        let exchange = ModelExchangeId("mdl_00000000000000000000000001".into());
+        let request_id = RequestId("req_00000000000000000000000001".into());
+        let payload = responses_api_payload();
+        let mut request = invocation(&exchange, &request_id);
+        request.payload = &payload;
+        adapter.open_https(request, SECRET).unwrap();
+        let result = adapter.drain_canonical(&responses_api_receipt(exchange, request_id));
+        assert_eq!(fixture.finish().len(), 1);
+        if public {
+            let completion = result.unwrap();
+            let frames = completion
+                .frames
+                .iter()
+                .map(|frame| {
+                    serde_json::from_str::<serde_json::Value>(frame.payload_json()).unwrap()
+                })
+                .collect::<Vec<_>>();
+            let deltas = frames
+                .iter()
+                .filter(|frame| frame["type"] == "tool_call_input_delta")
+                .map(|frame| frame["delta"].as_str().unwrap())
+                .collect::<Vec<_>>();
+            assert_eq!(deltas, [&source[..split], &source[split..]]);
+            assert!(frames.iter().any(|frame| {
+                frame["type"] == "output_item_done" && frame["item"]["input"] == source
+            }));
+            assert!(matches!(
+                completion.terminal,
+                ProviderGatewayTerminal::Completed { .. }
+            ));
+        } else {
+            assert_eq!(
+                result.unwrap_err().kind(),
+                HttpsSseProviderErrorKind::CredentialLeak
+            );
+        }
+    }
+}
+
+#[test]
+fn metadata_header_response_ids_and_models_preserve_public_text_and_block_credentials() {
+    for field in ["id", "model"] {
+        for (echoed, public) in metadata_header_echoes() {
+            let mut chunk = serde_json::json!({
+                "id":"header-response", "model":"fixture-model",
+                "choices":[{"index":0, "delta":{"content":"public fixture output"}, "finish_reason":"stop"}],
+                "usage":{"prompt_tokens":2, "completion_tokens":1}
+            });
+            chunk[field] = serde_json::json!(echoed);
+            let body = format!("data: {chunk}\n\ndata: [DONE]\n\n");
+            let fixture = TlsFixture::start(vec![TestResponse {
+                status: "200 OK",
+                content_type: "text/event-stream",
+                body: &body,
+                declared_length: None,
+                delay: Duration::ZERO,
+            }]);
+            let adapter = HttpsSseProviderAdapter::try_new(
+                metadata_header_settings(&fixture)
+                    .with_openai_chat_completions(8192, ProviderTokenPricing::default())
+                    .unwrap(),
+            )
+            .unwrap();
+            let exchange = ModelExchangeId("mdl_00000000000000000000000001".into());
+            let request_id = RequestId("req_00000000000000000000000001".into());
+            let payload = metadata_header_payload();
+            let mut request = invocation(&exchange, &request_id);
+            request.payload = &payload;
+            adapter.open_https(request, SECRET).unwrap();
+            let result = adapter.drain_canonical(&responses_api_receipt(exchange, request_id));
+            assert_eq!(fixture.finish().len(), 1);
+            if public {
+                let completion = result.unwrap();
+                assert!(matches!(
+                    completion.terminal,
+                    ProviderGatewayTerminal::Completed { .. }
+                ));
+                if field == "model" {
+                    assert!(completion.frames.iter().any(|frame| {
+                        let value: serde_json::Value =
+                            serde_json::from_str(frame.payload_json()).unwrap();
+                        value["type"] == "server_model" && value["model"] == echoed
+                    }));
+                }
+            } else {
+                let error = result.unwrap_err();
+                assert_eq!(error.kind(), HttpsSseProviderErrorKind::CredentialLeak);
+                assert!(!format!("{error:?}").contains(echoed));
+            }
+        }
+    }
+}
+
+fn http_referer_values() -> [(&'static str, bool); 12] {
+    [
+        ("https://public.example/app", true),
+        ("http://public.example/app", true),
+        ("http://localhost/app", true),
+        ("http://192.168.1.2/app", true),
+        ("https://public.example/my%20app", true),
+        (
+            "https://public.example/app?api_key=fixture-query-value",
+            false,
+        ),
+        (
+            "https://fixture-user:fixture-password@public.example/app",
+            false,
+        ),
+        ("https://public.example/app#fixture-fragment-value", false),
+        ("ftp://public.example/app", false),
+        ("public.example/app", false),
+        (
+            "https://public.example/sk-0123456789abcdefghijklmnop",
+            false,
+        ),
+        (
+            "https://public.example/%73%6b-0123456789abcdefghijklmnop",
+            false,
+        ),
+    ]
+}
+
+#[test]
+fn http_referer_stream_preserves_application_urls_and_blocks_credential_urls() {
+    for (referer, public) in http_referer_values() {
+        let body = metadata_header_sse(referer);
+        let fixture = TlsFixture::start(vec![TestResponse {
+            status: "200 OK",
+            content_type: "text/event-stream",
+            body: &body,
+            declared_length: None,
+            delay: Duration::ZERO,
+        }]);
+        let settings = config(&fixture)
+            .with_openai_chat_completions(8192, ProviderTokenPricing::default())
+            .unwrap()
+            .with_custom_headers([("hTtP-rEfErEr".into(), referer.into())])
+            .unwrap();
+        let adapter = HttpsSseProviderAdapter::try_new(settings).unwrap();
+        let exchange = ModelExchangeId("mdl_00000000000000000000000001".into());
+        let request_id = RequestId("req_00000000000000000000000001".into());
+        let payload = metadata_header_payload();
+        let mut request = invocation(&exchange, &request_id);
+        request.payload = &payload;
+        adapter.open_https(request, SECRET).unwrap();
+        let result = adapter.drain_canonical(&responses_api_receipt(exchange, request_id));
+        let requests = fixture.finish();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(
+            identity_header_values(&requests[0], "http-referer"),
+            [referer]
+        );
+        if public {
+            let completion = result.unwrap();
+            assert!(completion.frames.iter().any(|frame| {
+                let value: serde_json::Value = serde_json::from_str(frame.payload_json()).unwrap();
+                value["type"] == "output_item_done"
+                    && value["item"]["content"][0]["text"] == referer
+            }));
+        } else {
+            assert_eq!(
+                result.unwrap_err().kind(),
+                HttpsSseProviderErrorKind::CredentialLeak
+            );
+        }
+    }
+}
+
+#[test]
+fn http_referer_error_metadata_preserves_application_urls_and_blocks_credentials() {
+    for (referer, public) in http_referer_values() {
+        let custom_headers = vec![
+            ("hTtP-rEfErEr".to_owned(), referer.to_owned()),
+            (
+                "x-private-provider-header".to_owned(),
+                "fixture-private-header-value".to_owned(),
+            ),
+            (
+                "x-unknown-provider-header".to_owned(),
+                "fixture-unknown-header-value".to_owned(),
+            ),
+        ];
+        for echoed in [
+            referer,
+            std::str::from_utf8(SECRET).unwrap(),
+            "fixture-private-header-value",
+            "fixture-unknown-header-value",
+        ] {
+            let headers = [("x-request-id".parse().unwrap(), echoed.parse().unwrap())]
+                .into_iter()
+                .collect();
+            let metadata = response_metadata(&headers, 400, SECRET, &custom_headers);
+            assert_eq!(metadata.status, Some(400));
+            assert_eq!(
+                metadata.provider_request_id.as_deref(),
+                (public && echoed == referer).then_some(echoed)
+            );
+        }
+    }
+}
+
+#[test]
+fn http_referer_http_error_log_preserves_application_urls_and_blocks_credential_urls() {
+    for (referer, public) in http_referer_values() {
+        let fixture = TlsFixture::start(vec![TestResponse {
+            status: "400 Bad Request",
+            content_type: "text/plain",
+            body: referer,
+            declared_length: None,
+            delay: Duration::ZERO,
+        }]);
+        let directory = HttpErrorLogDirectory::new();
+        let settings = config(&fixture)
+            .with_custom_headers([("hTtP-rEfErEr".into(), referer.into())])
+            .unwrap();
+        let failure = fixture_http_failure(&fixture, &directory, settings);
+        assert_eq!(fixture.finish().len(), 1);
+        assert_eq!(failure.http_status, Some(400));
+        assert!(!failure.retryable());
+        let (metadata, retained) = retained_http_error(&directory, failure);
+        assert_eq!(metadata["bodyRetained"], public);
+        assert_eq!(metadata["responseBytesReceived"], referer.len());
+        assert_eq!(retained, if public { referer.as_bytes() } else { &[] });
     }
 }
 
@@ -119,7 +412,7 @@ fn metadata_header_device_model_preserves_public_text_and_blocks_credentials() {
     use base64::{Engine as _, engine::general_purpose::STANDARD};
     use winwincode_execution_port::generated::ExecutionPortErrorCode;
 
-    for echoed in metadata_header_echoes() {
+    for (echoed, public) in metadata_header_echoes() {
         let body = metadata_header_sse(echoed);
         let fixture = TlsFixture::start(vec![TestResponse {
             status: "200 OK",
@@ -194,15 +487,18 @@ fn metadata_header_device_model_preserves_public_text_and_blocks_credentials() {
         assert_eq!(fixture.finish().len(), 1);
         assert!(chunks.last().unwrap().is_final);
         let output = metadata_header_output(&chunks);
-        for credential in metadata_header_echoes().into_iter().skip(1) {
+        for (credential, _) in metadata_header_echoes()
+            .into_iter()
+            .filter(|(_, public)| !public)
+        {
             assert!(
                 !output.contains(credential),
                 "provider credential reached model output"
             );
         }
-        if echoed == "My App" {
+        if public {
             assert!(chunks.iter().all(|chunk| chunk.error.is_none()));
-            assert!(output.contains("My App"));
+            assert!(output.contains(echoed));
         } else {
             let error = chunks.last().unwrap().error.as_ref().unwrap();
             assert_eq!(
@@ -224,7 +520,7 @@ fn metadata_header_device_model_preserves_public_text_and_blocks_credentials() {
 
 #[test]
 fn metadata_header_http_error_log_preserves_public_text_and_blocks_credentials() {
-    for echoed in metadata_header_echoes() {
+    for (echoed, public) in metadata_header_echoes() {
         let fixture = TlsFixture::start(vec![TestResponse {
             status: "400 Bad Request",
             content_type: "text/plain",
@@ -237,7 +533,6 @@ fn metadata_header_http_error_log_preserves_public_text_and_blocks_credentials()
             fixture_http_failure(&fixture, &directory, metadata_header_settings(&fixture));
         assert_eq!(fixture.finish().len(), 1);
         let (metadata, retained) = retained_http_error(&directory, failure);
-        let public = echoed == "My App";
         assert_eq!(metadata["bodyRetained"], public);
         assert_eq!(metadata["responseBytesReceived"], echoed.len());
         if public {
